@@ -1,0 +1,38 @@
+{
+  "name": "codeoid",
+  "version": "0.1.0",
+  "description": "Identity-first remote control plane for AI coding agents",
+  "type": "module",
+  "bin": {
+    "codeoid": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "lint": "biome check src/",
+    "lint:fix": "biome check --write src/",
+    "format": "biome format --write src/",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^2.1.0",
+    "@highflame/sdk": "workspace:*",
+    "better-sqlite3": "^11.0.0",
+    "commander": "^13.0.0",
+    "grammy": "^1.35.0",
+    "ws": "^8.18.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.0",
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT"
+}

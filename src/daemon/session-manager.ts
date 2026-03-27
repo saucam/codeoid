@@ -1,0 +1,220 @@
+/**
+ * SessionManager — orchestrates multiple concurrent agent sessions.
+ *
+ * Enforces ZeroID scopes on every operation and maintains the live session map.
+ * The Store handles persistence; this class owns the in-memory Session objects.
+ */
+
+import { Session, type AttachedClient, type SessionCreateOptions } from "./session.js";
+import { Store } from "./store.js";
+import { hasScope, SCOPES } from "../protocol/scopes.js";
+import type {
+  AuthContext,
+  ClientMessage,
+  DaemonMessage,
+  SessionInfo,
+} from "../protocol/types.js";
+
+export class SessionManager {
+  #sessions = new Map<string, Session>();
+  #store: Store;
+
+  constructor(store: Store) {
+    this.#store = store;
+  }
+
+  /**
+   * Handle an inbound client message, enforce scopes, and return a response.
+   */
+  async handle(
+    msg: ClientMessage,
+    auth: AuthContext,
+    client: AttachedClient,
+  ): Promise<DaemonMessage> {
+    switch (msg.type) {
+      case "session.create":
+        return this.#create(msg, auth);
+      case "session.list":
+        return this.#list(msg, auth);
+      case "session.attach":
+        return this.#attach(msg, auth, client);
+      case "session.detach":
+        return this.#detach(msg, client);
+      case "session.send":
+        return this.#send(msg, auth);
+      case "session.interrupt":
+        return this.#interrupt(msg, auth);
+      case "session.approve":
+        return this.#approve(msg, auth);
+      case "session.destroy":
+        return this.#destroySession(msg, auth);
+    }
+  }
+
+  /** Remove a client from all sessions (e.g. on disconnect). */
+  disconnectClient(clientId: string): void {
+    for (const session of this.#sessions.values()) {
+      session.detach(clientId);
+    }
+  }
+
+  /** Get a session by name (for Telegram convenience). */
+  findByName(name: string, accountId: string, projectId: string): Session | undefined {
+    for (const session of this.#sessions.values()) {
+      const info = session.toInfo();
+      if (info.name === name) {
+        // Verify tenant match via store
+        const stored = this.#store.getSession(session.id);
+        if (stored) return session;
+      }
+    }
+    return undefined;
+  }
+
+  // ── Handlers ──────────────────────────────────────────────────────────
+
+  #create(
+    msg: Extract<ClientMessage, { type: "session.create" }>,
+    auth: AuthContext,
+  ): DaemonMessage {
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_CREATE)) {
+      return { type: "response.error", requestId: msg.id, error: "Missing scope: session:create", code: "forbidden" };
+    }
+
+    const session = new Session({
+      name: msg.name,
+      workdir: msg.workdir,
+      auth,
+      store: this.#store,
+    });
+
+    this.#sessions.set(session.id, session);
+
+    return {
+      type: "response.ok",
+      requestId: msg.id,
+      data: session.toInfo(),
+    };
+  }
+
+  #list(
+    msg: Extract<ClientMessage, { type: "session.list" }>,
+    auth: AuthContext,
+  ): DaemonMessage {
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_LIST)) {
+      return { type: "response.error", requestId: msg.id, error: "Missing scope: session:list", code: "forbidden" };
+    }
+
+    const sessions: SessionInfo[] = [];
+    for (const session of this.#sessions.values()) {
+      const info = session.toInfo();
+      sessions.push({ ...info, attachedClients: session.attachedClientCount });
+    }
+
+    return { type: "session.list.result", requestId: msg.id, sessions };
+  }
+
+  #attach(
+    msg: Extract<ClientMessage, { type: "session.attach" }>,
+    auth: AuthContext,
+    client: AttachedClient,
+  ): DaemonMessage {
+    const scope = hasScope(auth.scopes as string[], SCOPES.SESSION_ATTACH)
+      || hasScope(auth.scopes as string[], SCOPES.SESSION_WATCH);
+    if (!scope) {
+      return { type: "response.error", requestId: msg.id, error: "Missing scope: session:attach or session:watch", code: "forbidden" };
+    }
+
+    const session = this.#sessions.get(msg.sessionId);
+    if (!session) {
+      return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
+    }
+
+    session.attach(client);
+    return { type: "response.ok", requestId: msg.id, data: session.toInfo() };
+  }
+
+  #detach(
+    msg: Extract<ClientMessage, { type: "session.detach" }>,
+    client: AttachedClient,
+  ): DaemonMessage {
+    const session = this.#sessions.get(msg.sessionId);
+    if (!session) {
+      return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
+    }
+
+    session.detach(client.id);
+    return { type: "response.ok", requestId: msg.id };
+  }
+
+  #send(
+    msg: Extract<ClientMessage, { type: "session.send" }>,
+    auth: AuthContext,
+  ): DaemonMessage {
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_SEND)) {
+      return { type: "response.error", requestId: msg.id, error: "Missing scope: session:send", code: "forbidden" };
+    }
+
+    const session = this.#sessions.get(msg.sessionId);
+    if (!session) {
+      return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
+    }
+
+    // Fire and forget — output streams to attached clients
+    session.send(msg.text, auth).catch(() => {});
+
+    return { type: "response.ok", requestId: msg.id };
+  }
+
+  #interrupt(
+    msg: Extract<ClientMessage, { type: "session.interrupt" }>,
+    auth: AuthContext,
+  ): DaemonMessage {
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_INTERRUPT)) {
+      return { type: "response.error", requestId: msg.id, error: "Missing scope: session:interrupt", code: "forbidden" };
+    }
+
+    const session = this.#sessions.get(msg.sessionId);
+    if (!session) {
+      return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
+    }
+
+    session.interrupt(auth);
+    return { type: "response.ok", requestId: msg.id };
+  }
+
+  #approve(
+    msg: Extract<ClientMessage, { type: "session.approve" }>,
+    auth: AuthContext,
+  ): DaemonMessage {
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_APPROVE)) {
+      return { type: "response.error", requestId: msg.id, error: "Missing scope: session:approve", code: "forbidden" };
+    }
+
+    const session = this.#sessions.get(msg.sessionId);
+    if (!session) {
+      return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
+    }
+
+    session.approve(msg.approved, auth);
+    return { type: "response.ok", requestId: msg.id };
+  }
+
+  #destroySession(
+    msg: Extract<ClientMessage, { type: "session.destroy" }>,
+    auth: AuthContext,
+  ): DaemonMessage {
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_DESTROY)) {
+      return { type: "response.error", requestId: msg.id, error: "Missing scope: session:destroy", code: "forbidden" };
+    }
+
+    const session = this.#sessions.get(msg.sessionId);
+    if (!session) {
+      return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
+    }
+
+    session.destroy(auth);
+    this.#sessions.delete(msg.sessionId);
+    return { type: "response.ok", requestId: msg.id };
+  }
+}
