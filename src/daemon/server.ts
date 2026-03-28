@@ -1,19 +1,20 @@
 /**
- * WebSocket server — the daemon's network interface.
+ * Codeoid daemon — WebSocket server + frontend plugin host.
  *
- * Clients connect with a ZeroID JWT in the first message (auth handshake).
- * After verification, all subsequent messages are routed through the
- * SessionManager with the verified AuthContext.
+ * The daemon owns the SessionManager and Store. External clients (terminal CLI)
+ * connect over WebSocket. Embedded frontends (Telegram, Web UI) get direct
+ * access to the SessionManager via the Frontend plugin interface.
  */
 
 import { WebSocketServer, WebSocket } from "ws";
-import { createServer, type IncomingMessage, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import { verifyToken, extractBearerToken, type AuthConfig } from "./auth.js";
+import { verifyToken, type AuthConfig } from "./auth.js";
 import { SessionManager } from "./session-manager.js";
 import { Store } from "./store.js";
 import type { AuthContext, ClientMessage, DaemonMessage } from "../protocol/types.js";
 import type { AttachedClient } from "./session.js";
+import type { Frontend, FrontendContext } from "../frontends/types.js";
 
 export interface DaemonConfig {
   port: number;
@@ -35,6 +36,8 @@ export class DaemonServer {
   #httpServer: Server;
   #wss: WebSocketServer;
   #sockets = new Map<string, AuthenticatedSocket>();
+  #frontends: Frontend[] = [];
+  #httpHandlers: Array<(req: IncomingMessage, res: ServerResponse) => boolean> = [];
 
   constructor(config: DaemonConfig) {
     this.#config = config;
@@ -50,16 +53,67 @@ export class DaemonServer {
     return this.#manager;
   }
 
+  get httpServer(): Server {
+    return this.#httpServer;
+  }
+
+  // ── Frontend plugin management ──────────────────────────────────────
+
+  /**
+   * Register a frontend plugin. Call before start().
+   */
+  use(frontend: Frontend): void {
+    this.#frontends.push(frontend);
+  }
+
+  /**
+   * Register an HTTP route handler. Frontends use this to mount their
+   * own routes (e.g. /web/* for the web UI). Return true if handled.
+   */
+  route(handler: (req: IncomingMessage, res: ServerResponse) => boolean): void {
+    this.#httpHandlers.push(handler);
+  }
+
+  // ── Lifecycle ─────────────────────────────────────────────────────────
+
   async start(): Promise<void> {
-    return new Promise((resolve) => {
+    await new Promise<void>((resolve) => {
       this.#httpServer.listen(this.#config.port, this.#config.host, () => {
         console.log(`[codeoid] daemon listening on ${this.#config.host}:${this.#config.port}`);
         resolve();
       });
     });
+
+    // Start all registered frontends
+    const ctx: FrontendContext = {
+      manager: this.#manager,
+      store: this.#store,
+      auth: this.#config.auth,
+      httpServer: this.#httpServer,
+      host: this.#config.host,
+      port: this.#config.port,
+    };
+
+    for (const frontend of this.#frontends) {
+      try {
+        await frontend.start(ctx);
+        console.log(`[codeoid] frontend started: ${frontend.name}`);
+      } catch (err) {
+        console.error(`[codeoid] frontend failed to start: ${frontend.name}`, err);
+      }
+    }
   }
 
   async stop(): Promise<void> {
+    // Stop frontends first
+    for (const frontend of this.#frontends) {
+      try {
+        await frontend.stop();
+      } catch (err) {
+        console.error(`[codeoid] frontend failed to stop: ${frontend.name}`, err);
+      }
+    }
+
     for (const { ws } of this.#sockets.values()) {
       ws.close(1001, "Server shutting down");
     }
@@ -69,26 +123,32 @@ export class DaemonServer {
     console.log("[codeoid] daemon stopped");
   }
 
-  // ── HTTP handler (health check) ───────────────────────────────────────
+  // ── HTTP handler ──────────────────────────────────────────────────────
 
-  #handleHttp(req: IncomingMessage, res: import("node:http").ServerResponse): void {
+  #handleHttp(req: IncomingMessage, res: ServerResponse): void {
+    // Health check
     if (req.url === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ status: "ok", version: "0.1.0" }));
       return;
     }
+
+    // Let registered frontend handlers try first
+    for (const handler of this.#httpHandlers) {
+      if (handler(req, res)) return;
+    }
+
     res.writeHead(404);
     res.end();
   }
 
-  // ── WebSocket handler ─────────────────────────────────────────────────
+  // ── WebSocket handler (for terminal CLI clients) ──────────────────────
 
-  #handleConnection(ws: WebSocket, req: IncomingMessage): void {
+  #handleConnection(ws: WebSocket, _req: IncomingMessage): void {
     const clientId = randomUUID();
     let authenticated = false;
     let auth: AuthContext | null = null;
 
-    // Auth timeout — client must authenticate within 10 seconds
     const authTimeout = setTimeout(() => {
       if (!authenticated) {
         ws.close(4001, "Authentication timeout");
@@ -104,7 +164,6 @@ export class DaemonServer {
         return;
       }
 
-      // First message must be auth
       if (!authenticated) {
         clearTimeout(authTimeout);
         const token = typeof parsed["token"] === "string" ? parsed["token"] : undefined;
@@ -132,7 +191,6 @@ export class DaemonServer {
         return;
       }
 
-      // Authenticated — route through session manager
       const msg = parsed as unknown as ClientMessage;
       const client: AttachedClient = {
         id: clientId,

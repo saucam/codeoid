@@ -48,7 +48,7 @@ export function loadConfig(): CodeoidConfig {
     daemonUrl: process.env["CODEOID_DAEMON_URL"] ?? config.daemonUrl ?? "ws://127.0.0.1:7400",
     dbPath: process.env["CODEOID_DB_PATH"] ?? config.dbPath ?? join(CONFIG_DIR, "codeoid.db"),
     auth: {
-      jwksUrl: process.env["ZEROID_JWKS_URL"] ?? config.auth?.jwksUrl ?? `${zeroidUrl}/.well-known/jwks.json`,
+      baseUrl: zeroidUrl,
       issuer: process.env["ZEROID_ISSUER"] ?? config.auth?.issuer,
       audience: process.env["ZEROID_AUDIENCE"] ?? config.auth?.audience,
     },

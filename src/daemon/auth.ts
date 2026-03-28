@@ -7,17 +7,29 @@
  * Codeoid permission scopes and enforced per-message by the daemon.
  */
 
-import { verifyJWT, type ZeroIDIdentity } from "@highflame/sdk/zeroid";
+import { ZeroIDClient } from "@highflame/sdk";
 import type { AuthContext } from "../protocol/types.js";
 import type { Scope } from "../protocol/scopes.js";
 
 export interface AuthConfig {
-  /** ZeroID JWKS URL, e.g. "http://localhost:8899/.well-known/jwks.json" */
-  jwksUrl: string;
+  /** ZeroID base URL, e.g. "http://localhost:8899" */
+  baseUrl: string;
+  /** ZeroID JWKS URL — derived from baseUrl if not set */
+  jwksUrl?: string;
   /** Expected issuer claim */
   issuer?: string;
   /** Expected audience claim */
   audience?: string;
+}
+
+// Lazily initialised ZeroID client (one per daemon).
+let _zeroidClient: ZeroIDClient | null = null;
+
+function getClient(config: AuthConfig): ZeroIDClient {
+  if (!_zeroidClient) {
+    _zeroidClient = new ZeroIDClient({ baseUrl: config.baseUrl });
+  }
+  return _zeroidClient;
 }
 
 /**
@@ -29,7 +41,8 @@ export async function verifyToken(
   token: string,
   config: AuthConfig,
 ): Promise<AuthContext> {
-  const identity = await verifyJWT(token, config.jwksUrl);
+  const client = getClient(config);
+  const identity = await client.tokens.verify(token);
 
   if (config.issuer && identity.iss !== config.issuer) {
     throw new Error(`Token issuer mismatch: expected "${config.issuer}", got "${identity.iss}"`);
@@ -42,7 +55,10 @@ export async function verifyToken(
   return identityToAuthContext(identity);
 }
 
-function identityToAuthContext(identity: ZeroIDIdentity): AuthContext {
+// Use Awaited<ReturnType<...>> to get the identity type without importing the non-exported type.
+type VerifiedIdentity = Awaited<ReturnType<ZeroIDClient["tokens"]["verify"]>>;
+
+function identityToAuthContext(identity: VerifiedIdentity): AuthContext {
   return {
     sub: identity.sub,
     name: identity.name,

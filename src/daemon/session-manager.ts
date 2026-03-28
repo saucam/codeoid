@@ -5,7 +5,7 @@
  * The Store handles persistence; this class owns the in-memory Session objects.
  */
 
-import { Session, type AttachedClient, type SessionCreateOptions } from "./session.js";
+import { Session, type AttachedClient } from "./session.js";
 import { Store } from "./store.js";
 import { hasScope, SCOPES } from "../protocol/scopes.js";
 import type {
@@ -59,14 +59,9 @@ export class SessionManager {
   }
 
   /** Get a session by name (for Telegram convenience). */
-  findByName(name: string, accountId: string, projectId: string): Session | undefined {
+  findByName(name: string): Session | undefined {
     for (const session of this.#sessions.values()) {
-      const info = session.toInfo();
-      if (info.name === name) {
-        // Verify tenant match via store
-        const stored = this.#store.getSession(session.id);
-        if (stored) return session;
-      }
+      if (session.name === name) return session;
     }
     return undefined;
   }

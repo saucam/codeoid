@@ -81,6 +81,7 @@ export interface SessionDestroyMsg extends BaseClientMsg {
 // ---------------------------------------------------------------------------
 
 export type DaemonMessage =
+  | AuthOkMsg
   | ResponseOkMsg
   | ResponseErrorMsg
   | SessionListResultMsg
@@ -88,6 +89,13 @@ export type DaemonMessage =
   | AgentToolCallMsg
   | AgentApprovalRequestMsg
   | AgentStatusChangeMsg;
+
+export interface AuthOkMsg {
+  type: "auth.ok";
+  sub: string;
+  name?: string;
+  scopes: readonly string[];
+}
 
 export interface ResponseOkMsg {
   type: "response.ok";

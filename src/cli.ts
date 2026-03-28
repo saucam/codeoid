@@ -1,8 +1,8 @@
 /**
- * Codeoid CLI — terminal interface to the daemon.
+ * Codeoid CLI — terminal interface + daemon launcher.
  *
  * Usage:
- *   codeoid start                         Start the daemon
+ *   codeoid start                         Start daemon (+ Telegram + Web UI)
  *   codeoid ls                            List active sessions
  *   codeoid new <name> <workdir>          Create a new session
  *   codeoid attach <name|id>              Attach to a session (streaming)
@@ -26,9 +26,11 @@ program
 
 program
   .command("start")
-  .description("Start the Codeoid daemon")
+  .description("Start the Codeoid daemon with all frontends")
   .option("-p, --port <port>", "Port to listen on", "7400")
-  .option("-h, --host <host>", "Host to bind to", "127.0.0.1")
+  .option("--host <host>", "Host to bind to", "127.0.0.1")
+  .option("--no-telegram", "Disable Telegram bot")
+  .option("--no-web", "Disable Web UI")
   .action(async (opts) => {
     const config = loadConfig();
     const daemon = new DaemonServer({
@@ -38,16 +40,52 @@ program
       auth: config.auth,
     });
 
-    process.on("SIGINT", async () => {
+    // ── Register frontends ────────────────────────────────────────
+
+    // Web UI (always enabled unless --no-web)
+    if (opts.web !== false) {
+      const { WebFrontend } = await import("./frontends/web/index.js");
+      const web = new WebFrontend();
+      daemon.use(web);
+
+      // Register HTTP handler for /app/* routes
+      const wsUrl = `ws://${opts.host === "0.0.0.0" ? "localhost" : opts.host}:${opts.port}`;
+      daemon.route((req, res) => web.handleHttp(req, res, wsUrl));
+    }
+
+    // Telegram (enabled when TELEGRAM_BOT_TOKEN is set)
+    if (opts.telegram !== false) {
+      const botToken = process.env["TELEGRAM_BOT_TOKEN"];
+      const allowedIds = (process.env["TELEGRAM_ALLOWED_USER_IDS"] ?? "")
+        .split(",")
+        .map(Number)
+        .filter(Boolean);
+
+      if (botToken && allowedIds.length > 0) {
+        const { TelegramFrontend } = await import("./frontends/telegram/index.js");
+        daemon.use(new TelegramFrontend(botToken, allowedIds));
+      } else if (botToken) {
+        console.log("[codeoid] TELEGRAM_BOT_TOKEN set but TELEGRAM_ALLOWED_USER_IDS missing — skipping Telegram");
+      }
+    }
+
+    // ── Signal handling ───────────────────────────────────────────
+
+    const shutdown = async () => {
       await daemon.stop();
       process.exit(0);
-    });
-    process.on("SIGTERM", async () => {
-      await daemon.stop();
-      process.exit(0);
-    });
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+
+    // ── Start ─────────────────────────────────────────────────────
 
     await daemon.start();
+
+    if (opts.web !== false) {
+      const url = `http://${opts.host === "0.0.0.0" ? "localhost" : opts.host}:${opts.port}/app`;
+      console.log(`[codeoid] web UI: ${url}`);
+    }
   });
 
 // ── Session commands ──────────────────────────────────────────────────────────
@@ -82,7 +120,6 @@ program
     const client = new TerminalClient(config);
     await client.connect();
     await client.attachSession(session);
-    // attachSession runs until the user detaches (Ctrl+C)
   });
 
 program

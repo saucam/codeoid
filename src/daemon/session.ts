@@ -211,10 +211,23 @@ export class Session {
 
     switch (msg.type) {
       case "assistant": {
-        const text = msg.message.content
-          .filter((b): b is { type: "text"; text: string } => b.type === "text")
-          .map((b) => b.text)
-          .join("");
+        const content = msg.message.content as Array<Record<string, unknown>>;
+        const textParts: string[] = [];
+        for (const block of content) {
+          if (block["type"] === "text" && typeof block["text"] === "string") {
+            textParts.push(block["text"]);
+          }
+          if (block["type"] === "tool_use" && typeof block["name"] === "string") {
+            this.#broadcast({
+              type: "agent.tool_call",
+              sessionId: this.id,
+              tool: block["name"],
+              input: JSON.stringify(block["input"]),
+              timestamp,
+            });
+          }
+        }
+        const text = textParts.join("");
         if (text) {
           this.#broadcast({
             type: "agent.output",
@@ -222,19 +235,6 @@ export class Session {
             content: text,
             timestamp,
           });
-        }
-
-        // Broadcast tool use info
-        for (const block of msg.message.content) {
-          if (block.type === "tool_use") {
-            this.#broadcast({
-              type: "agent.tool_call",
-              sessionId: this.id,
-              tool: block.name,
-              input: JSON.stringify(block.input),
-              timestamp,
-            });
-          }
         }
         break;
       }
