@@ -46,6 +46,9 @@ export const OPERATOR_SCOPES: readonly Scope[] = [
   SCOPES.SESSION_APPROVE,
 ];
 
+/** All scopes as a space-delimited string (for OAuth scope parameter) */
+export const ALL_SCOPES_STRING: string = ALL_SCOPES.join(" ");
+
 /** Check if a set of granted scopes includes the required scope */
 export function hasScope(granted: readonly string[], required: Scope): boolean {
   return granted.includes(required);

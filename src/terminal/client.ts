@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import type { CodeoidConfig } from "../config.js";
 import type { ClientMessage, DaemonMessage, SessionInfo } from "../protocol/types.js";
+import { ALL_SCOPES_STRING } from "../protocol/scopes.js";
 
 export class TerminalClient {
   #config: CodeoidConfig;
@@ -317,7 +318,11 @@ export class TerminalClient {
       const resp = await fetch(`${this.#config.zeroidUrl}/oauth2/token`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ grant_type: "api_key", api_key: token }),
+        body: JSON.stringify({
+          grant_type: "api_key",
+          api_key: token,
+          scope: ALL_SCOPES_STRING,
+        }),
       });
 
       if (!resp.ok) {

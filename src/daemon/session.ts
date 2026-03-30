@@ -1,11 +1,19 @@
 /**
  * Session — wraps a single Claude Agent SDK query (one agent working in one repo).
  *
- * Manages the agent lifecycle, streams output to all attached clients, and
- * routes permission requests to clients for approval.
+ * Manages the agent lifecycle, streams output to all attached clients,
+ * routes permission requests to clients for approval, and assigns ZeroID
+ * identities to the coding agent and its sub-agents.
  */
 
-import { query, type Query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import {
+  query,
+  type Query,
+  type SDKMessage,
+  type PreToolUseHookInput,
+  type SubagentStartHookInput,
+  type SubagentStopHookInput,
+} from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "node:crypto";
 import type {
   AuthContext,
@@ -14,6 +22,7 @@ import type {
   DaemonMessage,
 } from "../protocol/types.js";
 import type { Store } from "./store.js";
+import type { AgentIdentityManager } from "./agent-identity.js";
 
 /** A connected client that can receive messages from this session. */
 export interface AttachedClient {
@@ -27,6 +36,8 @@ export interface SessionCreateOptions {
   workdir: string;
   auth: AuthContext;
   store: Store;
+  /** Optional — if provided, agents get ZeroID identities. */
+  identityManager?: AgentIdentityManager;
 }
 
 export class Session {
@@ -39,6 +50,8 @@ export class Session {
   #status: SessionStatus = "idle";
   #clients = new Map<string, AttachedClient>();
   #store: Store;
+  #identityManager?: AgentIdentityManager;
+  #agentWimseUri?: string;
   #query: Query | null = null;
   #abortController: AbortController | null = null;
 
@@ -49,6 +62,7 @@ export class Session {
     this.createdBy = opts.auth.sub;
     this.createdAt = new Date().toISOString();
     this.#store = opts.store;
+    this.#identityManager = opts.identityManager;
 
     this.#store.createSession({
       ...this.toInfo(),
@@ -64,6 +78,11 @@ export class Session {
 
   get attachedClientCount(): number {
     return this.#clients.size;
+  }
+
+  /** The agent's ZeroID WIMSE URI, if registered. */
+  get agentUri(): string | undefined {
+    return this.#agentWimseUri;
   }
 
   // ── Client management ─────────────────────────────────────────────────
@@ -91,6 +110,8 @@ export class Session {
     this.#setStatus("working");
 
     this.#abortController = new AbortController();
+    const im = this.#identityManager;
+    const sessionId = this.id;
 
     this.#query = query({
       prompt: text,
@@ -103,8 +124,62 @@ export class Session {
         persistSession: true,
         sessionId: this.id,
         settingSources: ["project"],
+
+        // ── ZeroID hooks for agent identity lifecycle ──────────────
+        hooks: {
+          // Register agent identity when Claude actually starts
+          SessionStart: [{
+            hooks: [async () => {
+              if (im && !this.#agentWimseUri) {
+                try {
+                  const { wimseUri } = await im.registerSessionAgent(
+                    sessionId,
+                    this.name,
+                    sender.sub,
+                  );
+                  this.#agentWimseUri = wimseUri;
+                } catch { /* best-effort */ }
+              }
+              return {};
+            }],
+          }],
+
+          // Audit every tool call with agent identity
+          PreToolUse: [{
+            hooks: [async (rawInput) => {
+              const input = rawInput as PreToolUseHookInput;
+              im?.auditToolCall(sessionId, input.tool_name, JSON.stringify(input.tool_input));
+              return {};
+            }],
+          }],
+
+          // Register sub-agent identity on spawn
+          SubagentStart: [{
+            hooks: [async (rawInput) => {
+              const input = rawInput as SubagentStartHookInput;
+              if (im) {
+                await im.registerSubagent(
+                  sessionId,
+                  input.agent_id ?? "unknown",
+                  input.agent_type ?? "unknown",
+                );
+              }
+              return {};
+            }],
+          }],
+
+          // Deactivate sub-agent identity on stop
+          SubagentStop: [{
+            hooks: [async (rawInput) => {
+              const input = rawInput as SubagentStopHookInput;
+              await im?.deactivateSubagent(sessionId, input.agent_id ?? "unknown");
+              return {};
+            }],
+          }],
+        },
+
+        // ── Permission routing to attached clients ─────────────────
         canUseTool: async (toolName, input) => {
-          // Surface permission request to attached clients
           const timestamp = new Date().toISOString();
           this.#broadcast({
             type: "agent.approval_request",
@@ -115,7 +190,6 @@ export class Session {
           });
           this.#setStatus("waiting_approval");
 
-          // Wait for approval from any attached client
           const result = await this.#waitForApproval();
           this.#setStatus("working");
 
@@ -174,13 +248,17 @@ export class Session {
   }
 
   /**
-   * Destroy this session — kills the agent and cleans up.
+   * Destroy this session — kills the agent, deactivates identity, cleans up.
    */
-  destroy(sender: AuthContext): void {
+  async destroy(sender: AuthContext): Promise<void> {
     this.#store.audit(sender.sub, "session.destroy", this.id);
     this.#abortController?.abort();
     this.#resolveApproval?.(false);
     this.#clients.clear();
+
+    // Deactivate agent identity (cascades to sub-agents)
+    await this.#identityManager?.deactivateSessionAgent(this.id);
+
     this.#store.deleteSession(this.id);
   }
 
@@ -257,7 +335,6 @@ export class Session {
       try {
         client.send(msg);
       } catch {
-        // Client disconnected — will be cleaned up on next message
         this.#clients.delete(client.id);
       }
     }

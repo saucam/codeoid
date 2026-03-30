@@ -14,6 +14,7 @@ import { SessionManager } from "./session-manager.js";
 import { Store } from "./store.js";
 import type { AuthContext, ClientMessage, DaemonMessage } from "../protocol/types.js";
 import type { AttachedClient } from "./session.js";
+import { AgentIdentityManager } from "./agent-identity.js";
 import type { Frontend, FrontendContext } from "../frontends/types.js";
 
 export interface DaemonConfig {
@@ -21,6 +22,11 @@ export interface DaemonConfig {
   host: string;
   dbPath: string;
   auth: AuthConfig;
+  /** If set, agents and sub-agents get ZeroID identities. */
+  agentIdentity?: {
+    accountId: string;
+    projectId: string;
+  };
 }
 
 interface AuthenticatedSocket {
@@ -42,7 +48,21 @@ export class DaemonServer {
   constructor(config: DaemonConfig) {
     this.#config = config;
     this.#store = new Store(config.dbPath);
-    this.#manager = new SessionManager(this.#store);
+
+    // Create agent identity manager if configured
+    let identityManager: AgentIdentityManager | undefined;
+    if (config.agentIdentity) {
+      identityManager = new AgentIdentityManager(
+        {
+          auth: config.auth,
+          accountId: config.agentIdentity.accountId,
+          projectId: config.agentIdentity.projectId,
+        },
+        this.#store,
+      );
+    }
+
+    this.#manager = new SessionManager(this.#store, identityManager);
 
     this.#httpServer = createServer(this.#handleHttp.bind(this));
     this.#wss = new WebSocketServer({ server: this.#httpServer });

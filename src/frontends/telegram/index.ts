@@ -19,6 +19,7 @@
 import { Bot, type Context } from "grammy";
 import { randomUUID } from "node:crypto";
 import { verifyToken } from "../../daemon/auth.js";
+import { ALL_SCOPES_STRING } from "../../protocol/scopes.js";
 import type { Frontend, FrontendContext } from "../types.js";
 import type { SessionManager } from "../../daemon/session-manager.js";
 import type { AuthConfig } from "../../daemon/auth.js";
@@ -121,7 +122,7 @@ export class TelegramFrontend implements Frontend {
         const resp = await fetch(`${zeroidUrl}/oauth2/token`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ grant_type: "api_key", api_key: apiKey }),
+          body: JSON.stringify({ grant_type: "api_key", api_key: apiKey, scope: ALL_SCOPES_STRING }),
         });
         if (!resp.ok) {
           await ctx.reply("Authentication failed. Check your API key.");

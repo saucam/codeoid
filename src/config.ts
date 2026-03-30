@@ -18,6 +18,11 @@ export interface CodeoidConfig {
   apiKey?: string;
   /** ZeroID base URL for token exchange */
   zeroidUrl: string;
+  /** ZeroID tenant for agent identity registration */
+  agentIdentity?: {
+    accountId: string;
+    projectId: string;
+  };
 }
 
 const CONFIG_DIR = join(homedir(), ".codeoid");
@@ -54,6 +59,12 @@ export function loadConfig(): CodeoidConfig {
     },
     apiKey: process.env["CODEOID_API_KEY"] ?? config.apiKey,
     zeroidUrl,
+    agentIdentity: (process.env["ZEROID_ACCOUNT_ID"] || config.agentIdentity)
+      ? {
+          accountId: process.env["ZEROID_ACCOUNT_ID"] ?? config.agentIdentity?.accountId ?? "personal",
+          projectId: process.env["ZEROID_PROJECT_ID"] ?? config.agentIdentity?.projectId ?? "dev",
+        }
+      : undefined,
   };
 }
 

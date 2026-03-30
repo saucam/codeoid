@@ -38,6 +38,7 @@ program
       host: opts.host,
       dbPath: config.dbPath,
       auth: config.auth,
+      agentIdentity: config.agentIdentity,
     });
 
     // ── Register frontends ────────────────────────────────────────

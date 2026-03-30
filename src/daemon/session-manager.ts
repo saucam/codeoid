@@ -8,6 +8,7 @@
 import { Session, type AttachedClient } from "./session.js";
 import { Store } from "./store.js";
 import { hasScope, SCOPES } from "../protocol/scopes.js";
+import type { AgentIdentityManager } from "./agent-identity.js";
 import type {
   AuthContext,
   ClientMessage,
@@ -18,9 +19,11 @@ import type {
 export class SessionManager {
   #sessions = new Map<string, Session>();
   #store: Store;
+  #identityManager?: AgentIdentityManager;
 
-  constructor(store: Store) {
+  constructor(store: Store, identityManager?: AgentIdentityManager) {
     this.#store = store;
+    this.#identityManager = identityManager;
   }
 
   /**
@@ -81,6 +84,7 @@ export class SessionManager {
       workdir: msg.workdir,
       auth,
       store: this.#store,
+      identityManager: this.#identityManager,
     });
 
     this.#sessions.set(session.id, session);

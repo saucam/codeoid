@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.85",
-    "@highflame/sdk": "file:../highflame-sdk/javascript",
+    "@highflame/sdk": "file:/Workspace/highflame-sdk/javascript",
     "better-sqlite3": "^11.0.0",
     "commander": "^13.0.0",
     "grammy": "^1.35.0",

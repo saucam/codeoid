@@ -125,9 +125,12 @@ codeoid destroy <n>
 ```bash
 CODEOID_API_KEY=zid_sk_...           # ZeroID API key
 ZEROID_URL=http://localhost:8899     # ZeroID server
-ANTHROPIC_API_KEY=sk-ant-...         # Claude API
 TELEGRAM_BOT_TOKEN=...              # Optional: enables Telegram frontend
 TELEGRAM_ALLOWED_USER_IDS=123,456   # Required with bot token
+
+# Claude auth: uses your existing `claude login` session (Pro/Max subscription).
+# No ANTHROPIC_API_KEY needed if you're logged in via Claude Code CLI.
+# Falls back to ANTHROPIC_API_KEY env var if not logged in.
 ```
 
 Web UI available at `http://localhost:7400/app` when daemon is running.
