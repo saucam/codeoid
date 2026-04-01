@@ -1,13 +1,18 @@
 /**
  * SessionManager — orchestrates multiple concurrent agent sessions.
  *
- * Enforces ZeroID scopes on every operation and maintains the live session map.
- * The Store handles persistence; this class owns the in-memory Session objects.
+ * Production-grade patterns:
+ *   - Per-user rate limiting on session creation
+ *   - Session resume from transcript on daemon restart
+ *   - Scope enforcement on every operation
+ *   - Graceful drain on shutdown
  */
 
 import { Session, type AttachedClient } from "./session.js";
 import { Store } from "./store.js";
 import { hasScope, SCOPES } from "../protocol/scopes.js";
+import { RateLimiter } from "./rate-limit.js";
+import { TranscriptStore } from "./transcript.js";
 import type { AgentIdentityManager } from "./agent-identity.js";
 import type {
   AuthContext,
@@ -19,11 +24,62 @@ import type {
 export class SessionManager {
   #sessions = new Map<string, Session>();
   #store: Store;
+  #transcriptStore: TranscriptStore;
   #identityManager?: AgentIdentityManager;
+  #rateLimiter: RateLimiter;
 
-  constructor(store: Store, identityManager?: AgentIdentityManager) {
+  constructor(
+    store: Store,
+    transcriptStore: TranscriptStore,
+    identityManager?: AgentIdentityManager,
+    rateLimiter?: RateLimiter,
+  ) {
     this.#store = store;
+    this.#transcriptStore = transcriptStore;
     this.#identityManager = identityManager;
+    this.#rateLimiter = rateLimiter ?? new RateLimiter();
+  }
+
+  /**
+   * Resume sessions from persisted transcripts (called on daemon restart).
+   * Rebuilds in-memory session objects and scrollback buffers.
+   */
+  async resumeSessions(): Promise<number> {
+    const metas = await this.#transcriptStore.loadAllMeta();
+    let resumed = 0;
+
+    for (const meta of metas) {
+      try {
+        const session = new Session({
+          name: meta.sessionName,
+          workdir: meta.workdir,
+          auth: {
+            sub: meta.createdBy,
+            scopes: [],
+            delegationDepth: 0,
+            accountId: meta.accountId,
+            projectId: meta.projectId,
+          },
+          store: this.#store,
+          transcriptStore: this.#transcriptStore,
+          identityManager: this.#identityManager,
+          existingId: meta.sessionId,
+        });
+
+        // Restore scrollback from transcript
+        const entries = await this.#transcriptStore.loadTranscript(meta.sessionId);
+        const messages = entries.map((e) => e.message);
+        session.restoreScrollback(messages);
+
+        this.#sessions.set(session.id, session);
+        this.#rateLimiter.recordCreation(meta.createdBy);
+        resumed++;
+      } catch {
+        // Skip sessions that fail to resume
+      }
+    }
+
+    return resumed;
   }
 
   /**
@@ -69,6 +125,35 @@ export class SessionManager {
     return undefined;
   }
 
+  /**
+   * Graceful drain — wait for all in-flight sessions to reach idle.
+   * Used during shutdown.
+   */
+  async drain(timeoutMs: number = 10_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      const working = [...this.#sessions.values()].filter(
+        (s) => s.status === "working" || s.status === "waiting_approval",
+      );
+
+      if (working.length === 0) return;
+
+      // Interrupt all working sessions
+      for (const session of working) {
+        session.interrupt({
+          sub: "system:shutdown",
+          scopes: [],
+          delegationDepth: 0,
+          accountId: "",
+          projectId: "",
+        });
+      }
+
+      await Bun.sleep(500);
+    }
+  }
+
   // ── Handlers ──────────────────────────────────────────────────────────
 
   #create(
@@ -79,15 +164,23 @@ export class SessionManager {
       return { type: "response.error", requestId: msg.id, error: "Missing scope: session:create", code: "forbidden" };
     }
 
+    // Rate limit check
+    const rateCheck = this.#rateLimiter.check(auth.sub);
+    if (!rateCheck.allowed) {
+      return { type: "response.error", requestId: msg.id, error: rateCheck.reason, code: "rate_limited" };
+    }
+
     const session = new Session({
       name: msg.name,
       workdir: msg.workdir,
       auth,
       store: this.#store,
+      transcriptStore: this.#transcriptStore,
       identityManager: this.#identityManager,
     });
 
     this.#sessions.set(session.id, session);
+    this.#rateLimiter.recordCreation(auth.sub);
 
     return {
       type: "response.ok",
@@ -195,7 +288,7 @@ export class SessionManager {
       return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
     }
 
-    session.approve(msg.approved, auth);
+    session.approve(msg.requestId, msg.approved, auth);
     return { type: "response.ok", requestId: msg.id };
   }
 
@@ -214,6 +307,7 @@ export class SessionManager {
 
     session.destroy(auth);
     this.#sessions.delete(msg.sessionId);
+    this.#rateLimiter.recordDestruction(auth.sub);
     return { type: "response.ok", requestId: msg.id };
   }
 }

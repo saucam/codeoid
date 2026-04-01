@@ -1,3 +1,4 @@
+#!/usr/bin/env bun
 /**
  * Codeoid CLI — terminal interface + daemon launcher.
  *
@@ -37,6 +38,7 @@ program
       port: parseInt(opts.port, 10),
       host: opts.host,
       dbPath: config.dbPath,
+      transcriptDir: config.transcriptDir,
       auth: config.auth,
       agentIdentity: config.agentIdentity,
     });
@@ -48,10 +50,6 @@ program
       const { WebFrontend } = await import("./frontends/web/index.js");
       const web = new WebFrontend();
       daemon.use(web);
-
-      // Register HTTP handler for /app/* routes
-      const wsUrl = `ws://${opts.host === "0.0.0.0" ? "localhost" : opts.host}:${opts.port}`;
-      daemon.route((req, res) => web.handleHttp(req, res, wsUrl));
     }
 
     // Telegram (enabled when TELEGRAM_BOT_TOKEN is set)
@@ -69,17 +67,6 @@ program
         console.log("[codeoid] TELEGRAM_BOT_TOKEN set but TELEGRAM_ALLOWED_USER_IDS missing — skipping Telegram");
       }
     }
-
-    // ── Signal handling ───────────────────────────────────────────
-
-    const shutdown = async () => {
-      await daemon.stop();
-      process.exit(0);
-    };
-    process.on("SIGINT", shutdown);
-    process.on("SIGTERM", shutdown);
-
-    // ── Start ─────────────────────────────────────────────────────
 
     await daemon.start();
 

@@ -1,21 +1,19 @@
 /**
  * SQLite-backed persistence for session metadata and audit log.
  *
- * Session *content* (conversation history) is managed by the Claude Agent SDK
- * via its built-in session persistence. We only store metadata needed for
- * listing, reconnecting, and auditing.
+ * Uses Bun's built-in SQLite (no native addon dependency).
  */
 
-import Database from "better-sqlite3";
+import { Database } from "bun:sqlite";
 import type { SessionInfo, SessionStatus } from "../protocol/types.js";
 
 export class Store {
-  #db: Database.Database;
+  #db: Database;
 
   constructor(dbPath: string) {
-    this.#db = new Database(dbPath);
-    this.#db.pragma("journal_mode = WAL");
-    this.#db.pragma("foreign_keys = ON");
+    this.#db = new Database(dbPath, { create: true });
+    this.#db.exec("PRAGMA journal_mode = WAL");
+    this.#db.exec("PRAGMA foreign_keys = ON");
     this.#migrate();
   }
 
@@ -54,7 +52,7 @@ export class Store {
   createSession(session: SessionInfo & { accountId: string; projectId: string }): void {
     this.#db
       .prepare(
-        `INSERT INTO sessions (id, name, workdir, status, created_by, account_id, project_id, created_at)
+        `INSERT OR REPLACE INTO sessions (id, name, workdir, status, created_by, account_id, project_id, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
@@ -88,7 +86,7 @@ export class Store {
       status: r.status as SessionStatus,
       createdBy: r.created_by,
       createdAt: r.created_at,
-      attachedClients: 0, // filled in by SessionManager from live state
+      attachedClients: 0,
     }));
   }
 

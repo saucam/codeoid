@@ -7,32 +7,24 @@
     "codeoid": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsup",
-    "dev": "tsup --watch",
+    "build": "bun build src/cli.ts --outdir dist --target bun --sourcemap",
+    "dev": "bun --watch src/cli.ts",
     "lint": "biome check src/",
     "lint:fix": "biome check --write src/",
     "format": "biome format --write src/",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "bun x tsc --noEmit"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.85",
     "@highflame/sdk": "file:/Workspace/highflame-sdk/javascript",
-    "better-sqlite3": "^11.0.0",
     "commander": "^13.0.0",
     "grammy": "^1.35.0",
-    "ws": "^8.18.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",
-    "@types/better-sqlite3": "^7.6.0",
-    "@types/node": "^22.0.0",
-    "@types/ws": "^8.5.0",
-    "tsup": "^8.0.0",
+    "@types/bun": "latest",
     "typescript": "^5.7.0"
-  },
-  "engines": {
-    "node": ">=20"
   },
   "license": "MIT"
 }

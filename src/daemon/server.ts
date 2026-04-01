@@ -1,28 +1,33 @@
 /**
- * Codeoid daemon — WebSocket server + frontend plugin host.
+ * Codeoid daemon — Bun WebSocket server + frontend plugin host.
  *
- * The daemon owns the SessionManager and Store. External clients (terminal CLI)
- * connect over WebSocket. Embedded frontends (Telegram, Web UI) get direct
- * access to the SessionManager via the Frontend plugin interface.
+ * Production-grade patterns:
+ *   - Graceful shutdown with cleanup registry
+ *   - Session resume from transcript on startup
+ *   - Frontend plugin architecture (Telegram, Web UI)
+ *   - ZeroID JWT verification on every connection
  */
 
-import { WebSocketServer, WebSocket } from "ws";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { verifyToken, type AuthConfig } from "./auth.js";
 import { SessionManager } from "./session-manager.js";
 import { Store } from "./store.js";
+import { TranscriptStore } from "./transcript.js";
+import { RateLimiter } from "./rate-limit.js";
+import { ShutdownManager } from "./shutdown.js";
+import { AgentIdentityManager } from "./agent-identity.js";
 import type { AuthContext, ClientMessage, DaemonMessage } from "../protocol/types.js";
 import type { AttachedClient } from "./session.js";
-import { AgentIdentityManager } from "./agent-identity.js";
 import type { Frontend, FrontendContext } from "../frontends/types.js";
+import type { Server } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
 export interface DaemonConfig {
   port: number;
   host: string;
   dbPath: string;
+  transcriptDir: string;
   auth: AuthConfig;
-  /** If set, agents and sub-agents get ZeroID identities. */
   agentIdentity?: {
     accountId: string;
     projectId: string;
@@ -38,9 +43,11 @@ interface AuthenticatedSocket {
 export class DaemonServer {
   #config: DaemonConfig;
   #store: Store;
+  #transcriptStore: TranscriptStore;
   #manager: SessionManager;
-  #httpServer: Server;
-  #wss: WebSocketServer;
+  #shutdown: ShutdownManager;
+  #httpServer: ReturnType<typeof createServer> | null = null;
+  #bunServer: ReturnType<typeof Bun.serve> | null = null;
   #sockets = new Map<string, AuthenticatedSocket>();
   #frontends: Frontend[] = [];
   #httpHandlers: Array<(req: IncomingMessage, res: ServerResponse) => boolean> = [];
@@ -48,8 +55,9 @@ export class DaemonServer {
   constructor(config: DaemonConfig) {
     this.#config = config;
     this.#store = new Store(config.dbPath);
+    this.#transcriptStore = new TranscriptStore(config.transcriptDir);
+    this.#shutdown = new ShutdownManager();
 
-    // Create agent identity manager if configured
     let identityManager: AgentIdentityManager | undefined;
     if (config.agentIdentity) {
       identityManager = new AgentIdentityManager(
@@ -62,34 +70,37 @@ export class DaemonServer {
       );
     }
 
-    this.#manager = new SessionManager(this.#store, identityManager);
+    const rateLimiter = new RateLimiter();
+    this.#manager = new SessionManager(
+      this.#store, this.#transcriptStore, identityManager, rateLimiter,
+    );
 
-    this.#httpServer = createServer(this.#handleHttp.bind(this));
-    this.#wss = new WebSocketServer({ server: this.#httpServer });
-    this.#wss.on("connection", this.#handleConnection.bind(this));
+    // Register cleanup functions (LIFO order)
+    this.#shutdown.register("sessions", () => this.#manager.drain(10_000));
+    this.#shutdown.register("store", () => this.#store.close());
+    this.#shutdown.register("websockets", () => {
+      for (const { ws } of this.#sockets.values()) {
+        ws.close(1001, "Server shutting down");
+      }
+    });
+    this.#shutdown.register("server", () => {
+      this.#bunServer?.stop();
+    });
   }
 
   get manager(): SessionManager {
     return this.#manager;
   }
 
-  get httpServer(): Server {
-    return this.#httpServer;
-  }
-
   // ── Frontend plugin management ──────────────────────────────────────
 
-  /**
-   * Register a frontend plugin. Call before start().
-   */
   use(frontend: Frontend): void {
     this.#frontends.push(frontend);
+
+    // Register frontend cleanup
+    this.#shutdown.register(`frontend:${frontend.name}`, () => frontend.stop());
   }
 
-  /**
-   * Register an HTTP route handler. Frontends use this to mount their
-   * own routes (e.g. /web/* for the web UI). Return true if handled.
-   */
   route(handler: (req: IncomingMessage, res: ServerResponse) => boolean): void {
     this.#httpHandlers.push(handler);
   }
@@ -97,19 +108,168 @@ export class DaemonServer {
   // ── Lifecycle ─────────────────────────────────────────────────────────
 
   async start(): Promise<void> {
-    await new Promise<void>((resolve) => {
-      this.#httpServer.listen(this.#config.port, this.#config.host, () => {
-        console.log(`[codeoid] daemon listening on ${this.#config.host}:${this.#config.port}`);
-        resolve();
-      });
+    // Install signal handlers
+    this.#shutdown.install();
+
+    // Resume sessions from transcripts
+    const resumed = await this.#manager.resumeSessions();
+    if (resumed > 0) {
+      console.log(`[codeoid] resumed ${resumed} session(s) from transcript`);
+    }
+
+    // Start Bun HTTP + WebSocket server
+    const self = this;
+    const authConfig = this.#config.auth;
+
+    this.#bunServer = Bun.serve({
+      port: this.#config.port,
+      hostname: this.#config.host,
+
+      async fetch(req, server) {
+        const url = new URL(req.url);
+
+        // WebSocket upgrade
+        if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+          const success = server.upgrade(req, {
+            data: { clientId: randomUUID(), authenticated: false, auth: null as AuthContext | null },
+          });
+          return success
+            ? undefined
+            : new Response("WebSocket upgrade failed", { status: 500 });
+        }
+
+        // HTTP routes
+        if (url.pathname === "/health") {
+          return Response.json({ status: "ok", version: "0.1.0" });
+        }
+
+        if (url.pathname === "/config") {
+          return Response.json({ zeroid_url: authConfig.baseUrl });
+        }
+
+        // Token exchange proxy (avoids CORS)
+        if (url.pathname === "/auth/token" && req.method === "POST") {
+          try {
+            const body = await req.text();
+            const zeroidResp = await fetch(`${authConfig.baseUrl}/oauth2/token`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body,
+            });
+            const data = await zeroidResp.text();
+            return new Response(data, {
+              status: zeroidResp.status,
+              headers: { "Content-Type": "application/json" },
+            });
+          } catch {
+            return Response.json({ error: "ZeroID unreachable" }, { status: 502 });
+          }
+        }
+
+        // Frontend routes (Web UI etc.) — use Node http compat for now
+        // Serve static from frontends
+        for (const frontend of self.#frontends) {
+          if ("handleFetch" in frontend && typeof frontend.handleFetch === "function") {
+            const resp = await (frontend as { handleFetch: (req: Request) => Promise<Response | null> }).handleFetch(req);
+            if (resp) return resp;
+          }
+        }
+
+        return new Response("Not Found", { status: 404 });
+      },
+
+      websocket: {
+        open(ws) {
+          // Auth timeout — client must authenticate within 10 seconds
+          const data = ws.data as { clientId: string; authenticated: boolean; auth: AuthContext | null; authTimer?: ReturnType<typeof setTimeout> };
+          data.authTimer = setTimeout(() => {
+            if (!data.authenticated) {
+              ws.close(4001, "Authentication timeout");
+            }
+          }, 10_000);
+        },
+
+        async message(ws, rawMessage) {
+          const data = ws.data as { clientId: string; authenticated: boolean; auth: AuthContext | null; authTimer?: ReturnType<typeof setTimeout> };
+          let parsed: Record<string, unknown>;
+
+          try {
+            parsed = JSON.parse(typeof rawMessage === "string" ? rawMessage : new TextDecoder().decode(rawMessage));
+          } catch {
+            ws.send(JSON.stringify({ type: "response.error", requestId: "", error: "Invalid JSON", code: "invalid_request" }));
+            return;
+          }
+
+          // First message must be auth
+          if (!data.authenticated) {
+            if (data.authTimer) clearTimeout(data.authTimer);
+            const token = typeof parsed["token"] === "string" ? parsed["token"] : undefined;
+            if (!token) {
+              ws.close(4001, "Missing auth token");
+              return;
+            }
+
+            try {
+              data.auth = await verifyToken(token, authConfig);
+            } catch (err) {
+              ws.close(4003, `Authentication failed: ${err instanceof Error ? err.message : "unknown"}`);
+              return;
+            }
+
+            data.authenticated = true;
+            self.#sockets.set(data.clientId, { ws: ws as unknown as WebSocket, clientId: data.clientId, auth: data.auth });
+
+            ws.send(JSON.stringify({
+              type: "auth.ok",
+              sub: data.auth.sub,
+              name: data.auth.name,
+              scopes: data.auth.scopes,
+            }));
+            return;
+          }
+
+          // Authenticated — route through session manager
+          const msg = parsed as unknown as ClientMessage;
+          const client: AttachedClient = {
+            id: data.clientId,
+            auth: data.auth!,
+            send: (m: DaemonMessage) => {
+              try {
+                ws.send(JSON.stringify(m));
+              } catch { /* client may have disconnected */ }
+            },
+          };
+
+          try {
+            const response = await self.#manager.handle(msg, data.auth!, client);
+            ws.send(JSON.stringify(response));
+          } catch (err) {
+            ws.send(JSON.stringify({
+              type: "response.error",
+              requestId: (msg as { id?: string }).id ?? "",
+              error: err instanceof Error ? err.message : "Internal error",
+              code: "internal",
+            }));
+          }
+        },
+
+        close(ws) {
+          const data = ws.data as { clientId: string; authTimer?: ReturnType<typeof setTimeout> };
+          if (data.authTimer) clearTimeout(data.authTimer);
+          self.#manager.disconnectClient(data.clientId);
+          self.#sockets.delete(data.clientId);
+        },
+      },
     });
+
+    console.log(`[codeoid] daemon listening on ${this.#config.host}:${this.#config.port}`);
 
     // Start all registered frontends
     const ctx: FrontendContext = {
       manager: this.#manager,
       store: this.#store,
       auth: this.#config.auth,
-      httpServer: this.#httpServer,
+      httpServer: null as unknown as Server, // Not used with Bun.serve
       host: this.#config.host,
       port: this.#config.port,
     };
@@ -125,131 +285,6 @@ export class DaemonServer {
   }
 
   async stop(): Promise<void> {
-    // Stop frontends first
-    for (const frontend of this.#frontends) {
-      try {
-        await frontend.stop();
-      } catch (err) {
-        console.error(`[codeoid] frontend failed to stop: ${frontend.name}`, err);
-      }
-    }
-
-    for (const { ws } of this.#sockets.values()) {
-      ws.close(1001, "Server shutting down");
-    }
-    this.#wss.close();
-    await new Promise<void>((resolve) => this.#httpServer.close(() => resolve()));
-    this.#store.close();
-    console.log("[codeoid] daemon stopped");
-  }
-
-  // ── HTTP handler ──────────────────────────────────────────────────────
-
-  #handleHttp(req: IncomingMessage, res: ServerResponse): void {
-    // Health check
-    if (req.url === "/health") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", version: "0.1.0" }));
-      return;
-    }
-
-    // Let registered frontend handlers try first
-    for (const handler of this.#httpHandlers) {
-      if (handler(req, res)) return;
-    }
-
-    res.writeHead(404);
-    res.end();
-  }
-
-  // ── WebSocket handler (for terminal CLI clients) ──────────────────────
-
-  #handleConnection(ws: WebSocket, _req: IncomingMessage): void {
-    const clientId = randomUUID();
-    let authenticated = false;
-    let auth: AuthContext | null = null;
-
-    const authTimeout = setTimeout(() => {
-      if (!authenticated) {
-        ws.close(4001, "Authentication timeout");
-      }
-    }, 10_000);
-
-    ws.on("message", async (data) => {
-      let parsed: Record<string, unknown>;
-      try {
-        parsed = JSON.parse(data.toString());
-      } catch {
-        this.#sendError(ws, "", "Invalid JSON", "invalid_request");
-        return;
-      }
-
-      if (!authenticated) {
-        clearTimeout(authTimeout);
-        const token = typeof parsed["token"] === "string" ? parsed["token"] : undefined;
-        if (!token) {
-          ws.close(4001, "Missing auth token");
-          return;
-        }
-
-        try {
-          auth = await verifyToken(token, this.#config.auth);
-        } catch (err) {
-          ws.close(4003, `Authentication failed: ${err instanceof Error ? err.message : "unknown"}`);
-          return;
-        }
-
-        authenticated = true;
-        this.#sockets.set(clientId, { ws, clientId, auth });
-
-        ws.send(JSON.stringify({
-          type: "auth.ok",
-          sub: auth.sub,
-          name: auth.name,
-          scopes: auth.scopes,
-        }));
-        return;
-      }
-
-      const msg = parsed as unknown as ClientMessage;
-      const client: AttachedClient = {
-        id: clientId,
-        auth: auth!,
-        send: (m: DaemonMessage) => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(m));
-          }
-        },
-      };
-
-      try {
-        const response = await this.#manager.handle(msg, auth!, client);
-        ws.send(JSON.stringify(response));
-      } catch (err) {
-        this.#sendError(
-          ws,
-          (msg as { id?: string }).id ?? "",
-          err instanceof Error ? err.message : "Internal error",
-          "internal",
-        );
-      }
-    });
-
-    ws.on("close", () => {
-      clearTimeout(authTimeout);
-      this.#manager.disconnectClient(clientId);
-      this.#sockets.delete(clientId);
-    });
-
-    ws.on("error", () => {
-      this.#manager.disconnectClient(clientId);
-      this.#sockets.delete(clientId);
-    });
-  }
-
-  #sendError(ws: WebSocket, requestId: string, error: string, code: string): void {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "response.error", requestId, error, code }));
-    }
+    await this.#shutdown.shutdown("manual");
   }
 }

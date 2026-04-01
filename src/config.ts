@@ -12,6 +12,8 @@ export interface CodeoidConfig {
   daemonUrl: string;
   /** SQLite database path */
   dbPath: string;
+  /** Transcript directory for JSONL persistence */
+  transcriptDir: string;
   /** ZeroID auth config */
   auth: AuthConfig;
   /** ZeroID API key for token exchange (client-side) */
@@ -29,15 +31,12 @@ const CONFIG_DIR = join(homedir(), ".codeoid");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 
 export function loadConfig(): CodeoidConfig {
-  // Ensure config dir exists
   if (!existsSync(CONFIG_DIR)) {
     mkdirSync(CONFIG_DIR, { recursive: true });
   }
 
-  // Defaults
   let config: Partial<CodeoidConfig> = {};
 
-  // Load from file if exists
   if (existsSync(CONFIG_FILE)) {
     try {
       config = JSON.parse(readFileSync(CONFIG_FILE, "utf-8"));
@@ -46,12 +45,12 @@ export function loadConfig(): CodeoidConfig {
     }
   }
 
-  // Env vars override
   const zeroidUrl = process.env["ZEROID_URL"] ?? config.zeroidUrl ?? "http://localhost:8899";
 
   return {
     daemonUrl: process.env["CODEOID_DAEMON_URL"] ?? config.daemonUrl ?? "ws://127.0.0.1:7400",
     dbPath: process.env["CODEOID_DB_PATH"] ?? config.dbPath ?? join(CONFIG_DIR, "codeoid.db"),
+    transcriptDir: process.env["CODEOID_TRANSCRIPT_DIR"] ?? config.transcriptDir ?? join(CONFIG_DIR, "transcripts"),
     auth: {
       baseUrl: zeroidUrl,
       issuer: process.env["ZEROID_ISSUER"] ?? config.auth?.issuer,

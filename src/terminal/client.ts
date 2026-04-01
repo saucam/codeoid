@@ -1,11 +1,9 @@
 /**
  * Terminal client — connects to the daemon over WebSocket.
  *
- * Handles auth handshake, session commands, and interactive streaming
- * when attached to a session (renders agent output to stdout).
+ * Uses Bun's native WebSocket (no ws dependency).
  */
 
-import WebSocket from "ws";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import type { CodeoidConfig } from "../config.js";
@@ -28,21 +26,18 @@ export class TerminalClient {
     return new Promise((resolve, reject) => {
       this.#ws = new WebSocket(this.#config.daemonUrl);
 
-      this.#ws.on("open", () => {
-        // Send auth handshake
+      this.#ws.onopen = () => {
         this.#ws!.send(JSON.stringify({ token }));
-      });
+      };
 
-      this.#ws.on("message", (data) => {
-        const msg = JSON.parse(data.toString()) as DaemonMessage & { type: string; requestId?: string };
+      this.#ws.onmessage = (event) => {
+        const msg = JSON.parse(typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data)) as DaemonMessage & { type: string; requestId?: string };
 
-        // Auth response
         if (msg.type === "auth.ok") {
           resolve();
           return;
         }
 
-        // Route to pending request handler
         if (msg.requestId && this.#pending.has(msg.requestId)) {
           const handler = this.#pending.get(msg.requestId)!;
           this.#pending.delete(msg.requestId);
@@ -50,18 +45,17 @@ export class TerminalClient {
           return;
         }
 
-        // Stream events (when attached)
         if (this.#streamHandler) {
           this.#streamHandler(msg as DaemonMessage);
         }
-      });
+      };
 
-      this.#ws.on("error", (err) => reject(err));
-      this.#ws.on("close", (code, reason) => {
-        if (code === 4001 || code === 4003) {
-          reject(new Error(`Auth failed: ${reason.toString()}`));
+      this.#ws.onerror = (event) => reject(new Error("WebSocket error"));
+      this.#ws.onclose = (event) => {
+        if (event.code === 4001 || event.code === 4003) {
+          reject(new Error(`Auth failed: ${event.reason}`));
         }
-      });
+      };
     });
   }
 
@@ -109,7 +103,6 @@ export class TerminalClient {
   }
 
   async attachSession(sessionIdOrName: string): Promise<void> {
-    // First resolve name to ID if needed
     const sessionId = await this.#resolveSession(sessionIdOrName);
     if (!sessionId) return;
 
@@ -126,9 +119,19 @@ export class TerminalClient {
 
     console.log(`\nAttached to session. Type messages below. Ctrl+C to detach.\n`);
 
-    // Stream agent output to terminal
+    // Track the latest approval ID for quick yes/no responses
+    let latestApprovalId: string | null = null;
+
     this.#streamHandler = (msg) => {
       switch (msg.type) {
+        case "scrollback.replay":
+          console.log(`\n--- scrollback (${msg.messages.length} messages) ---`);
+          for (const m of msg.messages) {
+            if (m.type === "agent.output") process.stdout.write(m.content);
+            if (m.type === "agent.tool_call") console.log(`\n[tool] ${m.tool}`);
+          }
+          console.log(`--- end scrollback ---\n`);
+          break;
         case "agent.output":
           process.stdout.write(msg.content);
           break;
@@ -136,8 +139,9 @@ export class TerminalClient {
           console.log(`\n[tool] ${msg.tool}`);
           break;
         case "agent.approval_request":
-          console.log(`\n[approval needed] ${msg.tool}: ${msg.input}`);
-          console.log(`  Type 'yes' to approve, 'no' to deny`);
+          latestApprovalId = msg.approvalId;
+          console.log(`\n[approval needed] ${msg.tool}: ${msg.description ?? msg.input}`);
+          console.log(`  Type 'yes' to approve, 'no' to deny (id: ${msg.approvalId.slice(0, 8)})`);
           break;
         case "agent.status_change":
           console.log(`\n[status] ${msg.status}`);
@@ -145,7 +149,6 @@ export class TerminalClient {
       }
     };
 
-    // Interactive input loop
     const rl = createInterface({ input: process.stdin, output: process.stdout });
 
     const cleanup = () => {
@@ -173,17 +176,18 @@ export class TerminalClient {
         continue;
       }
 
-      if (trimmed === "yes" || trimmed === "no") {
+      if ((trimmed === "yes" || trimmed === "no") && latestApprovalId) {
         await this.#request({
           type: "session.approve",
           id: randomUUID(),
           sessionId,
+          requestId: latestApprovalId,
           approved: trimmed === "yes",
         });
+        latestApprovalId = null;
         continue;
       }
 
-      // Regular message to agent
       await this.#request({
         type: "session.send",
         id: randomUUID(),
@@ -236,6 +240,7 @@ export class TerminalClient {
       type: "session.approve",
       id: randomUUID(),
       sessionId,
+      requestId: "", // Will fall back to first pending
       approved,
     });
 
@@ -266,12 +271,10 @@ export class TerminalClient {
   // ── Internals ─────────────────────────────────────────────────────────
 
   async #resolveSession(nameOrId: string): Promise<string | null> {
-    // If it looks like a UUID, use directly
     if (nameOrId.includes("-") && nameOrId.length > 30) {
       return nameOrId;
     }
 
-    // Otherwise resolve by name
     const resp = await this.#request({ type: "session.list", id: randomUUID() });
     if (resp.type === "session.list.result") {
       const match = resp.sessions.find((s) => s.name === nameOrId);
@@ -305,7 +308,6 @@ export class TerminalClient {
   }
 
   async #getToken(): Promise<string> {
-    // For now, read from config or env
     const token = this.#config.apiKey;
     if (!token) {
       throw new Error(
@@ -313,7 +315,6 @@ export class TerminalClient {
       );
     }
 
-    // If it's a ZeroID API key (zid_sk_*), exchange for JWT
     if (token.startsWith("zid_sk_")) {
       const resp = await fetch(`${this.#config.zeroidUrl}/oauth2/token`, {
         method: "POST",
@@ -333,7 +334,6 @@ export class TerminalClient {
       return data.access_token;
     }
 
-    // Otherwise assume it's already a JWT
     return token;
   }
 

@@ -13,8 +13,8 @@
  * - Works as Telegram Mini App or standalone PWA
  */
 
-import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Frontend, FrontendContext } from "../types.js";
+import { ALL_SCOPES_STRING } from "../../protocol/scopes.js";
 
 export class WebFrontend implements Frontend {
   readonly name = "web";
@@ -23,42 +23,29 @@ export class WebFrontend implements Frontend {
 
   async start(ctx: FrontendContext): Promise<void> {
     const wsUrl = `ws://${ctx.host === "0.0.0.0" ? "localhost" : ctx.host}:${ctx.port}`;
-
-    // Mount HTTP routes
-    (ctx as unknown as { daemon: { route: (h: (req: IncomingMessage, res: ServerResponse) => boolean) => void } }).daemon?.route?.(
-      (req, res) => this.#handle(req, res, wsUrl),
-    );
-
-    // Fallback: store handler for direct use by daemon
-    this.#html = buildHtml(wsUrl);
+    this.#html = buildHtml(wsUrl, ALL_SCOPES_STRING);
   }
 
   async stop(): Promise<void> {}
 
   /**
-   * Called by the daemon's HTTP handler. Returns true if this request was handled.
+   * Called by Bun.serve() fetch handler. Returns Response or null if not handled.
    */
-  handleHttp(req: IncomingMessage, res: ServerResponse, wsUrl: string): boolean {
-    return this.#handle(req, res, wsUrl);
-  }
+  async handleFetch(req: Request): Promise<Response | null> {
+    const url = new URL(req.url);
+    const path = url.pathname;
 
-  #handle(req: IncomingMessage, res: ServerResponse, wsUrl: string): boolean {
-    const url = req.url ?? "";
-
-    if (url === "/app" || url === "/app/" || url.startsWith("/app?")) {
-      if (!this.#html) this.#html = buildHtml(wsUrl);
-      res.writeHead(200, {
-        "Content-Type": "text/html; charset=utf-8",
-        "Cache-Control": "no-cache",
+    if (path === "/app" || path === "/app/" || path.startsWith("/app?")) {
+      return new Response(this.#html, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-cache",
+        },
       });
-      res.end(this.#html);
-      return true;
     }
 
-    // Manifest for PWA
-    if (url === "/app/manifest.json") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({
+    if (path === "/app/manifest.json") {
+      return Response.json({
         name: "Codeoid",
         short_name: "Codeoid",
         start_url: "/app",
@@ -66,17 +53,16 @@ export class WebFrontend implements Frontend {
         background_color: "#0a0a0f",
         theme_color: "#6366f1",
         icons: [],
-      }));
-      return true;
+      });
     }
 
-    return false;
+    return null;
   }
 }
 
 // ── HTML builder ──────────────────────────────────────────────────────────────
 
-function buildHtml(wsUrl: string): string {
+function buildHtml(wsUrl: string, scopesString: string): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -89,7 +75,41 @@ function buildHtml(wsUrl: string): string {
 <title>Codeoid</title>
 <style>
 ${CSS}
+/* Prose styling for markdown output */
+.msg-assistant h1, .msg-assistant h2, .msg-assistant h3, .msg-assistant h4 { font-weight: 700; margin: 0.75rem 0 0.35rem; }
+.msg-assistant h1 { font-size: 1.4rem; }
+.msg-assistant h2 { font-size: 1.2rem; }
+.msg-assistant h3 { font-size: 1.05rem; }
+.msg-assistant h4 { font-size: 0.95rem; }
+.msg-assistant p { margin: 0.35rem 0; }
+.msg-assistant ul, .msg-assistant ol { margin: 0.25rem 0; padding-left: 1.5rem; }
+.msg-assistant li { margin: 0.15rem 0; }
+.msg-assistant strong { font-weight: 700; }
+.msg-assistant em { font-style: italic; }
+.msg-assistant a { color: var(--accent); text-decoration: none; }
+.msg-assistant a:hover { text-decoration: underline; }
+.msg-assistant code {
+  background: var(--bg); padding: 0.15em 0.4em; border-radius: 4px;
+  font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.9em;
+}
+.msg-assistant pre {
+  background: var(--bg); border-radius: 8px; padding: 0.75rem; overflow-x: auto;
+  font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.85rem;
+  margin: 0.5rem 0; border: 1px solid var(--border);
+}
+.msg-assistant pre code { background: none; padding: 0; font-size: inherit; }
+.msg-assistant table { width: 100%; border-collapse: collapse; margin: 0.5rem 0; font-size: 0.9rem; }
+.msg-assistant th, .msg-assistant td { border: 1px solid var(--border); padding: 0.4rem 0.6rem; text-align: left; }
+.msg-assistant th { font-weight: 700; background: var(--bg); }
+.msg-assistant blockquote {
+  border-left: 3px solid var(--border); padding-left: 0.75rem;
+  color: var(--text-muted); margin: 0.5rem 0; font-style: italic;
+}
+.msg-assistant hr { border: none; border-top: 1px solid var(--border); margin: 0.5rem 0; }
+.msg-assistant img { max-width: 100%; border-radius: 8px; }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
+<script>window._marked = typeof marked !== 'undefined' ? marked : null;</script>
 </head>
 <body>
 <div id="app">
@@ -174,7 +194,7 @@ ${CSS}
 </div>
 
 <script>
-${JS(wsUrl)}
+${JS(wsUrl, scopesString)}
 </script>
 </body>
 </html>`;
@@ -303,11 +323,17 @@ input:focus, textarea:focus { border-color: var(--accent); }
   background: var(--accent); color: white; align-self: flex-end;
   margin-left: 20%; border-bottom-right-radius: 4px;
 }
-.msg-agent {
+.msg-assistant {
   background: var(--bg-surface); border: 1px solid var(--border);
   margin-right: 10%; border-bottom-left-radius: 4px;
 }
-.msg-tool {
+.msg-tool_call {
+  background: var(--bg-elevated); border: 1px solid var(--border);
+  font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.85rem;
+  color: var(--text-muted); margin-right: 10%; padding: 0.5rem 0.75rem;
+}
+.msg-tool_call .tool-icon { color: var(--yellow); }
+.msg-tool_result {
   background: var(--bg-elevated); border: 1px solid var(--border);
   font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.85rem;
   color: var(--text-muted); margin-right: 10%;
@@ -315,6 +341,10 @@ input:focus, textarea:focus { border-color: var(--accent); }
 .msg-system {
   text-align: center; color: var(--text-muted); font-size: 0.85rem;
   background: none; padding: 0.5rem;
+}
+.msg-info {
+  text-align: center; color: var(--text-muted); font-size: 0.8rem;
+  background: none; padding: 0.25rem; font-style: italic;
 }
 
 pre {
@@ -406,12 +436,13 @@ pre {
 
 // ── JavaScript ────────────────────────────────────────────────────────────────
 
-function JS(wsUrl: string): string {
+function JS(wsUrl: string, scopesString: string): string {
   return `
 (function() {
   'use strict';
 
   const WS_URL = ${JSON.stringify(wsUrl)};
+  const ALL_SCOPES = ${JSON.stringify(scopesString)};
   let ws = null;
   let authToken = null;
   let currentSessionId = null;
@@ -462,15 +493,28 @@ function JS(wsUrl: string): string {
     authBtn.disabled = true;
 
     try {
-      // If it's a ZeroID API key, exchange for JWT first
+      let token = key;
+
+      // If it's a ZeroID API key, exchange for JWT client-side
       if (key.startsWith('zid_sk_')) {
-        // Get the ZeroID URL from the daemon's health endpoint
-        const health = await fetch('/health').then(r => r.json());
-        // For now, use a convention: ZeroID URL is set during token exchange
-        // The daemon handles JWT verification, so we pass the key and let
-        // the daemon's auth handle the rest
+        const resp = await fetch('/auth/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            grant_type: 'api_key',
+            api_key: key,
+            scope: ALL_SCOPES
+          })
+        });
+        if (!resp.ok) {
+          throw new Error('Token exchange failed — check your API key');
+        }
+        const data = await resp.json();
+        token = data.access_token;
       }
-      authToken = key;
+
+      authToken = token;
+      localStorage.setItem('codeoid_token', token);
       connectWs();
     } catch (err) {
       authError.textContent = err.message;
@@ -535,9 +579,10 @@ function JS(wsUrl: string): string {
         break;
 
       case 'response.ok':
-        if (msg.data && msg.data.id) {
-          // Session created — refresh list and attach
-          send({ type: 'session.list', id: newId() });
+        if (msg.data && msg.data.id && msg.data.name && msg.data.workdir) {
+          // Session created — add to local list and attach
+          sessions.push(msg.data);
+          renderSessions();
           attachSession(msg.data.id, msg.data.name);
           newSessionModal.classList.add('hidden');
         }
@@ -547,22 +592,28 @@ function JS(wsUrl: string): string {
         addMessage('system', msg.error);
         break;
 
-      case 'agent.output':
+      case 'session.message':
         if (msg.sessionId === currentSessionId) {
-          addMessage('agent', msg.content);
-        }
-        break;
-
-      case 'agent.tool_call':
-        if (msg.sessionId === currentSessionId) {
-          addMessage('tool', '🔧 ' + msg.tool);
+          // Skip user messages from broadcast — already rendered locally on send
+          if (msg.role === 'user') break;
+          addMessage(msg.role, msg.content, msg.metadata);
         }
         break;
 
       case 'agent.approval_request':
         if (msg.sessionId === currentSessionId) {
-          approvalInfo.textContent = msg.tool + ': ' + msg.input.slice(0, 200);
+          approvalInfo.textContent = (msg.description || msg.tool) + ': ' + msg.input.slice(0, 200);
           approvalBar.classList.remove('hidden');
+          approvalBar.dataset.approvalId = msg.approvalId || '';
+        }
+        break;
+
+      case 'scrollback.replay':
+        if (msg.sessionId === currentSessionId && msg.messages) {
+          for (const m of msg.messages) {
+            if (m.type === 'session.message') addMessage(m.role, m.content, m.metadata);
+            else if (m.type === 'agent.status_change') sessionStatus.className = 'status-dot ' + m.status;
+          }
         }
         break;
 
@@ -603,6 +654,7 @@ function JS(wsUrl: string): string {
   }
 
   function attachSession(id, name) {
+    if (currentSessionId === id) return; // Already attached
     if (currentSessionId) {
       send({ type: 'session.detach', id: newId(), sessionId: currentSessionId });
     }
@@ -615,16 +667,38 @@ function JS(wsUrl: string): string {
     send({ type: 'session.attach', id: newId(), sessionId: id });
   }
 
-  // ── Output rendering ─────────────────────────────────────────────
-  function addMessage(type, content) {
+  // ── Output rendering (marked.js loaded via CDN) ──────────────────
+  function addMessage(role, content, metadata) {
     const div = document.createElement('div');
-    div.className = 'msg msg-' + type;
+    div.className = 'msg msg-' + role;
 
-    // Basic markdown-like rendering for code blocks
-    let html = esc(content);
-    html = html.replace(/\`\`\`([\\s\\S]*?)\`\`\`/g, '<pre>$1</pre>');
-    html = html.replace(/\`([^\`]+)\`/g, '<code style="background:var(--bg);padding:0.15em 0.4em;border-radius:4px;font-size:0.9em">$1</code>');
-    div.innerHTML = html;
+    switch (role) {
+      case 'user':
+        div.textContent = content;
+        break;
+      case 'assistant':
+        if (window._marked) {
+          div.innerHTML = window._marked.parse(content, { breaks: true, gfm: true });
+        } else {
+          div.textContent = content;
+        }
+        break;
+      case 'tool_call':
+        const desc = (metadata && metadata.toolDescription) || content;
+        div.innerHTML = '<span class="tool-icon">⚡</span> ' + esc(desc);
+        break;
+      case 'tool_result':
+        div.textContent = content;
+        break;
+      case 'system':
+        div.textContent = content;
+        break;
+      case 'info':
+        div.textContent = content;
+        break;
+      default:
+        div.textContent = content;
+    }
 
     output.appendChild(div);
     output.scrollTop = output.scrollHeight;
@@ -666,12 +740,12 @@ function JS(wsUrl: string): string {
   // ── Approvals ─────────────────────────────────────────────────────
   approveBtn.onclick = () => {
     if (!currentSessionId) return;
-    send({ type: 'session.approve', id: newId(), sessionId: currentSessionId, approved: true });
+    send({ type: 'session.approve', id: newId(), sessionId: currentSessionId, requestId: approvalBar.dataset.approvalId || '', approved: true });
     approvalBar.classList.add('hidden');
   };
   denyBtn.onclick = () => {
     if (!currentSessionId) return;
-    send({ type: 'session.approve', id: newId(), sessionId: currentSessionId, approved: false });
+    send({ type: 'session.approve', id: newId(), sessionId: currentSessionId, requestId: approvalBar.dataset.approvalId || '', approved: false });
     approvalBar.classList.add('hidden');
   };
 

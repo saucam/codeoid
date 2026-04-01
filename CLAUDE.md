@@ -6,10 +6,16 @@ Identity-first remote control plane for AI coding agents. Powered by ZeroID.
 
 ```
 codeoid start
-  ├── Daemon (WebSocket server + HTTP server + SQLite)
+  ├── Bun.serve() — HTTP + WebSocket server
+  ├── ShutdownManager — cleanup registry, signal handlers, 30s grace period
+  ├── SessionManager — rate limiting, session resume, scope enforcement
+  │   └── Session × N — each wraps Claude Agent SDK query()
+  │       ├── ScrollbackBuffer — circular ring, replayed on device handoff
+  │       ├── TranscriptStore — JSONL persistence, survives daemon restart
+  │       ├── RetryManager — exponential backoff, fallback model
+  │       └── AgentIdentityManager — ZeroID identities for agents + sub-agents
   ├── Web UI frontend (served at /app, also Telegram Mini App)
-  ├── Telegram frontend (embedded, direct SessionManager access)
-  └── SessionManager → Claude Agent SDK × N sessions
+  └── Telegram frontend (embedded, direct SessionManager access)
 ```
 
 ### Plugin Architecture
@@ -39,81 +45,108 @@ Register with `daemon.use(new MyFrontend())` — that's it.
 
 ```
 src/
-├── cli.ts                      # CLI entry: start, ls, new, attach, send, etc.
-├── config.ts                   # Config: ~/.codeoid/config.json + env vars
+├── cli.ts                        # CLI entry: start, ls, new, attach, send, etc.
+├── config.ts                     # Config: ~/.codeoid/config.json + env vars
 ├── daemon/
-│   ├── server.ts               # WebSocket + HTTP server, frontend plugin host
-│   ├── session-manager.ts      # Orchestrates N sessions, enforces scopes per-message
-│   ├── session.ts              # Wraps Claude Agent SDK, routes approvals to clients
-│   ├── store.ts                # SQLite: sessions + audit_log tables
-│   ├── auth.ts                 # ZeroID JWT verification via @highflame/sdk
+│   ├── server.ts                 # Bun.serve() — HTTP + WebSocket, frontend plugin host
+│   ├── session-manager.ts        # Orchestrates N sessions, rate limiting, resume
+│   ├── session.ts                # Wraps Claude Agent SDK, retry, scrollback, permissions
+│   ├── store.ts                  # bun:sqlite — sessions + audit_log tables
+│   ├── auth.ts                   # ZeroID JWT verification via @highflame/sdk
+│   ├── agent-identity.ts         # ZeroID identities for coding agents + sub-agents
+│   ├── scrollback.ts             # Circular ring buffer for device handoff replay
+│   ├── transcript.ts             # JSONL persistence for session resume
+│   ├── retry.ts                  # Exponential backoff, fallback model, error categories
+│   ├── rate-limit.ts             # Per-user session creation + concurrency limits
+│   ├── shutdown.ts               # Cleanup registry, signal handlers, grace period
 │   └── index.ts
 ├── protocol/
-│   ├── types.ts                # Client↔Daemon message protocol (AuthOk, SessionSend, AgentOutput, etc.)
-│   ├── scopes.ts               # 8 permission scopes (session:create/list/attach/watch/send/interrupt/approve/destroy)
+│   ├── types.ts                  # Client<->Daemon message protocol
+│   ├── scopes.ts                 # 8 permission scopes
 │   └── index.ts
 ├── frontends/
-│   ├── types.ts                # Frontend plugin interface
+│   ├── types.ts                  # Frontend plugin interface
 │   ├── index.ts
-│   ├── telegram/index.ts       # Grammy bot, embedded in daemon process
-│   └── web/index.ts            # Mobile-first SPA, served from daemon HTTP
+│   ├── telegram/index.ts         # Grammy bot, embedded in daemon process
+│   └── web/index.ts              # Mobile-first SPA, Telegram Mini App compatible
 └── terminal/
-    └── client.ts               # Terminal client, connects over WebSocket
+    └── client.ts                 # WebSocket client, connects to daemon
 ```
+
+## Tech Stack
+
+- **Runtime**: Bun (native WebSocket, bun:sqlite, Bun.serve())
+- **Agent**: Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`)
+- **Auth**: ZeroID via `@highflame/sdk` (local JWKS verification)
+- **Telegram**: Grammy
+- **CLI**: Commander
+- **Validation**: Zod
+
+No native addon dependencies. Single `bun build` produces a 1.1MB bundle.
 
 ## Core Concepts
 
 ### Sessions
 A session = one Claude Agent SDK process working in one directory.
-Sessions are named, persistent, and independent. Multiple clients can
+Sessions are named, persistent, and daemon-owned. Multiple clients can
 attach/detach simultaneously from any frontend.
 
 ### Auth Model (ZeroID)
 Every connection requires a ZeroID JWT. Scopes are enforced per-message:
 - `session:create` / `session:destroy` — lifecycle
+- `session:list` — discovery
 - `session:attach` / `session:watch` — connect to sessions
 - `session:send` / `session:interrupt` / `session:approve` — interact
 
 Delegation: users can share scoped tokens (e.g. read-only watcher) with teammates.
-Revocation: kill a token → immediately lose access.
+Revocation: kill a token -> immediately lose access.
 Audit: every action attributed to a ZeroID subject in SQLite.
 
+### Agent Identities
+When configured, Claude coding agents and their sub-agents get ZeroID identities:
+- Session agent registered on first `send()` (SessionStart hook)
+- Sub-agents registered on spawn (SubagentStart hook), with delegated tokens
+- Scope attenuation: sub-agents get a subset of parent's scopes
+- Cascading revocation: deactivate parent -> all sub-agents revoked
+
 ### Device Handoff
-Sessions live in the daemon. Clients are stateless. Detach from terminal →
-attach from Telegram → same session, same context, no state loss.
+Sessions live in the daemon. Clients are stateless.
+- **Scrollback buffer**: circular ring (500 entries / 1MB) replayed on attach
+- **Transcript persistence**: JSONL per session, user prompts written before API call
+- **Session resume**: on daemon restart, meta files scanned, sessions rebuilt, scrollback restored
 
-## Tech Stack
-- TypeScript, Node 20+
-- Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`)
-- ZeroID auth (`@highflame/sdk` — local file link to ../highflame-sdk/javascript)
-- WebSocket (`ws`), SQLite (`better-sqlite3`), Telegram (`grammy`), CLI (`commander`)
-- Web UI: vanilla JS SPA with CSS custom properties, Telegram Mini App compatible
+Detach from terminal -> attach from Telegram -> same session, same context, scrollback replayed.
 
-## Code Patterns
+### Production Resilience
 
-### Async/Error Handling
-- All I/O is async
-- Agent errors caught and broadcast to attached clients, never crash daemon
-- Permission requests surfaced to all attached clients, first response wins
+**Retry with fallback**: exponential backoff with jitter, error categorization
+(429 rate limit, 529 capacity, 5xx server, auth, connection). Capacity errors
+fall back to a secondary model after 3 attempts. Unattended sessions retry
+indefinitely with up to 5-minute backoff.
 
-### Security
-- ZeroID JWT verified on every connection (local JWKS, no round-trip)
-- Scopes enforced per-message in SessionManager
-- Telegram: user ID allowlist as first gate, ZeroID as second
-- API keys deleted from Telegram chat on /auth
-- Audit log: every action attributed to a ZeroID subject
+**Graceful shutdown**: cleanup registry runs in LIFO order on SIGTERM/SIGINT/SIGHUP.
+Sessions drained (in-flight work interrupted), store flushed, WebSockets closed,
+frontends stopped. 30-second grace period before forced exit.
+
+**Rate limiting**: per-user limits on concurrent sessions (default 10) and hourly
+creation rate (default 30/hr). Sliding window with automatic pruning.
+
+**Permission correlation**: each approval request has a unique `approvalId`.
+Clients respond referencing the specific request. Multiple concurrent approvals
+supported. First response wins.
 
 ## Commands
 
 ```bash
-npm run build        # tsup
-npm run typecheck    # tsc --noEmit
-npm run lint         # biome
+bun run build        # bun build src/cli.ts --outdir dist
+bun run dev          # bun --watch src/cli.ts
+bun run typecheck    # tsc --noEmit
+bun run lint         # biome check
 
 codeoid start        # daemon + all frontends
 codeoid ls           # list sessions
 codeoid new <n> <d>  # create session
-codeoid attach <n>   # interactive attach
+codeoid attach <n>   # interactive attach (with scrollback replay)
 codeoid send <n> <m> # one-shot message
 codeoid interrupt <n>
 codeoid approve <n>
@@ -132,5 +165,11 @@ TELEGRAM_ALLOWED_USER_IDS=123,456   # Required with bot token
 # No ANTHROPIC_API_KEY needed if you're logged in via Claude Code CLI.
 # Falls back to ANTHROPIC_API_KEY env var if not logged in.
 ```
+
+Config file at `~/.codeoid/config.json` (optional). Env vars take precedence.
+
+Data stored at:
+- `~/.codeoid/codeoid.db` — SQLite (sessions, audit log)
+- `~/.codeoid/transcripts/` — JSONL transcripts per session
 
 Web UI available at `http://localhost:7400/app` when daemon is running.
