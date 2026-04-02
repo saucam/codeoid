@@ -128,6 +128,10 @@ export class TranscriptStore {
 
   /**
    * Load a session's transcript entries — used for scrollback replay on resume.
+   *
+   * Entries with the same messageId are applied in order (append-only log).
+   * Later entries for the same messageId are updates (e.g. tool state transitions).
+   * Returns the final merged state of each unique message.
    */
   async loadTranscript(sessionId: string): Promise<TranscriptEntry[]> {
     const path = this.transcriptPath(sessionId);
@@ -136,18 +140,56 @@ export class TranscriptStore {
     if (!await file.exists()) return [];
 
     const text = await file.text();
-    const entries: TranscriptEntry[] = [];
+    const raw: TranscriptEntry[] = [];
 
     for (const line of text.split("\n")) {
       if (!line.trim()) continue;
       try {
-        entries.push(JSON.parse(line));
+        raw.push(JSON.parse(line));
       } catch {
         // Skip corrupted lines
       }
     }
 
-    return entries;
+    // Merge entries by messageId — later entries update earlier ones
+    const byMessageId = new Map<string, TranscriptEntry>();
+    const order: string[] = [];
+
+    for (const entry of raw) {
+      const msg = entry.message;
+      const messageId = (msg as { messageId?: string }).messageId;
+
+      if (!messageId) {
+        // No messageId (e.g. status_change) — keep as-is with synthetic key
+        const key = `_seq_${entry.seq}`;
+        byMessageId.set(key, entry);
+        order.push(key);
+        continue;
+      }
+
+      if (byMessageId.has(messageId)) {
+        // Update: merge the newer entry over the older one
+        const existing = byMessageId.get(messageId)!;
+        const existingMsg = existing.message as Record<string, unknown>;
+        const newMsg = msg as Record<string, unknown>;
+
+        // Shallow merge — newer fields overwrite older, preserving what's not in the update
+        for (const [k, v] of Object.entries(newMsg)) {
+          if (v !== undefined) existingMsg[k] = v;
+        }
+        // Deep merge tool state specifically
+        if (newMsg["tool"] && existingMsg["tool"]) {
+          Object.assign(existingMsg["tool"] as Record<string, unknown>, newMsg["tool"] as Record<string, unknown>);
+        }
+        existing.seq = entry.seq; // update seq to latest
+      } else {
+        // First occurrence — insert
+        byMessageId.set(messageId, { ...entry, message: { ...msg as object } as typeof msg });
+        order.push(messageId);
+      }
+    }
+
+    return order.map((key) => byMessageId.get(key)!);
   }
 
   /**

@@ -142,10 +142,13 @@ describe("TranscriptStore", () => {
   });
 
   test("handles corrupted JSONL lines gracefully", async () => {
-    // Write valid + invalid lines manually
+    // Write valid + invalid lines manually — each with a unique messageId
     const path = store.transcriptPath("sess-1");
-    const validLine = JSON.stringify({ seq: 0, timestamp: "t", message: makeMsg("valid") });
-    await Bun.write(path, validLine + "\nnot json\n" + validLine.replace("valid", "also valid") + "\n");
+    const msg1 = makeMsg("valid");
+    const msg2 = makeMsg("also valid");
+    const line1 = JSON.stringify({ seq: 0, timestamp: "t", message: msg1 });
+    const line2 = JSON.stringify({ seq: 1, timestamp: "t", message: msg2 });
+    await Bun.write(path, line1 + "\nnot json\n" + line2 + "\n");
 
     const entries = await store.loadTranscript("sess-1");
     expect(entries).toHaveLength(2); // Skips the corrupted line

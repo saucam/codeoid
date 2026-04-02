@@ -552,14 +552,16 @@ export class Session {
     }
   }
 
-  /** Mark all active tool calls as completed — updates scrollback + broadcasts delta */
+  /** Mark all active tool calls as completed — updates scrollback, persists, broadcasts */
   #completeActiveTools(): void {
     for (const msgId of this.#activeToolMsgIds) {
-      // Update scrollback so replay shows completed, not executing
+      // Update in scrollback so replay shows final state
       this.#scrollback.updateMessage(msgId, (msg) => {
         const sm = msg as SessionMessage;
         if (sm.tool) {
           sm.tool.state = { phase: "completed", success: true };
+          // Re-persist the updated message so transcript has final state
+          this.#transcriptStore.append(this.id, sm, this.#seq++).catch(() => {});
         }
       });
 
