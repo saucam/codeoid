@@ -118,8 +118,10 @@ ${CSS}
     <div class="auth-card">
       <div class="logo">⚡ Codeoid</div>
       <p class="subtitle">Identity-first agent control</p>
-      <input id="auth-input" type="password" placeholder="ZeroID API key (zid_sk_...)" autocomplete="off" />
-      <button id="auth-btn" class="btn-primary">Connect</button>
+      <button id="oauth-btn" class="btn-primary">Login with ZeroID</button>
+      <div class="divider"><span>or</span></div>
+      <input id="auth-input" type="password" placeholder="API key (zid_sk_...)" autocomplete="off" />
+      <button id="auth-btn" class="btn-secondary">Connect with API key</button>
       <p id="auth-error" class="error"></p>
     </div>
   </div>
@@ -258,6 +260,16 @@ input:focus, textarea:focus { border-color: var(--accent); }
 }
 .btn-primary:hover { background: var(--accent-hover); }
 .btn-primary:active { transform: scale(0.98); }
+.btn-secondary {
+  background: var(--bg-elevated); color: var(--text-muted); border: 1px solid var(--border);
+  border-radius: 10px; padding: 0.6rem; font-size: 0.9rem; cursor: pointer;
+  transition: border-color 0.15s; width: 100%;
+}
+.btn-secondary:hover { border-color: var(--accent); color: var(--text); }
+.divider {
+  display: flex; align-items: center; gap: 0.75rem; color: var(--text-muted); font-size: 0.8rem;
+}
+.divider::before, .divider::after { content: ''; flex: 1; border-top: 1px solid var(--border); }
 
 /* Top bar */
 #topbar {
@@ -346,6 +358,34 @@ input:focus, textarea:focus { border-color: var(--accent); }
   text-align: center; color: var(--text-muted); font-size: 0.8rem;
   background: none; padding: 0.25rem; font-style: italic;
 }
+.msg-thinking {
+  color: var(--text-muted); font-style: italic; background: none;
+  padding: 0.5rem 0.75rem;
+}
+.thinking-dots span {
+  animation: thinkBlink 1.4s infinite both;
+  font-size: 1.2em;
+}
+.thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
+.thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes thinkBlink { 0%, 80%, 100% { opacity: 0.2; } 40% { opacity: 1; } }
+
+/* Identity badge */
+.msg-identity {
+  font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.25rem;
+  font-weight: 500;
+}
+
+/* Tool states */
+.tool-state {
+  font-size: 0.7rem; padding: 0.1rem 0.4rem; border-radius: 8px;
+  text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;
+}
+.tool-streaming { background: var(--bg); color: var(--yellow); }
+.tool-waiting_confirmation { background: var(--red); color: white; }
+.tool-executing { background: var(--yellow); color: var(--bg); animation: pulse 1.5s infinite; }
+.tool-completed { background: var(--green); color: white; }
+.tool-cancelled { background: var(--text-muted); color: var(--bg); }
 
 pre {
   background: var(--bg); border-radius: 8px; padding: 0.75rem; overflow-x: auto;
@@ -485,6 +525,41 @@ function JS(wsUrl: string, scopesString: string): string {
   const nsClose = $('#new-session-close');
 
   // ── Auth ──────────────────────────────────────────────────────────
+
+  const oauthBtn = $('#oauth-btn');
+
+  // PKCE helper — generate code_verifier and code_challenge (S256)
+  async function generatePKCE() {
+    const array = new Uint8Array(32);
+    crypto.getRandomValues(array);
+    const verifier = btoa(String.fromCharCode(...array)).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+    const challenge = btoa(String.fromCharCode(...new Uint8Array(digest))).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+    return { verifier, challenge };
+  }
+
+  // OAuth login — redirect to /auth/authorize with PKCE
+  oauthBtn.onclick = async () => {
+    const { verifier, challenge } = await generatePKCE();
+    const state = Math.random().toString(36).slice(2);
+
+    // Store PKCE verifier for callback page
+    sessionStorage.setItem('codeoid_pkce_verifier', verifier);
+    sessionStorage.setItem('codeoid_pkce_state', state);
+
+    const params = new URLSearchParams({
+      client_id: 'codeoid',
+      redirect_uri: window.location.origin + '/auth/callback',
+      code_challenge: challenge,
+      code_challenge_method: 'S256',
+      scope: ALL_SCOPES,
+      state: state,
+    });
+
+    window.location.href = '/auth/authorize?' + params.toString();
+  };
+
+  // API key fallback login
   authBtn.onclick = async () => {
     const key = authInput.value.trim();
     if (!key) return;
@@ -495,20 +570,13 @@ function JS(wsUrl: string, scopesString: string): string {
     try {
       let token = key;
 
-      // If it's a ZeroID API key, exchange for JWT client-side
       if (key.startsWith('zid_sk_')) {
         const resp = await fetch('/auth/token', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            grant_type: 'api_key',
-            api_key: key,
-            scope: ALL_SCOPES
-          })
+          body: JSON.stringify({ grant_type: 'api_key', api_key: key, scope: ALL_SCOPES })
         });
-        if (!resp.ok) {
-          throw new Error('Token exchange failed — check your API key');
-        }
+        if (!resp.ok) throw new Error('Token exchange failed');
         const data = await resp.json();
         token = data.access_token;
       }
@@ -518,7 +586,7 @@ function JS(wsUrl: string, scopesString: string): string {
       connectWs();
     } catch (err) {
       authError.textContent = err.message;
-      authBtn.textContent = 'Connect';
+      authBtn.textContent = 'Connect with API key';
       authBtn.disabled = false;
     }
   };
@@ -526,6 +594,21 @@ function JS(wsUrl: string, scopesString: string): string {
   authInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') authBtn.click();
   });
+
+  // ── Logout helper ─────────────────────────────────────────────────
+  function logout(message) {
+    localStorage.removeItem('codeoid_token');
+    localStorage.removeItem('codeoid_refresh_token');
+    localStorage.removeItem('codeoid_user_id');
+    authToken = null;
+    ws = null;
+    currentSessionId = null;
+    mainScreen.classList.remove('active');
+    authScreen.classList.add('active');
+    authError.textContent = message || '';
+    authBtn.textContent = 'Connect with API key';
+    authBtn.disabled = false;
+  }
 
   // ── WebSocket ─────────────────────────────────────────────────────
   function connectWs() {
@@ -542,16 +625,12 @@ function JS(wsUrl: string, scopesString: string): string {
 
     ws.onclose = (e) => {
       if (e.code === 4001 || e.code === 4003) {
-        authError.textContent = 'Authentication failed';
-        authBtn.textContent = 'Connect';
-        authBtn.disabled = false;
+        logout('Session expired — please log in again');
       }
     };
 
     ws.onerror = () => {
-      authError.textContent = 'Connection error';
-      authBtn.textContent = 'Connect';
-      authBtn.disabled = false;
+      logout('Connection lost — daemon may be down');
     };
   }
 
@@ -563,13 +642,17 @@ function JS(wsUrl: string, scopesString: string): string {
 
   function newId() { return 'msg-' + (++msgIdCounter); }
 
-  // ── Message handler ───────────────────────────────────────────────
+  // ── v2 Message handler ─────────────────────────────────────────────
+  // Track messages by messageId for delta updates
+  const messageElements = {};
+  let currentIdentity = null;
+
   function handleMessage(msg) {
     switch (msg.type) {
       case 'auth.ok':
+        currentIdentity = msg.identity;
         authScreen.classList.remove('active');
         mainScreen.classList.add('active');
-        // Fetch session list
         send({ type: 'session.list', id: newId() });
         break;
 
@@ -580,7 +663,6 @@ function JS(wsUrl: string, scopesString: string): string {
 
       case 'response.ok':
         if (msg.data && msg.data.id && msg.data.name && msg.data.workdir) {
-          // Session created — add to local list and attach
           sessions.push(msg.data);
           renderSessions();
           attachSession(msg.data.id, msg.data.name);
@@ -589,43 +671,39 @@ function JS(wsUrl: string, scopesString: string): string {
         break;
 
       case 'response.error':
-        addMessage('system', msg.error);
+        addMessage({ role: 'system', content: msg.error, identity: { name: 'Codeoid', type: 'system' } });
         break;
 
       case 'session.message':
-        if (msg.sessionId === currentSessionId) {
-          // Skip user messages from broadcast — already rendered locally on send
-          if (msg.role === 'user') break;
-          addMessage(msg.role, msg.content, msg.metadata);
-        }
+        if (msg.sessionId !== currentSessionId) break;
+        // Skip user messages we sent locally (avoid duplicate)
+        if (msg.role === 'user' && msg.identity && currentIdentity && msg.identity.sub === currentIdentity.sub) break;
+
+        handleSessionMessage(msg);
         break;
 
-      case 'agent.approval_request':
-        if (msg.sessionId === currentSessionId) {
-          approvalInfo.textContent = (msg.description || msg.tool) + ': ' + msg.input.slice(0, 200);
-          approvalBar.classList.remove('hidden');
-          approvalBar.dataset.approvalId = msg.approvalId || '';
-        }
+      case 'session.message.delta':
+        if (msg.sessionId !== currentSessionId) break;
+        handleDelta(msg);
         break;
 
       case 'scrollback.replay':
         if (msg.sessionId === currentSessionId && msg.messages) {
           for (const m of msg.messages) {
-            if (m.type === 'session.message') addMessage(m.role, m.content, m.metadata);
-            else if (m.type === 'agent.status_change') sessionStatus.className = 'status-dot ' + m.status;
+            handleSessionMessage(m);
           }
         }
         break;
 
-      case 'agent.status_change':
+      case 'session.status_change':
         if (msg.sessionId === currentSessionId) {
           sessionStatus.className = 'status-dot ' + msg.status;
           if (msg.status === 'idle' || msg.status === 'error') {
             approvalBar.classList.add('hidden');
+            removeThinking();
           }
         }
-        // Update session list
-        const s = sessions.find(s => s.id === msg.sessionId);
+        const s = sessions.find(function(s) { return s.id === msg.sessionId; });
         if (s) s.status = msg.status;
         renderSessions();
         break;
@@ -662,42 +740,137 @@ function JS(wsUrl: string, scopesString: string): string {
     currentSessionName = name;
     sessionName.textContent = name;
     output.innerHTML = '';
-    addMessage('system', 'Attached to ' + name);
-
+    addMessage({ role: 'info', content: 'Attached to ' + name, identity: { name: 'Codeoid', type: 'system' } });
     send({ type: 'session.attach', id: newId(), sessionId: id });
   }
 
-  // ── Output rendering (marked.js loaded via CDN) ──────────────────
-  function addMessage(role, content, metadata) {
+  // ── v2 Session message handler ────────────────────────────────────
+  function handleSessionMessage(msg) {
+    if (!msg || !msg.role) return;
+
+    // Tool calls in waiting_confirmation → show approval bar
+    if (msg.role === 'tool_call' && msg.tool && msg.tool.state) {
+      if (msg.tool.state.phase === 'waiting_confirmation') {
+        approvalInfo.textContent = msg.tool.state.description || msg.content;
+        approvalBar.classList.remove('hidden');
+        approvalBar.dataset.approvalId = msg.tool.state.approvalId || '';
+      }
+    }
+
+    // Remove thinking indicator when we get substantive content
+    if (msg.role === 'assistant' || msg.role === 'tool_call') {
+      removeThinking();
+    }
+
+    addMessage(msg);
+  }
+
+  function handleDelta(delta) {
+    const el = messageElements[delta.messageId];
+    if (!el) return;
+
+    // Append text content
+    if (delta.contentAppend) {
+      const contentEl = el.querySelector('.msg-content');
+      if (contentEl) {
+        // For assistant: re-render markdown with appended text
+        el._fullContent = (el._fullContent || '') + delta.contentAppend;
+        if (el._role === 'assistant' && window._marked) {
+          contentEl.innerHTML = window._marked.parse(el._fullContent, { breaks: true, gfm: true });
+        } else {
+          contentEl.textContent = el._fullContent;
+        }
+        output.scrollTop = output.scrollHeight;
+      }
+    }
+
+    // Update tool state
+    if (delta.toolStateUpdate) {
+      const stateEl = el.querySelector('.tool-state');
+      if (stateEl) {
+        stateEl.className = 'tool-state tool-' + delta.toolStateUpdate.phase;
+        stateEl.textContent = delta.toolStateUpdate.phase;
+      }
+      // Hide approval bar if tool moved past confirmation
+      if (delta.toolStateUpdate.phase !== 'waiting_confirmation') {
+        approvalBar.classList.add('hidden');
+      }
+    }
+  }
+
+  function removeThinking() {
+    const thinking = output.querySelector('.msg-thinking');
+    if (thinking) thinking.remove();
+  }
+
+  // ── Render a SessionMessage ───────────────────────────────────────
+  function addMessage(msg) {
     const div = document.createElement('div');
+    const role = msg.role || 'system';
     div.className = 'msg msg-' + role;
+
+    // Identity badge
+    if (msg.identity && msg.identity.name && role !== 'system' && role !== 'info') {
+      const badge = document.createElement('div');
+      badge.className = 'msg-identity';
+      const typeIcon = { human: '👤', agent: '🤖', subagent: '🔧', system: '⚙️' }[msg.identity.type] || '';
+      badge.textContent = typeIcon + ' ' + msg.identity.name;
+      div.appendChild(badge);
+    }
+
+    // Content
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'msg-content';
 
     switch (role) {
       case 'user':
-        div.textContent = content;
+        contentDiv.textContent = msg.content;
         break;
+
       case 'assistant':
         if (window._marked) {
-          div.innerHTML = window._marked.parse(content, { breaks: true, gfm: true });
+          contentDiv.innerHTML = window._marked.parse(msg.content, { breaks: true, gfm: true });
         } else {
-          div.textContent = content;
+          contentDiv.textContent = msg.content;
         }
         break;
-      case 'tool_call':
-        const desc = (metadata && metadata.toolDescription) || content;
-        div.innerHTML = '<span class="tool-icon">⚡</span> ' + esc(desc);
+
+      case 'thinking':
+        contentDiv.innerHTML = '<span class="thinking-dots"><span>.</span><span>.</span><span>.</span></span> ' + esc(msg.content);
         break;
+
+      case 'tool_call': {
+        const toolName = (msg.tool && msg.tool.name) || msg.content;
+        const phase = (msg.tool && msg.tool.state && msg.tool.state.phase) || 'executing';
+        contentDiv.innerHTML = '<span class="tool-icon">⚡</span> ' + esc(toolName)
+          + ' <span class="tool-state tool-' + phase + '">' + phase + '</span>';
+        break;
+      }
+
       case 'tool_result':
-        div.textContent = content;
+        contentDiv.textContent = msg.content;
         break;
+
       case 'system':
-        div.textContent = content;
+        contentDiv.textContent = msg.content;
         break;
+
       case 'info':
-        div.textContent = content;
+        contentDiv.textContent = msg.content;
         break;
+
       default:
-        div.textContent = content;
+        contentDiv.textContent = msg.content;
+    }
+
+    div.appendChild(contentDiv);
+
+    // Track for delta updates
+    if (msg.messageId) {
+      div.id = 'msg-' + msg.messageId;
+      div._fullContent = msg.content;
+      div._role = role;
+      messageElements[msg.messageId] = div;
     }
 
     output.appendChild(div);
@@ -709,7 +882,6 @@ function JS(wsUrl: string, scopesString: string): string {
     const text = promptInput.value.trim();
     if (!text || !currentSessionId) return;
 
-    // Prepend context files if any
     let fullText = text;
     if (contextFiles.length > 0) {
       fullText = 'Context files: ' + contextFiles.join(', ') + '\\n\\n' + text;
@@ -717,7 +889,12 @@ function JS(wsUrl: string, scopesString: string): string {
       renderContextChips();
     }
 
-    addMessage('user', text);
+    // Local echo as user message
+    addMessage({
+      role: 'user',
+      content: text,
+      identity: currentIdentity || { name: 'You', type: 'human' },
+    });
     send({ type: 'session.send', id: newId(), sessionId: currentSessionId, text: fullText });
     promptInput.value = '';
     promptInput.style.height = 'auto';
@@ -740,12 +917,12 @@ function JS(wsUrl: string, scopesString: string): string {
   // ── Approvals ─────────────────────────────────────────────────────
   approveBtn.onclick = () => {
     if (!currentSessionId) return;
-    send({ type: 'session.approve', id: newId(), sessionId: currentSessionId, requestId: approvalBar.dataset.approvalId || '', approved: true });
+    send({ type: 'session.approve', id: newId(), sessionId: currentSessionId, approvalId: approvalBar.dataset.approvalId || '', approved: true });
     approvalBar.classList.add('hidden');
   };
   denyBtn.onclick = () => {
     if (!currentSessionId) return;
-    send({ type: 'session.approve', id: newId(), sessionId: currentSessionId, requestId: approvalBar.dataset.approvalId || '', approved: false });
+    send({ type: 'session.approve', id: newId(), sessionId: currentSessionId, approvalId: approvalBar.dataset.approvalId || '', approved: false });
     approvalBar.classList.add('hidden');
   };
 

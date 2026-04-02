@@ -79,7 +79,7 @@ export class AgentIdentityManager {
       const resp = await this.#client.agents.register({
         name: `codeoid/${sessionName}`,
         external_id: externalId,
-        sub_type: "code_agent",
+        sub_type: "autonomous",
         trust_level: "first_party",
         framework: "claude-agent-sdk",
         publisher: "codeoid",
@@ -154,10 +154,13 @@ export class AgentIdentityManager {
         }),
       });
 
-      // Delegate token from parent — scope intersection enforced by ZeroID
+      // Issue scoped token for the sub-agent via its own API key.
+      // TODO: upgrade to token_exchange (RFC 8693) with actor_token once
+      // we generate per-agent EC P-256 key pairs. For now, the delegation
+      // chain is tracked via created_by → parent WIMSE URI in the identity.
       const tokenResp = await this.#client.tokens.issue({
-        grant_type: "token_exchange",
-        subject_token: parent.token,
+        grant_type: "api_key",
+        api_key: resp.api_key,
         scope: scopes.join(" "),
       });
 

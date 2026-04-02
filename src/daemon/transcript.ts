@@ -43,8 +43,7 @@ export interface TranscriptMeta {
 /** Types we persist. Skip ephemeral events like heartbeats. */
 const PERSISTED_TYPES = new Set([
   "session.message",
-  "agent.approval_request",
-  "agent.status_change",
+  "session.status_change",
 ]);
 
 export class TranscriptStore {
@@ -93,25 +92,9 @@ export class TranscriptStore {
    * Write a user prompt to the transcript BEFORE the API call.
    * This ensures prompts survive crashes.
    */
-  async appendUserPrompt(sessionId: string, text: string, sender: string, seq: number): Promise<void> {
-    const entry: TranscriptEntry = {
-      seq,
-      timestamp: new Date().toISOString(),
-      message: {
-        type: "session.message",
-        sessionId,
-        role: "user",
-        content: text,
-        metadata: { sender },
-        timestamp: new Date().toISOString(),
-      },
-    };
-
-    const path = this.transcriptPath(sessionId);
-    const line = JSON.stringify(entry) + "\n";
-    const file = Bun.file(path);
-    const existing = await file.exists() ? await file.text() : "";
-    await Bun.write(path, existing + line);
+  /** @deprecated Use append() directly — session.ts now builds the full SessionMessage. */
+  async appendUserPrompt(_sessionId: string, _text: string, _sender: string, _seq: number): Promise<void> {
+    // No-op — session.ts now calls persistAndBuffer() which calls append()
   }
 
   /**

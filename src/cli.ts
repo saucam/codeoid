@@ -40,6 +40,7 @@ program
       dbPath: config.dbPath,
       transcriptDir: config.transcriptDir,
       auth: config.auth,
+      oauth: config.oauth,
       agentIdentity: config.agentIdentity,
     });
 

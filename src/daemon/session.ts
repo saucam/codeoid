@@ -1,12 +1,12 @@
 /**
  * Session — wraps a single Claude Agent SDK query (one agent working in one repo).
  *
- * Production-grade patterns:
- *   1. Scrollback buffer — replay on device handoff
- *   2. Persistent retry — exponential backoff, fallback model
- *   3. Transcript persistence — JSONL, survives daemon restart
- *   4. Permission request_id correlation — JSON-RPC style
- *   5. ZeroID identity lifecycle — agent + sub-agent identities
+ * Protocol v2:
+ *   - Every message carries identity (who produced it)
+ *   - Streaming via SessionMessageDelta (token-by-token)
+ *   - Tool calls are state machines (streaming → confirmation → executing → completed)
+ *   - Thinking indicator as first-class message
+ *   - Scrollback stores merged SessionMessage (not deltas)
  */
 
 import {
@@ -23,13 +23,17 @@ import type {
   SessionInfo,
   SessionStatus,
   DaemonMessage,
-  SessionMessageMsg,
+  SessionMessage,
+  SessionMessageDelta,
+  MessageIdentity,
+  ContentPart,
+  ToolState,
 } from "../protocol/types.js";
+import { authToIdentity, SYSTEM_IDENTITY } from "../protocol/types.js";
 import type { Store } from "./store.js";
 import type { AgentIdentityManager } from "./agent-identity.js";
 import { ScrollbackBuffer } from "./scrollback.js";
 import { TranscriptStore } from "./transcript.js";
-// retry.ts available for future use when SDK supports per-call retry hooks
 
 /** A connected client that can receive messages from this session. */
 export interface AttachedClient {
@@ -44,9 +48,7 @@ export interface SessionCreateOptions {
   auth: AuthContext;
   store: Store;
   transcriptStore: TranscriptStore;
-  /** Optional — if provided, agents get ZeroID identities. */
   identityManager?: AgentIdentityManager;
-  /** Existing session ID for resume. */
   existingId?: string;
 }
 
@@ -62,15 +64,23 @@ export class Session {
   #store: Store;
   #transcriptStore: TranscriptStore;
   #identityManager?: AgentIdentityManager;
-  #agentWimseUri?: string;
+  #agentIdentity: MessageIdentity;
   #query: Query | null = null;
   #abortController: AbortController | null = null;
   #scrollback = new ScrollbackBuffer();
   #seq = 0;
 
-  // ── Permission request_id correlation ─────────────────────────────────
-  // Multiple approvals can be pending simultaneously. Each has a unique ID.
+  // Track whether we've run a query before (for resume vs new session)
+  #hasQueried = false;
+
+  // Active streaming message — accumulates deltas into a complete message for scrollback
+  #activeAssistantMsg: SessionMessage | null = null;
+
+  // Pending tool approvals: approvalId → resolve(boolean)
   #pendingApprovals = new Map<string, (approved: boolean) => void>();
+
+  // Active tool call messageIds — completed when next assistant message arrives
+  #activeToolMsgIds: string[] = [];
 
   constructor(opts: SessionCreateOptions) {
     this.id = opts.existingId ?? randomUUID();
@@ -82,6 +92,13 @@ export class Session {
     this.#transcriptStore = opts.transcriptStore;
     this.#identityManager = opts.identityManager;
 
+    // Default agent identity — upgraded to ZeroID identity in SessionStart hook if manager is available
+    this.#agentIdentity = {
+      sub: `agent:${this.id}`,
+      name: `${opts.name} (Claude)`,
+      type: "agent",
+    };
+
     if (!opts.existingId) {
       this.#store.createSession({
         ...this.toInfo(),
@@ -90,7 +107,6 @@ export class Session {
       });
       this.#store.audit(opts.auth.sub, "session.create", this.id, `name=${this.name}`);
 
-      // Persist metadata for resume
       this.#transcriptStore.saveMeta({
         sessionId: this.id,
         sessionName: this.name,
@@ -105,17 +121,9 @@ export class Session {
     }
   }
 
-  get status(): SessionStatus {
-    return this.#status;
-  }
-
-  get attachedClientCount(): number {
-    return this.#clients.size;
-  }
-
-  get agentUri(): string | undefined {
-    return this.#agentWimseUri;
-  }
+  get status(): SessionStatus { return this.#status; }
+  get attachedClientCount(): number { return this.#clients.size; }
+  get agentUri(): string | undefined { return this.#agentIdentity.sub; }
 
   // ── Client management ─────────────────────────────────────────────────
 
@@ -123,8 +131,8 @@ export class Session {
     this.#clients.set(client.id, client);
     this.#store.audit(client.auth.sub, "session.attach", this.id);
 
-    // Replay scrollback so client sees what happened while disconnected.
-    const messages = this.#scrollback.read();
+    // Replay scrollback — full SessionMessage objects, not deltas
+    const messages = this.#scrollback.read() as SessionMessage[];
     if (messages.length > 0) {
       client.send({
         type: "scrollback.replay",
@@ -146,138 +154,179 @@ export class Session {
 
   async send(text: string, sender: AuthContext): Promise<void> {
     this.#store.audit(sender.sub, "session.send", this.id);
+
+    // Emit user message with proper identity
+    const userIdentity = authToIdentity(sender);
+    const userMsg = this.#makeMessage("user", text, userIdentity);
+    this.#persistAndBuffer(userMsg);
+    this.#broadcastRaw(userMsg);
+
     this.#setStatus("working");
 
-    // Broadcast user message to all attached clients
-    this.#broadcast({
-      type: "session.message",
-      sessionId: this.id,
-      role: "user",
-      content: text,
-      metadata: { sender: sender.sub, senderName: sender.name },
-      timestamp: new Date().toISOString(),
-    });
-
-    // Persist user prompt BEFORE API call — survives crashes
-    await this.#transcriptStore.appendUserPrompt(
-      this.id, text, sender.sub, this.#seq++,
+    // Emit thinking indicator
+    const thinkingMsg = this.#makeMessage(
+      "thinking", "Thinking...", this.#agentIdentity,
+      undefined, undefined, { event: "thinking_start" },
     );
+    this.#broadcastRaw(thinkingMsg);
 
     this.#abortController = new AbortController();
     const im = this.#identityManager;
+
+    // Register agent identity on first query (SessionStart hook doesn't fire via SDK query())
+    if (im && !this.#hasQueried && this.#agentIdentity.sub.startsWith("agent:")) {
+      try {
+        const { wimseUri } = await im.registerSessionAgent(this.id, this.name, sender.sub);
+        this.#agentIdentity = { sub: wimseUri, name: `${this.name} agent`, type: "agent" };
+        console.log(`[codeoid] agent identity registered: ${wimseUri}`);
+        const infoMsg = this.#makeMessage(
+          "info", `Agent identity: ${wimseUri}`,
+          SYSTEM_IDENTITY, undefined, undefined,
+          { event: "identity.registered", agentUri: wimseUri },
+        );
+        this.#persistAndBuffer(infoMsg);
+        this.#broadcastRaw(infoMsg);
+      } catch (err) {
+        console.error(`[codeoid] agent identity registration failed:`, err instanceof Error ? err.message : err);
+      }
+    }
     const sessionId = this.id;
 
-    // ── Retry wrapper for the entire query ────────────────────────
-    const executeQuery = async (ctx: { attempt: number; fallbackModel?: string }) => {
-      this.#query = query({
-        prompt: text,
-        options: {
-          cwd: this.workdir,
-          abortController: this.#abortController!,
-          allowedTools: ["Read", "Grep", "Glob", "Write", "Edit", "Agent"],
-          permissionMode: "default",
-          includePartialMessages: false,
-          persistSession: true,
-          sessionId: this.id,
-          settingSources: ["project"],
-          ...(ctx.fallbackModel ? { model: ctx.fallbackModel } : {}),
+    // First query: create session. Subsequent queries: resume existing.
+    const sessionOpts = this.#hasQueried
+      ? { resume: this.id }
+      : { sessionId: this.id };
 
-          // ── ZeroID hooks for agent identity lifecycle ──────────
-          hooks: {
-            SessionStart: [{
-              hooks: [async () => {
-                if (im && !this.#agentWimseUri) {
-                  try {
-                    const { wimseUri } = await im.registerSessionAgent(
-                      sessionId, this.name, sender.sub,
-                    );
-                    this.#agentWimseUri = wimseUri;
-                  } catch { /* best-effort */ }
-                }
-                return {};
-              }],
+    this.#query = query({
+      prompt: text,
+      options: {
+        cwd: this.workdir,
+        abortController: this.#abortController,
+        allowedTools: ["Read", "Grep", "Glob", "Write", "Edit", "Bash", "Agent"],
+        permissionMode: "default",
+        includePartialMessages: true,
+        persistSession: true,
+        ...sessionOpts,
+        settingSources: ["project"],
+
+        hooks: {
+          PreToolUse: [{
+            hooks: [async (rawInput) => {
+              const input = rawInput as PreToolUseHookInput;
+              im?.auditToolCall(sessionId, input.tool_name, JSON.stringify(input.tool_input));
+              return {};
             }],
+          }],
 
-            PreToolUse: [{
-              hooks: [async (rawInput) => {
-                const input = rawInput as PreToolUseHookInput;
-                im?.auditToolCall(sessionId, input.tool_name, JSON.stringify(input.tool_input));
-                return {};
-              }],
+          SubagentStart: [{
+            hooks: [async (rawInput) => {
+              const input = rawInput as SubagentStartHookInput;
+              if (im) {
+                const result = await im.registerSubagent(
+                  sessionId,
+                  input.agent_id ?? "unknown",
+                  input.agent_type ?? "unknown",
+                );
+                const infoMsg = this.#makeMessage(
+                  "info",
+                  `Sub-agent spawned: ${input.agent_type ?? "unknown"}`,
+                  this.#agentIdentity,
+                  undefined, undefined,
+                  { event: "subagent.spawned", subagentUri: result.wimseUri },
+                );
+                this.#persistAndBuffer(infoMsg);
+                this.#broadcastRaw(infoMsg);
+              }
+              return {};
             }],
+          }],
 
-            SubagentStart: [{
-              hooks: [async (rawInput) => {
-                const input = rawInput as SubagentStartHookInput;
-                if (im) {
-                  await im.registerSubagent(
-                    sessionId,
-                    input.agent_id ?? "unknown",
-                    input.agent_type ?? "unknown",
-                  );
-                }
-                return {};
-              }],
+          SubagentStop: [{
+            hooks: [async (rawInput) => {
+              const input = rawInput as SubagentStopHookInput;
+              await im?.deactivateSubagent(sessionId, input.agent_id ?? "unknown");
+              return {};
             }],
-
-            SubagentStop: [{
-              hooks: [async (rawInput) => {
-                const input = rawInput as SubagentStopHookInput;
-                await im?.deactivateSubagent(sessionId, input.agent_id ?? "unknown");
-                return {};
-              }],
-            }],
-          },
-
-          // ── Permission routing with request_id correlation ─────
-          canUseTool: async (toolName, input) => {
-            const approvalId = randomUUID();
-            const timestamp = new Date().toISOString();
-
-            this.#broadcast({
-              type: "agent.approval_request",
-              sessionId: this.id,
-              approvalId,
-              tool: toolName,
-              input: JSON.stringify(input),
-              description: `${toolName}(${Object.keys(input as Record<string, unknown>).join(", ")})`,
-              timestamp,
-            });
-            this.#setStatus("waiting_approval");
-
-            const result = await this.#waitForApproval(approvalId);
-            this.#setStatus("working");
-
-            if (result) {
-              this.#store.audit(sender.sub, "session.approve", this.id, `tool=${toolName} approvalId=${approvalId}`);
-              return { behavior: "allow" as const };
-            }
-            this.#store.audit(sender.sub, "session.deny", this.id, `tool=${toolName} approvalId=${approvalId}`);
-            return { behavior: "deny" as const, message: "Denied by user" };
-          },
+          }],
         },
-      });
 
+        canUseTool: async (toolName, input) => {
+          const approvalId = randomUUID();
+          const toolId = randomUUID();
+          const inputObj = input as Record<string, unknown>;
+
+          // Emit tool_call message with waiting_confirmation state
+          const toolMsg = this.#makeMessage(
+            "tool_call",
+            `${toolName}(${Object.keys(inputObj).join(", ")})`,
+            this.#agentIdentity,
+            undefined,
+            {
+              toolId,
+              name: toolName,
+              state: {
+                phase: "waiting_confirmation",
+                input: inputObj,
+                description: `${toolName}(${Object.keys(inputObj).join(", ")})`,
+                approvalId,
+              },
+            },
+          );
+          this.#persistAndBuffer(toolMsg);
+          this.#broadcastRaw(toolMsg);
+          this.#setStatus("waiting_approval");
+
+          const approved = await this.#waitForApproval(approvalId);
+          this.#setStatus("working");
+
+          // Emit tool state transition
+          const delta: SessionMessageDelta = {
+            type: "session.message.delta",
+            sessionId: this.id,
+            messageId: toolMsg.messageId,
+            toolStateUpdate: approved
+              ? { phase: "executing" }
+              : { phase: "cancelled", reason: "denied" },
+            timestamp: new Date().toISOString(),
+          };
+          this.#broadcastRaw(delta);
+
+          if (approved) {
+            this.#store.audit(sender.sub, "session.approve", this.id, `tool=${toolName} approvalId=${approvalId}`);
+
+            // Schedule completion delta after tool finishes (tracked by tool_use_id from SDK)
+            // We'll update this in handleAgentMessage when we see the tool result
+            return { behavior: "allow" as const };
+          }
+
+          this.#store.audit(sender.sub, "session.deny", this.id, `tool=${toolName} approvalId=${approvalId}`);
+          return { behavior: "deny" as const, message: "Denied by user" };
+        },
+      },
+    });
+
+    this.#hasQueried = true;
+
+    try {
       for await (const msg of this.#query) {
         this.#handleAgentMessage(msg);
       }
-    };
-
-    try {
-      await executeQuery({ attempt: 1, fallbackModel: undefined });
     } catch (err) {
       if (!this.#abortController.signal.aborted) {
         this.#setStatus("error");
-        this.#broadcast({
-          type: "session.message",
-          sessionId: this.id,
-          role: "system",
-          content: `Error: ${err instanceof Error ? err.message : String(err)}`,
-          metadata: { errorCode: "agent_error" },
-          timestamp: new Date().toISOString(),
-        });
+        const errorMsg = this.#makeMessage(
+          "system",
+          `Error: ${err instanceof Error ? err.message : String(err)}`,
+          SYSTEM_IDENTITY,
+          undefined, undefined,
+          { event: "agent_error", errorCode: "agent_error" },
+        );
+        this.#persistAndBuffer(errorMsg);
+        this.#broadcastRaw(errorMsg);
       }
     } finally {
+      this.#completeActiveTools();
+      this.#flushActiveAssistant();
       this.#query = null;
       this.#abortController = null;
       if (this.#status !== "error") {
@@ -289,22 +338,16 @@ export class Session {
   interrupt(sender: AuthContext): void {
     this.#store.audit(sender.sub, "session.interrupt", this.id);
     this.#abortController?.abort();
-    // Reject all pending approvals
-    for (const [id, resolve] of this.#pendingApprovals) {
+    for (const resolve of this.#pendingApprovals.values()) {
       resolve(false);
-      this.#pendingApprovals.delete(id);
     }
+    this.#pendingApprovals.clear();
   }
 
-  /**
-   * Respond to a specific pending approval request by approvalId.
-   * First response wins — subsequent responses for the same approvalId are ignored.
-   */
   approve(approvalId: string, approved: boolean, sender: AuthContext): void {
     const resolve = this.#pendingApprovals.get(approvalId);
     if (!resolve) {
-      // Fallback: if no approvalId match, resolve the first pending approval
-      // (backwards compat with clients that don't send approvalId)
+      // Fallback: resolve first pending (for clients that don't send approvalId)
       const first = this.#pendingApprovals.entries().next();
       if (!first.done) {
         const [firstId, firstResolve] = first.value;
@@ -323,25 +366,21 @@ export class Session {
   async destroy(sender: AuthContext): Promise<void> {
     this.#store.audit(sender.sub, "session.destroy", this.id);
     this.#abortController?.abort();
-
-    // Reject all pending approvals
     for (const resolve of this.#pendingApprovals.values()) {
       resolve(false);
     }
     this.#pendingApprovals.clear();
     this.#clients.clear();
-
     await this.#identityManager?.deactivateSessionAgent(this.id);
     this.#store.deleteSession(this.id);
     await this.#transcriptStore.delete(this.id);
   }
 
-  /**
-   * Restore scrollback from transcript entries (used on daemon restart).
-   */
   restoreScrollback(messages: DaemonMessage[]): void {
     for (const msg of messages) {
-      this.#scrollback.push(msg);
+      if (msg.type === "session.message") {
+        this.#scrollback.push(msg);
+      }
     }
   }
 
@@ -366,71 +405,198 @@ export class Session {
   }
 
   #handleAgentMessage(msg: SDKMessage): void {
-    const timestamp = new Date().toISOString();
-
     switch (msg.type) {
       case "assistant": {
         const content = msg.message.content as Array<Record<string, unknown>>;
         const textParts: string[] = [];
+        const parts: ContentPart[] = [];
+
         for (const block of content) {
           if (block["type"] === "text" && typeof block["text"] === "string") {
             textParts.push(block["text"]);
+            parts.push({ kind: "text", text: block["text"], markdown: true });
           }
           if (block["type"] === "tool_use" && typeof block["name"] === "string") {
             const toolName = block["name"] as string;
             const toolInput = block["input"] as Record<string, unknown>;
-            this.#broadcast({
-              type: "session.message",
-              sessionId: this.id,
-              role: "tool_call",
-              content: toolName,
-              metadata: {
-                tool: toolName,
-                toolInput: JSON.stringify(toolInput),
-                toolDescription: `${toolName}(${Object.keys(toolInput).join(", ")})`,
+
+            // Complete any previously executing tools before starting new one
+            this.#completeActiveTools();
+
+            const toolMsg = this.#makeMessage(
+              "tool_call",
+              `${toolName}(${Object.keys(toolInput).join(", ")})`,
+              this.#agentIdentity,
+              undefined,
+              {
+                toolId: randomUUID(),
+                name: toolName,
+                state: { phase: "executing" },
               },
-              timestamp,
-            });
+            );
+            this.#activeToolMsgIds.push(toolMsg.messageId);
+            this.#persistAndBuffer(toolMsg);
+            this.#broadcastRaw(toolMsg);
           }
         }
+
         const text = textParts.join("");
         if (text) {
-          this.#broadcast({
-            type: "session.message",
-            sessionId: this.id,
-            role: "assistant",
-            content: text,
-            timestamp,
-          });
+          // Tool calls finished — complete them before showing response
+          this.#completeActiveTools();
+
+          if (this.#activeAssistantMsg) {
+            // Streaming already delivered this content — just update scrollback
+            // with the final complete text and flush
+            this.#activeAssistantMsg.content = text;
+            this.#activeAssistantMsg.parts = parts;
+            this.#persistAndBuffer(this.#activeAssistantMsg);
+            this.#activeAssistantMsg = null;
+          } else {
+            // No streaming happened — send the full message directly
+            const assistantMsg = this.#makeMessage(
+              "assistant", text, this.#agentIdentity, parts,
+            );
+            this.#persistAndBuffer(assistantMsg);
+            this.#broadcastRaw(assistantMsg);
+          }
+        } else {
+          this.#flushActiveAssistant();
         }
         break;
       }
-      case "result": {
-        // Don't broadcast result text — it duplicates the last assistant message.
-        // Only broadcast errors.
-        if (msg.subtype === "error" && msg.error) {
-          this.#broadcast({
-            type: "session.message",
+
+      case "stream_event": {
+        // Partial streaming — emit delta
+        const event = (msg as { event?: { type?: string; delta?: { type?: string; text?: string } } }).event;
+        if (event?.type === "content_block_delta" && event.delta?.type === "text_delta" && event.delta.text) {
+          if (!this.#activeAssistantMsg) {
+            // Start new streaming message with empty content — deltas fill it in
+            this.#activeAssistantMsg = this.#makeMessage(
+              "assistant", "", this.#agentIdentity,
+            );
+            this.#broadcastRaw(this.#activeAssistantMsg);
+          }
+
+          // Track full content for scrollback
+          this.#activeAssistantMsg.content += event.delta.text;
+
+          // Send delta to clients
+          const delta: SessionMessageDelta = {
+            type: "session.message.delta",
             sessionId: this.id,
-            role: "system",
-            content: `Error: ${msg.error}`,
-            metadata: { errorCode: "agent_error" },
-            timestamp,
-          });
+            messageId: this.#activeAssistantMsg.messageId,
+            contentAppend: event.delta.text,
+            timestamp: new Date().toISOString(),
+          };
+          this.#broadcastRaw(delta);
         }
+        break;
+      }
+
+      case "result": {
+        this.#flushActiveAssistant();
+        // Only emit errors — success result duplicates last assistant message
+        if (msg.subtype === "error" && msg.error) {
+          const errorMsg = this.#makeMessage(
+            "system",
+            `Error: ${typeof msg.error === "string" ? msg.error : JSON.stringify(msg.error)}`,
+            SYSTEM_IDENTITY,
+            undefined, undefined,
+            { event: "agent_error" },
+          );
+          this.#persistAndBuffer(errorMsg);
+          this.#broadcastRaw(errorMsg);
+        }
+        break;
+      }
+
+      case "system": {
+        const subtype = (msg as { subtype?: string }).subtype;
+        if (subtype === "api_retry") {
+          const retryMsg = msg as { attempt?: number; retry_delay_ms?: number; error_status?: number | null };
+          const infoMsg = this.#makeMessage(
+            "system",
+            `API retry: attempt ${retryMsg.attempt}, delay ${retryMsg.retry_delay_ms}ms${retryMsg.error_status ? ` (status ${retryMsg.error_status})` : ""}`,
+            SYSTEM_IDENTITY,
+            [{ kind: "progress", message: `Retrying (attempt ${retryMsg.attempt})...` }],
+            undefined,
+            { event: "api_retry", attempt: retryMsg.attempt },
+          );
+          this.#broadcastRaw(infoMsg);
+        }
+        break;
+      }
+
+      case "tool_progress": {
+        const progress = msg as { tool_name?: string; elapsed_time_seconds?: number; tool_use_id?: string };
+        // Emit progress part as info
+        const progressMsg = this.#makeMessage(
+          "info",
+          `${progress.tool_name ?? "Tool"} running... (${Math.round(progress.elapsed_time_seconds ?? 0)}s)`,
+          this.#agentIdentity,
+          [{ kind: "progress", message: `${progress.tool_name} running...`, elapsedMs: (progress.elapsed_time_seconds ?? 0) * 1000 }],
+          undefined,
+          { event: "tool_progress", toolName: progress.tool_name },
+        );
+        this.#broadcastRaw(progressMsg);
         break;
       }
     }
   }
 
-  #broadcast(msg: DaemonMessage): void {
-    // Push to scrollback (device handoff)
+  /** Flush the active assistant message into scrollback (for device handoff) */
+  #flushActiveAssistant(): void {
+    if (this.#activeAssistantMsg) {
+      this.#activeAssistantMsg = null;
+    }
+  }
+
+  /** Mark all active tool calls as completed */
+  #completeActiveTools(): void {
+    for (const msgId of this.#activeToolMsgIds) {
+      this.#broadcastRaw({
+        type: "session.message.delta",
+        sessionId: this.id,
+        messageId: msgId,
+        toolStateUpdate: { phase: "completed", success: true },
+        timestamp: new Date().toISOString(),
+      });
+    }
+    this.#activeToolMsgIds = [];
+  }
+
+  /** Create a SessionMessage with all required fields */
+  #makeMessage(
+    role: SessionMessage["role"],
+    content: string,
+    identity: MessageIdentity,
+    parts?: ContentPart[],
+    tool?: SessionMessage["tool"],
+    metadata?: Record<string, unknown>,
+  ): SessionMessage {
+    return {
+      type: "session.message",
+      sessionId: this.id,
+      messageId: randomUUID(),
+      role,
+      content,
+      parts,
+      identity,
+      tool,
+      metadata,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  /** Persist to transcript + scrollback buffer */
+  #persistAndBuffer(msg: SessionMessage): void {
     this.#scrollback.push(msg);
-
-    // Persist to transcript (daemon restart)
     this.#transcriptStore.append(this.id, msg, this.#seq++).catch(() => {});
+  }
 
-    // Send to all attached clients
+  /** Broadcast any DaemonMessage to all attached clients */
+  #broadcastRaw(msg: DaemonMessage): void {
     for (const client of this.#clients.values()) {
       try {
         client.send(msg);
@@ -444,7 +610,6 @@ export class Session {
     this.#status = status;
     this.#store.updateSessionStatus(this.id, status);
 
-    // Update transcript metadata
     this.#transcriptStore.saveMeta({
       sessionId: this.id,
       sessionName: this.name,
@@ -453,12 +618,12 @@ export class Session {
       createdAt: this.createdAt,
       lastStatus: status,
       lastActivityAt: new Date().toISOString(),
-      accountId: "", // filled from auth context at creation
+      accountId: "",
       projectId: "",
     }).catch(() => {});
 
-    this.#broadcast({
-      type: "agent.status_change",
+    this.#broadcastRaw({
+      type: "session.status_change",
       sessionId: this.id,
       status,
       timestamp: new Date().toISOString(),

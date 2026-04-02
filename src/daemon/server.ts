@@ -16,6 +16,8 @@ import { TranscriptStore } from "./transcript.js";
 import { RateLimiter } from "./rate-limit.js";
 import { ShutdownManager } from "./shutdown.js";
 import { AgentIdentityManager } from "./agent-identity.js";
+import { OAuthHandler, type OAuthConfig } from "./oauth.js";
+import { GoogleOAuthProvider, LocalProvider } from "./identity-provider.js";
 import type { AuthContext, ClientMessage, DaemonMessage } from "../protocol/types.js";
 import type { AttachedClient } from "./session.js";
 import type { Frontend, FrontendContext } from "../frontends/types.js";
@@ -28,6 +30,7 @@ export interface DaemonConfig {
   dbPath: string;
   transcriptDir: string;
   auth: AuthConfig;
+  oauth?: OAuthConfig;
   agentIdentity?: {
     accountId: string;
     projectId: string;
@@ -51,12 +54,26 @@ export class DaemonServer {
   #sockets = new Map<string, AuthenticatedSocket>();
   #frontends: Frontend[] = [];
   #httpHandlers: Array<(req: IncomingMessage, res: ServerResponse) => boolean> = [];
+  #oauthHandler: OAuthHandler | null = null;
 
   constructor(config: DaemonConfig) {
     this.#config = config;
     this.#store = new Store(config.dbPath);
     this.#transcriptStore = new TranscriptStore(config.transcriptDir);
     this.#shutdown = new ShutdownManager();
+
+    if (config.oauth) {
+      // Choose IdP based on env config
+      const googleClientId = process.env["GOOGLE_CLIENT_ID"];
+      const googleClientSecret = process.env["GOOGLE_CLIENT_SECRET"];
+
+      const idp = (googleClientId && googleClientSecret)
+        ? new GoogleOAuthProvider({ clientId: googleClientId, clientSecret: googleClientSecret })
+        : new LocalProvider();
+
+      this.#oauthHandler = new OAuthHandler(config.oauth, idp);
+      console.log(`[codeoid] auth provider: ${idp.name}`);
+    }
 
     let identityManager: AgentIdentityManager | undefined;
     if (config.agentIdentity) {
@@ -166,8 +183,13 @@ export class DaemonServer {
           }
         }
 
-        // Frontend routes (Web UI etc.) — use Node http compat for now
-        // Serve static from frontends
+        // OAuth authorization routes (/auth/authorize, /auth/callback)
+        if (self.#oauthHandler && url.pathname.startsWith("/auth/")) {
+          const oauthResp = await self.#oauthHandler.handleFetch(req);
+          if (oauthResp) return oauthResp;
+        }
+
+        // Frontend routes (Web UI etc.)
         for (const frontend of self.#frontends) {
           if ("handleFetch" in frontend && typeof frontend.handleFetch === "function") {
             const resp = await (frontend as { handleFetch: (req: Request) => Promise<Response | null> }).handleFetch(req);
@@ -221,8 +243,11 @@ export class DaemonServer {
 
             ws.send(JSON.stringify({
               type: "auth.ok",
-              sub: data.auth.sub,
-              name: data.auth.name,
+              identity: {
+                sub: data.auth.sub,
+                name: data.auth.name,
+                type: data.auth.delegationDepth === 0 ? "human" : "agent",
+              },
               scopes: data.auth.scopes,
             }));
             return;

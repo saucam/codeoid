@@ -9,3 +9,5 @@ export { RateLimiter } from "./rate-limit.js";
 export { withRetry, categorizeError, type RetryConfig, type RetryEvent } from "./retry.js";
 export { verifyToken, extractBearerToken, type AuthConfig } from "./auth.js";
 export { AgentIdentityManager, type AgentIdentityConfig } from "./agent-identity.js";
+export { OAuthHandler, type OAuthConfig } from "./oauth.js";
+export { GoogleOAuthProvider, LocalProvider, type IdentityProvider, type VerifiedUser } from "./identity-provider.js";

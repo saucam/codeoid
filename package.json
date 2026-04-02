@@ -12,6 +12,7 @@
     "lint": "biome check src/",
     "lint:fix": "biome check --write src/",
     "format": "biome format --write src/",
+    "test": "bun test",
     "typecheck": "bun x tsc --noEmit"
   },
   "dependencies": {

@@ -50,10 +50,21 @@ export class TerminalClient {
         }
       };
 
-      this.#ws.onerror = (event) => reject(new Error("WebSocket error"));
+      this.#ws.onerror = () => {
+        console.error(`Cannot connect to Codeoid daemon at ${this.#config.daemonUrl}`);
+        console.error("  Is the daemon running? Try: codeoid start\n");
+        process.exit(1);
+      };
       this.#ws.onclose = (event) => {
-        if (event.code === 4001 || event.code === 4003) {
-          reject(new Error(`Auth failed: ${event.reason}`));
+        if (event.code === 4001) {
+          console.error("Authentication timeout — daemon did not accept credentials.\n");
+          process.exit(1);
+        }
+        if (event.code === 4003) {
+          console.error("Authentication failed — token is invalid or expired.");
+          console.error(`  ${event.reason}`);
+          console.error("  Try logging in again or check your API key.\n");
+          process.exit(1);
         }
       };
     });
@@ -119,33 +130,79 @@ export class TerminalClient {
 
     console.log(`\nAttached to session. Type messages below. Ctrl+C to detach.\n`);
 
-    // Track the latest approval ID for quick yes/no responses
     let latestApprovalId: string | null = null;
 
     this.#streamHandler = (msg) => {
       switch (msg.type) {
         case "scrollback.replay":
-          console.log(`\n--- scrollback (${msg.messages.length} messages) ---`);
-          for (const m of msg.messages) {
-            if (m.type === "agent.output") process.stdout.write(m.content);
-            if (m.type === "agent.tool_call") console.log(`\n[tool] ${m.tool}`);
+          console.log(`\n--- scrollback (${(msg as { messages?: unknown[] }).messages?.length ?? 0} messages) ---`);
+          for (const m of (msg as { messages: Array<{ type: string; role?: string; content?: string; tool?: { name?: string }; identity?: { name?: string } }> }).messages) {
+            if (m.type === "session.message") {
+              const id = m.identity?.name ? `\x1b[2m${m.identity.name}\x1b[0m ` : "";
+              switch (m.role) {
+                case "user": console.log(`\n${id}\x1b[36m> ${m.content}\x1b[0m`); break;
+                case "assistant": process.stdout.write(m.content ?? ""); break;
+                case "tool_call": console.log(`\n${id}\x1b[33m⚡ ${m.tool?.name ?? m.content}\x1b[0m`); break;
+                case "system": console.log(`\x1b[31m${m.content}\x1b[0m`); break;
+                case "info": console.log(`\x1b[2m${m.content}\x1b[0m`); break;
+              }
+            }
           }
-          console.log(`--- end scrollback ---\n`);
+          console.log(`\n--- end scrollback ---\n`);
           break;
-        case "agent.output":
-          process.stdout.write(msg.content);
+
+        case "session.message": {
+          const sm = msg as { role?: string; content?: string; tool?: { name?: string; state?: { phase?: string; approvalId?: string; description?: string } }; identity?: { name?: string; type?: string } };
+          const id = sm.identity?.name ? `\x1b[2m${sm.identity.name}\x1b[0m ` : "";
+
+          switch (sm.role) {
+            case "user":
+              console.log(`\n${id}\x1b[36m> ${sm.content}\x1b[0m`);
+              break;
+            case "assistant":
+              process.stdout.write(sm.content ?? "");
+              break;
+            case "thinking":
+              process.stdout.write(`\x1b[2m${sm.content}\x1b[0m`);
+              break;
+            case "tool_call": {
+              const phase = sm.tool?.state?.phase ?? "executing";
+              const name = sm.tool?.name ?? sm.content;
+              if (phase === "waiting_confirmation") {
+                latestApprovalId = sm.tool?.state?.approvalId ?? null;
+                console.log(`\n${id}\x1b[31m⚡ ${name}: ${sm.tool?.state?.description ?? ""}\x1b[0m`);
+                console.log(`  Type 'yes' to approve, 'no' to deny`);
+              } else {
+                console.log(`\n${id}\x1b[33m⚡ ${name} [${phase}]\x1b[0m`);
+              }
+              break;
+            }
+            case "system":
+              console.log(`\n\x1b[31m${sm.content}\x1b[0m`);
+              break;
+            case "info":
+              console.log(`\x1b[2m${sm.content}\x1b[0m`);
+              break;
+          }
           break;
-        case "agent.tool_call":
-          console.log(`\n[tool] ${msg.tool}`);
+        }
+
+        case "session.message.delta": {
+          const delta = msg as { contentAppend?: string; toolStateUpdate?: { phase?: string } };
+          if (delta.contentAppend) {
+            process.stdout.write(delta.contentAppend);
+          }
+          if (delta.toolStateUpdate) {
+            console.log(`\x1b[33m  → ${delta.toolStateUpdate.phase}\x1b[0m`);
+          }
           break;
-        case "agent.approval_request":
-          latestApprovalId = msg.approvalId;
-          console.log(`\n[approval needed] ${msg.tool}: ${msg.description ?? msg.input}`);
-          console.log(`  Type 'yes' to approve, 'no' to deny (id: ${msg.approvalId.slice(0, 8)})`);
+        }
+
+        case "session.status_change": {
+          const sc = msg as { status?: string };
+          console.log(`\n[status] ${sc.status}`);
           break;
-        case "agent.status_change":
-          console.log(`\n[status] ${msg.status}`);
-          break;
+        }
       }
     };
 
@@ -181,7 +238,7 @@ export class TerminalClient {
           type: "session.approve",
           id: randomUUID(),
           sessionId,
-          requestId: latestApprovalId,
+          approvalId: latestApprovalId,
           approved: trimmed === "yes",
         });
         latestApprovalId = null;
@@ -240,7 +297,7 @@ export class TerminalClient {
       type: "session.approve",
       id: randomUUID(),
       sessionId,
-      requestId: "", // Will fall back to first pending
+      approvalId: "", // Will fall back to first pending
       approved,
     });
 
@@ -310,24 +367,41 @@ export class TerminalClient {
   async #getToken(): Promise<string> {
     const token = this.#config.apiKey;
     if (!token) {
-      throw new Error(
-        "No API key configured. Set CODEOID_API_KEY or add apiKey to ~/.codeoid/config.json",
-      );
+      console.error("No API key configured.\n");
+      console.error("  Set CODEOID_API_KEY environment variable");
+      console.error("  Or add apiKey to ~/.codeoid/config.json");
+      console.error("  Or run: codeoid login\n");
+      process.exit(1);
     }
 
     if (token.startsWith("zid_sk_")) {
-      const resp = await fetch(`${this.#config.zeroidUrl}/oauth2/token`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          grant_type: "api_key",
-          api_key: token,
-          scope: ALL_SCOPES_STRING,
-        }),
-      });
+      let resp: Response;
+      try {
+        resp = await fetch(`${this.#config.zeroidUrl}/oauth2/token`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            grant_type: "api_key",
+            api_key: token,
+            scope: ALL_SCOPES_STRING,
+          }),
+        });
+      } catch (err) {
+        console.error(`Cannot reach ZeroID at ${this.#config.zeroidUrl}`);
+        console.error("  Is ZeroID running? Try: curl " + this.#config.zeroidUrl + "/health\n");
+        process.exit(1);
+      }
 
       if (!resp.ok) {
-        throw new Error(`Token exchange failed: ${resp.status}`);
+        const body = await resp.json().catch(() => ({})) as { error?: string; error_description?: string };
+        if (resp.status === 400 || resp.status === 401) {
+          console.error("Authentication failed — API key is invalid or expired.\n");
+          if (body.error_description) console.error(`  ${body.error_description}`);
+          console.error("  Re-register your agent in ZeroID or check CODEOID_API_KEY\n");
+        } else {
+          console.error(`Token exchange failed (${resp.status}): ${body.error_description ?? body.error ?? "unknown"}`);
+        }
+        process.exit(1);
       }
 
       const data = (await resp.json()) as { access_token: string };
