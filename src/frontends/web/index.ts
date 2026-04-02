@@ -355,9 +355,23 @@ input:focus, textarea:focus { border-color: var(--accent); }
   background: none; padding: 0.5rem;
 }
 .msg-info {
-  text-align: center; color: var(--text-muted); font-size: 0.8rem;
-  background: none; padding: 0.25rem; font-style: italic;
+  color: var(--text-muted); font-size: 0.8rem;
+  background: var(--bg-surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 0.4rem 0.75rem; margin-right: 20%;
 }
+.msg-info .info-summary {
+  cursor: pointer; display: flex; align-items: center; gap: 0.35rem;
+}
+.msg-info .info-summary::before {
+  content: '▸'; font-size: 0.7rem; transition: transform 0.15s; display: inline-block;
+}
+.msg-info.expanded .info-summary::before { transform: rotate(90deg); }
+.msg-info .info-detail {
+  display: none; margin-top: 0.35rem; padding-top: 0.35rem; border-top: 1px solid var(--border);
+  font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.75rem;
+  word-break: break-all; color: var(--text-muted); line-height: 1.5;
+}
+.msg-info.expanded .info-detail { display: block; }
 .msg-thinking {
   color: var(--text-muted); font-style: italic; background: none;
   padding: 0.5rem 0.75rem;
@@ -855,9 +869,36 @@ function JS(wsUrl: string, scopesString: string): string {
         contentDiv.textContent = msg.content;
         break;
 
-      case 'info':
-        contentDiv.textContent = msg.content;
+      case 'info': {
+        const meta = msg.metadata || {};
+        const hasDetail = meta.agentUri || meta.subagentUri || meta.event;
+
+        if (hasDetail) {
+          const summary = document.createElement('div');
+          summary.className = 'info-summary';
+          summary.textContent = msg.content;
+          summary.onclick = function() { div.classList.toggle('expanded'); };
+          contentDiv.appendChild(summary);
+
+          const detail = document.createElement('div');
+          detail.className = 'info-detail';
+          const lines = [];
+          if (meta.event) lines.push('event: ' + meta.event);
+          if (meta.agentUri) lines.push('identity: ' + meta.agentUri);
+          if (meta.subagentUri) lines.push('sub-agent: ' + meta.subagentUri);
+          // Show all metadata keys
+          for (const [k, v] of Object.entries(meta)) {
+            if (!['event','agentUri','subagentUri'].includes(k)) {
+              lines.push(k + ': ' + v);
+            }
+          }
+          detail.innerHTML = lines.map(function(l) { return esc(l); }).join('<br>');
+          contentDiv.appendChild(detail);
+        } else {
+          contentDiv.textContent = msg.content;
+        }
         break;
+      }
 
       default:
         contentDiv.textContent = msg.content;

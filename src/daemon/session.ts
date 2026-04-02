@@ -180,9 +180,9 @@ export class Session {
         this.#agentIdentity = { sub: wimseUri, name: `${this.name} agent`, type: "agent" };
         console.log(`[codeoid] agent identity registered: ${wimseUri}`);
         const infoMsg = this.#makeMessage(
-          "info", `Agent identity: ${wimseUri}`,
+          "info", `Agent identity registered`,
           SYSTEM_IDENTITY, undefined, undefined,
-          { event: "identity.registered", agentUri: wimseUri },
+          { event: "identity.registered", agentUri: wimseUri, sessionName: this.name, createdBy: sender.sub },
         );
         this.#persistAndBuffer(infoMsg);
         this.#broadcastRaw(infoMsg);
@@ -232,7 +232,7 @@ export class Session {
                   `Sub-agent spawned: ${input.agent_type ?? "unknown"}`,
                   this.#agentIdentity,
                   undefined, undefined,
-                  { event: "subagent.spawned", subagentUri: result.wimseUri },
+                  { event: "subagent.spawned", subagentUri: result.wimseUri, agentType: input.agent_type, parentAgent: this.#agentIdentity.sub },
                 );
                 this.#persistAndBuffer(infoMsg);
                 this.#broadcastRaw(infoMsg);
@@ -552,9 +552,18 @@ export class Session {
     }
   }
 
-  /** Mark all active tool calls as completed */
+  /** Mark all active tool calls as completed — updates scrollback + broadcasts delta */
   #completeActiveTools(): void {
     for (const msgId of this.#activeToolMsgIds) {
+      // Update scrollback so replay shows completed, not executing
+      this.#scrollback.updateMessage(msgId, (msg) => {
+        const sm = msg as SessionMessage;
+        if (sm.tool) {
+          sm.tool.state = { phase: "completed", success: true };
+        }
+      });
+
+      // Broadcast delta to live clients
       this.#broadcastRaw({
         type: "session.message.delta",
         sessionId: this.id,

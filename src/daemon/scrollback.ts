@@ -67,6 +67,19 @@ export class ScrollbackBuffer {
     );
   }
 
+  /**
+   * Update a message in the buffer by messageId. Used to apply tool state
+   * transitions so scrollback replay shows final states, not intermediate.
+   */
+  updateMessage(messageId: string, updater: (msg: DaemonMessage) => void): void {
+    for (const entry of this.#entries) {
+      if (entry.type === "session.message" && (entry as { messageId?: string }).messageId === messageId) {
+        updater(entry);
+        return;
+      }
+    }
+  }
+
   /** Number of entries currently buffered. */
   get length(): number {
     return this.#entries.length;
