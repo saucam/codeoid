@@ -18,6 +18,7 @@ import { ShutdownManager } from "./shutdown.js";
 import { AgentIdentityManager } from "./agent-identity.js";
 import { OAuthHandler, type OAuthConfig } from "./oauth.js";
 import { GoogleOAuthProvider, LocalProvider } from "./identity-provider.js";
+import { createMemory, type MemoryEngine } from "./memory/index.js";
 import type { AuthContext, ClientMessage, DaemonMessage } from "../protocol/types.js";
 import type { AttachedClient } from "./session.js";
 import type { Frontend, FrontendContext } from "../frontends/types.js";
@@ -35,6 +36,15 @@ export interface DaemonConfig {
     accountId: string;
     projectId: string;
   };
+  /** Memory config — when present, episodes are stored and recall() is exposed to Claude. */
+  memory?: {
+    /** Absolute path to the episode database. */
+    dbPath: string;
+    /** HuggingFace embedding model (default: Xenova/bge-small-en-v1.5). */
+    model?: string;
+    /** Weight cache directory (default: ~/.codeoid/models). */
+    modelCacheDir?: string;
+  };
 }
 
 interface AuthenticatedSocket {
@@ -49,6 +59,7 @@ export class DaemonServer {
   #transcriptStore: TranscriptStore;
   #manager: SessionManager;
   #shutdown: ShutdownManager;
+  #memory: MemoryEngine | null = null;
   #httpServer: ReturnType<typeof createServer> | null = null;
   #bunServer: ReturnType<typeof Bun.serve> | null = null;
   #sockets = new Map<string, AuthenticatedSocket>();
@@ -90,10 +101,15 @@ export class DaemonServer {
     const rateLimiter = new RateLimiter();
     this.#manager = new SessionManager(
       this.#store, this.#transcriptStore, identityManager, rateLimiter,
+      // Memory is wired post-construction via initMemory() — see start()
+      undefined,
     );
 
     // Register cleanup functions (LIFO order)
     this.#shutdown.register("sessions", () => this.#manager.drain(10_000));
+    this.#shutdown.register("memory", async () => {
+      if (this.#memory) await this.#memory.close();
+    });
     this.#shutdown.register("store", () => this.#store.close());
     this.#shutdown.register("websockets", () => {
       for (const { ws } of this.#sockets.values()) {
@@ -127,6 +143,29 @@ export class DaemonServer {
   async start(): Promise<void> {
     // Install signal handlers
     this.#shutdown.install();
+
+    // Boot memory engine if configured — before resume so ingestion queue is ready.
+    if (this.#config.memory) {
+      try {
+        this.#memory = await createMemory({
+          dbPath: this.#config.memory.dbPath,
+          embedder: {
+            model: this.#config.memory.model,
+            cacheDir: this.#config.memory.modelCacheDir,
+          },
+        });
+        await this.#memory.init();
+        this.#manager.setMemory(this.#memory);
+        console.log(
+          `[codeoid] memory enabled — episodes -> ${this.#config.memory.dbPath}`,
+        );
+      } catch (err) {
+        console.error(
+          `[codeoid] memory init failed, continuing without recall: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        this.#memory = null;
+      }
+    }
 
     // Resume sessions from transcripts
     const resumed = await this.#manager.resumeSessions();

@@ -34,6 +34,12 @@ import type { Store } from "./store.js";
 import type { AgentIdentityManager } from "./agent-identity.js";
 import { ScrollbackBuffer } from "./scrollback.js";
 import { TranscriptStore } from "./transcript.js";
+import {
+  EpisodeChunker,
+  buildMemoryMcpServer,
+  workspaceIdFromPath,
+  type MemoryEngine,
+} from "./memory/index.js";
 
 /** A connected client that can receive messages from this session. */
 export interface AttachedClient {
@@ -50,6 +56,8 @@ export interface SessionCreateOptions {
   transcriptStore: TranscriptStore;
   identityManager?: AgentIdentityManager;
   existingId?: string;
+  /** Optional memory engine — when provided, episodes are chunked and stored for recall. */
+  memory?: MemoryEngine;
 }
 
 export class Session {
@@ -69,6 +77,9 @@ export class Session {
   #abortController: AbortController | null = null;
   #scrollback = new ScrollbackBuffer();
   #seq = 0;
+  #memory?: MemoryEngine;
+  #chunker?: EpisodeChunker;
+  #workspaceId: string;
 
   // Track whether we've run a query before (for resume vs new session)
   #hasQueried = false;
@@ -91,6 +102,8 @@ export class Session {
     this.#store = opts.store;
     this.#transcriptStore = opts.transcriptStore;
     this.#identityManager = opts.identityManager;
+    this.#memory = opts.memory;
+    this.#workspaceId = workspaceIdFromPath(opts.workdir);
 
     // Default agent identity — upgraded to ZeroID identity in SessionStart hook if manager is available
     this.#agentIdentity = {
@@ -98,6 +111,26 @@ export class Session {
       name: `${opts.name} (Claude)`,
       type: "agent",
     };
+
+    if (this.#memory) {
+      const memory = this.#memory;
+      this.#chunker = new EpisodeChunker(
+        {
+          workspaceId: this.#workspaceId,
+          sessionId: this.id,
+          createdBy: opts.auth.sub,
+        },
+        (episode) => {
+          try {
+            memory.ingest(episode);
+          } catch (err) {
+            console.error(
+              `[codeoid/memory] ingest failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        },
+      );
+    }
 
     if (!opts.existingId) {
       this.#store.createSession({
@@ -197,15 +230,41 @@ export class Session {
       ? { resume: this.id }
       : { sessionId: this.id };
 
+    // Build MCP memory server for this turn so Claude can call recall()
+    const mcpServers = this.#memory
+      ? {
+          codeoid_memory: buildMemoryMcpServer(this.#memory, {
+            workspaceId: this.#workspaceId,
+            sessionId: this.id,
+          }),
+        }
+      : undefined;
+
     this.#query = query({
       prompt: text,
       options: {
         cwd: this.workdir,
         abortController: this.#abortController,
-        allowedTools: ["Read", "Grep", "Glob", "Write", "Edit", "Bash", "Agent"],
+        allowedTools: [
+          "Read",
+          "Grep",
+          "Glob",
+          "Write",
+          "Edit",
+          "Bash",
+          "Agent",
+          ...(this.#memory
+            ? [
+                "mcp__codeoid_memory__recall",
+                "mcp__codeoid_memory__recall_file",
+                "mcp__codeoid_memory__timeline",
+              ]
+            : []),
+        ],
         permissionMode: "default",
         includePartialMessages: true,
         persistSession: true,
+        ...(mcpServers ? { mcpServers } : {}),
         ...sessionOpts,
         settingSources: ["project"],
 
@@ -327,6 +386,7 @@ export class Session {
     } finally {
       this.#completeActiveTools();
       this.#flushActiveAssistant();
+      this.#chunker?.onTurnEnd();
       this.#query = null;
       this.#abortController = null;
       if (this.#status !== "error") {
@@ -600,10 +660,11 @@ export class Session {
     };
   }
 
-  /** Persist to transcript + scrollback buffer */
+  /** Persist to transcript + scrollback buffer + memory chunker */
   #persistAndBuffer(msg: SessionMessage): void {
     this.#scrollback.push(msg);
     this.#transcriptStore.append(this.id, msg, this.#seq++).catch(() => {});
+    this.#chunker?.onMessage(msg);
   }
 
   /** Broadcast any DaemonMessage to all attached clients */
