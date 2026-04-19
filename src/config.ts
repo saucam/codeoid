@@ -28,6 +28,13 @@ export interface CodeoidConfig {
     accountId: string;
     projectId: string;
   };
+  /** Memory / recall config — when enabled, stores episodes and exposes recall() to Claude. */
+  memory?: {
+    enabled: boolean;
+    dbPath: string;
+    model?: string;
+    modelCacheDir?: string;
+  };
 }
 
 const CONFIG_DIR = join(homedir(), ".codeoid");
@@ -52,6 +59,21 @@ export function loadConfig(): CodeoidConfig {
   const hmacSecret = process.env["CODEOID_HMAC_SECRET"] ?? config.oauth?.hmacSecret;
   const accountId = process.env["ZEROID_ACCOUNT_ID"] ?? config.agentIdentity?.accountId ?? "personal";
   const projectId = process.env["ZEROID_PROJECT_ID"] ?? config.agentIdentity?.projectId ?? "dev";
+
+  const memoryEnabled =
+    process.env["CODEOID_MEMORY"] !== undefined
+      ? process.env["CODEOID_MEMORY"] === "1" ||
+        process.env["CODEOID_MEMORY"]?.toLowerCase() === "true"
+      : (config.memory?.enabled ?? true);
+  const memoryDbPath =
+    process.env["CODEOID_MEMORY_DB_PATH"] ??
+    config.memory?.dbPath ??
+    join(CONFIG_DIR, "memory.db");
+  const memoryModel = process.env["CODEOID_MEMORY_MODEL"] ?? config.memory?.model;
+  const memoryCacheDir =
+    process.env["CODEOID_MEMORY_CACHE_DIR"] ??
+    config.memory?.modelCacheDir ??
+    join(CONFIG_DIR, "models");
 
   return {
     daemonUrl: process.env["CODEOID_DAEMON_URL"] ?? config.daemonUrl ?? "ws://127.0.0.1:7400",
@@ -83,6 +105,12 @@ export function loadConfig(): CodeoidConfig {
     agentIdentity: (process.env["ZEROID_ACCOUNT_ID"] || config.agentIdentity)
       ? { accountId, projectId }
       : undefined,
+    memory: {
+      enabled: memoryEnabled,
+      dbPath: memoryDbPath,
+      model: memoryModel,
+      modelCacheDir: memoryCacheDir,
+    },
   };
 }
 

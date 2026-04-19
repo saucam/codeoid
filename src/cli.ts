@@ -42,6 +42,13 @@ program
       auth: config.auth,
       oauth: config.oauth,
       agentIdentity: config.agentIdentity,
+      memory: config.memory?.enabled
+        ? {
+            dbPath: config.memory.dbPath,
+            model: config.memory.model,
+            modelCacheDir: config.memory.modelCacheDir,
+          }
+        : undefined,
     });
 
     // ── Register frontends ────────────────────────────────────────

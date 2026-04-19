@@ -1,0 +1,34 @@
+/**
+ * Memory module — durable episode storage + retrieval for Claude sessions.
+ *
+ * Public surface:
+ *   - createMemory() — factory wiring store + embedder + engine
+ *   - SqliteEpisodeStore, MemoryEngine, EpisodeChunker — lower-level handles
+ *   - workspaceIdFromPath() — canonicalize a workdir into a stable workspace id
+ *   - buildMemoryMcpServer() — wrap the engine as an MCP server for the Agent SDK
+ */
+
+import { SqliteEpisodeStore } from "./store.js";
+import { createEmbedder, type EmbedderConfig } from "./embedder.js";
+import { MemoryEngine } from "./engine.js";
+
+export { SqliteEpisodeStore, workspaceIdFromPath } from "./store.js";
+export { MemoryEngine } from "./engine.js";
+export { EpisodeChunker, extractFilePaths } from "./chunker.js";
+export { buildMemoryMcpServer } from "./mcp.js";
+export { DEFAULT_EMBEDDING_MODEL, createEmbedder } from "./embedder.js";
+export type { Episode, EpisodeKind, RecallHit, RecallQuery } from "./types.js";
+
+export interface MemoryConfig {
+  /** Absolute path to the memory SQLite database. */
+  dbPath: string;
+  /** Embedder config — model name, cache dir. */
+  embedder?: EmbedderConfig;
+}
+
+/** Build a ready-to-use MemoryEngine. Caller must call `engine.init()` before first use. */
+export async function createMemory(config: MemoryConfig): Promise<MemoryEngine> {
+  const store = new SqliteEpisodeStore(config.dbPath);
+  const embedder = await createEmbedder(config.embedder);
+  return new MemoryEngine({ store, embedder });
+}

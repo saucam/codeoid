@@ -14,6 +14,7 @@ import { hasScope, SCOPES } from "../protocol/scopes.js";
 import { RateLimiter } from "./rate-limit.js";
 import { TranscriptStore } from "./transcript.js";
 import type { AgentIdentityManager } from "./agent-identity.js";
+import type { MemoryEngine } from "./memory/index.js";
 import type {
   AuthContext,
   ClientMessage,
@@ -27,17 +28,20 @@ export class SessionManager {
   #transcriptStore: TranscriptStore;
   #identityManager?: AgentIdentityManager;
   #rateLimiter: RateLimiter;
+  #memory?: MemoryEngine;
 
   constructor(
     store: Store,
     transcriptStore: TranscriptStore,
     identityManager?: AgentIdentityManager,
     rateLimiter?: RateLimiter,
+    memory?: MemoryEngine,
   ) {
     this.#store = store;
     this.#transcriptStore = transcriptStore;
     this.#identityManager = identityManager;
     this.#rateLimiter = rateLimiter ?? new RateLimiter();
+    this.#memory = memory;
   }
 
   /**
@@ -64,6 +68,7 @@ export class SessionManager {
           transcriptStore: this.#transcriptStore,
           identityManager: this.#identityManager,
           existingId: meta.sessionId,
+          memory: this.#memory,
         });
 
         // Restore scrollback from transcript
@@ -108,6 +113,11 @@ export class SessionManager {
       case "session.destroy":
         return this.#destroySession(msg, auth);
     }
+  }
+
+  /** Inject the MemoryEngine after construction (embedder init is async). */
+  setMemory(memory: MemoryEngine): void {
+    this.#memory = memory;
   }
 
   /** Remove a client from all sessions (e.g. on disconnect). */
@@ -177,6 +187,7 @@ export class SessionManager {
       store: this.#store,
       transcriptStore: this.#transcriptStore,
       identityManager: this.#identityManager,
+      memory: this.#memory,
     });
 
     this.#sessions.set(session.id, session);
