@@ -41,6 +41,21 @@ import {
   type MemoryEngine,
 } from "./memory/index.js";
 
+/**
+ * System-prompt append used when memory is enabled. Deliberately brief and
+ * action-oriented — long preambles eat the cache hit. This string is stable
+ * per-workspace so it becomes part of the cached prompt prefix.
+ */
+const MEMORY_SYSTEM_PROMPT_APPEND = [
+  "You have access to durable cross-session memory for this workspace via three tools: recall, recall_file, and timeline.",
+  "",
+  "- Before reading a file, call recall_file(path) — if it was read recently and hasn't changed, reuse that content instead of issuing a fresh Read.",
+  "- When the user references earlier work ('what we did yesterday', 'the bug we hit', 'that auth flow'), call recall(query) first. Don't guess from your own session history; it may be out of date.",
+  "- At the start of a new session in a known workspace, consider calling timeline() to orient yourself on recent activity.",
+  "",
+  "Memory stores every tool call and assistant reply across all past sessions in this directory. It is the source of truth for history — summaries in your context may be partial.",
+].join("\n");
+
 /** A connected client that can receive messages from this session. */
 export interface AttachedClient {
   id: string;
@@ -92,6 +107,17 @@ export class Session {
 
   // Active tool call messageIds — completed when next assistant message arrives
   #activeToolMsgIds: string[] = [];
+
+  // SDK tool_use_id → our internal messageId — lets us correlate tool_result
+  // blocks (emitted in SDKUserMessage) back to the originating tool_call message
+  // so we can record the real tool output in scrollback, transcript, and memory.
+  #toolUseIdToMessageId = new Map<string, string>();
+  // messageIds of tool_calls already closed via a tool_result — so the
+  // fallback #completeActiveTools() path doesn't clobber their output.
+  #toolCallsClosedByResult = new Set<string>();
+  // messageId → canonical tool_call message, kept around so the completion
+  // update preserves the original tool input.
+  #toolCallMessages = new Map<string, SessionMessage>();
 
   constructor(opts: SessionCreateOptions) {
     this.id = opts.existingId ?? randomUUID();
@@ -265,6 +291,15 @@ export class Session {
         includePartialMessages: true,
         persistSession: true,
         ...(mcpServers ? { mcpServers } : {}),
+        ...(this.#memory
+          ? {
+              systemPrompt: {
+                type: "preset" as const,
+                preset: "claude_code" as const,
+                append: MEMORY_SYSTEM_PROMPT_APPEND,
+              },
+            }
+          : {}),
         ...sessionOpts,
         settingSources: ["project"],
 
@@ -479,6 +514,7 @@ export class Session {
           if (block["type"] === "tool_use" && typeof block["name"] === "string") {
             const toolName = block["name"] as string;
             const toolInput = block["input"] as Record<string, unknown>;
+            const sdkToolUseId = typeof block["id"] === "string" ? block["id"] : null;
 
             // Complete any previously executing tools before starting new one
             this.#completeActiveTools();
@@ -491,10 +527,14 @@ export class Session {
               {
                 toolId: randomUUID(),
                 name: toolName,
-                state: { phase: "executing" },
+                state: { phase: "executing", input: toolInput } as unknown as ToolState,
               },
             );
             this.#activeToolMsgIds.push(toolMsg.messageId);
+            this.#toolCallMessages.set(toolMsg.messageId, toolMsg);
+            if (sdkToolUseId) {
+              this.#toolUseIdToMessageId.set(sdkToolUseId, toolMsg.messageId);
+            }
             this.#persistAndBuffer(toolMsg);
             this.#broadcastRaw(toolMsg);
           }
@@ -602,7 +642,72 @@ export class Session {
         this.#broadcastRaw(progressMsg);
         break;
       }
+
+      case "user": {
+        // The SDK emits "user" messages that echo Claude's turn payload — these
+        // carry tool_result content blocks from tools that just executed. We
+        // correlate each tool_result back to the originating tool_call via its
+        // tool_use_id, then push a completion update (with real output) through
+        // #persistAndBuffer so the chunker can close the episode properly.
+        const content = (msg.message as { content?: unknown }).content;
+        if (!Array.isArray(content)) break;
+        for (const block of content as Array<Record<string, unknown>>) {
+          if (block["type"] !== "tool_result") continue;
+          const useId = typeof block["tool_use_id"] === "string" ? block["tool_use_id"] : null;
+          if (!useId) continue;
+          const messageId = this.#toolUseIdToMessageId.get(useId);
+          if (!messageId) continue;
+
+          const output = extractToolResultText(block["content"]);
+          const isError = block["is_error"] === true;
+          this.#closeToolCallWithOutput(messageId, output, !isError);
+        }
+        break;
+      }
     }
+  }
+
+  #closeToolCallWithOutput(messageId: string, output: string, success: boolean): void {
+    if (this.#toolCallsClosedByResult.has(messageId)) return;
+    this.#toolCallsClosedByResult.add(messageId);
+
+    const original = this.#toolCallMessages.get(messageId);
+    if (!original || !original.tool) return;
+
+    // Build an updated session.message that preserves identity + tool name +
+    // original input, and records the completion state with actual output.
+    const updated: SessionMessage = {
+      ...original,
+      tool: {
+        ...original.tool,
+        state: {
+          phase: "completed",
+          success,
+          output,
+        },
+      },
+      timestamp: new Date().toISOString(),
+    };
+
+    // Persist + feed the chunker so memory captures the real tool output.
+    this.#scrollback.updateMessage(messageId, (m) => {
+      const sm = m as SessionMessage;
+      if (sm.tool) sm.tool.state = updated.tool!.state;
+    });
+    this.#transcriptStore.append(this.id, updated, this.#seq++).catch(() => {});
+    this.#chunker?.onMessage(updated);
+
+    this.#broadcastRaw({
+      type: "session.message.delta",
+      sessionId: this.id,
+      messageId,
+      toolStateUpdate: updated.tool!.state,
+      timestamp: updated.timestamp,
+    });
+
+    // Remove from active list so the fallback completer doesn't clobber us.
+    this.#activeToolMsgIds = this.#activeToolMsgIds.filter((id) => id !== messageId);
+    this.#toolCallMessages.delete(messageId);
   }
 
   /** Flush the active assistant message into scrollback (for device handoff) */
@@ -612,20 +717,27 @@ export class Session {
     }
   }
 
-  /** Mark all active tool calls as completed — updates scrollback, persists, broadcasts */
+  /** Mark any still-open tool calls as completed — skips ones already closed with a real tool_result. */
   #completeActiveTools(): void {
     for (const msgId of this.#activeToolMsgIds) {
-      // Update in scrollback so replay shows final state
+      if (this.#toolCallsClosedByResult.has(msgId)) continue;
+
+      let updated: SessionMessage | null = null;
       this.#scrollback.updateMessage(msgId, (msg) => {
         const sm = msg as SessionMessage;
         if (sm.tool) {
           sm.tool.state = { phase: "completed", success: true };
-          // Re-persist the updated message so transcript has final state
-          this.#transcriptStore.append(this.id, sm, this.#seq++).catch(() => {});
+          updated = sm;
         }
       });
 
-      // Broadcast delta to live clients
+      if (updated) {
+        const sm = updated as SessionMessage;
+        this.#transcriptStore.append(this.id, sm, this.#seq++).catch(() => {});
+        // Feed the chunker so the episode closes even when we never saw a tool_result.
+        this.#chunker?.onMessage(sm);
+      }
+
       this.#broadcastRaw({
         type: "session.message.delta",
         sessionId: this.id,
@@ -701,4 +813,25 @@ export class Session {
       timestamp: new Date().toISOString(),
     });
   }
+}
+
+/**
+ * Extract text from an Anthropic tool_result content payload. The spec allows
+ * either a plain string or an array of content blocks; we flatten both to
+ * a single string for memory storage. Non-text blocks become a placeholder.
+ */
+function extractToolResultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const parts: string[] = [];
+  for (const block of content as Array<Record<string, unknown>>) {
+    if (block["type"] === "text" && typeof block["text"] === "string") {
+      parts.push(block["text"]);
+    } else if (block["type"] === "image") {
+      parts.push("[image]");
+    } else if (typeof block["text"] === "string") {
+      parts.push(block["text"] as string);
+    }
+  }
+  return parts.join("\n");
 }

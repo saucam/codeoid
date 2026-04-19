@@ -345,6 +345,7 @@ function sanitizeFtsQuery(q: string): string {
 
 function matchesQuery(ep: Episode, q: RecallQuery): boolean {
   if (q.sessionId && ep.sessionId !== q.sessionId) return false;
+  if (q.excludeSessionId && ep.sessionId === q.excludeSessionId) return false;
   if (q.toolName && ep.toolName !== q.toolName) return false;
   if (q.before && ep.createdAt >= q.before) return false;
   if (q.after && ep.createdAt <= q.after) return false;

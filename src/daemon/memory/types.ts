@@ -55,6 +55,8 @@ export interface RecallQuery {
   workspaceId: string;
   /** Restrict to a single session (default: workspace-wide). */
   sessionId?: string;
+  /** Exclude episodes from this session (typically the caller's own session). */
+  excludeSessionId?: string;
   /** Max hits to return. Default 8. */
   limit?: number;
   /** Only include episodes touching these file paths. */

@@ -53,10 +53,7 @@ export function buildMemoryMcpServer(
         workspaceId: binding.workspaceId,
         limit: limit ?? 6,
         toolName: tool_name,
-        sessionId: include_current_session ? undefined : undefined,
-        // sessionId filter currently restricts TO one session; we want to
-        // EXCLUDE current session by default, which needs a store-level flag.
-        // Until then, include-everything behavior is the right default.
+        excludeSessionId: include_current_session ? undefined : binding.sessionId,
       });
 
       return {

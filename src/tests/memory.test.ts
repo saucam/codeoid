@@ -128,6 +128,61 @@ describe("SqliteEpisodeStore", () => {
   });
 });
 
+describe("MemoryEngine.recall excludeSessionId", () => {
+  it("excludes episodes from the caller's own session", async () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    const embedder = new StubEmbedder();
+    const engine = new MemoryEngine({ store, embedder });
+    await engine.init();
+
+    const now = Date.now();
+    engine.ingest({
+      workspaceId: "ws_a",
+      sessionId: "current",
+      kind: "tool_call",
+      toolName: "Read",
+      summary: "Read from current session",
+      content: "auth.ts contents from current session",
+      filePaths: ["auth.ts"],
+      tokenEstimate: 10,
+      createdAt: now,
+      createdBy: "u",
+    });
+    engine.ingest({
+      workspaceId: "ws_a",
+      sessionId: "prior",
+      kind: "tool_call",
+      toolName: "Read",
+      summary: "Read from prior session",
+      content: "auth.ts contents from prior session",
+      filePaths: ["auth.ts"],
+      tokenEstimate: 10,
+      createdAt: now - 1000,
+      createdBy: "u",
+    });
+
+    await engine.drain();
+
+    const withCurrent = await engine.recall({
+      query: "auth contents",
+      workspaceId: "ws_a",
+      limit: 5,
+    });
+    const withoutCurrent = await engine.recall({
+      query: "auth contents",
+      workspaceId: "ws_a",
+      excludeSessionId: "current",
+      limit: 5,
+    });
+
+    expect(withCurrent.some((h) => h.episode.sessionId === "current")).toBe(true);
+    expect(withoutCurrent.some((h) => h.episode.sessionId === "current")).toBe(false);
+    expect(withoutCurrent.every((h) => h.episode.sessionId === "prior")).toBe(true);
+
+    await engine.close();
+  });
+});
+
 describe("MemoryEngine.recall", () => {
   it("ranks by hybrid vector + FTS + recency", async () => {
     const store = new SqliteEpisodeStore(dbPath);
