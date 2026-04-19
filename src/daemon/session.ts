@@ -290,6 +290,10 @@ export class Session {
         permissionMode: "default",
         includePartialMessages: true,
         persistSession: true,
+        // Capture subprocess stderr into the daemon log so spawn failures are debuggable.
+        stderr: (data: string) => {
+          process.stderr.write(`[claude-subprocess ${this.id.slice(0, 8)}] ${data}`);
+        },
         ...(mcpServers ? { mcpServers } : {}),
         ...(this.#memory
           ? {
@@ -407,6 +411,19 @@ export class Session {
       }
     } catch (err) {
       if (!this.#abortController.signal.aborted) {
+        // Surface the full error (message + stack + any extra fields) to
+        // daemon stdout so we can diagnose SDK-level failures from the logs.
+        console.error(
+          `[codeoid/session ${this.id}] SDK query failed:`,
+          err instanceof Error ? err.stack ?? err.message : err,
+        );
+        if (err && typeof err === "object") {
+          for (const key of Object.keys(err as object)) {
+            const v = (err as Record<string, unknown>)[key];
+            if (v !== undefined) console.error(`  ${key}:`, v);
+          }
+        }
+
         this.#setStatus("error");
         const errorMsg = this.#makeMessage(
           "system",
@@ -476,6 +493,11 @@ export class Session {
       if (msg.type === "session.message") {
         this.#scrollback.push(msg);
       }
+    }
+    // A session with prior scrollback already exists in Claude Code's own
+    // persistent session store — next send() must use `resume`, not re-create.
+    if (messages.length > 0) {
+      this.#hasQueried = true;
     }
   }
 
@@ -651,6 +673,7 @@ export class Session {
         // #persistAndBuffer so the chunker can close the episode properly.
         const content = (msg.message as { content?: unknown }).content;
         if (!Array.isArray(content)) break;
+        let closedAny = false;
         for (const block of content as Array<Record<string, unknown>>) {
           if (block["type"] !== "tool_result") continue;
           const useId = typeof block["tool_use_id"] === "string" ? block["tool_use_id"] : null;
@@ -661,6 +684,20 @@ export class Session {
           const output = extractToolResultText(block["content"]);
           const isError = block["is_error"] === true;
           this.#closeToolCallWithOutput(messageId, output, !isError);
+          closedAny = true;
+        }
+        // Re-emit a thinking indicator so the UI shows Claude is still working
+        // while it decides the next step. The web frontend auto-dismisses it
+        // when the next assistant content, tool_call, or status=idle arrives.
+        if (closedAny && this.#status === "working") {
+          const thinkingMsg = this.#makeMessage(
+            "thinking",
+            "Thinking...",
+            this.#agentIdentity,
+            undefined, undefined,
+            { event: "thinking_continue" },
+          );
+          this.#broadcastRaw(thinkingMsg);
         }
         break;
       }

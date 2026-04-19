@@ -122,13 +122,30 @@ export function buildMemoryMcpServer(
           content: [{ type: "text" as const, text: "Timeline is empty." }],
         };
       }
+      // Assign stable short labels to each distinct session so Claude can
+      // reason about cross-session continuity without seeing raw UUIDs.
+      const sessionLabels = new Map<string, string>();
+      let priorCount = 0;
+      for (const e of episodes) {
+        if (sessionLabels.has(e.sessionId)) continue;
+        if (e.sessionId === binding.sessionId) {
+          sessionLabels.set(e.sessionId, "current session");
+        } else {
+          priorCount++;
+          sessionLabels.set(e.sessionId, `prior session #${priorCount}`);
+        }
+      }
       const lines = episodes.map((e) => {
         const when = new Date(e.createdAt).toISOString();
-        const tag = e.sessionId === binding.sessionId ? "(this session)" : "";
-        return `- [${when}] ${e.kind}: ${e.summary} ${tag}`.trim();
+        const label = sessionLabels.get(e.sessionId) ?? "unknown session";
+        return `- [${when}] [${label}] ${e.kind}: ${e.summary}`;
       });
+      const header =
+        priorCount > 0
+          ? `Found ${episodes.length} recent episode(s) across ${sessionLabels.size} session(s) in this workspace (current + ${priorCount} prior).\n\n`
+          : `Found ${episodes.length} recent episode(s) — all from the current session. No prior sessions recorded in this workspace yet.\n\n`;
       return {
-        content: [{ type: "text" as const, text: lines.join("\n") }],
+        content: [{ type: "text" as const, text: header + lines.join("\n") }],
       };
     },
   );
@@ -153,12 +170,25 @@ function formatHits(
     return "No matching episodes in memory.";
   }
 
+  // Stable per-session labels so Claude can reason about cross-session origin.
+  const sessionLabels = new Map<string, string>();
+  let priorCount = 0;
+  for (const h of filtered) {
+    if (sessionLabels.has(h.episode.sessionId)) continue;
+    if (h.episode.sessionId === currentSessionId) {
+      sessionLabels.set(h.episode.sessionId, "current session");
+    } else {
+      priorCount++;
+      sessionLabels.set(h.episode.sessionId, `prior session #${priorCount}`);
+    }
+  }
+
   const blocks = filtered.map((h, i) => {
     const ep = h.episode;
     const when = new Date(ep.createdAt).toISOString();
-    const tag = ep.sessionId === currentSessionId ? " (this session)" : "";
+    const label = sessionLabels.get(ep.sessionId) ?? "unknown session";
     return [
-      `### [${i + 1}] ${ep.summary}${tag}`,
+      `### [${i + 1}] ${ep.summary} — ${label}`,
       `- when: ${when}`,
       `- kind: ${ep.kind}${ep.toolName ? ` (${ep.toolName})` : ""}`,
       `- score: ${h.score.toFixed(3)} (vec=${h.components.vector.toFixed(2)}, fts=${h.components.fts.toFixed(2)}, rec=${h.components.recency.toFixed(2)}, path=${h.components.pathOverlap.toFixed(2)})`,
@@ -168,5 +198,10 @@ function formatHits(
     ].join("\n");
   });
 
-  return blocks.join("\n\n---\n\n");
+  const header =
+    priorCount > 0
+      ? `Found ${filtered.length} matching episode(s) across ${sessionLabels.size} session(s) (${priorCount} prior).\n\n`
+      : `Found ${filtered.length} matching episode(s), all from the current session.\n\n`;
+
+  return header + blocks.join("\n\n---\n\n");
 }
