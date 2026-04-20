@@ -15,6 +15,8 @@ import { RateLimiter } from "./rate-limit.js";
 import { TranscriptStore } from "./transcript.js";
 import type { AgentIdentityManager } from "./agent-identity.js";
 import type { MemoryEngine } from "./memory/index.js";
+import type { CodeoidConfig } from "../config.js";
+import type { CompressionRegistry } from "./compress/index.js";
 import type {
   AuthContext,
   ClientMessage,
@@ -29,6 +31,8 @@ export class SessionManager {
   #identityManager?: AgentIdentityManager;
   #rateLimiter: RateLimiter;
   #memory?: MemoryEngine;
+  #config?: CodeoidConfig;
+  #compressionRegistry?: CompressionRegistry;
 
   constructor(
     store: Store,
@@ -36,12 +40,15 @@ export class SessionManager {
     identityManager?: AgentIdentityManager,
     rateLimiter?: RateLimiter,
     memory?: MemoryEngine,
+    opts?: { config?: CodeoidConfig; compressionRegistry?: CompressionRegistry },
   ) {
     this.#store = store;
     this.#transcriptStore = transcriptStore;
     this.#identityManager = identityManager;
     this.#rateLimiter = rateLimiter ?? new RateLimiter();
     this.#memory = memory;
+    this.#config = opts?.config;
+    this.#compressionRegistry = opts?.compressionRegistry;
   }
 
   /**
@@ -69,6 +76,8 @@ export class SessionManager {
           identityManager: this.#identityManager,
           existingId: meta.sessionId,
           memory: this.#memory,
+          config: this.#config,
+          compressionRegistry: this.#compressionRegistry,
         });
 
         // Restore scrollback from transcript
@@ -112,6 +121,14 @@ export class SessionManager {
         return this.#approve(msg, auth);
       case "session.destroy":
         return this.#destroySession(msg, auth);
+      case "session.set_mode":
+        return this.#setMode(msg, auth);
+      case "session.pin":
+        return this.#pin(msg, auth);
+      case "session.unpin":
+        return this.#unpin(msg, auth);
+      case "session.rotate":
+        return this.#rotate(msg, auth);
     }
   }
 
@@ -188,6 +205,8 @@ export class SessionManager {
       transcriptStore: this.#transcriptStore,
       identityManager: this.#identityManager,
       memory: this.#memory,
+      config: this.#config,
+      compressionRegistry: this.#compressionRegistry,
     });
 
     this.#sessions.set(session.id, session);
@@ -263,10 +282,100 @@ export class SessionManager {
       return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
     }
 
-    // Fire and forget — output streams to attached clients
-    session.send(msg.text, auth).catch(() => {});
+    // Fire and forget — output streams to attached clients.
+    // priority controls mid-turn insertion semantics (default "later" = FIFO).
+    session
+      .send(msg.text, auth, msg.attachments, msg.priority)
+      .catch(() => {});
 
     return { type: "response.ok", requestId: msg.id };
+  }
+
+  #pin(
+    msg: Extract<ClientMessage, { type: "session.pin" }>,
+    auth: AuthContext,
+  ): DaemonMessage {
+    // Reuse SESSION_SEND scope — pins only make sense to holders of send.
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_SEND)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Missing scope: session:send",
+        code: "forbidden",
+      };
+    }
+    const session = this.#sessions.get(msg.sessionId);
+    if (!session) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Session not found",
+        code: "not_found",
+      };
+    }
+    session.pinFile(msg.path, auth);
+    return { type: "response.ok", requestId: msg.id };
+  }
+
+  #unpin(
+    msg: Extract<ClientMessage, { type: "session.unpin" }>,
+    auth: AuthContext,
+  ): DaemonMessage {
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_SEND)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Missing scope: session:send",
+        code: "forbidden",
+      };
+    }
+    const session = this.#sessions.get(msg.sessionId);
+    if (!session) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Session not found",
+        code: "not_found",
+      };
+    }
+    session.unpinFile(msg.path, auth);
+    return { type: "response.ok", requestId: msg.id };
+  }
+
+  /**
+   * Manual rotation via `/rotate` slash. Reuses SESSION_SEND scope: anyone
+   * who can drive the session can rotate it. Rejects silently (with
+   * `response.ok` + boolean in `data`) when the min-turns guard fires —
+   * the user sees the reason in the scrollback info message the session
+   * itself emits.
+   */
+  async #rotate(
+    msg: Extract<ClientMessage, { type: "session.rotate" }>,
+    auth: AuthContext,
+  ): Promise<DaemonMessage> {
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_SEND)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Missing scope: session:send",
+        code: "forbidden",
+      };
+    }
+    const session = this.#sessions.get(msg.sessionId);
+    if (!session) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Session not found",
+        code: "not_found",
+      };
+    }
+    const rotated = await session.manualRotate(auth);
+    return {
+      type: "response.ok",
+      requestId: msg.id,
+      data: { rotated },
+    };
   }
 
   #interrupt(
@@ -300,6 +409,33 @@ export class SessionManager {
     }
 
     session.approve(msg.approvalId, msg.approved, auth);
+    return { type: "response.ok", requestId: msg.id };
+  }
+
+  #setMode(
+    msg: Extract<ClientMessage, { type: "session.set_mode" }>,
+    auth: AuthContext,
+  ): DaemonMessage {
+    // Set-mode reuses the same scope gates as approve/send — the caller must
+    // already be authorized to act on the session.
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_APPROVE)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Missing scope: session:approve",
+        code: "forbidden",
+      };
+    }
+    const session = this.#sessions.get(msg.sessionId);
+    if (!session) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Session not found",
+        code: "not_found",
+      };
+    }
+    session.setMode(msg.mode, msg.maxTurns, auth);
     return { type: "response.ok", requestId: msg.id };
   }
 

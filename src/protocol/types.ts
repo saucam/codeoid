@@ -22,6 +22,16 @@ import type { Scope } from "./scopes.js";
 
 export type SessionStatus = "idle" | "working" | "waiting_approval" | "error";
 
+/**
+ * Execution mode — controls tool approval and autonomous budgeting.
+ *
+ * - `interactive` (default): every tool call asks for approval
+ * - `auto-allow`: Read/Grep/Glob/memory/recall are auto-approved; Write/Edit/Bash still ask
+ * - `autonomous`: every tool auto-approved until the turn budget (`maxTurns`) is exhausted;
+ *   session then reverts to `interactive` and interrupts
+ */
+export type SessionMode = "interactive" | "auto-allow" | "autonomous";
+
 export interface SessionInfo {
   id: string;
   name: string;
@@ -30,6 +40,127 @@ export interface SessionInfo {
   createdBy: string;
   createdAt: string;
   attachedClients: number;
+  /** Current execution mode (default "interactive"). */
+  mode?: SessionMode;
+  /** Remaining turns budget for autonomous mode (undefined = unbounded, 0 = exhausted). */
+  turnsRemaining?: number;
+  /** Files pinned to the session — prepended to every turn's prompt. */
+  pinnedFiles?: string[];
+  /** SPIFFE/WIMSE URI of the primary session agent (falls back to anonymous:session:<id>). */
+  agentUri?: string;
+  /** Active sub-agents for the identity chain display. */
+  subagents?: Subagent[];
+  /** Cumulative token + cost usage since the session started. */
+  usage?: SessionUsage;
+  /**
+   * Rotation telemetry — how many times the underlying Claude Code session
+   * has been rolled over to avoid context compaction. Only populated when
+   * auto-rotation is active or the user has manually rotated.
+   */
+  rotation?: {
+    count: number;
+    /** Unix ms of last rotation, or null if never rotated. */
+    lastRotatedAt: number | null;
+    /** Backing Claude Code session id (opaque to UI, useful for debugging). */
+    claudeCodeSessionId?: string;
+  };
+  /**
+   * Number of user messages buffered in the streamInput queue, waiting for
+   * the SDK consumer to pick them up. > 0 means: user has sent faster than
+   * Claude can process — useful signal for mid-turn queueing UX.
+   */
+  queuedMessages?: number;
+}
+
+/**
+ * Cumulative usage totals for a session. Aggregated from each SDK `result`
+ * message (one per turn). Frontends render this as a "$X · Yk in / Zk out"
+ * counter so the user sees what they're spending in near-realtime.
+ *
+ * Persistent: the daemon records one `TurnUsage` row per turn to SQLite so
+ * totals survive daemon restarts and can be queried after the fact.
+ */
+export interface SessionUsage {
+  /** Input tokens consumed across all turns. */
+  inputTokens: number;
+  /** Output tokens generated across all turns. */
+  outputTokens: number;
+  /** Tokens read from the prompt cache (cheap). */
+  cacheReadTokens: number;
+  /** Tokens written to the prompt cache (a premium on cache-misses). */
+  cacheCreationTokens: number;
+  /** Total cost in USD across all turns, as reported by the SDK. */
+  totalCostUsd: number;
+  /** Number of turns (round-trips) included in these totals. */
+  numTurns: number;
+  /** Wall-clock duration of agent work (sum of per-turn `duration_ms`). */
+  durationMs: number;
+  /** Most recent turns (newest first) — lightweight trend signal for UIs. */
+  recentTurns?: TurnUsage[];
+  /** Max input_tokens ever seen on a single turn — bloat canary. */
+  peakInputTokens?: number;
+  /** Most recent turn's billable input (input - cache_read). */
+  lastTurnInputTokens?: number;
+  /** Most recent turn's output tokens. */
+  lastTurnOutputTokens?: number;
+  /** Most recent turn's cost (USD). */
+  lastTurnCostUsd?: number;
+  /** Most recent turn's cache-read ratio (cache_read / total_input). */
+  lastTurnCacheHitRate?: number;
+}
+
+/**
+ * Per-turn usage record — one row per SDK `result` event.
+ *
+ * Kept small + serializable so it fits cleanly in SessionInfo broadcasts.
+ * `totalInputTokens`, `billableInputTokens` and `cacheHitRate` are derived
+ * fields we compute once on write rather than re-computing in every
+ * frontend — keeps the StatusBar render cheap.
+ *
+ * Important Anthropic semantics (easy to get wrong):
+ *   - `inputTokens` = NEW (uncached) input tokens only
+ *   - `cacheReadTokens` = tokens served from prompt cache (billed 0.1x)
+ *   - `cacheCreationTokens` = tokens written to cache (billed 1.25x)
+ *   - Actual context size Claude processed = input + cacheRead + cacheCreation
+ */
+export interface TurnUsage {
+  /** 1-indexed turn number within the session. */
+  turnNumber: number;
+  /** Unix ms when the turn settled. */
+  createdAt: number;
+  /** New (uncached) input tokens for this turn. Does NOT include cache tokens. */
+  inputTokens: number;
+  /** Output tokens from the assistant. */
+  outputTokens: number;
+  /** Cache-read tokens (billed at ~10% of full input). */
+  cacheReadTokens: number;
+  /** Cache-write tokens (billed at ~125% of full input). */
+  cacheCreationTokens: number;
+  /** Total cost for the turn in USD, as reported by the SDK. */
+  totalCostUsd: number;
+  /** Wall-clock duration in ms (agent work, not network). */
+  durationMs: number;
+  /** Stop reason ("end_turn", "max_tokens", "tool_use", "error", …) if known. */
+  stopReason?: string;
+  /** Derived: total context size = inputTokens + cacheReadTokens + cacheCreationTokens. */
+  totalInputTokens: number;
+  /** Derived: full-price input = inputTokens + cacheCreationTokens (cache reads are ~free). */
+  billableInputTokens: number;
+  /** Derived: cacheReadTokens / totalInputTokens. 0-1. */
+  cacheHitRate: number;
+}
+
+export interface Subagent {
+  /** SDK-side agent id (opaque handle). */
+  agentId: string;
+  /** ZeroID WIMSE URI if registered, else undefined. */
+  wimseUri?: string;
+  /** Subagent type label (e.g. "general-purpose", "code-reviewer", "Explorer"). */
+  agentType: string;
+  /** Unix ms when the sub-agent started. */
+  spawnedAt: number;
+  /** True while the sub-agent is running; false after SubagentStop. */
+  active: boolean;
 }
 
 // =============================================================================
@@ -336,7 +467,11 @@ export type ClientMessage =
   | SessionSendMsg
   | SessionInterruptMsg
   | SessionApproveMsg
-  | SessionDestroyMsg;
+  | SessionDestroyMsg
+  | SessionSetModeMsg
+  | SessionPinMsg
+  | SessionUnpinMsg
+  | SessionRotateMsg;
 
 interface BaseClientMsg {
   /** Request ID for correlating responses */
@@ -367,6 +502,45 @@ export interface SessionSendMsg extends BaseClientMsg {
   type: "session.send";
   sessionId: string;
   text: string;
+  /**
+   * One-shot attachments for this turn only. Daemon resolves each path
+   * (relative to the session's workdir), reads and prepends the content
+   * to the effective prompt. Missing or oversized files are surfaced as
+   * inline error markers rather than silently dropped.
+   */
+  attachments?: Attachment[];
+  /**
+   * Mid-turn priority hint (SDK semantics):
+   *   - `now`   — interrupt the agent's current turn and observe immediately
+   *   - `next`  — let the current turn finish, then pick this up
+   *   - `later` — queue as a standard follow-up (default)
+   * Frontends that don't care pass nothing; FIFO stays the default.
+   */
+  priority?: "now" | "next" | "later";
+}
+
+export interface Attachment {
+  /** File path, absolute or relative to the session workdir. */
+  path: string;
+  /**
+   * Optional inlined text content. When provided, daemon skips the file
+   * read and uses this directly — useful for paste-from-clipboard flows or
+   * remote editors that push the bytes over the wire.
+   */
+  content?: string;
+  /**
+   * MIME type when the attachment carries non-text bytes (images, PDFs).
+   * Combined with `data`, lets a frontend push binary payloads that the
+   * daemon writes to a temp file under the session workdir so Claude's
+   * Read tool can pick them up.
+   */
+  mimeType?: string;
+  /**
+   * Base64-encoded bytes. Mutually exclusive with `content` — when set,
+   * `mimeType` must also be set. The daemon decodes into a temp file and
+   * rewrites `path` to point at that file before handing it to Claude.
+   */
+  data?: string;
 }
 
 export interface SessionInterruptMsg extends BaseClientMsg {
@@ -387,6 +561,43 @@ export interface SessionDestroyMsg extends BaseClientMsg {
   sessionId: string;
 }
 
+export interface SessionSetModeMsg extends BaseClientMsg {
+  type: "session.set_mode";
+  sessionId: string;
+  mode: SessionMode;
+  /** Only meaningful for `autonomous`; undefined = unbounded. */
+  maxTurns?: number;
+}
+
+/**
+ * Manage the session's pinned-files list. Pinned files get prepended to
+ * every turn until unpinned — useful for keeping a spec document or
+ * acceptance criteria in Claude's attention across a long task.
+ */
+export interface SessionPinMsg extends BaseClientMsg {
+  type: "session.pin";
+  sessionId: string;
+  /** File path (absolute or relative to the session workdir). */
+  path: string;
+}
+
+export interface SessionUnpinMsg extends BaseClientMsg {
+  type: "session.unpin";
+  sessionId: string;
+  path: string;
+}
+
+/**
+ * Manually rotate the session's backing Claude Code context. Keeps the
+ * user-visible session id + scrollback + memory unchanged; starts a fresh
+ * Claude Code transcript. Rejected if the session has fewer turns than
+ * the configured min-turns-before-rotate.
+ */
+export interface SessionRotateMsg extends BaseClientMsg {
+  type: "session.rotate";
+  sessionId: string;
+}
+
 // =============================================================================
 // Daemon → Client messages
 // =============================================================================
@@ -399,6 +610,7 @@ export type DaemonMessage =
   | SessionMessage
   | SessionMessageDelta
   | SessionStatusChangeMsg
+  | SessionInfoUpdateMsg
   | ScrollbackReplayMsg;
 
 export interface AuthOkMsg {
@@ -439,6 +651,17 @@ export interface SessionStatusChangeMsg {
   type: "session.status_change";
   sessionId: string;
   status: SessionStatus;
+  timestamp: string;
+}
+
+/**
+ * Broadcast when non-status fields of a SessionInfo change (e.g. execution
+ * mode, turns-remaining). Carries the full updated SessionInfo so clients
+ * can merge without a separate list refresh.
+ */
+export interface SessionInfoUpdateMsg {
+  type: "session.info_update";
+  session: SessionInfo;
   timestamp: string;
 }
 
