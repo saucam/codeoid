@@ -118,6 +118,57 @@ describe("resolveAttachments — size limits", () => {
   });
 });
 
+describe("resolveAttachments — binary payloads (paste/drop)", () => {
+  it("writes base64 image payload to the session attachment subdir", () => {
+    // 1x1 transparent PNG (base64). Lets Buffer.from round-trip without
+    // pulling in a real image lib.
+    const pngBase64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+P+/HgAFhAJ/wlseKgAAAABJRU5ErkJggg==";
+    const { resolved, promptPrefix } = resolveAttachments(
+      [{ path: "paste-1.png", mimeType: "image/png", data: pngBase64 }],
+      { workdir: dir },
+    );
+    expect(resolved.length).toBe(1);
+    expect(resolved[0]!.binary).toBe(true);
+    expect(resolved[0]!.mimeType).toBe("image/png");
+    // Path is rewritten to the attachment subdir under the workdir.
+    expect(resolved[0]!.path.startsWith(".codeoid/attachments/")).toBe(true);
+    expect(resolved[0]!.path.endsWith(".png")).toBe(true);
+    expect(resolved[0]!.content).toBeUndefined();
+    expect(resolved[0]!.error).toBeUndefined();
+    // Prompt block signals the binary nature and nudges Read.
+    expect(promptPrefix).toContain(`binary="true"`);
+    expect(promptPrefix).toContain("Use the Read tool");
+  });
+
+  it("surfaces a PNG file referenced by path (binary by extension)", () => {
+    const png = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+    ]);
+    writeFileSync(join(dir, "shot.png"), png);
+    const { resolved, promptPrefix } = resolveAttachments(
+      [{ path: "shot.png" }],
+      { workdir: dir },
+    );
+    expect(resolved[0]!.binary).toBe(true);
+    expect(resolved[0]!.mimeType).toBe("image/png");
+    expect(resolved[0]!.error).toBeUndefined();
+    expect(promptPrefix).toContain(`path="shot.png"`);
+    expect(promptPrefix).toContain(`type="image/png"`);
+  });
+
+  it("rejects base64 payloads above the binary cap", () => {
+    // Synthesize a fake base64 string that decodes to > 2 MB.
+    const huge = "A".repeat(Math.ceil((2 * 1024 * 1024 + 1) * 4 / 3));
+    const { resolved } = resolveAttachments(
+      [{ path: "too-big.png", mimeType: "image/png", data: huge }],
+      { workdir: dir },
+    );
+    expect(resolved[0]!.error).toContain("exceeds");
+    expect(resolved[0]!.content).toBeUndefined();
+  });
+});
+
 describe("formatAsPrompt output shape", () => {
   it("returns empty string when no attachments", () => {
     expect(formatAsPrompt([])).toBe("");

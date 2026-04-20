@@ -50,6 +50,30 @@ export interface SessionInfo {
   agentUri?: string;
   /** Active sub-agents for the identity chain display. */
   subagents?: Subagent[];
+  /** Cumulative token + cost usage since the session started. */
+  usage?: SessionUsage;
+}
+
+/**
+ * Cumulative usage totals for a session. Aggregated from each SDK `result`
+ * message (one per turn). Frontends render this as a "$X · Yk in / Zk out"
+ * counter so the user sees what they're spending in near-realtime.
+ */
+export interface SessionUsage {
+  /** Input tokens consumed across all turns. */
+  inputTokens: number;
+  /** Output tokens generated across all turns. */
+  outputTokens: number;
+  /** Tokens read from the prompt cache (cheap). */
+  cacheReadTokens: number;
+  /** Tokens written to the prompt cache (a premium on cache-misses). */
+  cacheCreationTokens: number;
+  /** Total cost in USD across all turns, as reported by the SDK. */
+  totalCostUsd: number;
+  /** Number of turns (round-trips) included in these totals. */
+  numTurns: number;
+  /** Wall-clock duration of agent work (sum of per-turn `duration_ms`). */
+  durationMs: number;
 }
 
 export interface Subagent {
@@ -416,11 +440,24 @@ export interface Attachment {
   /** File path, absolute or relative to the session workdir. */
   path: string;
   /**
-   * Optional inlined content. When provided, daemon skips the file read
-   * and uses this directly — useful for paste-from-clipboard flows or
+   * Optional inlined text content. When provided, daemon skips the file
+   * read and uses this directly — useful for paste-from-clipboard flows or
    * remote editors that push the bytes over the wire.
    */
   content?: string;
+  /**
+   * MIME type when the attachment carries non-text bytes (images, PDFs).
+   * Combined with `data`, lets a frontend push binary payloads that the
+   * daemon writes to a temp file under the session workdir so Claude's
+   * Read tool can pick them up.
+   */
+  mimeType?: string;
+  /**
+   * Base64-encoded bytes. Mutually exclusive with `content` — when set,
+   * `mimeType` must also be set. The daemon decodes into a temp file and
+   * rewrites `path` to point at that file before handing it to Claude.
+   */
+  data?: string;
 }
 
 export interface SessionInterruptMsg extends BaseClientMsg {

@@ -23,6 +23,7 @@ import type {
   SessionInfo,
   SessionMode,
   SessionStatus,
+  SessionUsage,
   DaemonMessage,
   SessionMessage,
   SessionMessageDelta,
@@ -102,6 +103,19 @@ export class Session {
   // Execution mode + turn budget (autonomous mode only).
   #mode: SessionMode = "interactive";
   #turnsRemaining: number | undefined = undefined;
+
+  // Cumulative token + cost totals, aggregated from SDK `result` messages
+  // (one per turn). Broadcast via session.info_update so StatusBar-style
+  // UIs can render a running counter without polling.
+  #usage: SessionUsage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    totalCostUsd: 0,
+    numTurns: 0,
+    durationMs: 0,
+  };
 
   // Pinned files — prepended to every turn until unpinned. Kept both in
   // memory (for hot reads) and in the Store (for restart persistence).
@@ -327,6 +341,8 @@ export class Session {
       pinned: this.#pinnedFiles.includes(r.path),
       bytes: r.bytes,
       error: r.error,
+      binary: r.binary,
+      mimeType: r.mimeType,
     }));
     const userMsg = this.#makeMessage(
       "user",
@@ -406,6 +422,11 @@ export class Session {
         permissionMode: "default",
         includePartialMessages: true,
         persistSession: true,
+        // Adaptive thinking — lets the model decide how deeply to reason per
+        // turn. Without this, many prompts ship thinking=disabled and the
+        // TUI's gray reasoning block stays empty. Adaptive = small prompts
+        // get no overhead, hard prompts get visible reasoning.
+        thinking: { type: "adaptive" as const },
         // Capture subprocess stderr into the daemon log so spawn failures are debuggable.
         stderr: (data: string) => {
           process.stderr.write(`[claude-subprocess ${this.id.slice(0, 8)}] ${data}`);
@@ -693,6 +714,7 @@ export class Session {
       pinnedFiles: [...this.#pinnedFiles],
       agentUri: this.#agentIdentity.sub,
       subagents: this.subagentSnapshot,
+      usage: { ...this.#usage },
     };
   }
 
@@ -943,11 +965,43 @@ export class Session {
 
       case "result": {
         this.#flushActiveAssistant();
+        // Accumulate token + cost usage from this turn into the session-level
+        // running totals. `usage` (Anthropic BetaUsage) reports per-turn
+        // totals; we add them into the cumulative counters and broadcast.
+        const turn = msg as unknown as {
+          usage?: {
+            input_tokens?: number;
+            output_tokens?: number;
+            cache_read_input_tokens?: number;
+            cache_creation_input_tokens?: number;
+          };
+          total_cost_usd?: number;
+          duration_ms?: number;
+          is_error?: boolean;
+          error?: unknown;
+          subtype?: string;
+        };
+        if (turn.usage) {
+          this.#usage.inputTokens += turn.usage.input_tokens ?? 0;
+          this.#usage.outputTokens += turn.usage.output_tokens ?? 0;
+          this.#usage.cacheReadTokens += turn.usage.cache_read_input_tokens ?? 0;
+          this.#usage.cacheCreationTokens +=
+            turn.usage.cache_creation_input_tokens ?? 0;
+        }
+        if (typeof turn.total_cost_usd === "number") {
+          this.#usage.totalCostUsd += turn.total_cost_usd;
+        }
+        if (typeof turn.duration_ms === "number") {
+          this.#usage.durationMs += turn.duration_ms;
+        }
+        this.#usage.numTurns += 1;
+        this.#broadcastInfoUpdate();
+
         // Only emit errors — success result duplicates last assistant message
-        if (msg.subtype === "error" && msg.error) {
+        if (turn.subtype && turn.subtype !== "success" && turn.error) {
           const errorMsg = this.#makeMessage(
             "system",
-            `Error: ${typeof msg.error === "string" ? msg.error : JSON.stringify(msg.error)}`,
+            `Error: ${typeof turn.error === "string" ? turn.error : JSON.stringify(turn.error)}`,
             SYSTEM_IDENTITY,
             undefined, undefined,
             { event: "agent_error" },

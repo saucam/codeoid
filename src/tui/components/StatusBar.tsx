@@ -1,6 +1,6 @@
 /**
  * StatusBar — one-line context row above the prompt. Shows connection state,
- * focused session info, and last error.
+ * focused session info, cumulative token/cost usage, and the last error.
  */
 
 import React from "react";
@@ -21,6 +21,7 @@ const CONNECTION_COLOR: Record<Props["connection"], string> = {
 };
 
 export function StatusBar({ connection, focused, lastError }: Props) {
+  const usage = focused?.info.usage;
   return (
     <Box paddingX={1}>
       <Text color={CONNECTION_COLOR[connection]}>●</Text>
@@ -64,6 +65,24 @@ export function StatusBar({ connection, focused, lastError }: Props) {
               </Text>
             </>
           )}
+          {usage && usage.numTurns > 0 && (
+            <>
+              <Text dimColor>{"   │   "}</Text>
+              <Text color="cyan" bold>
+                {formatCost(usage.totalCostUsd)}
+              </Text>
+              <Text dimColor>
+                {" · " + formatTokens(usage.inputTokens) + " in / " +
+                  formatTokens(usage.outputTokens) + " out"}
+              </Text>
+              {usage.cacheReadTokens > 0 && (
+                <Text dimColor>
+                  {" · " + formatTokens(usage.cacheReadTokens) + " cached"}
+                </Text>
+              )}
+              <Text dimColor>{" · " + usage.numTurns + " turns"}</Text>
+            </>
+          )}
         </>
       )}
       {lastError && (
@@ -75,3 +94,26 @@ export function StatusBar({ connection, focused, lastError }: Props) {
     </Box>
   );
 }
+
+/** Render a token count as 1234 / 12.3k / 1.2M to keep the status bar tight. */
+function formatTokens(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0";
+  if (n < 1_000) return String(Math.round(n));
+  if (n < 10_000) return (n / 1_000).toFixed(1) + "k";
+  if (n < 1_000_000) return Math.round(n / 1_000) + "k";
+  return (n / 1_000_000).toFixed(1) + "M";
+}
+
+/**
+ * Render cost in USD with one decimal below $10 (e.g. "$0.42", "$9.8") and
+ * whole dollars above (e.g. "$42", "$1.2k"). Tiny costs collapse to "$0.00"
+ * rather than a noisy exponential.
+ */
+function formatCost(usd: number): string {
+  if (!Number.isFinite(usd) || usd <= 0) return "$0.00";
+  if (usd < 10) return "$" + usd.toFixed(2);
+  if (usd < 100) return "$" + usd.toFixed(1);
+  if (usd < 1_000) return "$" + Math.round(usd);
+  return "$" + (usd / 1_000).toFixed(1) + "k";
+}
+

@@ -950,7 +950,14 @@ function JS(wsUrl: string, scopesString: string): string {
       if (seen.has(path)) continue;
       seen.add(path);
       const entry = { path };
-      if (typeof f !== 'string' && f.content !== undefined) entry.content = f.content;
+      if (typeof f !== 'string') {
+        if (f.kind === 'binary' && f.data && f.mimeType) {
+          entry.mimeType = f.mimeType;
+          entry.data = f.data;
+        } else if (f.content !== undefined) {
+          entry.content = f.content;
+        }
+      }
       attachments.push(entry);
     }
     const mentionRe = /(?:^|\s)@([A-Za-z0-9_./-]+)/g;
@@ -1064,8 +1071,16 @@ function JS(wsUrl: string, scopesString: string): string {
   function renderContextChips() {
     contextChips.innerHTML = contextFiles.map((f, i) => {
       const path = typeof f === 'string' ? f : f.path;
-      const hasInline = typeof f !== 'string' && f.content !== undefined;
-      const suffix = hasInline ? ' <span style="opacity:0.6;font-size:0.75rem">(inlined)</span>' : '';
+      let suffix = '';
+      if (typeof f !== 'string') {
+        if (f.kind === 'binary') {
+          const kb = Math.round((f.size || 0) / 1024);
+          const icon = (f.mimeType || '').startsWith('image/') ? '🖼' : '📎';
+          suffix = ' <span style="opacity:0.6;font-size:0.75rem">' + icon + ' ' + kb + ' KB</span>';
+        } else if (f.content !== undefined) {
+          suffix = ' <span style="opacity:0.6;font-size:0.75rem">(inlined)</span>';
+        }
+      }
       return '<span class="chip">' + esc(path) + suffix
         + ' <span class="chip-remove" data-idx="' + i + '">✕</span></span>';
     }).join('');
@@ -1085,21 +1100,48 @@ function JS(wsUrl: string, scopesString: string): string {
   // host path). Pasting rich clipboard data with File items does the same.
 
   function ingestDroppedFile(file) {
-    const MAX = 200 * 1024; // 200 KB per file from the browser
-    if (file.size > MAX) {
-      contextFiles.push({ path: file.name, content: '(skipped: file > 200 KB)' });
+    const MAX_TEXT = 200 * 1024;   // 200 KB for text snippets
+    const MAX_BINARY = 2 * 1024 * 1024; // 2 MB for images / PDFs
+
+    const mime = file.type || '';
+    const isImage = mime.startsWith('image/');
+    const isPdf = mime === 'application/pdf';
+    const isBinary = isImage || isPdf;
+    const cap = isBinary ? MAX_BINARY : MAX_TEXT;
+
+    if (file.size > cap) {
+      contextFiles.push({
+        path: file.name,
+        content: '(skipped: file > ' + Math.round(cap / 1024) + ' KB)'
+      });
       renderContextChips();
       return;
     }
+
     const reader = new FileReader();
     reader.onload = () => {
-      const text = typeof reader.result === 'string'
-        ? reader.result
-        : new TextDecoder().decode(reader.result);
-      contextFiles.push({ path: file.name, content: text });
+      if (isBinary) {
+        // readAsDataURL returns "data:<mime>;base64,<payload>" — split it.
+        const result = typeof reader.result === 'string' ? reader.result : '';
+        const comma = result.indexOf(',');
+        const base64 = comma >= 0 ? result.slice(comma + 1) : '';
+        contextFiles.push({
+          path: file.name,
+          mimeType: mime,
+          data: base64,
+          kind: 'binary',
+          size: file.size,
+        });
+      } else {
+        const text = typeof reader.result === 'string'
+          ? reader.result
+          : new TextDecoder().decode(reader.result);
+        contextFiles.push({ path: file.name, content: text });
+      }
       renderContextChips();
     };
-    reader.readAsText(file);
+    if (isBinary) reader.readAsDataURL(file);
+    else reader.readAsText(file);
   }
 
   function setupDragDrop(el) {

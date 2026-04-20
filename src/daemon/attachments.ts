@@ -9,16 +9,28 @@
  * Claude sees WHY an attachment wasn't usable and can tell the user.
  */
 
-import { statSync, readFileSync, accessSync, constants } from "node:fs";
-import { isAbsolute, resolve as resolvePath } from "node:path";
+import {
+  statSync,
+  readFileSync,
+  accessSync,
+  constants,
+  mkdirSync,
+  writeFileSync,
+} from "node:fs";
+import { isAbsolute, resolve as resolvePath, join as joinPath } from "node:path";
+import { randomBytes } from "node:crypto";
 import type { Attachment } from "../protocol/types.js";
 
-/** Hard cap per individual attachment (bytes). 100 KB. */
+/** Hard cap per individual attachment (bytes). 100 KB for text, 2 MB for binary. */
 export const MAX_ATTACHMENT_BYTES = 100 * 1024;
+/** Hard cap per binary (image/PDF) attachment — generous enough for screenshots. */
+export const MAX_BINARY_ATTACHMENT_BYTES = 2 * 1024 * 1024;
 /** Hard cap on total attachment bytes per turn. 500 KB. */
 export const MAX_TOTAL_ATTACHMENT_BYTES = 500 * 1024;
 /** First N bytes inspected to detect binary content. */
 const BINARY_SNIFF_BYTES = 1024;
+/** Subdirectory under the session workdir where binary payloads land. */
+const ATTACHMENT_SUBDIR = ".codeoid/attachments";
 
 export interface ResolvedAttachment {
   /** The path as recorded (workspace-relative when possible, for readability). */
@@ -29,6 +41,10 @@ export interface ResolvedAttachment {
   error?: string;
   /** Raw byte count (pre-truncation) for accounting. */
   bytes: number;
+  /** True when the attachment was a binary payload written to disk (image/PDF). */
+  binary?: boolean;
+  /** Resolved mime type for binary attachments. */
+  mimeType?: string;
 }
 
 export interface ResolverOptions {
@@ -58,6 +74,14 @@ export function resolveAttachments(
   let totalBytes = 0;
 
   for (const a of attachments) {
+    // Binary payloads (image paste/drop) go through a separate writer that
+    // materializes the bytes under the session workdir and rewrites `path`.
+    // They don't count toward the text-attachment budget.
+    if (a.data && a.mimeType) {
+      resolved.push(resolveBinary(a, opts.workdir));
+      continue;
+    }
+
     const entry = resolveOne(a, opts.workdir, maxPer);
     // Enforce the total-bytes ceiling by truncating the next attachment
     // when we'd otherwise overflow.
@@ -77,6 +101,114 @@ export function resolveAttachments(
 
   const promptPrefix = formatAsPrompt(resolved);
   return { resolved, promptPrefix };
+}
+
+/**
+ * Decode a base64 attachment into the session's attachment subdir and return
+ * a resolved entry that references the new on-disk path. Claude's Read tool
+ * natively handles image files, so we just point it there via the prompt.
+ */
+function resolveBinary(a: Attachment, workdir: string): ResolvedAttachment {
+  if (!a.data || !a.mimeType) {
+    return { path: a.path, error: "missing data or mimeType", bytes: 0 };
+  }
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(a.data, "base64");
+  } catch (err) {
+    return {
+      path: a.path,
+      error: `base64 decode failed: ${err instanceof Error ? err.message : String(err)}`,
+      bytes: 0,
+    };
+  }
+  if (bytes.length === 0) {
+    return { path: a.path, error: "empty binary payload", bytes: 0 };
+  }
+  if (bytes.length > MAX_BINARY_ATTACHMENT_BYTES) {
+    return {
+      path: a.path,
+      error: `binary attachment exceeds ${MAX_BINARY_ATTACHMENT_BYTES} bytes`,
+      bytes: bytes.length,
+    };
+  }
+
+  const ext = extensionForMime(a.mimeType) ?? deriveExtension(a.path) ?? "bin";
+  const filename = `${Date.now()}-${randomBytes(4).toString("hex")}.${ext}`;
+  const dir = joinPath(workdir, ATTACHMENT_SUBDIR);
+  const absPath = joinPath(dir, filename);
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(absPath, bytes);
+  } catch (err) {
+    return {
+      path: a.path,
+      error: `write failed: ${err instanceof Error ? err.message : String(err)}`,
+      bytes: bytes.length,
+    };
+  }
+
+  // Record the workspace-relative path so Claude's Read tool picks it up
+  // without needing the absolute workdir prefix.
+  const relPath = `${ATTACHMENT_SUBDIR}/${filename}`;
+  return {
+    path: relPath,
+    bytes: bytes.length,
+    binary: true,
+    mimeType: a.mimeType,
+  };
+}
+
+function extensionForMime(mime: string): string | null {
+  switch (mime.toLowerCase()) {
+    case "image/png":
+      return "png";
+    case "image/jpeg":
+    case "image/jpg":
+      return "jpg";
+    case "image/webp":
+      return "webp";
+    case "image/gif":
+      return "gif";
+    case "image/bmp":
+      return "bmp";
+    case "image/svg+xml":
+      return "svg";
+    case "application/pdf":
+      return "pdf";
+    default:
+      return null;
+  }
+}
+
+function deriveExtension(path: string): string | null {
+  const m = /\.([A-Za-z0-9]+)$/.exec(path);
+  return m ? m[1]!.toLowerCase() : null;
+}
+
+/** Infer a mime type from a local file path — used for @image.png mentions. */
+function mimeFromPath(path: string): string | null {
+  const ext = deriveExtension(path);
+  if (!ext) return null;
+  switch (ext) {
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "webp":
+      return "image/webp";
+    case "gif":
+      return "image/gif";
+    case "bmp":
+      return "image/bmp";
+    case "svg":
+      return "image/svg+xml";
+    case "pdf":
+      return "application/pdf";
+    default:
+      return null;
+  }
 }
 
 function resolveOne(
@@ -144,6 +276,17 @@ function resolveOne(
 
   const sniff = buf.subarray(0, Math.min(BINARY_SNIFF_BYTES, buf.length));
   if (sniff.includes(0)) {
+    // Binary content — if it looks like an image/PDF by extension, pass it
+    // through as a Read-tool pointer rather than blocking. Otherwise skip.
+    const mime = mimeFromPath(a.path);
+    if (mime && rawBytes <= MAX_BINARY_ATTACHMENT_BYTES) {
+      return {
+        path: a.path,
+        bytes: rawBytes,
+        binary: true,
+        mimeType: mime,
+      };
+    }
     return {
       path: a.path,
       error: `binary file skipped (${rawBytes} bytes)`,
@@ -173,6 +316,17 @@ export function formatAsPrompt(resolved: readonly ResolvedAttachment[]): string 
   for (const r of resolved) {
     if (r.error) {
       blocks.push(`<file path="${escapeAttr(r.path)}" error="${escapeAttr(r.error)}" />`);
+    } else if (r.binary) {
+      // Binary payload: Claude's Read tool can view images/PDFs directly.
+      // Tell it where the file lives and nudge it to open before responding.
+      const mime = r.mimeType ?? "application/octet-stream";
+      blocks.push(
+        `<file path="${escapeAttr(r.path)}" type="${escapeAttr(mime)}" binary="true">`,
+      );
+      blocks.push(
+        `The user attached a ${mime} file. Use the Read tool on the path above to view its contents before responding.`,
+      );
+      blocks.push(`</file>`);
     } else {
       blocks.push(`<file path="${escapeAttr(r.path)}">`);
       blocks.push(r.content ?? "");

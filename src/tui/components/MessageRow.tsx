@@ -15,6 +15,7 @@ import { Box, Text } from "ink";
 import type { SessionMessage, ToolInfo } from "../../protocol/types.js";
 import { renderMarkdown, type Segment } from "../markdown.js";
 import { computeDiff, truncateToolOutput } from "../diff.js";
+import { fileUri, maybeLink } from "../osc8.js";
 
 export interface MessageRowProps {
   msg: SessionMessage;
@@ -119,6 +120,8 @@ function AttachmentSummary({ metadata }: { metadata: Record<string, unknown> | u
     pinned?: boolean;
     bytes?: number;
     error?: string;
+    binary?: boolean;
+    mimeType?: string;
   }>;
   if (rows.length === 0) return null;
   return (
@@ -126,13 +129,20 @@ function AttachmentSummary({ metadata }: { metadata: Record<string, unknown> | u
       <Text dimColor>
         attached: {rows.length} file{rows.length === 1 ? "" : "s"}
       </Text>
-      {rows.map((r) => (
-        <Text key={r.path} dimColor>
-          {r.pinned ? "  📌 " : "   • "}
-          {r.path}
-          {r.error ? <Text color="red">{" — " + r.error}</Text> : null}
-        </Text>
-      ))}
+      {rows.map((r) => {
+        const isImage = r.binary && r.mimeType?.startsWith("image/");
+        const icon = r.pinned ? "📌 " : isImage ? "🖼 " : r.binary ? "📎 " : "• ";
+        return (
+          <Text key={r.path} dimColor>
+            {"   " + icon}
+            {maybeLink(fileUri(r.path), r.path)}
+            {r.binary && r.mimeType ? (
+              <Text dimColor>{" (" + r.mimeType + ")"}</Text>
+            ) : null}
+            {r.error ? <Text color="red">{" — " + r.error}</Text> : null}
+          </Text>
+        );
+      })}
     </Box>
   );
 }
@@ -197,7 +207,7 @@ function ToolRow({
         {filePath && (
           <>
             <Text>{" "}</Text>
-            <Text color="cyan">{filePath}</Text>
+            <Text color="cyan">{maybeLink(fileUri(filePath), filePath)}</Text>
           </>
         )}
         {!filePath && input && (
