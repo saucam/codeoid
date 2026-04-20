@@ -15,6 +15,8 @@ import { RateLimiter } from "./rate-limit.js";
 import { TranscriptStore } from "./transcript.js";
 import type { AgentIdentityManager } from "./agent-identity.js";
 import type { MemoryEngine } from "./memory/index.js";
+import type { CodeoidConfig } from "../config.js";
+import type { CompressionRegistry } from "./compress/index.js";
 import type {
   AuthContext,
   ClientMessage,
@@ -29,6 +31,8 @@ export class SessionManager {
   #identityManager?: AgentIdentityManager;
   #rateLimiter: RateLimiter;
   #memory?: MemoryEngine;
+  #config?: CodeoidConfig;
+  #compressionRegistry?: CompressionRegistry;
 
   constructor(
     store: Store,
@@ -36,12 +40,15 @@ export class SessionManager {
     identityManager?: AgentIdentityManager,
     rateLimiter?: RateLimiter,
     memory?: MemoryEngine,
+    opts?: { config?: CodeoidConfig; compressionRegistry?: CompressionRegistry },
   ) {
     this.#store = store;
     this.#transcriptStore = transcriptStore;
     this.#identityManager = identityManager;
     this.#rateLimiter = rateLimiter ?? new RateLimiter();
     this.#memory = memory;
+    this.#config = opts?.config;
+    this.#compressionRegistry = opts?.compressionRegistry;
   }
 
   /**
@@ -69,6 +76,8 @@ export class SessionManager {
           identityManager: this.#identityManager,
           existingId: meta.sessionId,
           memory: this.#memory,
+          config: this.#config,
+          compressionRegistry: this.#compressionRegistry,
         });
 
         // Restore scrollback from transcript
@@ -194,6 +203,8 @@ export class SessionManager {
       transcriptStore: this.#transcriptStore,
       identityManager: this.#identityManager,
       memory: this.#memory,
+      config: this.#config,
+      compressionRegistry: this.#compressionRegistry,
     });
 
     this.#sessions.set(session.id, session);

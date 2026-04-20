@@ -46,6 +46,11 @@ import {
 } from "./memory/index.js";
 import type { Attachment } from "../protocol/types.js";
 import { resolveAttachments } from "./attachments.js";
+import type { CodeoidConfig } from "../config.js";
+import {
+  CompressionRegistry,
+  rewriteBashToolInput,
+} from "./compress/index.js";
 
 /**
  * System-prompt append used when memory is enabled. Deliberately brief and
@@ -79,6 +84,16 @@ export interface SessionCreateOptions {
   existingId?: string;
   /** Optional memory engine — when provided, episodes are chunked and stored for recall. */
   memory?: MemoryEngine;
+  /**
+   * Full parsed config — carries compress / workspaceIndex / telemetry
+   * toggles. When absent, compression stays off (safe default).
+   */
+  config?: CodeoidConfig;
+  /**
+   * Optional pre-built compression registry. If provided, PreToolUse hook
+   * rewrites Bash commands to route through the wrapper CLI when enabled.
+   */
+  compressionRegistry?: CompressionRegistry;
 }
 
 export class Session {
@@ -102,6 +117,10 @@ export class Session {
   #chunker?: EpisodeChunker;
   #indexScheduler?: IndexScheduler;
   #workspaceId: string;
+
+  // Compression (Layer B) — toggled via config.compress.enabled.
+  #config?: CodeoidConfig;
+  #compressionRegistry?: CompressionRegistry;
 
   // Execution mode + turn budget (autonomous mode only).
   #mode: SessionMode = "interactive";
@@ -187,6 +206,8 @@ export class Session {
     this.#transcriptStore = opts.transcriptStore;
     this.#identityManager = opts.identityManager;
     this.#memory = opts.memory;
+    this.#config = opts.config;
+    this.#compressionRegistry = opts.compressionRegistry;
     this.#workspaceId = workspaceIdFromPath(opts.workdir);
 
     // Restore any pinned files the user had on this session before.
@@ -492,6 +513,28 @@ export class Session {
               // the emitted tool_call SessionMessage with the right identity.
               if (input.tool_use_id && input.agent_id) {
                 this.#toolUseAgentId.set(input.tool_use_id, input.agent_id);
+              }
+
+              // Compression (Layer B): rewrite Bash tool_input to route
+              // through the codeoid wrapper CLI when enabled + eligible.
+              // Returns null on any non-applicable path — then we pass
+              // through unchanged.
+              if (this.#config && this.#compressionRegistry) {
+                const rewritten = rewriteBashToolInput({
+                  toolName: input.tool_name,
+                  toolInput: (input.tool_input ?? {}) as Record<string, unknown>,
+                  config: this.#config,
+                  registry: this.#compressionRegistry,
+                  workdir: this.workdir,
+                });
+                if (rewritten) {
+                  return {
+                    hookSpecificOutput: {
+                      hookEventName: "PreToolUse" as const,
+                      updatedInput: rewritten,
+                    },
+                  };
+                }
               }
               return {};
             }],

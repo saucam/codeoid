@@ -19,6 +19,11 @@ import { AgentIdentityManager } from "./agent-identity.js";
 import { OAuthHandler, type OAuthConfig } from "./oauth.js";
 import { GoogleOAuthProvider, LocalProvider } from "./identity-provider.js";
 import { createMemory, type MemoryEngine } from "./memory/index.js";
+import {
+  CompressionRegistry,
+  createRegistry,
+} from "./compress/index.js";
+import type { CodeoidConfig } from "../config.js";
 import type { AuthContext, ClientMessage, DaemonMessage } from "../protocol/types.js";
 import type { AttachedClient } from "./session.js";
 import type { Frontend, FrontendContext } from "../frontends/types.js";
@@ -45,6 +50,11 @@ export interface DaemonConfig {
     /** Weight cache directory (default: ~/.codeoid/models). */
     modelCacheDir?: string;
   };
+  /**
+   * Full parsed CodeoidConfig — wired through to Session so the compression
+   * subsystem (Layer B) can consult toggles and rule exclusions.
+   */
+  fullConfig?: CodeoidConfig;
 }
 
 interface AuthenticatedSocket {
@@ -98,11 +108,18 @@ export class DaemonServer {
       );
     }
 
+    // Build the compression registry once at startup. It's stateless and
+    // safe to share across all sessions — rules never mutate.
+    const compressionRegistry: CompressionRegistry | undefined = config.fullConfig
+      ? createRegistry(config.fullConfig)
+      : undefined;
+
     const rateLimiter = new RateLimiter();
     this.#manager = new SessionManager(
       this.#store, this.#transcriptStore, identityManager, rateLimiter,
       // Memory is wired post-construction via initMemory() — see start()
       undefined,
+      { config: config.fullConfig, compressionRegistry },
     );
 
     // Register cleanup functions (LIFO order)

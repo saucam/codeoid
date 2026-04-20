@@ -1,29 +1,178 @@
 /**
- * Configuration loader — reads from env vars and ~/.codeoid/config.json.
+ * Configuration loader — layered precedence: CLI flag > env var > config file > defaults.
+ *
+ * Single source of truth for daemon + client behavior. File lives at
+ * `~/.codeoid/config.json` (or `$XDG_CONFIG_HOME/codeoid/config.json` if set)
+ * and is validated through zod on load. Malformed files fail loudly so a
+ * subtle typo doesn't silently change runtime.
+ *
+ * Design goals:
+ *   1. Backwards compatible — old config.json files (just `apiKey`) still work.
+ *   2. Every field has an env-var override (for Docker / CI / per-invocation tweaks).
+ *   3. Paths with ~ or relative get normalized to absolute before return.
+ *   4. Zero process.env reads outside this module — downstream code reads
+ *      the parsed config, not env vars, so we can mock cleanly in tests.
  */
 
 import { existsSync, readFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, isAbsolute, resolve } from "node:path";
 import { homedir } from "node:os";
+import { z } from "zod";
 import type { AuthConfig } from "./daemon/auth.js";
 import type { OAuthConfig } from "./daemon/oauth.js";
 
+// ── Paths ────────────────────────────────────────────────────────────────
+
+const DEFAULT_CONFIG_DIR = join(homedir(), ".codeoid");
+
+/** Resolve the config directory honoring XDG_CONFIG_HOME if set. */
+export function getConfigDir(): string {
+  const xdg = process.env["XDG_CONFIG_HOME"];
+  if (xdg && xdg.length > 0) return join(xdg, "codeoid");
+  return DEFAULT_CONFIG_DIR;
+}
+
+/** Expand a leading `~` to $HOME; leaves absolute paths untouched. */
+function expandHome(p: string): string {
+  if (p.startsWith("~/")) return join(homedir(), p.slice(2));
+  if (p === "~") return homedir();
+  return p;
+}
+
+
+// ── Schema ───────────────────────────────────────────────────────────────
+
+/**
+ * Zod schema for the config file. Keep this permissive — unknown fields are
+ * passed through so future additions don't break older loaders. Required
+ * fields are minimal (nothing) — defaults cover everything.
+ */
+const CompressSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    excludeCommands: z.array(z.string()).default([]),
+    excludePatterns: z.array(z.string()).default([]),
+    compressPipes: z.boolean().default(false),
+    /** Byte threshold below which compression is skipped (already small). */
+    minBytes: z.number().int().nonnegative().default(1024),
+  })
+  .default({
+    enabled: false,
+    excludeCommands: [],
+    excludePatterns: [],
+    compressPipes: false,
+    minBytes: 1024,
+  });
+
+const WorkspaceIndexSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    episodeThreshold: z.number().int().positive().default(5),
+    timeThresholdMs: z.number().int().positive().default(60_000),
+    debounceMs: z.number().int().positive().default(15_000),
+  })
+  .default({
+    enabled: true,
+    episodeThreshold: 5,
+    timeThresholdMs: 60_000,
+    debounceMs: 15_000,
+  });
+
+const MemoryClustersSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+  })
+  .default({ enabled: false });
+
+const MemorySchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    dbPath: z.string().default("memory.db"),
+    model: z.string().optional(),
+    modelCacheDir: z.string().default("models"),
+    clusters: MemoryClustersSchema,
+  })
+  .default({
+    enabled: true,
+    dbPath: "memory.db",
+    modelCacheDir: "models",
+    clusters: { enabled: false },
+  });
+
+const LabelingSchema = z
+  .object({
+    anthropicApiKey: z.string().optional(),
+  })
+  .default({});
+
+const TelemetrySchema = z
+  .object({
+    osc8: z.enum(["auto", "force", "disable"]).default("auto"),
+  })
+  .default({ osc8: "auto" });
+
+const AgentIdentitySchema = z
+  .object({
+    accountId: z.string().default("personal"),
+    projectId: z.string().default("dev"),
+  })
+  .default({ accountId: "personal", projectId: "dev" });
+
+const AuthSchemaFields = z
+  .object({
+    issuer: z.string().optional(),
+    audience: z.string().optional(),
+  })
+  .default({});
+
+const OAuthSchemaFields = z
+  .object({
+    hmacSecret: z.string().optional(),
+    issuer: z.string().optional(),
+    clientId: z.string().optional(),
+  })
+  .default({});
+
+const RootSchema = z.object({
+  daemonUrl: z.string().default("ws://127.0.0.1:7400"),
+  dbPath: z.string().default("codeoid.db"),
+  transcriptDir: z.string().default("transcripts"),
+  zeroidUrl: z.string().default("http://localhost:8899"),
+  apiKey: z.string().optional(),
+  auth: AuthSchemaFields,
+  oauth: OAuthSchemaFields,
+  agentIdentity: AgentIdentitySchema,
+  memory: MemorySchema,
+  workspaceIndex: WorkspaceIndexSchema,
+  compress: CompressSchema,
+  labeling: LabelingSchema,
+  telemetry: TelemetrySchema,
+});
+
+type ParsedConfig = z.infer<typeof RootSchema>;
+
+// ── Public types ─────────────────────────────────────────────────────────
+
+/**
+ * Flattened, path-resolved config consumed by the daemon + client. Shape is
+ * append-only — add new fields here, don't rename existing ones.
+ */
 export interface CodeoidConfig {
-  /** Daemon WebSocket URL */
+  /** Daemon WebSocket URL. */
   daemonUrl: string;
-  /** SQLite database path */
+  /** SQLite database path (absolute). */
   dbPath: string;
-  /** Transcript directory for JSONL persistence */
+  /** Transcript directory (absolute). */
   transcriptDir: string;
-  /** ZeroID auth config */
+  /** ZeroID auth config. */
   auth: AuthConfig;
-  /** OAuth authorization server config */
+  /** OAuth authorization server config — only populated when hmacSecret is set. */
   oauth?: OAuthConfig;
-  /** ZeroID API key for token exchange (client-side, legacy) */
+  /** ZeroID API key for token exchange (client-side). */
   apiKey?: string;
-  /** ZeroID base URL for token exchange */
+  /** ZeroID base URL for token exchange. */
   zeroidUrl: string;
-  /** ZeroID tenant for agent identity registration */
+  /** ZeroID tenant for agent identity registration. */
   agentIdentity?: {
     accountId: string;
     projectId: string;
@@ -34,86 +183,257 @@ export interface CodeoidConfig {
     dbPath: string;
     model?: string;
     modelCacheDir?: string;
+    clusters: { enabled: boolean };
+  };
+  /** Workspace memory index — always-in-context pointer to verbatim episodes. */
+  workspaceIndex: {
+    enabled: boolean;
+    episodeThreshold: number;
+    timeThresholdMs: number;
+    debounceMs: number;
+  };
+  /** Homegrown CLI output compressor (RTK-style). Disabled by default. */
+  compress: {
+    enabled: boolean;
+    excludeCommands: string[];
+    excludePatterns: string[];
+    compressPipes: boolean;
+    minBytes: number;
+  };
+  /** Cluster-label settings (Haiku API key). */
+  labeling: {
+    anthropicApiKey?: string;
+  };
+  /** Misc display toggles. */
+  telemetry: {
+    osc8: "auto" | "force" | "disable";
   };
 }
 
-const CONFIG_DIR = join(homedir(), ".codeoid");
-const CONFIG_FILE = join(CONFIG_DIR, "config.json");
+// ── Env-var override map ─────────────────────────────────────────────────
 
-export function loadConfig(): CodeoidConfig {
-  if (!existsSync(CONFIG_DIR)) {
-    mkdirSync(CONFIG_DIR, { recursive: true });
-  }
+/**
+ * Table-driven env override. Stays explicit so typos in process.env don't
+ * silently hijack a field — we only honor keys listed here.
+ */
+type OverrideKind = "string" | "boolean" | "int" | "csv";
 
-  let config: Partial<CodeoidConfig> = {};
+interface EnvOverride {
+  /** Dotted path into ParsedConfig. */
+  path: string;
+  env: string;
+  kind: OverrideKind;
+}
 
-  if (existsSync(CONFIG_FILE)) {
+const ENV_OVERRIDES: readonly EnvOverride[] = [
+  { env: "CODEOID_DAEMON_URL", path: "daemonUrl", kind: "string" },
+  { env: "CODEOID_DB_PATH", path: "dbPath", kind: "string" },
+  { env: "CODEOID_TRANSCRIPT_DIR", path: "transcriptDir", kind: "string" },
+  { env: "CODEOID_API_KEY", path: "apiKey", kind: "string" },
+  { env: "ZEROID_URL", path: "zeroidUrl", kind: "string" },
+  { env: "ZEROID_ISSUER", path: "auth.issuer", kind: "string" },
+  { env: "ZEROID_AUDIENCE", path: "auth.audience", kind: "string" },
+  { env: "CODEOID_HMAC_SECRET", path: "oauth.hmacSecret", kind: "string" },
+  { env: "CODEOID_OAUTH_CLIENT_ID", path: "oauth.clientId", kind: "string" },
+  { env: "ZEROID_ACCOUNT_ID", path: "agentIdentity.accountId", kind: "string" },
+  { env: "ZEROID_PROJECT_ID", path: "agentIdentity.projectId", kind: "string" },
+  { env: "CODEOID_MEMORY", path: "memory.enabled", kind: "boolean" },
+  { env: "CODEOID_MEMORY_DB_PATH", path: "memory.dbPath", kind: "string" },
+  { env: "CODEOID_MEMORY_MODEL", path: "memory.model", kind: "string" },
+  { env: "CODEOID_MEMORY_CACHE_DIR", path: "memory.modelCacheDir", kind: "string" },
+  { env: "CODEOID_MEMORY_CLUSTERS", path: "memory.clusters.enabled", kind: "boolean" },
+  { env: "CODEOID_WORKSPACE_INDEX", path: "workspaceIndex.enabled", kind: "boolean" },
+  { env: "CODEOID_WORKSPACE_INDEX_EPISODE_THRESHOLD", path: "workspaceIndex.episodeThreshold", kind: "int" },
+  { env: "CODEOID_WORKSPACE_INDEX_TIME_MS", path: "workspaceIndex.timeThresholdMs", kind: "int" },
+  { env: "CODEOID_WORKSPACE_INDEX_DEBOUNCE_MS", path: "workspaceIndex.debounceMs", kind: "int" },
+  { env: "CODEOID_COMPRESS", path: "compress.enabled", kind: "boolean" },
+  { env: "CODEOID_COMPRESS_EXCLUDE", path: "compress.excludeCommands", kind: "csv" },
+  { env: "CODEOID_COMPRESS_EXCLUDE_PATTERNS", path: "compress.excludePatterns", kind: "csv" },
+  { env: "CODEOID_COMPRESS_PIPES", path: "compress.compressPipes", kind: "boolean" },
+  { env: "CODEOID_COMPRESS_MIN_BYTES", path: "compress.minBytes", kind: "int" },
+  { env: "ANTHROPIC_API_KEY", path: "labeling.anthropicApiKey", kind: "string" },
+  { env: "CODEOID_OSC8", path: "telemetry.osc8", kind: "string" },
+];
+
+// ── Loading ──────────────────────────────────────────────────────────────
+
+export interface LoadOptions {
+  /** Explicit config file path; overrides XDG / default search. */
+  configPath?: string;
+  /** Env source (default process.env). Tests inject a controlled object. */
+  env?: Record<string, string | undefined>;
+}
+
+/**
+ * Load and validate the full config. Never throws on a missing file — that's
+ * normal (first run). Throws ONLY on schema validation error when a file
+ * exists but is malformed (loud fail is better than silent drift).
+ */
+export function loadConfig(opts: LoadOptions = {}): CodeoidConfig {
+  const configDir = getConfigDir();
+  if (!existsSync(configDir)) {
     try {
-      config = JSON.parse(readFileSync(CONFIG_FILE, "utf-8"));
+      mkdirSync(configDir, { recursive: true });
     } catch {
-      // Ignore malformed config
+      /* non-fatal; loader still works with defaults */
     }
   }
 
-  const zeroidUrl = process.env["ZEROID_URL"] ?? config.zeroidUrl ?? "http://localhost:8899";
-  const hmacSecret = process.env["CODEOID_HMAC_SECRET"] ?? config.oauth?.hmacSecret;
-  const accountId = process.env["ZEROID_ACCOUNT_ID"] ?? config.agentIdentity?.accountId ?? "personal";
-  const projectId = process.env["ZEROID_PROJECT_ID"] ?? config.agentIdentity?.projectId ?? "dev";
+  const configPath = opts.configPath ?? join(configDir, "config.json");
+  const env = opts.env ?? process.env;
 
-  const memoryEnabled =
-    process.env["CODEOID_MEMORY"] !== undefined
-      ? process.env["CODEOID_MEMORY"] === "1" ||
-        process.env["CODEOID_MEMORY"]?.toLowerCase() === "true"
-      : (config.memory?.enabled ?? true);
-  const memoryDbPath =
-    process.env["CODEOID_MEMORY_DB_PATH"] ??
-    config.memory?.dbPath ??
-    join(CONFIG_DIR, "memory.db");
-  const memoryModel = process.env["CODEOID_MEMORY_MODEL"] ?? config.memory?.model;
-  const memoryCacheDir =
-    process.env["CODEOID_MEMORY_CACHE_DIR"] ??
-    config.memory?.modelCacheDir ??
-    join(CONFIG_DIR, "models");
+  // 1. File defaults.
+  let fileConfig: unknown = {};
+  if (existsSync(configPath)) {
+    try {
+      const raw = readFileSync(configPath, "utf8");
+      fileConfig = JSON.parse(raw);
+    } catch (err) {
+      throw new Error(
+        `Failed to parse ${configPath}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  // 2. Validate + fill defaults via zod.
+  const parseResult = RootSchema.safeParse(fileConfig);
+  if (!parseResult.success) {
+    const issues = parseResult.error.issues
+      .map((i) => `  ${i.path.join(".")}: ${i.message}`)
+      .join("\n");
+    throw new Error(
+      `Invalid config at ${configPath}:\n${issues}\n(Delete or fix the file and retry.)`,
+    );
+  }
+  const parsed: ParsedConfig = parseResult.data;
+
+  // 3. Apply env overrides in declaration order.
+  for (const ov of ENV_OVERRIDES) {
+    const raw = env[ov.env];
+    if (raw === undefined || raw === "") continue;
+    setByPath(parsed, ov.path, parseOverride(raw, ov.kind));
+  }
+
+  // 4. Path normalization.
+  const configRelResolve = (p: string): string =>
+    isAbsolute(expandHome(p)) ? expandHome(p) : resolve(configDir, p);
+
+  const dbPath = configRelResolve(parsed.dbPath);
+  const transcriptDir = configRelResolve(parsed.transcriptDir);
+  const memoryDbPath = configRelResolve(parsed.memory.dbPath);
+  const memoryCacheDir = configRelResolve(parsed.memory.modelCacheDir);
+
+  // 5. Assemble OAuth only when hmacSecret is present — keeps optionality.
+  const oauth: OAuthConfig | undefined = parsed.oauth.hmacSecret
+    ? {
+        hmacSecret: parsed.oauth.hmacSecret,
+        issuer: parsed.oauth.issuer ?? "https://auth.zeroid.dev",
+        tokenEndpoint: `${parsed.zeroidUrl}/oauth2/token`,
+        clientId: parsed.oauth.clientId ?? "codeoid",
+        accountId: parsed.agentIdentity.accountId,
+        projectId: parsed.agentIdentity.projectId,
+        allowedRedirectUris: [
+          "http://localhost:7400/auth/callback",
+          "http://127.0.0.1:7400/auth/callback",
+        ],
+        defaultScopes: [
+          "session:create",
+          "session:list",
+          "session:attach",
+          "session:watch",
+          "session:send",
+          "session:interrupt",
+          "session:approve",
+          "session:destroy",
+        ],
+      }
+    : undefined;
+
+  // 6. Preserve the "only populate agentIdentity when env or file supplied one"
+  //    semantic so existing single-tenant setups don't accidentally flip into
+  //    multi-tenant mode.
+  const hasExplicitTenant =
+    env["ZEROID_ACCOUNT_ID"] !== undefined ||
+    (typeof fileConfig === "object" &&
+      fileConfig !== null &&
+      "agentIdentity" in fileConfig);
+
+  const osc8Mode = isOsc8Mode(parsed.telemetry.osc8)
+    ? parsed.telemetry.osc8
+    : "auto";
 
   return {
-    daemonUrl: process.env["CODEOID_DAEMON_URL"] ?? config.daemonUrl ?? "ws://127.0.0.1:7400",
-    dbPath: process.env["CODEOID_DB_PATH"] ?? config.dbPath ?? join(CONFIG_DIR, "codeoid.db"),
-    transcriptDir: process.env["CODEOID_TRANSCRIPT_DIR"] ?? config.transcriptDir ?? join(CONFIG_DIR, "transcripts"),
+    daemonUrl: parsed.daemonUrl,
+    dbPath,
+    transcriptDir,
     auth: {
-      baseUrl: zeroidUrl,
-      issuer: process.env["ZEROID_ISSUER"] ?? config.auth?.issuer,
-      audience: process.env["ZEROID_AUDIENCE"] ?? config.auth?.audience,
+      baseUrl: parsed.zeroidUrl,
+      issuer: parsed.auth.issuer,
+      audience: parsed.auth.audience,
     },
-    oauth: hmacSecret ? {
-      hmacSecret,
-      issuer: process.env["ZEROID_ISSUER"] ?? config.oauth?.issuer ?? "https://auth.zeroid.dev",
-      tokenEndpoint: `${zeroidUrl}/oauth2/token`,
-      clientId: process.env["CODEOID_OAUTH_CLIENT_ID"] ?? config.oauth?.clientId ?? "codeoid",
-      accountId,
-      projectId,
-      allowedRedirectUris: [
-        "http://localhost:7400/auth/callback",
-        "http://127.0.0.1:7400/auth/callback",
-      ],
-      defaultScopes: [
-        "session:create", "session:list", "session:attach", "session:watch",
-        "session:send", "session:interrupt", "session:approve", "session:destroy",
-      ],
-    } : undefined,
-    apiKey: process.env["CODEOID_API_KEY"] ?? config.apiKey,
-    zeroidUrl,
-    agentIdentity: (process.env["ZEROID_ACCOUNT_ID"] || config.agentIdentity)
-      ? { accountId, projectId }
+    oauth,
+    apiKey: parsed.apiKey,
+    zeroidUrl: parsed.zeroidUrl,
+    agentIdentity: hasExplicitTenant
+      ? {
+          accountId: parsed.agentIdentity.accountId,
+          projectId: parsed.agentIdentity.projectId,
+        }
       : undefined,
     memory: {
-      enabled: memoryEnabled,
+      enabled: parsed.memory.enabled,
       dbPath: memoryDbPath,
-      model: memoryModel,
+      model: parsed.memory.model,
       modelCacheDir: memoryCacheDir,
+      clusters: parsed.memory.clusters,
     },
+    workspaceIndex: parsed.workspaceIndex,
+    compress: parsed.compress,
+    labeling: parsed.labeling,
+    telemetry: { osc8: osc8Mode },
   };
 }
 
-export function getConfigDir(): string {
-  return CONFIG_DIR;
+// ── Internals ────────────────────────────────────────────────────────────
+
+function parseOverride(raw: string, kind: OverrideKind): unknown {
+  switch (kind) {
+    case "string":
+      return raw;
+    case "boolean":
+      return raw === "1" || raw.toLowerCase() === "true";
+    case "int": {
+      const n = Number.parseInt(raw, 10);
+      if (!Number.isFinite(n))
+        throw new Error(`Expected integer for env override, got "${raw}"`);
+      return n;
+    }
+    case "csv":
+      return raw
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+  }
+}
+
+/** Write a value into `obj` at a dotted path, creating intermediate objects. */
+function setByPath(obj: Record<string, unknown>, path: string, value: unknown): void {
+  const parts = path.split(".");
+  let cur: Record<string, unknown> = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const k = parts[i]!;
+    const next = cur[k];
+    if (next === undefined || next === null || typeof next !== "object") {
+      const created: Record<string, unknown> = {};
+      cur[k] = created;
+      cur = created;
+    } else {
+      cur = next as Record<string, unknown>;
+    }
+  }
+  cur[parts[parts.length - 1]!] = value;
+}
+
+function isOsc8Mode(s: string): s is "auto" | "force" | "disable" {
+  return s === "auto" || s === "force" || s === "disable";
 }

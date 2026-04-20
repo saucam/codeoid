@@ -49,6 +49,9 @@ program
             modelCacheDir: config.memory.modelCacheDir,
           }
         : undefined,
+      // Forward the full config so session-level features (compress, etc.)
+      // get the parsed shape rather than re-reading env/file.
+      fullConfig: config,
     });
 
     // ── Register frontends ────────────────────────────────────────
