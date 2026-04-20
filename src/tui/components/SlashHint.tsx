@@ -24,6 +24,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/pin", description: "Pin a file to the session (prepended every turn)" },
   { name: "/unpin", description: "Unpin a previously-pinned file" },
   { name: "/context", description: "Attach files to the next turn only" },
+  { name: "/rotate", description: "Rotate the Claude Code backing session (fresh context, memory preserved)" },
   { name: "/who", description: "Show the identity chain (user → agent → sub-agents)" },
   { name: "/help", description: "Show keybindings" },
 ];

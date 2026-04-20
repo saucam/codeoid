@@ -31,6 +31,17 @@ export class Store {
         updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
       );
 
+      -- Rotation columns added post-launch. Use additive ALTER below.
+    `);
+
+    // Additive columns — SQLite ALTER TABLE ADD COLUMN is idempotent-ish
+    // only via catch; use PRAGMA table_info to be deterministic.
+    this.#addColumnIfMissing("sessions", "claude_code_session_id", "TEXT");
+    this.#addColumnIfMissing("sessions", "rotation_count", "INTEGER NOT NULL DEFAULT 0");
+    this.#addColumnIfMissing("sessions", "last_rotated_at", "INTEGER");
+
+    this.#db.exec(`
+
       CREATE TABLE IF NOT EXISTS audit_log (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp   TEXT NOT NULL DEFAULT (datetime('now')),
@@ -54,6 +65,18 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS idx_session_pins_session ON session_pins(session_id);
     `);
+  }
+
+  /**
+   * Idempotent column-adder — skips when the column already exists. SQLite
+   * lacks `ADD COLUMN IF NOT EXISTS`, so we check PRAGMA first.
+   */
+  #addColumnIfMissing(table: string, column: string, ddl: string): void {
+    const cols = this.#db
+      .prepare(`PRAGMA table_info(${table})`)
+      .all() as Array<{ name: string }>;
+    if (cols.some((c) => c.name === column)) return;
+    this.#db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
   }
 
   // ── Pinned attachments ────────────────────────────────────────────────
@@ -154,6 +177,50 @@ export class Store {
     this.#db
       .prepare("UPDATE sessions SET status = ?, updated_at = datetime('now') WHERE id = ?")
       .run(status, id);
+  }
+
+  /**
+   * Claude Code backing session id — separate from codeoid's stable
+   * session.id so we can rotate the underlying context without breaking
+   * user-facing identifiers.
+   */
+  getClaudeCodeSessionId(id: string): string | null {
+    const row = this.#db
+      .prepare("SELECT claude_code_session_id AS cc FROM sessions WHERE id = ?")
+      .get(id) as { cc: string | null } | undefined;
+    return row?.cc ?? null;
+  }
+
+  setClaudeCodeSessionId(
+    id: string,
+    backingId: string,
+    rotationDelta = 0,
+    rotatedAt?: number,
+  ): void {
+    this.#db
+      .prepare(
+        `UPDATE sessions SET
+           claude_code_session_id = ?,
+           rotation_count = rotation_count + ?,
+           last_rotated_at = COALESCE(?, last_rotated_at),
+           updated_at = datetime('now')
+         WHERE id = ?`,
+      )
+      .run(backingId, rotationDelta, rotatedAt ?? null, id);
+  }
+
+  /** Rotation counters for a session (for UI display + diagnostics). */
+  getRotationStats(id: string): { count: number; lastRotatedAt: number | null } {
+    const row = this.#db
+      .prepare(
+        `SELECT rotation_count AS c, last_rotated_at AS t
+         FROM sessions WHERE id = ?`,
+      )
+      .get(id) as { c: number | null; t: number | null } | undefined;
+    return {
+      count: row?.c ?? 0,
+      lastRotatedAt: row?.t ?? null,
+    };
   }
 
   deleteSession(id: string): void {

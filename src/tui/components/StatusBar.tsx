@@ -34,6 +34,12 @@ export function StatusBar({ connection, focused, lastError }: Props) {
           <Text dimColor>{focused.info.workdir}</Text>
           <Text dimColor>{" · "}</Text>
           <Text>{focused.info.status}</Text>
+          {focused.info.queuedMessages !== undefined &&
+            focused.info.queuedMessages > 0 && (
+              <Text color="yellow" bold>
+                {" · ⎆ " + focused.info.queuedMessages + " queued"}
+              </Text>
+            )}
           <Text dimColor>{" · mode: "}</Text>
           <Text
             color={
@@ -89,14 +95,37 @@ export function StatusBar({ connection, focused, lastError }: Props) {
                 </Text>
               )}
               <Text dimColor>{" · " + usage.numTurns + " turns"}</Text>
-              {usage.peakInputTokens !== undefined && usage.peakInputTokens > 0 && (
-                <Text
-                  color={pickContextColor(usage.peakInputTokens)}
-                  dimColor
-                >
-                  {" · peak " + formatTokens(usage.peakInputTokens)}
-                </Text>
+              {usage.lastTurnInputTokens !== undefined && usage.lastTurnInputTokens > 0 && (
+                <>
+                  <Text dimColor>{" · ctx "}</Text>
+                  <Text color={pickContextColor(usage.lastTurnInputTokens)} bold>
+                    {formatTokens(usage.lastTurnInputTokens)}
+                  </Text>
+                  <Text dimColor>
+                    {"/" + formatTokens(CONTEXT_WINDOW) + " ("}
+                  </Text>
+                  <Text color={pickContextColor(usage.lastTurnInputTokens)}>
+                    {formatPct(usage.lastTurnInputTokens / CONTEXT_WINDOW)}
+                  </Text>
+                  <Text dimColor>{")"}</Text>
+                </>
               )}
+              {usage.peakInputTokens !== undefined &&
+                usage.peakInputTokens > 0 &&
+                usage.peakInputTokens !== usage.lastTurnInputTokens && (
+                  <Text
+                    color={pickContextColor(usage.peakInputTokens)}
+                    dimColor
+                  >
+                    {" · peak " + formatTokens(usage.peakInputTokens)}
+                  </Text>
+                )}
+              {focused.info.rotation &&
+                focused.info.rotation.count > 0 && (
+                  <Text color="magenta" dimColor>
+                    {" · 🔄 " + focused.info.rotation.count}
+                  </Text>
+                )}
             </>
           )}
         </>
@@ -175,11 +204,19 @@ function pickCacheColor(u: {
 }
 
 /**
- * Color the peak input-token value by context-window occupancy. Assumes
- * 1M context. > 50% peak = warning (we're close to compaction territory).
+ * Claude's context window. Opus 4.7 + Sonnet 4.x (with the `context-1m`
+ * beta) both hit 1M tokens. Pre-beta models cap at 200k but codeoid defaults
+ * to the 1M setting and the SDK exposes the 1M beta explicitly, so 1M is
+ * the right denominator for compaction-risk coloring here.
  */
-function pickContextColor(peakInputTokens: number): string {
-  const r = peakInputTokens / 1_000_000;
+const CONTEXT_WINDOW = 1_000_000;
+
+/**
+ * Color a context-size value by occupancy of the window.
+ * > 80% → red (compaction imminent), 50-80% → yellow, < 50% → green.
+ */
+function pickContextColor(inputTokens: number): string {
+  const r = inputTokens / CONTEXT_WINDOW;
   if (r >= 0.8) return "red";
   if (r >= 0.5) return "yellow";
   return "green";

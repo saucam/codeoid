@@ -127,6 +127,8 @@ export class SessionManager {
         return this.#pin(msg, auth);
       case "session.unpin":
         return this.#unpin(msg, auth);
+      case "session.rotate":
+        return this.#rotate(msg, auth);
     }
   }
 
@@ -280,8 +282,11 @@ export class SessionManager {
       return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
     }
 
-    // Fire and forget — output streams to attached clients
-    session.send(msg.text, auth, msg.attachments).catch(() => {});
+    // Fire and forget — output streams to attached clients.
+    // priority controls mid-turn insertion semantics (default "later" = FIFO).
+    session
+      .send(msg.text, auth, msg.attachments, msg.priority)
+      .catch(() => {});
 
     return { type: "response.ok", requestId: msg.id };
   }
@@ -335,6 +340,42 @@ export class SessionManager {
     }
     session.unpinFile(msg.path, auth);
     return { type: "response.ok", requestId: msg.id };
+  }
+
+  /**
+   * Manual rotation via `/rotate` slash. Reuses SESSION_SEND scope: anyone
+   * who can drive the session can rotate it. Rejects silently (with
+   * `response.ok` + boolean in `data`) when the min-turns guard fires —
+   * the user sees the reason in the scrollback info message the session
+   * itself emits.
+   */
+  async #rotate(
+    msg: Extract<ClientMessage, { type: "session.rotate" }>,
+    auth: AuthContext,
+  ): Promise<DaemonMessage> {
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_SEND)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Missing scope: session:send",
+        code: "forbidden",
+      };
+    }
+    const session = this.#sessions.get(msg.sessionId);
+    if (!session) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Session not found",
+        code: "not_found",
+      };
+    }
+    const rotated = await session.manualRotate(auth);
+    return {
+      type: "response.ok",
+      requestId: msg.id,
+      data: { rotated },
+    };
   }
 
   #interrupt(

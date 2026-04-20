@@ -506,6 +506,13 @@ export function App({ config }: Props) {
           );
         return;
       }
+      case "/rotate": {
+        if (!client || !focusedSession) return;
+        void client.rotate(focusedSession.info.id).catch((err: Error) =>
+          dispatch({ type: "error", message: err.message }),
+        );
+        return;
+      }
       default: {
         // Workspace command? Expand template and send.
         const wsCmd = workspaceCommands.find((c) => c.name === cmd);
@@ -572,9 +579,15 @@ export function App({ config }: Props) {
 
   const cols = stdout.columns ?? 120;
 
+  // Prompt hint — mode-aware so users know what pressing Enter does.
+  //   - waiting_approval → the approval banner (y/n shortcut)
+  //   - working          → mid-turn queue hint; Enter pushes now, Claude sees mid-stream
+  //   - idle             → normal send copy
   const promptHint = focusedSession?.pendingApproval
     ? `⎆ ${focusedSession.pendingApproval.toolName}: ${focusedSession.pendingApproval.description} — press y/n`
-    : "Enter to send · Ctrl-N new · Ctrl-G switch · Ctrl-X interrupt · Ctrl-D destroy · ? help · Ctrl-C quit";
+    : focusedSession?.info.status === "working"
+      ? "⋯ session is working — Enter queues a mid-turn message · Ctrl-X interrupt"
+      : "Enter to send · Ctrl-N new · Ctrl-G switch · Ctrl-X interrupt · Ctrl-D destroy · ? help · Ctrl-C quit";
 
   // Static items: a rolling list of ALL committed messages seen so far,
   // augmented with session boundaries so switches are visible in scrollback.

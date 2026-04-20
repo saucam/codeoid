@@ -52,6 +52,24 @@ export interface SessionInfo {
   subagents?: Subagent[];
   /** Cumulative token + cost usage since the session started. */
   usage?: SessionUsage;
+  /**
+   * Rotation telemetry — how many times the underlying Claude Code session
+   * has been rolled over to avoid context compaction. Only populated when
+   * auto-rotation is active or the user has manually rotated.
+   */
+  rotation?: {
+    count: number;
+    /** Unix ms of last rotation, or null if never rotated. */
+    lastRotatedAt: number | null;
+    /** Backing Claude Code session id (opaque to UI, useful for debugging). */
+    claudeCodeSessionId?: string;
+  };
+  /**
+   * Number of user messages buffered in the streamInput queue, waiting for
+   * the SDK consumer to pick them up. > 0 means: user has sent faster than
+   * Claude can process — useful signal for mid-turn queueing UX.
+   */
+  queuedMessages?: number;
 }
 
 /**
@@ -452,7 +470,8 @@ export type ClientMessage =
   | SessionDestroyMsg
   | SessionSetModeMsg
   | SessionPinMsg
-  | SessionUnpinMsg;
+  | SessionUnpinMsg
+  | SessionRotateMsg;
 
 interface BaseClientMsg {
   /** Request ID for correlating responses */
@@ -490,6 +509,14 @@ export interface SessionSendMsg extends BaseClientMsg {
    * inline error markers rather than silently dropped.
    */
   attachments?: Attachment[];
+  /**
+   * Mid-turn priority hint (SDK semantics):
+   *   - `now`   — interrupt the agent's current turn and observe immediately
+   *   - `next`  — let the current turn finish, then pick this up
+   *   - `later` — queue as a standard follow-up (default)
+   * Frontends that don't care pass nothing; FIFO stays the default.
+   */
+  priority?: "now" | "next" | "later";
 }
 
 export interface Attachment {
@@ -558,6 +585,17 @@ export interface SessionUnpinMsg extends BaseClientMsg {
   type: "session.unpin";
   sessionId: string;
   path: string;
+}
+
+/**
+ * Manually rotate the session's backing Claude Code context. Keeps the
+ * user-visible session id + scrollback + memory unchanged; starts a fresh
+ * Claude Code transcript. Rejected if the session has fewer turns than
+ * the configured min-turns-before-rotate.
+ */
+export interface SessionRotateMsg extends BaseClientMsg {
+  type: "session.rotate";
+  sessionId: string;
 }
 
 // =============================================================================

@@ -111,6 +111,38 @@ const TelemetrySchema = z
   })
   .default({ osc8: "auto" });
 
+/**
+ * Auto-rotation: proactively roll over Claude Code's backing session when
+ * the context window gets close to the compaction ceiling. Codeoid's
+ * verbatim memory + recall tools mean we can hand off to a fresh context
+ * losslessly — the agent just calls `recall` when it needs prior detail.
+ *
+ * Thresholds are fractions of the context window (1.0 = 1M tokens). Pick
+ * sane defaults; users can tune via config or env.
+ */
+const AutoRotateSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    /** Below this, no action. */
+    warnPct: z.number().min(0).max(1).default(0.6),
+    /** Suggest rotation in scrollback at this occupancy. */
+    rotatePct: z.number().min(0).max(1).default(0.8),
+    /** Auto-rotate at this occupancy EVEN if `enabled` is false. Safety net. */
+    hardRotatePct: z.number().min(0).max(1).default(0.9),
+    /** Don't rotate within the first N turns — seed prompt matters. */
+    minTurnsBeforeRotate: z.number().int().nonnegative().default(3),
+    /** Seed strategy. Only "task-anchor" implemented today (loss-free via recall). */
+    strategy: z.enum(["task-anchor"]).default("task-anchor"),
+  })
+  .default({
+    enabled: false,
+    warnPct: 0.6,
+    rotatePct: 0.8,
+    hardRotatePct: 0.9,
+    minTurnsBeforeRotate: 3,
+    strategy: "task-anchor",
+  });
+
 const AgentIdentitySchema = z
   .object({
     accountId: z.string().default("personal"),
@@ -147,6 +179,7 @@ const RootSchema = z.object({
   compress: CompressSchema,
   labeling: LabelingSchema,
   telemetry: TelemetrySchema,
+  autoRotate: AutoRotateSchema,
 });
 
 type ParsedConfig = z.infer<typeof RootSchema>;
@@ -208,6 +241,15 @@ export interface CodeoidConfig {
   telemetry: {
     osc8: "auto" | "force" | "disable";
   };
+  /** Auto-rotation of the Claude Code backing session near the context ceiling. */
+  autoRotate: {
+    enabled: boolean;
+    warnPct: number;
+    rotatePct: number;
+    hardRotatePct: number;
+    minTurnsBeforeRotate: number;
+    strategy: "task-anchor";
+  };
 }
 
 // ── Env-var override map ─────────────────────────────────────────────────
@@ -216,7 +258,7 @@ export interface CodeoidConfig {
  * Table-driven env override. Stays explicit so typos in process.env don't
  * silently hijack a field — we only honor keys listed here.
  */
-type OverrideKind = "string" | "boolean" | "int" | "csv";
+type OverrideKind = "string" | "boolean" | "int" | "float" | "csv";
 
 interface EnvOverride {
   /** Dotted path into ParsedConfig. */
@@ -253,6 +295,11 @@ const ENV_OVERRIDES: readonly EnvOverride[] = [
   { env: "CODEOID_COMPRESS_MIN_BYTES", path: "compress.minBytes", kind: "int" },
   { env: "ANTHROPIC_API_KEY", path: "labeling.anthropicApiKey", kind: "string" },
   { env: "CODEOID_OSC8", path: "telemetry.osc8", kind: "string" },
+  { env: "CODEOID_AUTO_ROTATE", path: "autoRotate.enabled", kind: "boolean" },
+  { env: "CODEOID_AUTO_ROTATE_WARN_PCT", path: "autoRotate.warnPct", kind: "float" },
+  { env: "CODEOID_AUTO_ROTATE_PCT", path: "autoRotate.rotatePct", kind: "float" },
+  { env: "CODEOID_AUTO_ROTATE_HARD_PCT", path: "autoRotate.hardRotatePct", kind: "float" },
+  { env: "CODEOID_AUTO_ROTATE_MIN_TURNS", path: "autoRotate.minTurnsBeforeRotate", kind: "int" },
 ];
 
 // ── Loading ──────────────────────────────────────────────────────────────
@@ -391,6 +438,7 @@ export function loadConfig(opts: LoadOptions = {}): CodeoidConfig {
     compress: parsed.compress,
     labeling: parsed.labeling,
     telemetry: { osc8: osc8Mode },
+    autoRotate: parsed.autoRotate,
   };
 }
 
@@ -406,6 +454,12 @@ function parseOverride(raw: string, kind: OverrideKind): unknown {
       const n = Number.parseInt(raw, 10);
       if (!Number.isFinite(n))
         throw new Error(`Expected integer for env override, got "${raw}"`);
+      return n;
+    }
+    case "float": {
+      const n = Number.parseFloat(raw);
+      if (!Number.isFinite(n))
+        throw new Error(`Expected number for env override, got "${raw}"`);
       return n;
     }
     case "csv":

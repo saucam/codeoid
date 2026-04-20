@@ -65,6 +65,7 @@ export class TuiWsClient {
     sessionId: string,
     text: string,
     attachments?: readonly Attachment[],
+    priority?: "now" | "next" | "later",
   ): Promise<DaemonMessage> {
     return this.#request({
       type: "session.send",
@@ -73,6 +74,7 @@ export class TuiWsClient {
       text,
       attachments:
         attachments && attachments.length > 0 ? [...attachments] : undefined,
+      priority,
     });
   }
 
@@ -114,6 +116,10 @@ export class TuiWsClient {
 
   destroy(sessionId: string): Promise<DaemonMessage> {
     return this.#request({ type: "session.destroy", id: randomUUID(), sessionId });
+  }
+
+  rotate(sessionId: string): Promise<DaemonMessage> {
+    return this.#request({ type: "session.rotate", id: randomUUID(), sessionId });
   }
 
   // ── Internals ─────────────────────────────────────────────────────────
