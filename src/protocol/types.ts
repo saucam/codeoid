@@ -471,7 +471,8 @@ export type ClientMessage =
   | SessionSetModeMsg
   | SessionPinMsg
   | SessionUnpinMsg
-  | SessionRotateMsg;
+  | SessionRotateMsg
+  | SessionSearchMsg;
 
 interface BaseClientMsg {
   /** Request ID for correlating responses */
@@ -598,6 +599,61 @@ export interface SessionRotateMsg extends BaseClientMsg {
   sessionId: string;
 }
 
+/**
+ * Full-text + semantic search across ALL sessions in a workspace — the
+ * human-facing counterpart to Claude's `recall()` tool. Searches over
+ * every user message, Claude reply, tool call, tool result, and reasoning
+ * block stored in memory. Combines FTS5 BM25 (exact-keyword match) with
+ * vector similarity (semantic) + recency + session-name boost.
+ *
+ * Returns a ranked list of SESSIONS (not a flat list of episodes) with
+ * evidence snippets so frontends can render previews without a second
+ * round-trip. Pick a session → re-attach to jump into it.
+ */
+export interface SessionSearchMsg extends BaseClientMsg {
+  type: "session.search";
+  query: string;
+  /** Scope of the search. Default: `workspace` = sessions in the current workdir's workspace. */
+  scope?: "workspace" | "all";
+  /**
+   * Anchor workspace. When `scope="workspace"` and this is unset, the
+   * daemon infers from the requesting client's current focus — if the
+   * client doesn't have one either, it falls back to cross-workspace.
+   */
+  workdir?: string;
+  /** Max results to return. Default 10. */
+  limit?: number;
+}
+
+/** Per-session hit returned by session.search. */
+export interface SessionSearchHit {
+  sessionId: string;
+  sessionName: string;
+  workdir: string;
+  /** Number of matching episodes within the session. */
+  matchCount: number;
+  firstMatchAt: number;
+  lastMatchAt: number;
+  /** Aggregate rank score (higher = more relevant). */
+  aggregateScore: number;
+  /** Top evidence snippets from the session. */
+  snippets: SessionSearchSnippet[];
+}
+
+/** A single evidence snippet inside a SessionSearchHit. */
+export interface SessionSearchSnippet {
+  episodeId: string;
+  kind: "user_turn" | "assistant_turn" | "tool_call" | "error";
+  toolName?: string;
+  summary: string;
+  /** Query-centered excerpt (~240 chars). */
+  excerpt: string;
+  createdAt: number;
+  /** Hybrid recall score (0..~1). */
+  score: number;
+  filePaths: string[];
+}
+
 // =============================================================================
 // Daemon → Client messages
 // =============================================================================
@@ -611,7 +667,8 @@ export type DaemonMessage =
   | SessionMessageDelta
   | SessionStatusChangeMsg
   | SessionInfoUpdateMsg
-  | ScrollbackReplayMsg;
+  | ScrollbackReplayMsg
+  | SessionSearchResultMsg;
 
 export interface AuthOkMsg {
   type: "auth.ok";
@@ -676,6 +733,18 @@ export interface ScrollbackReplayMsg {
   type: "scrollback.replay";
   sessionId: string;
   messages: SessionMessage[];
+}
+
+/** Result of a session.search query. */
+export interface SessionSearchResultMsg {
+  type: "session.search.result";
+  requestId: string;
+  query: string;
+  sessions: SessionSearchHit[];
+  /** Workspace id the search was scoped to ('' = cross-workspace). */
+  workspaceId: string;
+  /** Cap applied to the search. */
+  limit: number;
 }
 
 // =============================================================================

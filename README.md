@@ -18,10 +18,40 @@ You're orchestrating AI coding agents. Codeoid solves the things Claude Code's s
 
 - **Parallel sessions, shared workspace memory** — Two sessions on two git worktrees building feature A and feature B. Both inherit the same workspace's history. Session B can `recall()` what Session A learned yesterday, no re-read.
 - **Never-lose-detail memory** — Every tool call, result, and reasoning block persists as a retrievable episode. No lossy compaction. Recall returns the real bytes.
+- **Three-layer context reduction** — Pre-entry compression of CLI output + auto-rotation of the backing context + verbatim recall. Turns that would have cost $0.30 drop to pennies; peak occupancy stays below compaction.
+- **Mid-turn streaming input (VSCode parity)** — Send a follow-up message while Claude is already responding. Priority semantics (`now` / `next` / `later`) let you interrupt-and-re-integrate or gracefully queue for the next turn.
+- **Production-grade token instrumentation** — Per-turn input/output/cache/cost persisted to SQLite. Live StatusBar shows cumulative + Δ this-turn + cache hit rate + current context occupancy + queue depth + rotation count.
 - **Autonomous runs with a budget** — Flip a session to autonomous mode; it auto-approves safe operations until a write/exec budget is spent, then hands control back.
 - **Device handoff** — Start a session on your laptop, attach from your phone. Scrollback replays. Same conversation.
 - **Identity-grade audit** — Every tool call stamped with the SPIFFE URI of the agent that made it. Sub-agents get their own attenuated identities. Delegation chain traceable top to bottom.
 - **Multi-frontend** — same session accessible from terminal TUI, browser, or Telegram bot. Share read-only tokens with a teammate.
+
+## How Codeoid compares
+
+Codeoid is not a general-purpose IDE assistant — it's aimed at **long-horizon multi-session agent work** where context continuity and token economics matter more than inline code actions. Here's where it differs from the tools you're probably already using:
+
+| Capability | Claude Code CLI (interactive) | VSCode Extension | Cursor | Aider | **Codeoid** |
+|---|:-:|:-:|:-:|:-:|:-:|
+| **Cross-session verbatim memory** | ❌ `/compact` is lossy | ❌ session-scoped | ❌ | ❌ | ✅ SQLite + FTS5 + vectors, workspace-scoped |
+| **Parallel sessions, one control plane** | ❌ one terminal | ❌ one window per repo | ~ tabs | ❌ | ✅ N sessions, switch with Ctrl-G |
+| **Git-worktree-aware memory sharing** | ❌ | ❌ | ❌ | ❌ | ✅ anchored on `git-common-dir` |
+| **Workspace memory index** injected into system prompt | ❌ | ❌ | ❌ | ~ repo map | ✅ hot files + topic clusters + recent sessions, auto-regenerated |
+| **Pre-entry CLI output compression** (git diff, test runners, etc.) with recall recovery | ❌ | ❌ | ❌ | ❌ | ✅ declarative rules, 60-90% reduction with tee-cache |
+| **Auto-rotation of backing context** near compaction ceiling | ❌ | ❌ | ❌ | ❌ | ✅ lossless via memory recall seed |
+| **Mid-turn user input (stream)** | ❌ interactive CLI is turn-based | ✅ | ~ | ❌ | ✅ with `now`/`next`/`later` priority |
+| **Per-turn token / cost / cache telemetry** | ~ `/cost` total only | ❌ | ❌ | ~ | ✅ persistent SQLite, StatusBar, Δ per turn |
+| **Current context occupancy visible** | ❌ | ❌ | ❌ | ❌ | ✅ `ctx 65k/1.0M (7%)` live in StatusBar |
+| **Cryptographic identity per agent + sub-agent** (SPIFFE) | ❌ | ❌ | ❌ | ❌ | ✅ ZeroID WIMSE URIs |
+| **Autonomous mode with write-action budget** | ❌ | ~ | ~ | ❌ | ✅ budget tracked per session |
+| **Multi-frontend (TUI + Web + Telegram)** | ❌ CLI only | ❌ IDE only | ❌ IDE only | ❌ | ✅ same session on all three |
+| **Device handoff** (start laptop, continue phone) | ❌ | ❌ | ❌ | ❌ | ✅ WS re-attach with scrollback replay |
+| **Inline IDE code actions** | ❌ | ✅ | ✅ | ~ | ❌ not our niche |
+| **SWE-bench / automated coding benchmark score** | — | — | ✅ | ✅ | ❌ not yet benchmarked |
+| **Multi-model routing** (Opus for plan, Haiku for cheap subtasks) | ~ recent | ~ | ✅ | ✅ | ❌ roadmap |
+
+Legend: ✅ first-class · ~ partial · ❌ not supported · — not a meaningful comparison
+
+**Translation**: if you're working on a big codebase over weeks, occasionally switching devices, and you care that Claude *remembers* rather than re-summarizes — Codeoid is the frontier. If you want "fix this function I'm looking at right now" — Cursor is still sharper.
 
 ## Quick start
 
@@ -160,6 +190,7 @@ Claude
 | `Ctrl-G` | Switch session (fuzzy) |
 | `Ctrl-D` | Destroy focused session |
 | `Ctrl-X` | Interrupt focused session |
+| `Esc` | Clear input draft — or interrupt if input is empty and session is working |
 | `Shift-Tab` / `Ctrl-M` | Cycle execution mode |
 | `y` / `n` | Approve / deny pending tool (when input empty) |
 | `?` | Show keybindings overlay |
@@ -191,6 +222,7 @@ Claude
 | `/pin <path>` | Pin a file — prepended to every turn |
 | `/unpin <path>` | Unpin a file |
 | `/context <path>…` | Attach files to the NEXT turn only |
+| `/rotate` | Roll over the Claude Code backing session — fresh context, memory preserved |
 | `/who` | Print the identity chain (user → agent → sub-agents) |
 | `/help` | Show keybindings |
 
@@ -331,6 +363,74 @@ Ctrl+C  # detach — session keeps running
 # → scrollback replays → continue the conversation
 ```
 
+### Context reduction stack
+
+Three orthogonal layers, each opt-in, each carrying its weight:
+
+**Layer C — workspace memory index** (on by default with memory enabled)
+
+A compact markdown block auto-injected into every turn's system prompt. Contains:
+- Fingerprint: `294 episodes across 8 sessions · last activity 8m ago`
+- Hot files: top 10 by touch count, each with a `recall_file(path)` nudge
+- Topic clusters: k-means (k ≤ 8) over episode embeddings, labeled with dominant directory + content terms (optional LLM re-labeling via Haiku when `ANTHROPIC_API_KEY` is set)
+- Recent sessions: one-liner per session with its first user-turn summary
+- Recall shortcuts: compact tool reference
+
+Rebuilt on a hybrid trigger: `≥ 5 new episodes` OR `≥ 60s elapsed with ≥ 1 new episode`, debounced to max one regen per 15 s so the prompt cache stays warm. Toggle: `CODEOID_WORKSPACE_INDEX=0` disables, `CODEOID_MEMORY_CLUSTERS=1` enables the cluster section.
+
+**Layer B — CLI output compression** (opt-in: `CODEOID_COMPRESS=1`)
+
+A homegrown RTK-style compressor that routes Bash tool invocations through a daemon-local wrapper before Claude sees them:
+
+- `PreToolUse` hook rewrites `Bash({ command: "git diff HEAD~5" })` → `Bash({ command: "bun …/wrapper.ts --b64 …" })`
+- Wrapper runs the real command, captures stdout, applies declarative rules (`git-diff` collapses long unchanged context, `git-status` elides huge untracked-files lists, `test-runner` drops passing-test noise, `ls`/`cat`/`find`/`grep` summarize by extension/dir/file), 60–90% reduction on shell-heavy turns
+- Stderr **never** compressed (error fidelity matters)
+- Raw output lives in our verbatim memory store — Claude can `recall(query)` to retrieve the original bytes if the compressed version dropped something it needs
+
+Rule format is declarative TypeScript:
+
+```ts
+export const myRule: CompressionRule = {
+  name: "my-rule",
+  description: "…",
+  match: (cmd) => /^mything\b/.test(cmd),
+  compress: (stdout, ctx) => ({ compressed, originalBytes: ctx.rawBytes, ruleName: "my-rule" }),
+};
+```
+
+Drop new rules in [src/daemon/compress/rules/](src/daemon/compress/rules/) — first match wins, generic head+tail truncator is the last-resort fallback.
+
+**Layer D — auto-rotation of the backing session** (opt-in: `CODEOID_AUTO_ROTATE=1`)
+
+When context occupancy creeps toward Claude Code's compaction ceiling, Codeoid rolls the underlying Claude Code session to a fresh backing id while keeping codeoid's public session id stable. The user never notices — same tab, same scrollback, same memory.
+
+Seed strategy **B: task-anchor** (current default):
+
+- Capture the most recent user turn from memory
+- Inject a `<rotation_context>` block into the first post-rotation prompt with: workspace, rotation count, last user message verbatim, reminder to call `recall` / `recall_file` / `timeline` for prior detail
+- No summarization — full verbatim memory is one tool call away
+
+Thresholds (all configurable):
+
+| Threshold | Default | Behavior |
+|---|---|---|
+| `warnPct` | 60% | (Reserved for UI nudging — currently unused) |
+| `rotatePct` | 80% | Auto-rotate when `enabled: true` + over `minTurnsBeforeRotate` |
+| `hardRotatePct` | 90% | Rotate even when `enabled: false` (safety net) |
+| `minTurnsBeforeRotate` | 3 | Prevent rotation on fresh sessions where seed would be empty |
+
+Each rotation emits a scrollback info message, bumps the rotation counter (persisted in SQLite), and shows `🔄 N` in the StatusBar. Manual trigger via `/rotate` slash command.
+
+### Mid-turn streaming input (VSCode parity)
+
+Claude Code's interactive CLI is turn-based — you wait for the response before sending the next message. The SDK underneath actually supports `AsyncIterable<SDKUserMessage>` streaming, which codeoid uses for mid-turn responsiveness.
+
+When you hit Enter on an idle session: FIFO push, business as usual. When you hit Enter on a **working** session: codeoid auto-sets `priority: "now"` — the SDK aborts Claude's in-flight response and restarts with the new context included. You pay ~1-2 s for time-to-first-token on the restart; the alternative (`priority: "next"`) gets two separate responses instead of one unified one.
+
+Explicit control is exposed on the protocol — frontends can pass `priority: "now" | "next" | "later"` on any `session.send` message. Default is the smart auto-promotion above.
+
+A live `⎆ N queued` badge on the StatusBar shows queue depth. Turning-point feedback: the moment you queue a mid-turn message, an info row appears immediately so you know it was received, even though Claude's reply takes a second to start flowing.
+
 ### Autonomous + stop conditions
 
 Flip a session to autonomous mode and send it off:
@@ -428,6 +528,28 @@ CODEOID_MEMORY=1                        # default: on; set to 0 to disable
 CODEOID_MEMORY_DB_PATH=~/.codeoid/memory.db
 CODEOID_MEMORY_MODEL=Xenova/bge-small-en-v1.5   # HF model id
 CODEOID_MEMORY_CACHE_DIR=~/.codeoid/models
+CODEOID_MEMORY_CLUSTERS=0               # k-means topic clusters in workspace index
+
+# Workspace index (always-in-context memory pointer)
+CODEOID_WORKSPACE_INDEX=1               # auto-injected into system prompt
+CODEOID_WORKSPACE_INDEX_EPISODE_THRESHOLD=5
+CODEOID_WORKSPACE_INDEX_TIME_MS=60000
+CODEOID_WORKSPACE_INDEX_DEBOUNCE_MS=15000
+
+# CLI output compression (Layer B)
+CODEOID_COMPRESS=0                      # opt-in: rewrites Bash output via rules
+CODEOID_COMPRESS_EXCLUDE=                # comma-separated cmd prefixes to skip
+CODEOID_COMPRESS_PIPES=0                 # allow compressing piped commands
+CODEOID_COMPRESS_MIN_BYTES=1024          # skip compression below this size
+
+# Auto-rotation (Layer D)
+CODEOID_AUTO_ROTATE=0                   # auto-rotate backing session near context ceiling
+CODEOID_AUTO_ROTATE_PCT=0.8              # rotate at this occupancy (when enabled)
+CODEOID_AUTO_ROTATE_HARD_PCT=0.9         # hard-rotate even when disabled
+CODEOID_AUTO_ROTATE_MIN_TURNS=3          # skip rotation on fresh sessions
+
+# Anthropic (optional, for Haiku cluster labeling)
+ANTHROPIC_API_KEY=sk-ant-...            # if set, clusters get LLM-quality labels
 
 # OAuth (web UI PKCE)
 CODEOID_HMAC_SECRET=...                 # enables OAuth authorization server

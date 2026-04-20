@@ -249,9 +249,27 @@ export function App({ config }: Props) {
         });
         return;
       }
+      if (key.ctrl && input === "f") {
+        dispatch({ type: "modal.open", modal: { kind: "search", query: "" } });
+        return;
+      }
       if (key.ctrl && input === "x" && focusedSession) {
         void wsRef.current?.interrupt(focusedSession.info.id).catch(() => {});
         return;
+      }
+      // Esc semantics (when NO overlay is open — those branches above):
+      //   - input non-empty → clear input (natural "cancel this draft")
+      //   - input empty + session working → interrupt (shortcut for Ctrl-X)
+      //   - input empty + session idle → no-op
+      if (key.escape && focusedSession) {
+        if (state.input.length > 0) {
+          dispatch({ type: "input.clear" });
+          return;
+        }
+        if (focusedSession.info.status === "working") {
+          void wsRef.current?.interrupt(focusedSession.info.id).catch(() => {});
+          return;
+        }
       }
       if (input === "?" && state.input.length === 0) {
         dispatch({ type: "modal.open", modal: { kind: "help" } });
@@ -513,6 +531,16 @@ export function App({ config }: Props) {
         );
         return;
       }
+      case "/search": {
+        // Opens the search modal pre-populated with whatever the user
+        // typed after `/search`. Empty is fine — modal shows the hint.
+        const initial = args.join(" ").trim();
+        dispatch({
+          type: "modal.open",
+          modal: { kind: "search", query: initial },
+        });
+        return;
+      }
       default: {
         // Workspace command? Expand template and send.
         const wsCmd = workspaceCommands.find((c) => c.name === cmd);
@@ -575,6 +603,26 @@ export function App({ config }: Props) {
 
   const onCancelModal = () => dispatch({ type: "modal.close" });
 
+  /**
+   * Search handler passed into the modal. Returns hits directly so the
+   * modal stays in control of its async state (loading, error, stale).
+   * Uses the focused session's workdir to anchor the workspace scope;
+   * falls back to cross-workspace when nothing is focused.
+   */
+  const onSearch = async (q: string): Promise<import("../protocol/types.js").SessionSearchHit[]> => {
+    const client = wsRef.current;
+    if (!client) return [];
+    const workdir = focusedSession?.info.workdir;
+    const resp = await client.search(q, workdir, 10, "workspace");
+    if (resp.type === "session.search.result") {
+      return resp.sessions;
+    }
+    if (resp.type === "response.error") {
+      throw new Error(resp.error);
+    }
+    return [];
+  };
+
   // ── Layout ─────────────────────────────────────────────────────────────
 
   const cols = stdout.columns ?? 120;
@@ -586,8 +634,8 @@ export function App({ config }: Props) {
   const promptHint = focusedSession?.pendingApproval
     ? `⎆ ${focusedSession.pendingApproval.toolName}: ${focusedSession.pendingApproval.description} — press y/n`
     : focusedSession?.info.status === "working"
-      ? "⋯ session is working — Enter queues a mid-turn message · Ctrl-X interrupt"
-      : "Enter to send · Ctrl-N new · Ctrl-G switch · Ctrl-X interrupt · Ctrl-D destroy · ? help · Ctrl-C quit";
+      ? "⋯ session is working — Enter queues a mid-turn message · Ctrl-F search · Esc / Ctrl-X interrupt"
+      : "Enter to send · Ctrl-N new · Ctrl-G switch · Ctrl-F search · Esc clear · Ctrl-X interrupt · ? help · Ctrl-C quit";
 
   // Static items: a rolling list of ALL committed messages seen so far,
   // augmented with session boundaries so switches are visible in scrollback.
@@ -661,6 +709,7 @@ export function App({ config }: Props) {
           onSelectSession={onSelectSession}
           onConfirmDestroy={onConfirmDestroy}
           onCancel={onCancelModal}
+          onSearch={onSearch}
         />
       )}
     </>

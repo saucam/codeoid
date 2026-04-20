@@ -1,13 +1,14 @@
 /**
- * Modal — overlay dialogs for new-session, switch-session, destroy confirm.
- * Intentionally minimal; renders inline at the bottom so it doesn't fight
- * with Ink's single-surface render model.
+ * Modal — overlay dialogs for new-session, switch-session, destroy confirm,
+ * and cross-session search. Intentionally minimal; renders inline at the
+ * bottom so it doesn't fight with Ink's single-surface render model.
  */
 
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
 import type { ModalState, TuiSession } from "../types.js";
+import type { SessionSearchHit } from "../../protocol/types.js";
 
 interface Props {
   modal: ModalState;
@@ -16,6 +17,8 @@ interface Props {
   onSelectSession: (sessionId: string) => void;
   onConfirmDestroy: (sessionId: string) => void;
   onCancel: () => void;
+  /** Run a full-text + semantic session search. Resolves to result hits. */
+  onSearch?: (query: string) => Promise<SessionSearchHit[]>;
 }
 
 export function Modal(props: Props) {
@@ -46,6 +49,15 @@ export function Modal(props: Props) {
     }
     case "help":
       return <HelpModal onCancel={props.onCancel} />;
+    case "search":
+      return (
+        <SearchModal
+          query={props.modal.query}
+          onSearch={props.onSearch}
+          onSelect={props.onSelectSession}
+          onCancel={props.onCancel}
+        />
+      );
   }
 }
 
@@ -193,6 +205,173 @@ function ConfirmDestroyModal({
       </Box>
     </Box>
   );
+}
+
+// ── Search modal ────────────────────────────────────────────────────────
+
+function SearchModal({
+  query,
+  onSearch,
+  onSelect,
+  onCancel,
+}: {
+  query: string;
+  onSearch?: (q: string) => Promise<SessionSearchHit[]>;
+  onSelect: (id: string) => void;
+  onCancel: () => void;
+}) {
+  const [q, setQ] = useState(query);
+  const [hits, setHits] = useState<SessionSearchHit[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [idx, setIdx] = useState(0);
+
+  // Debounce — hit the daemon after the user stops typing for 200 ms.
+  // Any typing in between cancels prior in-flight requests via a ref
+  // guard so old results don't race ahead of new ones.
+  const requestSeq = useRef(0);
+  useEffect(() => {
+    if (!onSearch) return;
+    const trimmed = q.trim();
+    if (!trimmed) {
+      setHits([]);
+      setError(null);
+      setIsSearching(false);
+      return;
+    }
+    const seq = ++requestSeq.current;
+    const timer = setTimeout(async () => {
+      setIsSearching(true);
+      setError(null);
+      try {
+        const results = await onSearch(trimmed);
+        if (seq !== requestSeq.current) return; // stale response
+        setHits(results);
+        setIdx(0);
+      } catch (err) {
+        if (seq !== requestSeq.current) return;
+        setError(err instanceof Error ? err.message : String(err));
+        setHits([]);
+      } finally {
+        if (seq === requestSeq.current) setIsSearching(false);
+      }
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [q, onSearch]);
+
+  useInput((_input, key) => {
+    if (key.escape) onCancel();
+    if (key.upArrow) setIdx((i) => Math.max(0, i - 1));
+    if (key.downArrow) setIdx((i) => Math.min(Math.max(0, hits.length - 1), i + 1));
+    if (key.return && hits[idx]) onSelect(hits[idx]!.sessionId);
+  });
+
+  return (
+    <Box
+      flexDirection="column"
+      borderStyle="double"
+      borderColor="cyan"
+      paddingX={1}
+    >
+      <Text bold color="cyan">
+        🔍 Search across sessions
+      </Text>
+      <Box marginTop={1}>
+        <Text>{"query: "}</Text>
+        <TextInput value={q} onChange={setQ} onSubmit={() => {}} />
+      </Box>
+
+      {error && (
+        <Box marginTop={1}>
+          <Text color="red">error: {error}</Text>
+        </Box>
+      )}
+
+      {q.trim().length === 0 ? (
+        <Box marginTop={1}>
+          <Text dimColor>
+            Hybrid search (FTS5 keywords + vector + recency). Searches every
+            message, tool call, and assistant reply across all sessions in
+            this workspace.
+          </Text>
+        </Box>
+      ) : isSearching && hits.length === 0 ? (
+        <Box marginTop={1}>
+          <Text dimColor>searching…</Text>
+        </Box>
+      ) : hits.length === 0 ? (
+        <Box marginTop={1}>
+          <Text dimColor>(no matches)</Text>
+        </Box>
+      ) : (
+        <Box flexDirection="column" marginTop={1}>
+          {hits.map((hit, i) => (
+            <SearchHitRow
+              key={hit.sessionId}
+              hit={hit}
+              selected={i === idx}
+            />
+          ))}
+        </Box>
+      )}
+
+      <Box marginTop={1}>
+        <Text dimColor>
+          ↑↓ navigate · Enter to focus session · Esc to close
+        </Text>
+      </Box>
+    </Box>
+  );
+}
+
+function SearchHitRow({
+  hit,
+  selected,
+}: {
+  hit: SessionSearchHit;
+  selected: boolean;
+}) {
+  const bar = selected ? "▸ " : "  ";
+  const when = formatAgo(hit.lastMatchAt);
+  const top = hit.snippets[0];
+  return (
+    <Box flexDirection="column" marginBottom={0}>
+      <Text color={selected ? "cyan" : "white"} bold={selected}>
+        {bar}
+        {hit.sessionName}
+        <Text dimColor>
+          {" — " + hit.matchCount + " match" + (hit.matchCount === 1 ? "" : "es") + " · " + when}
+        </Text>
+      </Text>
+      {top && (
+        <Text dimColor>
+          {"    "}
+          {top.kind === "user_turn"
+            ? "you: "
+            : top.kind === "assistant_turn"
+              ? "claude: "
+              : top.kind === "tool_call"
+                ? (top.toolName ? top.toolName + ": " : "tool: ")
+                : "!: "}
+          {compactExcerpt(top.excerpt)}
+        </Text>
+      )}
+    </Box>
+  );
+}
+
+function formatAgo(when: number): string {
+  const dt = Math.max(0, Date.now() - when);
+  if (dt < 60_000) return "just now";
+  if (dt < 3_600_000) return Math.round(dt / 60_000) + "m ago";
+  if (dt < 86_400_000) return Math.round(dt / 3_600_000) + "h ago";
+  return Math.round(dt / 86_400_000) + "d ago";
+}
+
+function compactExcerpt(s: string): string {
+  // Collapse internal whitespace + cap length for a single inline row.
+  const collapsed = s.replace(/\s+/g, " ").trim();
+  return collapsed.length > 120 ? collapsed.slice(0, 117) + "…" : collapsed;
 }
 
 function HelpModal({ onCancel }: { onCancel: () => void }) {

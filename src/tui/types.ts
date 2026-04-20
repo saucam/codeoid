@@ -65,7 +65,8 @@ export type ModalState =
   | { kind: "new-session" }
   | { kind: "switch-session"; query: string }
   | { kind: "confirm-destroy"; sessionId: string }
-  | { kind: "help" };
+  | { kind: "help" }
+  | { kind: "search"; query: string };
 
 /** UI action type — reducer fan-in. */
 export type TuiAction =

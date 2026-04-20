@@ -122,6 +122,22 @@ export class TuiWsClient {
     return this.#request({ type: "session.rotate", id: randomUUID(), sessionId });
   }
 
+  search(
+    query: string,
+    workdir?: string,
+    limit?: number,
+    scope?: "workspace" | "all",
+  ): Promise<DaemonMessage> {
+    return this.#request({
+      type: "session.search",
+      id: randomUUID(),
+      query,
+      workdir,
+      limit,
+      scope,
+    });
+  }
+
   // ── Internals ─────────────────────────────────────────────────────────
 
   async #connect(): Promise<void> {

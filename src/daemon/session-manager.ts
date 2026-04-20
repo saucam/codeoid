@@ -14,7 +14,7 @@ import { hasScope, SCOPES } from "../protocol/scopes.js";
 import { RateLimiter } from "./rate-limit.js";
 import { TranscriptStore } from "./transcript.js";
 import type { AgentIdentityManager } from "./agent-identity.js";
-import type { MemoryEngine } from "./memory/index.js";
+import { type MemoryEngine, workspaceIdFromPath } from "./memory/index.js";
 import type { CodeoidConfig } from "../config.js";
 import type { CompressionRegistry } from "./compress/index.js";
 import type {
@@ -129,6 +129,8 @@ export class SessionManager {
         return this.#unpin(msg, auth);
       case "session.rotate":
         return this.#rotate(msg, auth);
+      case "session.search":
+        return this.#search(msg, auth);
     }
   }
 
@@ -340,6 +342,104 @@ export class SessionManager {
     }
     session.unpinFile(msg.path, auth);
     return { type: "response.ok", requestId: msg.id };
+  }
+
+  /**
+   * Cross-session search — fans out to the memory engine, groups by
+   * session, and returns a ranked list with evidence snippets. Requires
+   * SESSION_LIST scope (same level as listing sessions — you need to be
+   * able to see sessions to search their content).
+   *
+   * Resolution of workspace scope:
+   *   - `scope: "all"` → search across every workspace the memory store has
+   *   - `scope: "workspace"` (default) + `workdir` explicit → anchor there
+   *   - `scope: "workspace"` + no workdir → use the caller's most recent
+   *     session if any, else empty-string (engine handles gracefully)
+   */
+  async #search(
+    msg: Extract<ClientMessage, { type: "session.search" }>,
+    auth: AuthContext,
+  ): Promise<DaemonMessage> {
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_LIST)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Missing scope: session:list",
+        code: "forbidden",
+      };
+    }
+    if (!this.#memory) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Memory is disabled — session search requires CODEOID_MEMORY=1",
+        code: "invalid_request",
+      };
+    }
+    if (!msg.query || msg.query.trim().length === 0) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Query must be a non-empty string",
+        code: "invalid_request",
+      };
+    }
+
+    const scope = msg.scope ?? "workspace";
+    let workspaceId = "";
+    if (scope === "workspace") {
+      const anchorPath = msg.workdir ?? this.#guessCallerWorkdir(auth);
+      if (anchorPath) workspaceId = workspaceIdFromPath(anchorPath);
+    }
+
+    // Provide a session-name map so the ranker can boost exact-name hits.
+    const sessionNames = new Map<string, string>();
+    for (const s of this.#sessions.values()) {
+      sessionNames.set(s.id, s.name);
+    }
+
+    const limit = Math.max(1, Math.min(msg.limit ?? 10, 50));
+    const hits = await this.#memory.searchSessions({
+      query: msg.query,
+      workspaceId,
+      limit,
+      sessionNames,
+    });
+
+    // Enrich each hit with sessionName + workdir from the in-memory map
+    // (store has the rest; we just want ergonomic display).
+    const enriched = hits.map((h) => {
+      const liveSession = this.#sessions.get(h.sessionId);
+      return {
+        ...h,
+        sessionName: liveSession?.name ?? "(unknown)",
+        workdir: liveSession?.workdir ?? "",
+      };
+    });
+
+    return {
+      type: "session.search.result",
+      requestId: msg.id,
+      query: msg.query,
+      sessions: enriched,
+      workspaceId,
+      limit,
+    };
+  }
+
+  /**
+   * Infer a workdir for the caller to anchor workspace search. We look for
+   * the caller's most-recent session (by createdBy match); the daemon
+   * doesn't track per-client focus explicitly so "most recent session
+   * they created" is the best stand-in.
+   */
+  #guessCallerWorkdir(auth: AuthContext): string | null {
+    let best: Session | null = null;
+    for (const s of this.#sessions.values()) {
+      if (s.createdBy !== auth.sub) continue;
+      if (!best || s.createdAt > best.createdAt) best = s;
+    }
+    return best?.workdir ?? null;
   }
 
   /**
