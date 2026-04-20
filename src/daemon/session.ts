@@ -21,6 +21,7 @@ import { randomUUID } from "node:crypto";
 import type {
   AuthContext,
   SessionInfo,
+  SessionMode,
   SessionStatus,
   DaemonMessage,
   SessionMessage,
@@ -40,6 +41,8 @@ import {
   workspaceIdFromPath,
   type MemoryEngine,
 } from "./memory/index.js";
+import type { Attachment } from "../protocol/types.js";
+import { resolveAttachments } from "./attachments.js";
 
 /**
  * System-prompt append used when memory is enabled. Deliberately brief and
@@ -96,11 +99,42 @@ export class Session {
   #chunker?: EpisodeChunker;
   #workspaceId: string;
 
+  // Execution mode + turn budget (autonomous mode only).
+  #mode: SessionMode = "interactive";
+  #turnsRemaining: number | undefined = undefined;
+
+  // Pinned files — prepended to every turn until unpinned. Kept both in
+  // memory (for hot reads) and in the Store (for restart persistence).
+  #pinnedFiles: string[] = [];
+
+  // Sub-agent tracking — identity-first attribution for delegated work.
+  // Populated by SubagentStart / SubagentStop hooks; consulted when building
+  // a tool_call SessionMessage so each tool call carries the identity of the
+  // agent that actually made it (parent session OR sub-agent worker).
+  #subagents = new Map<
+    string,
+    {
+      identity: MessageIdentity;
+      agentType: string;
+      spawnedAt: number;
+      active: boolean;
+    }
+  >();
+  // SDK tool_use_id → agent_id that invoked it. Populated in the PreToolUse
+  // hook, used when we later see the tool_use in an assistant message.
+  #toolUseAgentId = new Map<string, string>();
+
   // Track whether we've run a query before (for resume vs new session)
   #hasQueried = false;
 
   // Active streaming message — accumulates deltas into a complete message for scrollback
   #activeAssistantMsg: SessionMessage | null = null;
+  // Active thinking message — Claude's extended reasoning, streamed live so
+  // the user can see what the model is considering before it acts.
+  #activeThinkingMsg: SessionMessage | null = null;
+  // Which content block index the active thinking corresponds to (so we
+  // only finalize it on the matching content_block_stop).
+  #activeThinkingIndex: number | null = null;
 
   // Pending tool approvals: approvalId → resolve(boolean)
   #pendingApprovals = new Map<string, (approved: boolean) => void>();
@@ -130,6 +164,13 @@ export class Session {
     this.#identityManager = opts.identityManager;
     this.#memory = opts.memory;
     this.#workspaceId = workspaceIdFromPath(opts.workdir);
+
+    // Restore any pinned files the user had on this session before.
+    try {
+      this.#pinnedFiles = this.#store.listPins(this.id);
+    } catch {
+      this.#pinnedFiles = [];
+    }
 
     // Default agent identity — upgraded to ZeroID identity in SessionStart hook if manager is available
     this.#agentIdentity = {
@@ -183,6 +224,56 @@ export class Session {
   get status(): SessionStatus { return this.#status; }
   get attachedClientCount(): number { return this.#clients.size; }
   get agentUri(): string | undefined { return this.#agentIdentity.sub; }
+  get mode(): SessionMode { return this.#mode; }
+  get turnsRemaining(): number | undefined { return this.#turnsRemaining; }
+  get pinnedFiles(): readonly string[] { return this.#pinnedFiles; }
+
+  /** Snapshot the active sub-agent tree — used by /who and toInfo(). */
+  get subagentSnapshot(): Array<{
+    agentId: string;
+    wimseUri?: string;
+    agentType: string;
+    spawnedAt: number;
+    active: boolean;
+  }> {
+    return Array.from(this.#subagents.entries()).map(([agentId, s]) => ({
+      agentId,
+      wimseUri: s.identity.sub.startsWith("anonymous:") ? undefined : s.identity.sub,
+      agentType: s.agentType,
+      spawnedAt: s.spawnedAt,
+      active: s.active,
+    }));
+  }
+
+  /** Pin a file — prepended to every subsequent turn until unpinned. */
+  pinFile(path: string, sender: AuthContext): void {
+    if (!path || this.#pinnedFiles.includes(path)) return;
+    this.#pinnedFiles.push(path);
+    this.#store.pinFile(this.id, path);
+    this.#store.audit(sender.sub, "session.pin", this.id, `path=${path}`);
+    this.#broadcastInfoUpdate();
+  }
+
+  /** Unpin a file. No-op if it wasn't pinned. */
+  unpinFile(path: string, sender: AuthContext): void {
+    const idx = this.#pinnedFiles.indexOf(path);
+    if (idx < 0) return;
+    this.#pinnedFiles.splice(idx, 1);
+    this.#store.unpinFile(this.id, path);
+    this.#store.audit(sender.sub, "session.unpin", this.id, `path=${path}`);
+    this.#broadcastInfoUpdate();
+  }
+
+  /** Change execution mode. Resets turn budget if moving out of autonomous. */
+  setMode(mode: SessionMode, maxTurns?: number, sender?: AuthContext): void {
+    if (this.#mode === mode && this.#turnsRemaining === maxTurns) return;
+    this.#mode = mode;
+    this.#turnsRemaining = mode === "autonomous" ? maxTurns : undefined;
+    if (sender) {
+      this.#store.audit(sender.sub, "session.set_mode", this.id, `mode=${mode}`);
+    }
+    this.#broadcastInfoUpdate();
+  }
 
   // ── Client management ─────────────────────────────────────────────────
 
@@ -211,23 +302,48 @@ export class Session {
 
   // ── Agent interaction ─────────────────────────────────────────────────
 
-  async send(text: string, sender: AuthContext): Promise<void> {
+  async send(
+    text: string,
+    sender: AuthContext,
+    attachments?: readonly Attachment[],
+  ): Promise<void> {
     this.#store.audit(sender.sub, "session.send", this.id);
 
-    // Emit user message with proper identity
+    // Merge pinned + per-turn attachments (dedup by path, per-turn wins).
+    const allAttachments = this.#buildEffectiveAttachments(attachments);
+    const { resolved, promptPrefix } = resolveAttachments(allAttachments, {
+      workdir: this.workdir,
+    });
+    const effectivePrompt = promptPrefix ? `${promptPrefix}${text}` : text;
+
+    // The user-visible message carries the bare text plus a metadata
+    // breadcrumb for the transcript/memory layer. The attachment content
+    // itself doesn't need to be echoed back into the UI — we log the
+    // filenames (and any resolution errors) so the user can see what was
+    // sent without flooding the chat.
     const userIdentity = authToIdentity(sender);
-    const userMsg = this.#makeMessage("user", text, userIdentity);
+    const attachmentSummary = resolved.map((r) => ({
+      path: r.path,
+      pinned: this.#pinnedFiles.includes(r.path),
+      bytes: r.bytes,
+      error: r.error,
+    }));
+    const userMsg = this.#makeMessage(
+      "user",
+      text,
+      userIdentity,
+      undefined,
+      undefined,
+      attachmentSummary.length > 0 ? { attachments: attachmentSummary } : undefined,
+    );
     this.#persistAndBuffer(userMsg);
     this.#broadcastRaw(userMsg);
 
     this.#setStatus("working");
 
-    // Emit thinking indicator
-    const thinkingMsg = this.#makeMessage(
-      "thinking", "Thinking...", this.#agentIdentity,
-      undefined, undefined, { event: "thinking_start" },
-    );
-    this.#broadcastRaw(thinkingMsg);
+    // Thinking is now streamed from the SDK (content_block type=thinking).
+    // No hardcoded "Thinking..." indicator; if the model actually reasons
+    // out loud, we'll stream it live as a role=thinking message.
 
     this.#abortController = new AbortController();
     const im = this.#identityManager;
@@ -267,7 +383,7 @@ export class Session {
       : undefined;
 
     this.#query = query({
-      prompt: text,
+      prompt: effectivePrompt,
       options: {
         cwd: this.workdir,
         abortController: this.#abortController,
@@ -310,8 +426,14 @@ export class Session {
         hooks: {
           PreToolUse: [{
             hooks: [async (rawInput) => {
-              const input = rawInput as PreToolUseHookInput;
+              const input = rawInput as PreToolUseHookInput & { agent_id?: string };
               im?.auditToolCall(sessionId, input.tool_name, JSON.stringify(input.tool_input));
+              // Record which agent (parent session or sub-agent) is invoking
+              // this tool_use_id. Used later in #handleAgentMessage to tag
+              // the emitted tool_call SessionMessage with the right identity.
+              if (input.tool_use_id && input.agent_id) {
+                this.#toolUseAgentId.set(input.tool_use_id, input.agent_id);
+              }
               return {};
             }],
           }],
@@ -319,22 +441,49 @@ export class Session {
           SubagentStart: [{
             hooks: [async (rawInput) => {
               const input = rawInput as SubagentStartHookInput;
+              const agentId = input.agent_id ?? "unknown";
+              const agentType = input.agent_type ?? "unknown";
+              let childIdentity: MessageIdentity = {
+                sub: `anonymous:subagent:${agentId}`,
+                name: agentType,
+                type: "subagent",
+              };
               if (im) {
-                const result = await im.registerSubagent(
-                  sessionId,
-                  input.agent_id ?? "unknown",
-                  input.agent_type ?? "unknown",
-                );
-                const infoMsg = this.#makeMessage(
-                  "info",
-                  `Sub-agent spawned: ${input.agent_type ?? "unknown"}`,
-                  this.#agentIdentity,
-                  undefined, undefined,
-                  { event: "subagent.spawned", subagentUri: result.wimseUri, agentType: input.agent_type, parentAgent: this.#agentIdentity.sub },
-                );
-                this.#persistAndBuffer(infoMsg);
-                this.#broadcastRaw(infoMsg);
+                try {
+                  const result = await im.registerSubagent(sessionId, agentId, agentType);
+                  childIdentity = {
+                    sub: result.wimseUri,
+                    name: agentType,
+                    type: "subagent",
+                  };
+                } catch (err) {
+                  console.error(
+                    `[codeoid] subagent register failed: ${err instanceof Error ? err.message : String(err)}`,
+                  );
+                }
               }
+              this.#subagents.set(agentId, {
+                identity: childIdentity,
+                agentType,
+                spawnedAt: Date.now(),
+                active: true,
+              });
+              const infoMsg = this.#makeMessage(
+                "info",
+                `Sub-agent spawned: ${agentType}`,
+                this.#agentIdentity,
+                undefined,
+                undefined,
+                {
+                  event: "subagent.spawned",
+                  subagentUri: childIdentity.sub,
+                  agentType,
+                  parentAgent: this.#agentIdentity.sub,
+                },
+              );
+              this.#persistAndBuffer(infoMsg);
+              this.#broadcastRaw(infoMsg);
+              this.#broadcastInfoUpdate();
               return {};
             }],
           }],
@@ -342,7 +491,13 @@ export class Session {
           SubagentStop: [{
             hooks: [async (rawInput) => {
               const input = rawInput as SubagentStopHookInput;
-              await im?.deactivateSubagent(sessionId, input.agent_id ?? "unknown");
+              const agentId = input.agent_id ?? "unknown";
+              await im?.deactivateSubagent(sessionId, agentId);
+              const entry = this.#subagents.get(agentId);
+              if (entry) {
+                entry.active = false;
+                this.#broadcastInfoUpdate();
+              }
               return {};
             }],
           }],
@@ -352,6 +507,29 @@ export class Session {
           const approvalId = randomUUID();
           const toolId = randomUUID();
           const inputObj = input as Record<string, unknown>;
+
+          // Mode-based auto-approve check — runs before we even emit a
+          // waiting_confirmation message.
+          const autoApprove = this.#shouldAutoApprove(toolName);
+          if (autoApprove) {
+            const autoMsg = this.#makeMessage(
+              "tool_call",
+              `${toolName}(${Object.keys(inputObj).join(", ")})`,
+              this.#agentIdentity,
+              undefined,
+              {
+                toolId,
+                name: toolName,
+                state: { phase: "executing", input: inputObj } as unknown as ToolState,
+              },
+            );
+            this.#activeToolMsgIds.push(autoMsg.messageId);
+            this.#toolCallMessages.set(autoMsg.messageId, autoMsg);
+            this.#persistAndBuffer(autoMsg);
+            this.#broadcastRaw(autoMsg);
+            this.#store.audit(sender.sub, "session.auto_approve", this.id, `tool=${toolName} mode=${this.#mode}`);
+            return { behavior: "allow" as const };
+          }
 
           // Emit tool_call message with waiting_confirmation state
           const toolMsg = this.#makeMessage(
@@ -510,7 +688,81 @@ export class Session {
       createdBy: this.createdBy,
       createdAt: this.createdAt,
       attachedClients: this.#clients.size,
+      mode: this.#mode,
+      turnsRemaining: this.#turnsRemaining,
+      pinnedFiles: [...this.#pinnedFiles],
+      agentUri: this.#agentIdentity.sub,
+      subagents: this.subagentSnapshot,
     };
+  }
+
+  #broadcastInfoUpdate(): void {
+    this.#broadcastRaw({
+      type: "session.info_update",
+      session: this.toInfo(),
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  /**
+   * Merge pinned files + per-turn attachments. Per-turn entries override
+   * pinned entries with the same path (caller can push fresh content
+   * inline without removing the pin).
+   */
+  #buildEffectiveAttachments(
+    perTurn: readonly Attachment[] | undefined,
+  ): Attachment[] {
+    const out: Attachment[] = [];
+    const seen = new Set<string>();
+    if (perTurn) {
+      for (const a of perTurn) {
+        if (seen.has(a.path)) continue;
+        seen.add(a.path);
+        out.push(a);
+      }
+    }
+    for (const p of this.#pinnedFiles) {
+      if (seen.has(p)) continue;
+      seen.add(p);
+      out.push({ path: p });
+    }
+    return out;
+  }
+
+  /**
+   * Look up the identity that should be credited with a given SDK
+   * tool_use_id. Falls back to the session's primary agent identity when
+   * no sub-agent mapping is recorded.
+   */
+  #identityForToolUse(toolUseId: string | null): MessageIdentity {
+    if (!toolUseId) return this.#agentIdentity;
+    const agentId = this.#toolUseAgentId.get(toolUseId);
+    if (!agentId) return this.#agentIdentity;
+    const sub = this.#subagents.get(agentId);
+    return sub ? sub.identity : this.#agentIdentity;
+  }
+
+  /** Tool classification — used by auto-approve logic. */
+  #shouldAutoApprove(toolName: string): boolean {
+    if (this.#mode === "interactive") return false;
+
+    // Read-only / retrieval tools — safe in both auto-allow and autonomous.
+    if (isSafeTool(toolName)) return true;
+
+    // Write / exec tools — only auto-approved in autonomous mode.
+    if (this.#mode === "autonomous") {
+      if (this.#turnsRemaining === undefined) return true;
+      if (this.#turnsRemaining <= 0) {
+        // Budget exhausted — revert to interactive and fall through to ask.
+        this.setMode("interactive");
+        return false;
+      }
+      this.#turnsRemaining -= 1;
+      this.#broadcastInfoUpdate();
+      return true;
+    }
+
+    return false;
   }
 
   // ── Internals ─────────────────────────────────────────────────────────
@@ -541,10 +793,15 @@ export class Session {
             // Complete any previously executing tools before starting new one
             this.#completeActiveTools();
 
+            // Attribute this tool call to the correct agent — the parent
+            // session agent by default, or the sub-agent worker that ran it
+            // (if PreToolUse recorded a mapping).
+            const emittingIdentity = this.#identityForToolUse(sdkToolUseId);
+
             const toolMsg = this.#makeMessage(
               "tool_call",
               `${toolName}(${Object.keys(toolInput).join(", ")})`,
-              this.#agentIdentity,
+              emittingIdentity,
               undefined,
               {
                 toolId: randomUUID(),
@@ -568,11 +825,13 @@ export class Session {
           this.#completeActiveTools();
 
           if (this.#activeAssistantMsg) {
-            // Streaming already delivered this content — just update scrollback
-            // with the final complete text and flush
+            // Streaming already delivered this content — update in-place,
+            // persist, AND re-broadcast so clients can flip this message
+            // from "live/streaming" to "committed" in their transcript.
             this.#activeAssistantMsg.content = text;
             this.#activeAssistantMsg.parts = parts;
             this.#persistAndBuffer(this.#activeAssistantMsg);
+            this.#broadcastRaw(this.#activeAssistantMsg);
             this.#activeAssistantMsg = null;
           } else {
             // No streaming happened — send the full message directly
@@ -589,29 +848,95 @@ export class Session {
       }
 
       case "stream_event": {
-        // Partial streaming — emit delta
-        const event = (msg as { event?: { type?: string; delta?: { type?: string; text?: string } } }).event;
-        if (event?.type === "content_block_delta" && event.delta?.type === "text_delta" && event.delta.text) {
-          if (!this.#activeAssistantMsg) {
-            // Start new streaming message with empty content — deltas fill it in
-            this.#activeAssistantMsg = this.#makeMessage(
-              "assistant", "", this.#agentIdentity,
+        // The SDK forwards the raw Anthropic stream. We care about three
+        // event shapes: content_block_start (begin thinking/text block),
+        // content_block_delta (append thinking/text chunk), content_block_stop
+        // (finalize the active block so its message commits to scrollback).
+        const event = (msg as {
+          event?: {
+            type?: string;
+            index?: number;
+            content_block?: { type?: string };
+            delta?: { type?: string; text?: string; thinking?: string };
+          };
+        }).event;
+        if (!event) break;
+
+        if (event.type === "content_block_start") {
+          if (event.content_block?.type === "thinking") {
+            this.#activeThinkingMsg = this.#makeMessage(
+              "thinking",
+              "",
+              this.#agentIdentity,
+              undefined,
+              undefined,
+              { event: "thinking_stream" },
             );
-            this.#broadcastRaw(this.#activeAssistantMsg);
+            this.#activeThinkingIndex = event.index ?? null;
+            this.#broadcastRaw(this.#activeThinkingMsg);
+          }
+          break;
+        }
+
+        if (event.type === "content_block_delta" && event.delta) {
+          // Text delta — streaming assistant response.
+          if (event.delta.type === "text_delta" && event.delta.text) {
+            if (!this.#activeAssistantMsg) {
+              this.#activeAssistantMsg = this.#makeMessage(
+                "assistant", "", this.#agentIdentity,
+              );
+              this.#broadcastRaw(this.#activeAssistantMsg);
+            }
+            this.#activeAssistantMsg.content += event.delta.text;
+            const delta: SessionMessageDelta = {
+              type: "session.message.delta",
+              sessionId: this.id,
+              messageId: this.#activeAssistantMsg.messageId,
+              contentAppend: event.delta.text,
+              timestamp: new Date().toISOString(),
+            };
+            this.#broadcastRaw(delta);
+            break;
           }
 
-          // Track full content for scrollback
-          this.#activeAssistantMsg.content += event.delta.text;
+          // Thinking delta — Claude's extended reasoning.
+          if (event.delta.type === "thinking_delta" && event.delta.thinking) {
+            if (!this.#activeThinkingMsg) {
+              this.#activeThinkingMsg = this.#makeMessage(
+                "thinking", "", this.#agentIdentity,
+                undefined, undefined, { event: "thinking_stream" },
+              );
+              this.#activeThinkingIndex = event.index ?? null;
+              this.#broadcastRaw(this.#activeThinkingMsg);
+            }
+            this.#activeThinkingMsg.content += event.delta.thinking;
+            const delta: SessionMessageDelta = {
+              type: "session.message.delta",
+              sessionId: this.id,
+              messageId: this.#activeThinkingMsg.messageId,
+              contentAppend: event.delta.thinking,
+              timestamp: new Date().toISOString(),
+            };
+            this.#broadcastRaw(delta);
+            break;
+          }
+        }
 
-          // Send delta to clients
-          const delta: SessionMessageDelta = {
-            type: "session.message.delta",
-            sessionId: this.id,
-            messageId: this.#activeAssistantMsg.messageId,
-            contentAppend: event.delta.text,
-            timestamp: new Date().toISOString(),
-          };
-          this.#broadcastRaw(delta);
+        if (event.type === "content_block_stop") {
+          // Finalize the matching active block. Thinking blocks commit to
+          // scrollback here (with their complete content) so the user can
+          // scroll back and read the reasoning later. We also re-broadcast
+          // the message so clients can flip it from "live" to "committed"
+          // in their transcript layout.
+          if (
+            this.#activeThinkingMsg &&
+            (event.index === this.#activeThinkingIndex || event.index === undefined)
+          ) {
+            this.#persistAndBuffer(this.#activeThinkingMsg);
+            this.#broadcastRaw(this.#activeThinkingMsg);
+            this.#activeThinkingMsg = null;
+            this.#activeThinkingIndex = null;
+          }
         }
         break;
       }
@@ -851,6 +1176,16 @@ export class Session {
     });
   }
 }
+
+/** Tools that only read state — safe to auto-approve in auto-allow mode. */
+function isSafeTool(name: string): boolean {
+  if (SAFE_TOOLS.has(name)) return true;
+  // All memory recall tools are read-only.
+  if (name.startsWith("mcp__codeoid_memory__")) return true;
+  return false;
+}
+
+const SAFE_TOOLS = new Set<string>(["Read", "Grep", "Glob"]);
 
 /**
  * Extract text from an Anthropic tool_result content payload. The spec allows

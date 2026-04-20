@@ -112,6 +112,12 @@ export class SessionManager {
         return this.#approve(msg, auth);
       case "session.destroy":
         return this.#destroySession(msg, auth);
+      case "session.set_mode":
+        return this.#setMode(msg, auth);
+      case "session.pin":
+        return this.#pin(msg, auth);
+      case "session.unpin":
+        return this.#unpin(msg, auth);
     }
   }
 
@@ -264,8 +270,59 @@ export class SessionManager {
     }
 
     // Fire and forget — output streams to attached clients
-    session.send(msg.text, auth).catch(() => {});
+    session.send(msg.text, auth, msg.attachments).catch(() => {});
 
+    return { type: "response.ok", requestId: msg.id };
+  }
+
+  #pin(
+    msg: Extract<ClientMessage, { type: "session.pin" }>,
+    auth: AuthContext,
+  ): DaemonMessage {
+    // Reuse SESSION_SEND scope — pins only make sense to holders of send.
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_SEND)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Missing scope: session:send",
+        code: "forbidden",
+      };
+    }
+    const session = this.#sessions.get(msg.sessionId);
+    if (!session) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Session not found",
+        code: "not_found",
+      };
+    }
+    session.pinFile(msg.path, auth);
+    return { type: "response.ok", requestId: msg.id };
+  }
+
+  #unpin(
+    msg: Extract<ClientMessage, { type: "session.unpin" }>,
+    auth: AuthContext,
+  ): DaemonMessage {
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_SEND)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Missing scope: session:send",
+        code: "forbidden",
+      };
+    }
+    const session = this.#sessions.get(msg.sessionId);
+    if (!session) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Session not found",
+        code: "not_found",
+      };
+    }
+    session.unpinFile(msg.path, auth);
     return { type: "response.ok", requestId: msg.id };
   }
 
@@ -300,6 +357,33 @@ export class SessionManager {
     }
 
     session.approve(msg.approvalId, msg.approved, auth);
+    return { type: "response.ok", requestId: msg.id };
+  }
+
+  #setMode(
+    msg: Extract<ClientMessage, { type: "session.set_mode" }>,
+    auth: AuthContext,
+  ): DaemonMessage {
+    // Set-mode reuses the same scope gates as approve/send — the caller must
+    // already be authorized to act on the session.
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_APPROVE)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Missing scope: session:approve",
+        code: "forbidden",
+      };
+    }
+    const session = this.#sessions.get(msg.sessionId);
+    if (!session) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Session not found",
+        code: "not_found",
+      };
+    }
+    session.setMode(msg.mode, msg.maxTurns, auth);
     return { type: "response.ok", requestId: msg.id };
   }
 

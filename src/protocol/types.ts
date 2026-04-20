@@ -22,6 +22,16 @@ import type { Scope } from "./scopes.js";
 
 export type SessionStatus = "idle" | "working" | "waiting_approval" | "error";
 
+/**
+ * Execution mode — controls tool approval and autonomous budgeting.
+ *
+ * - `interactive` (default): every tool call asks for approval
+ * - `auto-allow`: Read/Grep/Glob/memory/recall are auto-approved; Write/Edit/Bash still ask
+ * - `autonomous`: every tool auto-approved until the turn budget (`maxTurns`) is exhausted;
+ *   session then reverts to `interactive` and interrupts
+ */
+export type SessionMode = "interactive" | "auto-allow" | "autonomous";
+
 export interface SessionInfo {
   id: string;
   name: string;
@@ -30,6 +40,29 @@ export interface SessionInfo {
   createdBy: string;
   createdAt: string;
   attachedClients: number;
+  /** Current execution mode (default "interactive"). */
+  mode?: SessionMode;
+  /** Remaining turns budget for autonomous mode (undefined = unbounded, 0 = exhausted). */
+  turnsRemaining?: number;
+  /** Files pinned to the session — prepended to every turn's prompt. */
+  pinnedFiles?: string[];
+  /** SPIFFE/WIMSE URI of the primary session agent (falls back to anonymous:session:<id>). */
+  agentUri?: string;
+  /** Active sub-agents for the identity chain display. */
+  subagents?: Subagent[];
+}
+
+export interface Subagent {
+  /** SDK-side agent id (opaque handle). */
+  agentId: string;
+  /** ZeroID WIMSE URI if registered, else undefined. */
+  wimseUri?: string;
+  /** Subagent type label (e.g. "general-purpose", "code-reviewer", "Explorer"). */
+  agentType: string;
+  /** Unix ms when the sub-agent started. */
+  spawnedAt: number;
+  /** True while the sub-agent is running; false after SubagentStop. */
+  active: boolean;
 }
 
 // =============================================================================
@@ -336,7 +369,10 @@ export type ClientMessage =
   | SessionSendMsg
   | SessionInterruptMsg
   | SessionApproveMsg
-  | SessionDestroyMsg;
+  | SessionDestroyMsg
+  | SessionSetModeMsg
+  | SessionPinMsg
+  | SessionUnpinMsg;
 
 interface BaseClientMsg {
   /** Request ID for correlating responses */
@@ -367,6 +403,24 @@ export interface SessionSendMsg extends BaseClientMsg {
   type: "session.send";
   sessionId: string;
   text: string;
+  /**
+   * One-shot attachments for this turn only. Daemon resolves each path
+   * (relative to the session's workdir), reads and prepends the content
+   * to the effective prompt. Missing or oversized files are surfaced as
+   * inline error markers rather than silently dropped.
+   */
+  attachments?: Attachment[];
+}
+
+export interface Attachment {
+  /** File path, absolute or relative to the session workdir. */
+  path: string;
+  /**
+   * Optional inlined content. When provided, daemon skips the file read
+   * and uses this directly — useful for paste-from-clipboard flows or
+   * remote editors that push the bytes over the wire.
+   */
+  content?: string;
 }
 
 export interface SessionInterruptMsg extends BaseClientMsg {
@@ -387,6 +441,32 @@ export interface SessionDestroyMsg extends BaseClientMsg {
   sessionId: string;
 }
 
+export interface SessionSetModeMsg extends BaseClientMsg {
+  type: "session.set_mode";
+  sessionId: string;
+  mode: SessionMode;
+  /** Only meaningful for `autonomous`; undefined = unbounded. */
+  maxTurns?: number;
+}
+
+/**
+ * Manage the session's pinned-files list. Pinned files get prepended to
+ * every turn until unpinned — useful for keeping a spec document or
+ * acceptance criteria in Claude's attention across a long task.
+ */
+export interface SessionPinMsg extends BaseClientMsg {
+  type: "session.pin";
+  sessionId: string;
+  /** File path (absolute or relative to the session workdir). */
+  path: string;
+}
+
+export interface SessionUnpinMsg extends BaseClientMsg {
+  type: "session.unpin";
+  sessionId: string;
+  path: string;
+}
+
 // =============================================================================
 // Daemon → Client messages
 // =============================================================================
@@ -399,6 +479,7 @@ export type DaemonMessage =
   | SessionMessage
   | SessionMessageDelta
   | SessionStatusChangeMsg
+  | SessionInfoUpdateMsg
   | ScrollbackReplayMsg;
 
 export interface AuthOkMsg {
@@ -439,6 +520,17 @@ export interface SessionStatusChangeMsg {
   type: "session.status_change";
   sessionId: string;
   status: SessionStatus;
+  timestamp: string;
+}
+
+/**
+ * Broadcast when non-status fields of a SessionInfo change (e.g. execution
+ * mode, turns-remaining). Carries the full updated SessionInfo so clients
+ * can merge without a separate list refresh.
+ */
+export interface SessionInfoUpdateMsg {
+  type: "session.info_update";
+  session: SessionInfo;
   timestamp: string;
 }
 

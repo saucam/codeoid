@@ -31,6 +31,12 @@ interface UserState {
   attachedSessionId: string | null;
   attachedSessionName: string | null;
   clientId: string;
+  /**
+   * Per-messageId accumulator for streaming content. Telegram's rate limits
+   * make per-token streaming infeasible, so we buffer deltas and flush
+   * whenever Claude moves to a new message OR the session goes idle.
+   */
+  streaming: Map<string, { role: string; content: string }>;
 }
 
 export class TelegramFrontend implements Frontend {
@@ -208,10 +214,11 @@ export class TelegramFrontend implements Frontend {
     }
 
     const chatId = ctx.chat!.id;
+    const userId = ctx.from!.id;
     const client: AttachedClient = {
       id: state.clientId,
       auth: state.auth!,
-      send: (msg: DaemonMessage) => this.#forwardToChat(chatId, msg),
+      send: (msg: DaemonMessage) => this.#forwardToChat(chatId, userId, msg),
     };
 
     const resp = await this.#manager.handle(
@@ -307,6 +314,8 @@ export class TelegramFrontend implements Frontend {
           type: "session.approve",
           id: randomUUID(),
           sessionId: state.attachedSessionId,
+          // Daemon falls back to first pending approval when approvalId is empty.
+          approvalId: "",
           approved: lower === "yes" || lower === "approve",
         },
         state.auth!,
@@ -333,30 +342,118 @@ export class TelegramFrontend implements Frontend {
 
   // ── Forward agent output to Telegram chat ─────────────────────────────
 
-  #forwardToChat(chatId: number, msg: DaemonMessage): void {
+  #forwardToChat(chatId: number, userId: number, msg: DaemonMessage): void {
+    const state = this.#users.get(userId);
     const send = (text: string, opts?: { parse_mode?: string }) =>
       this.#bot.api.sendMessage(chatId, text, opts as Record<string, unknown>).catch(() => {});
 
     switch (msg.type) {
-      case "agent.output":
-        // Chunk for Telegram's 4096 char limit
-        for (let i = 0; i < msg.content.length; i += 4000) {
-          send(msg.content.slice(i, i + 4000));
+      case "session.message": {
+        const m = msg;
+        // Flush any buffered streams that are stale (different messageId).
+        if (state) this.#flushStale(chatId, state, m.messageId);
+
+        switch (m.role) {
+          case "user":
+            // Echo of our own send — no need to replay.
+            break;
+          case "assistant":
+            if (m.content) {
+              this.#sendChunked(chatId, m.content);
+            } else if (state) {
+              // Empty assistant = start of a streaming block.
+              state.streaming.set(m.messageId, { role: "assistant", content: "" });
+            }
+            break;
+          case "thinking":
+            if (m.content) {
+              send(`💭 _thinking_\n${m.content.slice(0, 800)}`, { parse_mode: "Markdown" });
+            } else if (state) {
+              state.streaming.set(m.messageId, { role: "thinking", content: "" });
+            }
+            break;
+          case "tool_call": {
+            if (!m.tool) break;
+            const phase = m.tool.state.phase;
+            if (phase === "waiting_confirmation" && "description" in m.tool.state) {
+              const st = m.tool.state;
+              send(
+                `⚠️ *Permission needed*\nTool: \`${escMd(m.tool.name)}\`\n${escMd(st.description.slice(0, 800))}\n\nReply *yes* or *no*`,
+                { parse_mode: "MarkdownV2" },
+              );
+            } else if (phase === "executing") {
+              send(`⚡ ${m.tool.name}`);
+            } else if (phase === "completed") {
+              send(`✓ ${m.tool.name}`);
+            } else if (phase === "cancelled") {
+              send(`✗ ${m.tool.name} cancelled`);
+            }
+            break;
+          }
+          case "system":
+            if (m.content) send(`⚠️ ${m.content}`);
+            break;
+          case "info":
+            // Quiet by default on mobile.
+            break;
         }
         break;
-      case "agent.tool_call":
-        send(`🔧 ${msg.tool}`);
+      }
+
+      case "session.message.delta": {
+        // Buffer; don't stream to Telegram per-token (rate limits).
+        if (!state) break;
+        const buf = state.streaming.get(msg.messageId);
+        if (buf && msg.contentAppend) {
+          buf.content += msg.contentAppend;
+        }
         break;
-      case "agent.approval_request":
-        send(
-          `⚠️ *Permission needed*\n\nTool: \`${esc(msg.tool)}\`\nInput: \`${esc(msg.input.slice(0, 500))}\`\n\nReply *yes* or *no*`,
-          { parse_mode: "MarkdownV2" },
-        );
+      }
+
+      case "session.status_change": {
+        if (msg.status === "idle") {
+          // Session done — flush any remaining buffered streams.
+          if (state) {
+            for (const [, buf] of state.streaming) {
+              this.#flushBuffer(chatId, buf);
+            }
+            state.streaming.clear();
+          }
+          send("✅ Done.");
+        } else if (msg.status === "error") {
+          send("❌ Error.");
+        }
         break;
-      case "agent.status_change":
-        if (msg.status === "idle") send("✅ Agent finished.");
-        else if (msg.status === "error") send("❌ Agent error.");
-        break;
+      }
+    }
+  }
+
+  /** Flush buffered streams whose messageId is no longer current. */
+  #flushStale(chatId: number, state: UserState, currentMessageId: string): void {
+    for (const [id, buf] of state.streaming) {
+      if (id !== currentMessageId) {
+        this.#flushBuffer(chatId, buf);
+        state.streaming.delete(id);
+      }
+    }
+  }
+
+  #flushBuffer(chatId: number, buf: { role: string; content: string }): void {
+    if (!buf.content) return;
+    if (buf.role === "thinking") {
+      this.#bot.api
+        .sendMessage(chatId, `💭 _thinking_\n${buf.content.slice(0, 1500)}`, {
+          parse_mode: "Markdown",
+        } as Record<string, unknown>)
+        .catch(() => {});
+    } else {
+      this.#sendChunked(chatId, buf.content);
+    }
+  }
+
+  #sendChunked(chatId: number, text: string): void {
+    for (let i = 0; i < text.length; i += 4000) {
+      this.#bot.api.sendMessage(chatId, text.slice(i, i + 4000)).catch(() => {});
     }
   }
 
@@ -370,6 +467,7 @@ export class TelegramFrontend implements Frontend {
         attachedSessionId: null,
         attachedSessionName: null,
         clientId: `telegram:${userId}`,
+        streaming: new Map(),
       };
       this.#users.set(userId, state);
     }
@@ -387,15 +485,21 @@ export class TelegramFrontend implements Frontend {
 
   #makeClient(state: UserState, ctx: Context): AttachedClient {
     const chatId = ctx.chat!.id;
+    const userId = ctx.from!.id;
     return {
       id: state.clientId,
       auth: state.auth!,
-      send: (msg: DaemonMessage) => this.#forwardToChat(chatId, msg),
+      send: (msg: DaemonMessage) => this.#forwardToChat(chatId, userId, msg),
     };
   }
 }
 
 /** Escape MarkdownV2 special characters. */
+function escMd(text: string): string {
+  return text.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, (m) => "\\" + m);
+}
+
+/** @deprecated — legacy esc used elsewhere in this file. */
 function esc(text: string): string {
   return text.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, "\\$&");
 }

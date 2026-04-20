@@ -44,7 +44,42 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
       CREATE INDEX IF NOT EXISTS idx_audit_session ON audit_log(session_id);
       CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id, project_id);
+
+      CREATE TABLE IF NOT EXISTS session_pins (
+        session_id  TEXT NOT NULL,
+        file_path   TEXT NOT NULL,
+        pinned_at   INTEGER NOT NULL,
+        PRIMARY KEY (session_id, file_path),
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_pins_session ON session_pins(session_id);
     `);
+  }
+
+  // ── Pinned attachments ────────────────────────────────────────────────
+
+  pinFile(sessionId: string, filePath: string): void {
+    this.#db
+      .prepare(
+        `INSERT OR IGNORE INTO session_pins (session_id, file_path, pinned_at)
+         VALUES (?, ?, ?)`,
+      )
+      .run(sessionId, filePath, Date.now());
+  }
+
+  unpinFile(sessionId: string, filePath: string): void {
+    this.#db
+      .prepare(`DELETE FROM session_pins WHERE session_id = ? AND file_path = ?`)
+      .run(sessionId, filePath);
+  }
+
+  listPins(sessionId: string): string[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT file_path FROM session_pins WHERE session_id = ? ORDER BY pinned_at ASC`,
+      )
+      .all(sessionId) as Array<{ file_path: string }>;
+    return rows.map((r) => r.file_path);
   }
 
   // ── Sessions ──────────────────────────────────────────────────────────

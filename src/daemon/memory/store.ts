@@ -14,6 +14,8 @@
 
 import { Database } from "bun:sqlite";
 import { randomUUID, createHash } from "node:crypto";
+import { execSync } from "node:child_process";
+import { resolve, isAbsolute } from "node:path";
 import type { Episode, FileReadRecord, RecallQuery } from "./types.js";
 
 /** Row shape as stored in SQLite. */
@@ -33,9 +35,34 @@ interface EpisodeRow {
   created_by: string;
 }
 
-/** Canonicalize a workdir path into a stable workspace ID. */
+/**
+ * Derive a stable workspace ID from a working directory.
+ *
+ * For git repos, we anchor on `git rev-parse --git-common-dir` — the shared
+ * .git directory that's identical across all worktrees of the same repo. That
+ * way two sessions running in separate worktrees of the same codebase
+ * (e.g. `/Workspace/codeoid` and `/Workspace/codeoid.wt-feat-x`) share one
+ * workspace and cross-pollinate memory. For non-git directories, we fall back
+ * to hashing the absolute workdir path.
+ */
 export function workspaceIdFromPath(workdir: string): string {
   const normalized = workdir.replace(/\/+$/, "");
+
+  try {
+    const out = execSync("git rev-parse --git-common-dir", {
+      cwd: normalized,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (out) {
+      const absolute = isAbsolute(out) ? out : resolve(normalized, out);
+      const hash = createHash("sha256").update(absolute).digest("hex");
+      return `ws_${hash.slice(0, 16)}`;
+    }
+  } catch {
+    // Not a git repo, or git not installed — fall through.
+  }
+
   const hash = createHash("sha256").update(normalized).digest("hex");
   return `ws_${hash.slice(0, 16)}`;
 }

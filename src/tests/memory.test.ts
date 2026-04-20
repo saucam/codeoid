@@ -233,6 +233,29 @@ describe("MemoryEngine.recall", () => {
   });
 });
 
+describe("workspaceIdFromPath", () => {
+  it("returns the same ID for different worktrees of the same repo", () => {
+    // codeoid repo itself is a git repo — use it for the test.
+    const mainRepo = "/Workspace/codeoid";
+    const srcSubdir = "/Workspace/codeoid/src";
+    const mainId = workspaceIdFromPath(mainRepo);
+    const subdirId = workspaceIdFromPath(srcSubdir);
+    // Same git repo, different subdirectory → same workspace (anchored on git-common-dir).
+    expect(mainId).toBe(subdirId);
+  });
+
+  it("returns different IDs for unrelated directories", () => {
+    const a = workspaceIdFromPath("/tmp");
+    const b = workspaceIdFromPath("/home");
+    expect(a).not.toBe(b);
+  });
+
+  it("falls back to path hash for non-git dirs", () => {
+    const id = workspaceIdFromPath("/tmp");
+    expect(id).toMatch(/^ws_[a-f0-9]{16}$/);
+  });
+});
+
 describe("EpisodeChunker", () => {
   it("emits one tool_call episode per completed tool invocation", () => {
     const emitted: Array<{ kind: string; toolName?: string; summary: string }> = [];

@@ -98,15 +98,47 @@ program
   });
 
 program
-  .command("new <name> <workdir>")
-  .description("Create a new agent session")
-  .action(async (name: string, workdir: string) => {
-    const config = loadConfig();
-    const client = new TerminalClient(config);
-    await client.connect();
-    await client.createSession(name, workdir);
-    client.disconnect();
-  });
+  .command("new <name> [workdir]")
+  .description("Create a new agent session. With --worktree, auto-spawns a git worktree.")
+  .option(
+    "--worktree <branch>",
+    "Create a git worktree for <branch> and run the session there. Requires being inside a git repo (or pass --repo).",
+  )
+  .option(
+    "--repo <path>",
+    "Path to the source git repo (defaults to current directory when --worktree is set).",
+  )
+  .option(
+    "--worktree-dir <path>",
+    "Override the worktree directory (default: <repo>.wt-<branch>).",
+  )
+  .action(
+    async (
+      name: string,
+      workdir: string | undefined,
+      opts: { worktree?: string; repo?: string; worktreeDir?: string },
+    ) => {
+      const config = loadConfig();
+      let resolvedWorkdir = workdir;
+      if (opts.worktree) {
+        const { createWorktree } = await import("./worktree.js");
+        resolvedWorkdir = await createWorktree({
+          branch: opts.worktree,
+          repo: opts.repo ?? process.cwd(),
+          workdir: opts.worktreeDir,
+        });
+        console.log(`[codeoid] worktree ready: ${resolvedWorkdir}`);
+      }
+      if (!resolvedWorkdir) {
+        console.error("workdir is required (pass as argument or use --worktree).");
+        process.exit(1);
+      }
+      const client = new TerminalClient(config);
+      await client.connect();
+      await client.createSession(name, resolvedWorkdir);
+      client.disconnect();
+    },
+  );
 
 program
   .command("attach <session>")
@@ -116,6 +148,15 @@ program
     const client = new TerminalClient(config);
     await client.connect();
     await client.attachSession(session);
+  });
+
+program
+  .command("tui")
+  .description("Interactive multi-session cockpit (Ink-based TUI)")
+  .action(async () => {
+    const config = loadConfig();
+    const { startTui } = await import("./tui/index.js");
+    await startTui(config);
   });
 
 program
