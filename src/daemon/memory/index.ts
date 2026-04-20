@@ -17,6 +17,22 @@ export { MemoryEngine } from "./engine.js";
 export { EpisodeChunker, extractFilePaths } from "./chunker.js";
 export { buildMemoryMcpServer } from "./mcp.js";
 export { DEFAULT_EMBEDDING_MODEL, createEmbedder } from "./embedder.js";
+export { buildWorkspaceIndex, MAX_INDEX_BYTES } from "./index-builder.js";
+export { IndexScheduler } from "./index-scheduler.js";
+export {
+  clusterEpisodes,
+  MIN_EPISODES_FOR_CLUSTERING,
+  type Cluster,
+  type ClusterMember,
+} from "./cluster.js";
+export {
+  HeuristicLabeler,
+  HaikuLabeler,
+  CachedLabeler,
+  createLabeler,
+  type Labeler,
+  type ClusterLabel,
+} from "./cluster-labeler.js";
 export type { Episode, EpisodeKind, RecallHit, RecallQuery } from "./types.js";
 
 export interface MemoryConfig {

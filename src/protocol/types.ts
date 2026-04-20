@@ -58,6 +58,9 @@ export interface SessionInfo {
  * Cumulative usage totals for a session. Aggregated from each SDK `result`
  * message (one per turn). Frontends render this as a "$X · Yk in / Zk out"
  * counter so the user sees what they're spending in near-realtime.
+ *
+ * Persistent: the daemon records one `TurnUsage` row per turn to SQLite so
+ * totals survive daemon restarts and can be queried after the fact.
  */
 export interface SessionUsage {
   /** Input tokens consumed across all turns. */
@@ -74,6 +77,59 @@ export interface SessionUsage {
   numTurns: number;
   /** Wall-clock duration of agent work (sum of per-turn `duration_ms`). */
   durationMs: number;
+  /** Most recent turns (newest first) — lightweight trend signal for UIs. */
+  recentTurns?: TurnUsage[];
+  /** Max input_tokens ever seen on a single turn — bloat canary. */
+  peakInputTokens?: number;
+  /** Most recent turn's billable input (input - cache_read). */
+  lastTurnInputTokens?: number;
+  /** Most recent turn's output tokens. */
+  lastTurnOutputTokens?: number;
+  /** Most recent turn's cost (USD). */
+  lastTurnCostUsd?: number;
+  /** Most recent turn's cache-read ratio (cache_read / total_input). */
+  lastTurnCacheHitRate?: number;
+}
+
+/**
+ * Per-turn usage record — one row per SDK `result` event.
+ *
+ * Kept small + serializable so it fits cleanly in SessionInfo broadcasts.
+ * `totalInputTokens`, `billableInputTokens` and `cacheHitRate` are derived
+ * fields we compute once on write rather than re-computing in every
+ * frontend — keeps the StatusBar render cheap.
+ *
+ * Important Anthropic semantics (easy to get wrong):
+ *   - `inputTokens` = NEW (uncached) input tokens only
+ *   - `cacheReadTokens` = tokens served from prompt cache (billed 0.1x)
+ *   - `cacheCreationTokens` = tokens written to cache (billed 1.25x)
+ *   - Actual context size Claude processed = input + cacheRead + cacheCreation
+ */
+export interface TurnUsage {
+  /** 1-indexed turn number within the session. */
+  turnNumber: number;
+  /** Unix ms when the turn settled. */
+  createdAt: number;
+  /** New (uncached) input tokens for this turn. Does NOT include cache tokens. */
+  inputTokens: number;
+  /** Output tokens from the assistant. */
+  outputTokens: number;
+  /** Cache-read tokens (billed at ~10% of full input). */
+  cacheReadTokens: number;
+  /** Cache-write tokens (billed at ~125% of full input). */
+  cacheCreationTokens: number;
+  /** Total cost for the turn in USD, as reported by the SDK. */
+  totalCostUsd: number;
+  /** Wall-clock duration in ms (agent work, not network). */
+  durationMs: number;
+  /** Stop reason ("end_turn", "max_tokens", "tool_use", "error", …) if known. */
+  stopReason?: string;
+  /** Derived: total context size = inputTokens + cacheReadTokens + cacheCreationTokens. */
+  totalInputTokens: number;
+  /** Derived: full-price input = inputTokens + cacheCreationTokens (cache reads are ~free). */
+  billableInputTokens: number;
+  /** Derived: cacheReadTokens / totalInputTokens. 0-1. */
+  cacheHitRate: number;
 }
 
 export interface Subagent {

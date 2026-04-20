@@ -24,6 +24,7 @@ import type {
   SessionMode,
   SessionStatus,
   SessionUsage,
+  TurnUsage,
   DaemonMessage,
   SessionMessage,
   SessionMessageDelta,
@@ -38,6 +39,7 @@ import { ScrollbackBuffer } from "./scrollback.js";
 import { TranscriptStore } from "./transcript.js";
 import {
   EpisodeChunker,
+  IndexScheduler,
   buildMemoryMcpServer,
   workspaceIdFromPath,
   type MemoryEngine,
@@ -98,6 +100,7 @@ export class Session {
   #seq = 0;
   #memory?: MemoryEngine;
   #chunker?: EpisodeChunker;
+  #indexScheduler?: IndexScheduler;
   #workspaceId: string;
 
   // Execution mode + turn budget (autonomous mode only).
@@ -106,7 +109,9 @@ export class Session {
 
   // Cumulative token + cost totals, aggregated from SDK `result` messages
   // (one per turn). Broadcast via session.info_update so StatusBar-style
-  // UIs can render a running counter without polling.
+  // UIs can render a running counter without polling. The authoritative
+  // store is the `turn_usage` SQLite table — #usage is a cached projection
+  // rebuilt from the DB on session load and kept fresh per-turn.
   #usage: SessionUsage = {
     inputTokens: 0,
     outputTokens: 0,
@@ -115,7 +120,12 @@ export class Session {
     totalCostUsd: 0,
     numTurns: 0,
     durationMs: 0,
+    recentTurns: [],
+    peakInputTokens: 0,
   };
+
+  /** Cap on how many recent turns we embed in SessionInfo broadcasts. */
+  static readonly RECENT_TURNS_KEEP = 20;
 
   // Pinned files — prepended to every turn until unpinned. Kept both in
   // memory (for hot reads) and in the Store (for restart persistence).
@@ -193,8 +203,27 @@ export class Session {
       type: "agent",
     };
 
+    // Restore cumulative usage from SQLite so the StatusBar reflects any
+    // prior turns after a daemon restart. No-op on first-ever session start.
+    if (opts.memory) {
+      try {
+        this.#refreshUsageFromStore();
+      } catch (err) {
+        console.error(
+          `[codeoid/usage] restore failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
     if (this.#memory) {
       const memory = this.#memory;
+      this.#indexScheduler = new IndexScheduler({
+        store: memory.store,
+        workspaceId: this.#workspaceId,
+        currentSessionId: this.id,
+        workdir: opts.workdir,
+      });
+      const scheduler = this.#indexScheduler;
       this.#chunker = new EpisodeChunker(
         {
           workspaceId: this.#workspaceId,
@@ -204,6 +233,7 @@ export class Session {
         (episode) => {
           try {
             memory.ingest(episode);
+            scheduler.onEpisode();
           } catch (err) {
             console.error(
               `[codeoid/memory] ingest failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -434,10 +464,18 @@ export class Session {
         ...(mcpServers ? { mcpServers } : {}),
         ...(this.#memory
           ? {
+              // Build the system-prompt append by stacking:
+              //   (1) MEMORY_SYSTEM_PROMPT_APPEND — stable across turns, cached by
+              //       prompt cache since the string never changes.
+              //   (2) IndexScheduler.get() — the workspace memory index. Cheaply
+              //       rebuilt when episodes accumulate; gated by debounce so cache
+              //       invalidation stays bounded to ~1/minute of active work.
+              // Putting the stable text first lets the prompt cache hold more
+              // often than if the dynamic index came first.
               systemPrompt: {
                 type: "preset" as const,
                 preset: "claude_code" as const,
-                append: MEMORY_SYSTEM_PROMPT_APPEND,
+                append: this.#buildMemoryPromptAppend(),
               },
             }
           : {}),
@@ -727,6 +765,156 @@ export class Session {
   }
 
   /**
+   * Persist a turn's usage from an SDK `result` message into SQLite and
+   * refresh the in-memory cumulative projection. Single source of truth is
+   * the DB; #usage is a cache for fast broadcasts. Also handles the error
+   * surface (the old inline path used to do this).
+   */
+  #recordTurnFromResult(msg: unknown): void {
+    const turn = msg as {
+      usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+        cache_read_input_tokens?: number;
+        cache_creation_input_tokens?: number;
+      };
+      total_cost_usd?: number;
+      duration_ms?: number;
+      stop_reason?: string | null;
+      is_error?: boolean;
+      error?: unknown;
+      subtype?: string;
+    };
+
+    // Surface error sub-types as system messages (used to happen in the
+    // old inline accumulator).
+    if (turn.subtype && turn.subtype !== "success" && turn.error) {
+      const errorMsg = this.#makeMessage(
+        "system",
+        `Error: ${typeof turn.error === "string" ? turn.error : JSON.stringify(turn.error)}`,
+        SYSTEM_IDENTITY,
+        undefined,
+        undefined,
+        { event: "agent_error" },
+      );
+      this.#persistAndBuffer(errorMsg);
+      this.#broadcastRaw(errorMsg);
+    }
+
+    // Anthropic semantics: input_tokens = NEW input only (not cache).
+    // Total context = input + cache_read + cache_creation.
+    const input = turn.usage?.input_tokens ?? 0;
+    const output = turn.usage?.output_tokens ?? 0;
+    const cacheRead = turn.usage?.cache_read_input_tokens ?? 0;
+    const cacheCreate = turn.usage?.cache_creation_input_tokens ?? 0;
+    const total = input + cacheRead + cacheCreate;
+    const billable = input + cacheCreate;
+    const hitRate = total > 0 ? cacheRead / total : 0;
+
+    // If the memory engine isn't enabled we have no durable store — fall
+    // back to pure in-memory accumulation so StatusBar still gets usage.
+    const store = this.#memory?.store;
+    if (!store) {
+      this.#usage.inputTokens += input;
+      this.#usage.outputTokens += output;
+      this.#usage.cacheReadTokens += cacheRead;
+      this.#usage.cacheCreationTokens += cacheCreate;
+      this.#usage.totalCostUsd += turn.total_cost_usd ?? 0;
+      this.#usage.durationMs += turn.duration_ms ?? 0;
+      this.#usage.numTurns += 1;
+      this.#usage.peakInputTokens = Math.max(
+        this.#usage.peakInputTokens ?? 0,
+        total,
+      );
+      this.#usage.lastTurnInputTokens = total;
+      this.#usage.lastTurnOutputTokens = output;
+      this.#usage.lastTurnCostUsd = turn.total_cost_usd ?? 0;
+      this.#usage.lastTurnCacheHitRate = hitRate;
+      this.#broadcastInfoUpdate();
+      return;
+    }
+
+    const turnNumber = store.nextTurnNumber(this.id);
+    const record: TurnUsage = {
+      turnNumber,
+      createdAt: Date.now(),
+      inputTokens: input,
+      outputTokens: output,
+      cacheReadTokens: cacheRead,
+      cacheCreationTokens: cacheCreate,
+      totalCostUsd: turn.total_cost_usd ?? 0,
+      durationMs: turn.duration_ms ?? 0,
+      stopReason: turn.stop_reason ?? undefined,
+      totalInputTokens: total,
+      billableInputTokens: billable,
+      cacheHitRate: hitRate,
+    };
+
+    try {
+      store.recordTurnUsage({
+        workspaceId: this.#workspaceId,
+        sessionId: this.id,
+        turn: record,
+      });
+    } catch (err) {
+      console.error(
+        `[codeoid/usage] recordTurnUsage failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    this.#refreshUsageFromStore(record);
+    this.#broadcastInfoUpdate();
+  }
+
+  /**
+   * Rebuild the cumulative #usage projection from SQLite. Called on session
+   * load (daemon restart) and after each turn record so StatusBar stays in
+   * sync without caller bookkeeping. Optional `lastTurn` parameter seeds
+   * the "last turn" fields when we have fresher data than the DB read.
+   */
+  #refreshUsageFromStore(lastTurn?: TurnUsage): void {
+    const store = this.#memory?.store;
+    if (!store) return;
+
+    const totals = store.sessionUsageTotals(this.id);
+    const recent = store.listTurnsForSession(
+      this.id,
+      Session.RECENT_TURNS_KEEP,
+    );
+    const mostRecent = lastTurn ?? recent[0];
+
+    this.#usage = {
+      inputTokens: totals.inputTokens,
+      outputTokens: totals.outputTokens,
+      cacheReadTokens: totals.cacheReadTokens,
+      cacheCreationTokens: totals.cacheCreationTokens,
+      totalCostUsd: totals.totalCostUsd,
+      numTurns: totals.numTurns,
+      durationMs: totals.durationMs,
+      recentTurns: recent,
+      peakInputTokens: totals.peakInputTokens,
+      // Use the total-context count (not billable) so StatusBar shows the
+      // true context size — that's what drives compaction risk.
+      lastTurnInputTokens: mostRecent?.totalInputTokens,
+      lastTurnOutputTokens: mostRecent?.outputTokens,
+      lastTurnCostUsd: mostRecent?.totalCostUsd,
+      lastTurnCacheHitRate: mostRecent?.cacheHitRate,
+    };
+  }
+
+  /**
+   * Build the system-prompt `append` block for the memory-enabled path.
+   * Concatenates the stable nudge with the workspace index. The index is
+   * omitted on cold sessions (no episodes yet) so the append stays identical
+   * to the pre-index version — prompt cache stays warm for first turns.
+   */
+  #buildMemoryPromptAppend(): string {
+    const index = this.#indexScheduler?.get() ?? "";
+    if (!index) return MEMORY_SYSTEM_PROMPT_APPEND;
+    return `${MEMORY_SYSTEM_PROMPT_APPEND}\n\n${index}`;
+  }
+
+  /**
    * Merge pinned files + per-turn attachments. Per-turn entries override
    * pinned entries with the same path (caller can push fresh content
    * inline without removing the pin).
@@ -965,50 +1153,7 @@ export class Session {
 
       case "result": {
         this.#flushActiveAssistant();
-        // Accumulate token + cost usage from this turn into the session-level
-        // running totals. `usage` (Anthropic BetaUsage) reports per-turn
-        // totals; we add them into the cumulative counters and broadcast.
-        const turn = msg as unknown as {
-          usage?: {
-            input_tokens?: number;
-            output_tokens?: number;
-            cache_read_input_tokens?: number;
-            cache_creation_input_tokens?: number;
-          };
-          total_cost_usd?: number;
-          duration_ms?: number;
-          is_error?: boolean;
-          error?: unknown;
-          subtype?: string;
-        };
-        if (turn.usage) {
-          this.#usage.inputTokens += turn.usage.input_tokens ?? 0;
-          this.#usage.outputTokens += turn.usage.output_tokens ?? 0;
-          this.#usage.cacheReadTokens += turn.usage.cache_read_input_tokens ?? 0;
-          this.#usage.cacheCreationTokens +=
-            turn.usage.cache_creation_input_tokens ?? 0;
-        }
-        if (typeof turn.total_cost_usd === "number") {
-          this.#usage.totalCostUsd += turn.total_cost_usd;
-        }
-        if (typeof turn.duration_ms === "number") {
-          this.#usage.durationMs += turn.duration_ms;
-        }
-        this.#usage.numTurns += 1;
-        this.#broadcastInfoUpdate();
-
-        // Only emit errors — success result duplicates last assistant message
-        if (turn.subtype && turn.subtype !== "success" && turn.error) {
-          const errorMsg = this.#makeMessage(
-            "system",
-            `Error: ${typeof turn.error === "string" ? turn.error : JSON.stringify(turn.error)}`,
-            SYSTEM_IDENTITY,
-            undefined, undefined,
-            { event: "agent_error" },
-          );
-          this.#persistAndBuffer(errorMsg);
-          this.#broadcastRaw(errorMsg);
-        }
+        this.#recordTurnFromResult(msg);
         break;
       }
 

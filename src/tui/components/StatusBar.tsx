@@ -71,16 +71,32 @@ export function StatusBar({ connection, focused, lastError }: Props) {
               <Text color="cyan" bold>
                 {formatCost(usage.totalCostUsd)}
               </Text>
+              {usage.lastTurnCostUsd !== undefined && usage.lastTurnCostUsd > 0 && (
+                <Text color="cyan" dimColor>
+                  {" (Δ " + formatCost(usage.lastTurnCostUsd) + ")"}
+                </Text>
+              )}
               <Text dimColor>
-                {" · " + formatTokens(usage.inputTokens) + " in / " +
+                {" · " + formatTokens(totalInputOf(usage)) + " in / " +
                   formatTokens(usage.outputTokens) + " out"}
               </Text>
               {usage.cacheReadTokens > 0 && (
-                <Text dimColor>
-                  {" · " + formatTokens(usage.cacheReadTokens) + " cached"}
+                <Text
+                  color={pickCacheColor(usage)}
+                  dimColor
+                >
+                  {" · " + formatPct(cacheRateCumulative(usage)) + " cache"}
                 </Text>
               )}
               <Text dimColor>{" · " + usage.numTurns + " turns"}</Text>
+              {usage.peakInputTokens !== undefined && usage.peakInputTokens > 0 && (
+                <Text
+                  color={pickContextColor(usage.peakInputTokens)}
+                  dimColor
+                >
+                  {" · peak " + formatTokens(usage.peakInputTokens)}
+                </Text>
+              )}
             </>
           )}
         </>
@@ -115,5 +131,57 @@ function formatCost(usd: number): string {
   if (usd < 100) return "$" + usd.toFixed(1);
   if (usd < 1_000) return "$" + Math.round(usd);
   return "$" + (usd / 1_000).toFixed(1) + "k";
+}
+
+/** Render a 0-1 ratio as a compact "NN%". */
+function formatPct(r: number): string {
+  if (!Number.isFinite(r) || r <= 0) return "0%";
+  return Math.round(r * 100) + "%";
+}
+
+/** Total context tokens processed = new input + cache read + cache write. */
+function totalInputOf(u: {
+  inputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+}): number {
+  return u.inputTokens + u.cacheReadTokens + u.cacheCreationTokens;
+}
+
+/**
+ * Cumulative cache hit rate across all turns. Denominator is the total
+ * context size (new input + cache read + cache creation), NOT just
+ * new input — Anthropic's `input_tokens` excludes cached tokens.
+ */
+function cacheRateCumulative(u: {
+  inputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+}): number {
+  const total = totalInputOf(u);
+  return total > 0 ? u.cacheReadTokens / total : 0;
+}
+
+/** Color the cache percentage by desirability (higher = greener). */
+function pickCacheColor(u: {
+  inputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+}): string {
+  const r = cacheRateCumulative(u);
+  if (r >= 0.7) return "green";
+  if (r >= 0.4) return "yellow";
+  return "red";
+}
+
+/**
+ * Color the peak input-token value by context-window occupancy. Assumes
+ * 1M context. > 50% peak = warning (we're close to compaction territory).
+ */
+function pickContextColor(peakInputTokens: number): string {
+  const r = peakInputTokens / 1_000_000;
+  if (r >= 0.8) return "red";
+  if (r >= 0.5) return "yellow";
+  return "green";
 }
 

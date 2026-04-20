@@ -50,6 +50,12 @@ export class MemoryEngine {
     await this.#embedder.init();
   }
 
+  /** Expose the underlying store so callers that need raw aggregate queries
+   *  (index builder, admin UIs) don't have to wire a second handle. */
+  get store(): SqliteEpisodeStore {
+    return this.#store;
+  }
+
   /** Persist an episode and schedule it for embedding. */
   ingest(episode: Omit<Episode, "id">): Episode {
     const saved = this.#store.insert(episode);
