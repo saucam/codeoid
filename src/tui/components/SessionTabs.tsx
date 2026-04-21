@@ -33,8 +33,14 @@ export function SessionTabs({ sessions, focusedId }: Props) {
     );
   }
 
+  // NO flexWrap. A wrapping tab strip changes height (1 row ↔ 2 rows)
+  // as status dots flip color, unread counters toggle, or approval
+  // badges appear — and each height flip desyncs Ink's lastFrame
+  // measurement, so the patchConsole path under-erases on the next
+  // ScrollbackWriter write and the old tab row leaks into scrollback.
+  // Fixed-1-row guarantees a stable live-dock footprint.
   return (
-    <Box paddingX={1} flexWrap="wrap">
+    <Box paddingX={1} overflowX="hidden">
       {sessions.map((s, i) => (
         <SessionTab
           key={s.info.id}

@@ -59,7 +59,16 @@ export function Prompt({
       )}
       {isSlashQuery && <SlashHint input={value} selectedIdx={slashSelectedIdx} />}
       <Box paddingX={1} flexDirection="column">
-        {hint && !isSlashQuery && <Text dimColor>{hint}</Text>}
+        {hint && !isSlashQuery && (
+          // wrap="truncate-end" keeps the hint at exactly 1 row even on
+          // narrow terminals. Without it, soft-wrap adds rows Ink's
+          // layout engine doesn't count, which desyncs cursor math in
+          // the live region and stacks the status bar above on each
+          // re-render. Same root cause as the fix in StatusBar.
+          <Text dimColor wrap="truncate-end">
+            {hint}
+          </Text>
+        )}
         {disabled ? (
           <Box>
             <Text color="cyan" bold>

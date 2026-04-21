@@ -105,9 +105,21 @@ export interface SessionUsage {
   durationMs: number;
   /** Most recent turns (newest first) — lightweight trend signal for UIs. */
   recentTurns?: TurnUsage[];
-  /** Max input_tokens ever seen on a single turn — bloat canary. */
+  /**
+   * Max PRIMARY-AGENT context size ever seen on a single turn — bloat canary.
+   * Computed as max(input + cache_read + cache_creation) across the primary
+   * agent's per-call usages within each turn (subagent calls excluded). This
+   * is the size the model actually processed; NOT a cumulative or billable
+   * figure. Capped at the model's context window on historical fallback.
+   */
   peakInputTokens?: number;
-  /** Most recent turn's billable input (input - cache_read). */
+  /**
+   * Most recent turn's PRIMARY-AGENT context size.
+   * = input + cache_read + cache_creation on the biggest primary call of the
+   * turn (subagents excluded). Matches Claude Code's canonical ctx-occupancy
+   * formula (`calculateContextPercentages`). Used as the numerator for the
+   * StatusBar's ctx%/window display — NOT billable input.
+   */
   lastTurnInputTokens?: number;
   /** Most recent turn's output tokens. */
   lastTurnOutputTokens?: number;

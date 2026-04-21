@@ -12,6 +12,29 @@ interface Props {
   connection: "connecting" | "connected" | "reconnecting" | "error";
   focused: TuiSession | null;
   lastError: string | null;
+  /**
+   * All sessions — used to surface background activity counts (unread,
+   * approvals) as a compact pill-summary at the end of the bar. Kept
+   * on the status bar instead of a separate tab strip so the Ink live
+   * dock stays fixed-height; users switch sessions via Ctrl-G.
+   */
+  sessions?: readonly TuiSession[];
+  /**
+   * Epoch ms when the focused session started working, or null when
+   * idle/approving/errored. Renders a "working 12s" hint inline so the
+   * former WorkingIndicator block doesn't need to live in the dock
+   * (that block's variable height was a major source of stacking).
+   */
+  workingSince?: number | null;
+  /**
+   * Terminal column count. Required so we can constrain the outer
+   * Box width and force `<Text wrap="truncate-end">` to clip at the
+   * real terminal edge. Without this, Ink's layout engine lets wide
+   * content soft-wrap across multiple physical rows — which in turn
+   * desyncs Ink's cursor math (it tracks logical rows, not terminal
+   * rows) and stacks the bar on every re-render.
+   */
+  cols: number;
 }
 
 const CONNECTION_COLOR: Record<Props["connection"], string> = {
@@ -21,12 +44,51 @@ const CONNECTION_COLOR: Record<Props["connection"], string> = {
   error: "red",
 };
 
-export function StatusBar({ connection, focused, lastError }: Props) {
+export function StatusBar({
+  connection,
+  focused,
+  lastError,
+  sessions,
+  workingSince,
+  cols,
+}: Props) {
   const usage = focused?.info.usage;
+  // Background-activity summary: count sessions (other than focused) with
+  // unread messages or pending approvals. Shown as a single compact pill
+  // at the end of the bar — no per-session chrome.
+  const others = (sessions ?? []).filter((s) => s.info.id !== focused?.info.id);
+  const unreadCount = others.filter((s) => s.unread > 0).length;
+  const approvalCount = others.filter((s) => s.pendingApproval).length;
+  const sessionCount = (sessions ?? []).length;
+  // Elapsed seconds since the focused session started working — read
+  // once per render (parent re-renders every 1s tick via workingSince).
+  const workingSec =
+    workingSince !== null && workingSince !== undefined
+      ? Math.max(0, Math.floor((Date.now() - workingSince) / 1000))
+      : null;
+  // Resolve the denominator for ctx% from the CURRENT model's real window.
+  // Haiku 4.5 = 200k; Opus 4.7 / Sonnet 4.6 = 1M. Hardcoding 1M made a Haiku
+  // session at 150k look like "15%" when it's really 75% full.
+  const contextWindow =
+    (focused?.info.model && findModel(focused.info.model)?.contextWindow) ||
+    CONTEXT_WINDOW_FALLBACK;
+  // Outer Box is width-constrained to `cols` and the inner <Text> uses
+  // wrap="truncate-end". Together these guarantee the bar renders as
+  // EXACTLY one terminal row regardless of how much dynamic content
+  // (cost, tokens, path, peak) we try to cram in. Without this, wide
+  // content soft-wraps → Ink's cursor math (logical rows only) doesn't
+  // match the terminal → each re-render appends a fresh copy below the
+  // old one instead of repainting, producing the stacked-bar artifact.
+  //
+  // Nested <Text> elements are treated as inline spans inside the outer
+  // wrap-controlled text, so colors/bold/dim are preserved. We pad the
+  // left edge with a single space in place of the old `paddingX={1}`.
   return (
-    <Box paddingX={1}>
-      <Text color={CONNECTION_COLOR[connection]}>●</Text>
-      <Text> {connection}</Text>
+    <Box width={cols} height={1}>
+      <Text wrap="truncate-end">
+        <Text> </Text>
+        <Text color={CONNECTION_COLOR[connection]}>●</Text>
+        <Text> {connection}</Text>
       {focused && (
         <>
           <Text dimColor>{"   │   "}</Text>
@@ -34,7 +96,25 @@ export function StatusBar({ connection, focused, lastError }: Props) {
           <Text dimColor>{" @ "}</Text>
           <Text dimColor>{focused.info.workdir}</Text>
           <Text dimColor>{" · "}</Text>
-          <Text>{focused.info.status}</Text>
+          <Text
+            color={
+              focused.info.status === "working"
+                ? "yellow"
+                : focused.info.status === "waiting_approval"
+                  ? "red"
+                  : focused.info.status === "error"
+                    ? "red"
+                    : "green"
+            }
+            bold={focused.info.status !== "idle"}
+          >
+            {focused.info.status}
+          </Text>
+          {workingSec !== null && (
+            <Text color="yellow" dimColor>
+              {" · " + formatDuration(workingSec)}
+            </Text>
+          )}
           {focused.info.queuedMessages !== undefined &&
             focused.info.queuedMessages > 0 && (
               <Text color="yellow" bold>
@@ -64,7 +144,11 @@ export function StatusBar({ connection, focused, lastError }: Props) {
             <>
               <Text dimColor>{" · "}</Text>
               <Text color="cyan">
-                {findModel(focused.info.model)?.alias ?? focused.info.model}
+                {/* Prefer the resolved full id (e.g. "claude-opus-4-7") so
+                    operators can see the exact version routed to the SDK.
+                    Falls through to whatever the session reports if we
+                    don't recognize it in the catalog. */}
+                {findModel(focused.info.model)?.id ?? focused.info.model}
               </Text>
             </>
           )}
@@ -107,14 +191,14 @@ export function StatusBar({ connection, focused, lastError }: Props) {
               {usage.lastTurnInputTokens !== undefined && usage.lastTurnInputTokens > 0 && (
                 <>
                   <Text dimColor>{" · ctx "}</Text>
-                  <Text color={pickContextColor(usage.lastTurnInputTokens)} bold>
+                  <Text color={pickContextColor(usage.lastTurnInputTokens, contextWindow)} bold>
                     {formatTokens(usage.lastTurnInputTokens)}
                   </Text>
                   <Text dimColor>
-                    {"/" + formatTokens(CONTEXT_WINDOW) + " ("}
+                    {"/" + formatTokens(contextWindow) + " ("}
                   </Text>
-                  <Text color={pickContextColor(usage.lastTurnInputTokens)}>
-                    {formatPct(usage.lastTurnInputTokens / CONTEXT_WINDOW)}
+                  <Text color={pickContextColor(usage.lastTurnInputTokens, contextWindow)}>
+                    {formatPct(usage.lastTurnInputTokens / contextWindow)}
                   </Text>
                   <Text dimColor>{")"}</Text>
                 </>
@@ -123,15 +207,15 @@ export function StatusBar({ connection, focused, lastError }: Props) {
                 usage.peakInputTokens > 0 &&
                 usage.peakInputTokens !== usage.lastTurnInputTokens && (
                   <Text
-                    color={pickContextColor(usage.peakInputTokens)}
+                    color={pickContextColor(usage.peakInputTokens, contextWindow)}
                     dimColor
                   >
-                    {" · peak " + formatTokens(Math.min(usage.peakInputTokens, CONTEXT_WINDOW))}
+                    {" · peak " + formatTokens(Math.min(usage.peakInputTokens, contextWindow))}
                     {/* When raw peak exceeds the window, that turn summed
                         multiple internal API calls (subagents/retries). The
                         sum isn't a real single-call context size — badge
                         it so the user knows not to trust the raw figure. */}
-                    {usage.peakInputTokens > CONTEXT_WINDOW && (
+                    {usage.peakInputTokens > contextWindow && (
                       <Text color="yellow">{" (Σ multi-call)"}</Text>
                     )}
                   </Text>
@@ -146,14 +230,40 @@ export function StatusBar({ connection, focused, lastError }: Props) {
           )}
         </>
       )}
+      {sessionCount > 1 && (
+        <>
+          <Text dimColor>{"   │   "}</Text>
+          <Text dimColor>{sessionCount + " sessions"}</Text>
+          {unreadCount > 0 && (
+            <Text color="yellow">{" · " + unreadCount + " unread"}</Text>
+          )}
+          {approvalCount > 0 && (
+            <Text color="red" bold>
+              {" · ⎆ " + approvalCount}
+            </Text>
+          )}
+        </>
+      )}
       {lastError && (
         <>
           <Text dimColor>{"   │   "}</Text>
           <Text color="red">⚠ {lastError}</Text>
         </>
       )}
+      </Text>
     </Box>
   );
+}
+
+/** "12s" / "1m 23s" / "1h 5m" — compact working-duration stamp. */
+function formatDuration(totalSec: number): string {
+  if (totalSec < 60) return `${totalSec}s`;
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  if (m < 60) return s === 0 ? `${m}m` : `${m}m ${s}s`;
+  const h = Math.floor(m / 60);
+  const mm = m % 60;
+  return mm === 0 ? `${h}h` : `${h}h ${mm}m`;
 }
 
 /** Render a token count as 1234 / 12.3k / 1.2M to keep the status bar tight. */
@@ -220,19 +330,19 @@ function pickCacheColor(u: {
 }
 
 /**
- * Claude's context window. Opus 4.7 + Sonnet 4.x (with the `context-1m`
- * beta) both hit 1M tokens. Pre-beta models cap at 200k but codeoid defaults
- * to the 1M setting and the SDK exposes the 1M beta explicitly, so 1M is
- * the right denominator for compaction-risk coloring here.
+ * Fallback context window when the session reports a model we don't recognize.
+ * 1M matches the default codeoid ships with (Opus 4.7 / Sonnet 4.6 both 1M).
+ * The real denominator comes from `findModel(id).contextWindow` per-session
+ * — this only kicks in for unknown ids (e.g. a passthrough `claude-foo-bar`).
  */
-const CONTEXT_WINDOW = 1_000_000;
+const CONTEXT_WINDOW_FALLBACK = 1_000_000;
 
 /**
- * Color a context-size value by occupancy of the window.
+ * Color a context-size value by occupancy of the given window.
  * > 80% → red (compaction imminent), 50-80% → yellow, < 50% → green.
  */
-function pickContextColor(inputTokens: number): string {
-  const r = inputTokens / CONTEXT_WINDOW;
+function pickContextColor(inputTokens: number, contextWindow: number): string {
+  const r = inputTokens / contextWindow;
   if (r >= 0.8) return "red";
   if (r >= 0.5) return "yellow";
   return "green";

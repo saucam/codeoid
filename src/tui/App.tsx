@@ -5,15 +5,12 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Box, Static, Text, useApp, useInput, useStdout } from "ink";
+import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { useTuiStore } from "./store.js";
 import { TuiWsClient } from "./ws.js";
-import { SessionTabs } from "./components/SessionTabs.js";
-import { MessageRow } from "./components/MessageRow.js";
 import { Prompt } from "./components/Prompt.js";
 import { StatusBar } from "./components/StatusBar.js";
 import { Modal } from "./components/Modal.js";
-import { WorkingIndicator } from "./components/WorkingIndicator.js";
 import { filterCommands } from "./components/SlashHint.js";
 import { fuzzyMatch, scanWorkspaceFiles } from "./file-scanner.js";
 import {
@@ -23,6 +20,11 @@ import {
 } from "./workspace-commands.js";
 import type { Attachment } from "../protocol/types.js";
 import type { CodeoidConfig } from "../config.js";
+import { findModel } from "../daemon/models.js";
+import {
+  createScrollbackWriter,
+  type ScrollbackWriter,
+} from "./ansi/scrollback-writer.js";
 
 interface Props {
   config: CodeoidConfig;
@@ -57,6 +59,128 @@ export function App({ config }: Props) {
       });
     }
   }, [state.order, state.connection]);
+
+  // ── Scrollback writer ──────────────────────────────────────────────────
+  //
+  // The writer owns "what has been printed to the terminal's native
+  // scrollback". It's the imperative replacement for Ink's <Static>.
+  // We drive it from effects so every state update funnels through the
+  // writer's dedupe logic — no matter if a message arrived via live
+  // streaming finalization, /clear replacement, or reconnect replay, the
+  // writer emits each (sessionId, messageId) at most once.
+  //
+  // Only the FOCUSED session emits to scrollback — matching the prior
+  // <Static> behavior. Background sessions accumulate in state until the
+  // user focuses them, at which point their accumulated committed tail
+  // flushes in one batch (preceded by a session banner).
+
+  const writerRef = useRef<ScrollbackWriter | null>(null);
+  if (writerRef.current === null) {
+    writerRef.current = createScrollbackWriter();
+  }
+  /** Per-session count of committed messages already emitted to scrollback. */
+  const committedSeenRef = useRef<Map<string, number>>(new Map());
+  /** Set of session ids we've seen — used to detect removals for forget(). */
+  const knownSessionsRef = useRef<Set<string>>(new Set());
+
+  // Emit banner on focus transitions. The writer handles "same focus =
+  // no-op" and "null focus = clear pointer so re-focus re-announces".
+  useEffect(() => {
+    const writer = writerRef.current;
+    if (!writer) return;
+    writer.maybeEmitBanner(state.focused, (id) => {
+      const s = state.sessions.get(id);
+      return s ? { name: s.info.name, workdir: s.info.workdir } : null;
+    });
+  }, [state.focused, state.sessions]);
+
+  // Emit newly-committed messages for the focused session. Handles three
+  // cases:
+  //   1. Append (common): committed grew from N → N+k. Emit the tail.
+  //   2. Replacement (/clear or reconnect replay): committed is shorter
+  //      or different. Emit the whole array — the writer dedupes by
+  //      messageId so previously-seen messages are no-ops, and brand-new
+  //      messages in the replayed set reach the terminal.
+  //   3. No change: emit nothing.
+  useEffect(() => {
+    const writer = writerRef.current;
+    if (!writer) return;
+    const focusedId = state.focused;
+    if (!focusedId) return;
+    const session = state.sessions.get(focusedId);
+    if (!session) return;
+    const seen = committedSeenRef.current.get(focusedId) ?? 0;
+    const committed = session.committed;
+    if (committed.length >= seen) {
+      if (committed.length > seen) {
+        writer.writeBatch(focusedId, committed.slice(seen));
+      }
+    } else {
+      // Shorter than before: re-walk the full array (writer dedupes).
+      writer.writeBatch(focusedId, committed);
+    }
+    committedSeenRef.current.set(focusedId, committed.length);
+  }, [state.focused, state.sessions]);
+
+  // Stream live deltas straight to the terminal's scrollback — this is
+  // what replaces the old Ink `live.map(...)` rendering. The writer
+  // tracks per-messageId emittedLen internally, so calling streamDelta
+  // with the full accumulated content is idempotent: only the new tail
+  // is printed. When a live message disappears from `live[]` (moved to
+  // committed), we finalize the stream so the committed-emission effect
+  // treats it as already-done.
+  const liveSeenRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const writer = writerRef.current;
+    if (!writer) return;
+    const focusedId = state.focused;
+    if (!focusedId) return;
+    const session = state.sessions.get(focusedId);
+    if (!session) return;
+
+    // Stream each live message. We restrict to roles that have a
+    // textual body (assistant/thinking); tool_calls stay in the live
+    // dock's future-rendering path or get atomic-rendered on finalize.
+    const currentLiveIds = new Set<string>();
+    for (const m of session.live) {
+      if (m.role !== "assistant" && m.role !== "thinking") continue;
+      const key = `${focusedId}:${m.messageId}`;
+      currentLiveIds.add(key);
+      liveSeenRef.current.add(key);
+      writer.streamDelta(focusedId, {
+        messageId: m.messageId,
+        role: m.role,
+        content: m.content,
+        identity: m.identity,
+      });
+    }
+
+    // Any message that WAS live but isn't anymore → finalize. Handles
+    // both "moved to committed" and "dropped on status=idle" cases.
+    for (const key of liveSeenRef.current) {
+      if (!key.startsWith(`${focusedId}:`)) continue;
+      if (currentLiveIds.has(key)) continue;
+      const messageId = key.slice(focusedId.length + 1);
+      writer.finalizeStream(focusedId, messageId);
+      liveSeenRef.current.delete(key);
+    }
+  }, [state.focused, state.sessions]);
+
+  // Track session removals so the writer can forget emitted ids. Without
+  // this, the seen set grows unbounded across the TUI lifetime for
+  // short-lived sessions.
+  useEffect(() => {
+    const writer = writerRef.current;
+    if (!writer) return;
+    const current = new Set(state.sessions.keys());
+    for (const id of knownSessionsRef.current) {
+      if (!current.has(id)) {
+        writer.forget(id);
+        committedSeenRef.current.delete(id);
+      }
+    }
+    knownSessionsRef.current = current;
+  }, [state.sessions]);
 
   const focusedSession = state.focused ? state.sessions.get(state.focused) ?? null : null;
   const orderedSessions = useMemo(
@@ -96,6 +220,18 @@ export function App({ config }: Props) {
       : null;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   void workingSinceTick;
+
+  // 1-second tick while the focused session is working, so the status
+  // bar's "working 12s" readout advances without the user needing to
+  // interact. Interval clears itself the moment status flips to idle
+  // so we don't spend CPU rendering when nothing is changing.
+  useEffect(() => {
+    if (workingSince === null) return;
+    const id = setInterval(() => {
+      setWorkingSinceTick((t) => t + 1);
+    }, 1000);
+    return () => clearInterval(id);
+  }, [workingSince]);
 
   // ── Slash + workspace-command selection state (UI-only) ───────────────
 
@@ -392,7 +528,11 @@ export function App({ config }: Props) {
   const printContextBreakdownMessage = (session: import("./types.js").TuiSession) => {
     const info = session.info;
     const u = info.usage;
-    const W = 1_000_000;
+    // Resolve context window from the session's current model (200k for
+    // Haiku, 1M for Opus/Sonnet). Mirrors the StatusBar so both readouts
+    // agree on what "100%" means.
+    const W =
+      (info.model && findModel(info.model)?.contextWindow) || 1_000_000;
 
     const lines: string[] = [];
     lines.push(`## Context breakdown for ${info.name}`);
@@ -773,58 +913,32 @@ export function App({ config }: Props) {
       ? "⋯ session is working — Enter queues a mid-turn message · Ctrl-F search · Esc / Ctrl-X interrupt"
       : "Enter to send · Ctrl-N new · Ctrl-G switch · Ctrl-F search · Esc clear · Ctrl-X interrupt · ? help · Ctrl-C quit";
 
-  // Static items: a rolling list of ALL committed messages seen so far,
-  // augmented with session boundaries so switches are visible in scrollback.
-  // Items are keyed so Ink's Static can dedupe — each render adds new items
-  // only; previously-written ones stay in the terminal's native scrollback.
-  const staticItems = useMemo(
-    () => buildStaticItems(orderedSessions, state.focused),
-    [orderedSessions, state.focused],
-  );
+  // Scrollback is now driven by the ScrollbackWriter effects above —
+  // no <Static> here. The Ink render tree below is ONLY the live dock:
+  // tabs, streaming messages, working indicator, status bar, prompt,
+  // and optional modal overlay. Everything finalized has already been
+  // written to the terminal's native scrollback via console.log, which
+  // Ink's `patchConsole: true` routes through writeToStdout safely.
 
   return (
     <>
-      <Static items={staticItems}>
-        {(item) => <StaticItemRow key={item.key} item={item} />}
-      </Static>
       {/*
-        No outer border on the cockpit: the round frame's top edge is
-        exactly what stacks in scrollback when Ink's cursor anchor
-        desyncs (stray stdout write, terminal scroll past the frame,
-        etc.). The internal HorizontalRule dividers already delimit
-        sections, so the frame is pure repaint surface.
+        The Ink tree is now ONLY the bottom dock: status bar + prompt.
+        Fixed ~2-row footprint means Ink's cursor-up/erase math is
+        trivial and can't desync. Everything else — session tabs,
+        streaming message body, tool calls, working indicator —
+        is emitted into the terminal's native scrollback via the
+        ScrollbackWriter effects above. This is the Claude-Code-style
+        layout the user asked for.
       */}
       <Box flexDirection="column">
-        <SessionTabs
-          sessions={orderedSessions}
-          focusedId={state.focused}
-          width={cols - 2}
-        />
-        {focusedSession && focusedSession.live.length > 0 && (
-          <>
-            <HorizontalRule width={cols - 2} />
-            <Box flexDirection="column" paddingX={1}>
-              {focusedSession.live.map((m) => (
-                <MessageRow key={m.messageId} msg={m} live />
-              ))}
-            </Box>
-          </>
-        )}
-        {workingSince !== null && (
-          <>
-            <HorizontalRule width={cols - 2} />
-            <WorkingIndicator
-              startedAt={workingSince}
-              agentUri={focusedSession?.info.agentUri}
-              subagents={focusedSession?.info.subagents}
-            />
-          </>
-        )}
-        <HorizontalRule width={cols - 2} />
         <StatusBar
           connection={state.connection}
           focused={focusedSession}
           lastError={state.lastError}
+          sessions={orderedSessions}
+          workingSince={workingSince}
+          cols={cols}
         />
         <HorizontalRule width={cols - 2} />
         <Prompt
@@ -861,66 +975,12 @@ export function App({ config }: Props) {
   );
 }
 
-// ── Static items ────────────────────────────────────────────────────────────
-
-type StaticItem =
-  | { key: string; kind: "session-banner"; sessionName: string; workdir: string }
-  | { key: string; kind: "message"; message: import("../protocol/types.js").SessionMessage };
-
-/**
- * Build the append-only items list for Ink's Static. We emit a banner when
- * the focused session changes so users can see context shifts in scrollback,
- * then each committed message in order. Keys are stable per-item so Ink's
- * Static dedupes correctly.
- */
-function buildStaticItems(
-  sessions: import("./types.js").TuiSession[],
-  focusedId: string | null,
-): StaticItem[] {
-  const items: StaticItem[] = [];
-  for (const s of sessions) {
-    if (s.info.id !== focusedId) continue;
-    items.push({
-      key: `banner:${s.info.id}`,
-      kind: "session-banner",
-      sessionName: s.info.name,
-      workdir: s.info.workdir,
-    });
-    for (const m of s.committed) {
-      items.push({
-        key: `${s.info.id}:${m.messageId}`,
-        kind: "message",
-        message: m,
-      });
-    }
-  }
-  return items;
-}
-
 function HorizontalRule({ width }: { width: number }) {
   return (
     <Box>
       <Text dimColor>{"─".repeat(Math.max(0, width))}</Text>
     </Box>
   );
-}
-
-function StaticItemRow({ item }: { item: StaticItem }) {
-  if (item.kind === "session-banner") {
-    return (
-      <Box marginTop={1} borderStyle="round" borderColor="cyan" paddingX={1}>
-        <Text>
-          <Text color="cyan" bold>
-            {"▾ "}
-            {item.sessionName}
-          </Text>
-          <Text dimColor>{"  @  "}</Text>
-          <Text dimColor>{item.workdir}</Text>
-        </Text>
-      </Box>
-    );
-  }
-  return <MessageRow msg={item.message} />;
 }
 
 // ── Mention helpers ────────────────────────────────────────────────────────
