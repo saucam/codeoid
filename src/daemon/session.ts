@@ -892,6 +892,7 @@ export class Session {
         // Cleanup per-loop state. Next send() will start a fresh loop.
         this.#completeActiveTools();
         this.#flushActiveAssistant();
+        this.#finalizeActiveThinking();
         this.#chunker?.onTurnEnd();
         if (this.#query === query$) this.#query = null;
         if (this.#abortController === ac) this.#abortController = null;
@@ -957,6 +958,13 @@ export class Session {
 
   interrupt(sender: AuthContext): void {
     this.#store.audit(sender.sub, "session.interrupt", this.id);
+    // Finalize any in-flight streaming messages RIGHT NOW so the TUI's
+    // live region doesn't keep spinning on content the model won't finish
+    // emitting. The consumer task's finally block also calls these, but
+    // there's a window between abort and finally where the user sees
+    // stuck spinners — doing it here flushes immediately.
+    this.#flushActiveAssistant();
+    this.#finalizeActiveThinking();
     // Abort aborts the whole SDK stream. The consumer task picks that up
     // via its try/catch and cleans itself up. Next send() will start a
     // fresh loop. Approvals are always unblocked to avoid orphan waiters.
@@ -1758,19 +1766,14 @@ export class Session {
           this.#closeToolCallWithOutput(messageId, output, !isError);
           closedAny = true;
         }
-        // Re-emit a thinking indicator so the UI shows Claude is still working
-        // while it decides the next step. The web frontend auto-dismisses it
-        // when the next assistant content, tool_call, or status=idle arrives.
-        if (closedAny && this.#status === "working") {
-          const thinkingMsg = this.#makeMessage(
-            "thinking",
-            "Thinking...",
-            this.#agentIdentity,
-            undefined, undefined,
-            { event: "thinking_continue" },
-          );
-          this.#broadcastRaw(thinkingMsg);
-        }
+        // NOTE: we used to emit a synthetic `thinking: "Thinking..."`
+        // message here to visually signal "Claude is deciding next step".
+        // That's been removed — it created orphan live-region messages
+        // that never finalized (each had a fresh messageId with no
+        // content_block_stop partner). Real streaming thinking via
+        // `content_block_start` now handles this case, and the StatusBar's
+        // `working` state + WorkingIndicator cover the gap otherwise.
+        void closedAny;
         break;
       }
     }
@@ -1819,10 +1822,42 @@ export class Session {
     this.#toolCallMessages.delete(messageId);
   }
 
-  /** Flush the active assistant message into scrollback (for device handoff) */
+  /**
+   * Finalize the active assistant stream. When the model gets cut off
+   * mid-reply (interrupt, abort, error, turn boundary reached without a
+   * natural end), we need to flip the TUI's live-region entry into a
+   * committed scrollback row — otherwise the spinner on the streaming
+   * cursor never retires.
+   *
+   * If there's meaningful content already, re-broadcast it so the store
+   * treats it as committed (store rule: same messageId + non-empty content
+   * → move live → committed). If there's no content, just drop it — an
+   * empty assistant row would be noise.
+   */
   #flushActiveAssistant(): void {
-    if (this.#activeAssistantMsg) {
-      this.#activeAssistantMsg = null;
+    if (!this.#activeAssistantMsg) return;
+    const m = this.#activeAssistantMsg;
+    this.#activeAssistantMsg = null;
+    if (m.content && m.content.length > 0) {
+      this.#persistAndBuffer(m);
+      this.#broadcastRaw(m);
+    }
+  }
+
+  /**
+   * Finalize the active thinking stream. Same shape as
+   * #flushActiveAssistant — persist + re-broadcast if content present so
+   * the TUI moves it to committed. Prevents stuck `Thinking…` spinners
+   * when Claude is cut off mid-reasoning.
+   */
+  #finalizeActiveThinking(): void {
+    if (!this.#activeThinkingMsg) return;
+    const m = this.#activeThinkingMsg;
+    this.#activeThinkingMsg = null;
+    this.#activeThinkingIndex = null;
+    if (m.content && m.content.length > 0) {
+      this.#persistAndBuffer(m);
+      this.#broadcastRaw(m);
     }
   }
 
