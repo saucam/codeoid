@@ -23,7 +23,7 @@ export class TerminalClient {
   async connect(): Promise<void> {
     const token = await this.#getToken();
 
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve, _reject) => {
       this.#ws = new WebSocket(this.#config.daemonUrl);
 
       this.#ws.onopen = () => {

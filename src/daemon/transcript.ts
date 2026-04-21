@@ -170,8 +170,8 @@ export class TranscriptStore {
       if (byMessageId.has(messageId)) {
         // Update: merge the newer entry over the older one
         const existing = byMessageId.get(messageId)!;
-        const existingMsg = existing.message as Record<string, unknown>;
-        const newMsg = msg as Record<string, unknown>;
+        const existingMsg = existing.message as unknown as Record<string, unknown>;
+        const newMsg = msg as unknown as Record<string, unknown>;
 
         // Shallow merge — newer fields overwrite older, preserving what's not in the update
         for (const [k, v] of Object.entries(newMsg)) {

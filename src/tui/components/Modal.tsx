@@ -83,13 +83,23 @@ function NewSessionModal({
   onSubmit: (name: string, workdir: string) => void;
   onCancel: () => void;
 }) {
-  const [stage, setStage] = useState<"name" | "workdir">("name");
+  // Both fields are always rendered as TextInputs so the workdir is
+  // visibly editable. `focused` controls which one captures keystrokes
+  // (via ink-text-input's `focus` prop). Tab / Enter on name moves focus
+  // to workdir; Enter on workdir submits.
+  const [focused, setFocused] = useState<"name" | "workdir">("name");
   const [name, setName] = useState("");
   const [workdir, setWorkdir] = useState(process.cwd());
 
   useInput((_input, key) => {
     if (key.escape) onCancel();
+    if (key.tab) {
+      setFocused((f) => (f === "name" ? "workdir" : "name"));
+    }
   });
+
+  const pointer = (field: "name" | "workdir") =>
+    focused === field ? "▸ " : "  ";
 
   return (
     <Box
@@ -103,35 +113,36 @@ function NewSessionModal({
         New Session
       </Text>
       <Box marginTop={1}>
-        <Text>{stage === "name" ? "name:    " : "name:    "}</Text>
-        {stage === "name" ? (
-          <TextInput
-            value={name}
-            onChange={setName}
-            onSubmit={() => {
-              if (name.trim()) setStage("workdir");
-            }}
-          />
-        ) : (
-          <Text>{name}</Text>
-        )}
+        <Text color={focused === "name" ? "cyan" : undefined}>
+          {pointer("name")}name:
+        </Text>
+        <TextInput
+          focus={focused === "name"}
+          value={name}
+          onChange={setName}
+          onSubmit={() => {
+            if (name.trim()) setFocused("workdir");
+          }}
+        />
       </Box>
       <Box>
-        <Text>workdir: </Text>
-        {stage === "workdir" ? (
-          <TextInput
-            value={workdir}
-            onChange={setWorkdir}
-            onSubmit={() => {
-              if (workdir.trim()) onSubmit(name.trim(), workdir.trim());
-            }}
-          />
-        ) : (
-          <Text dimColor>{workdir}</Text>
-        )}
+        <Text color={focused === "workdir" ? "cyan" : undefined}>
+          {pointer("workdir")}workdir:
+        </Text>
+        <TextInput
+          focus={focused === "workdir"}
+          value={workdir}
+          onChange={setWorkdir}
+          onSubmit={() => {
+            if (name.trim() && workdir.trim())
+              onSubmit(name.trim(), workdir.trim());
+          }}
+        />
       </Box>
       <Box marginTop={1}>
-        <Text dimColor>Enter to advance · Esc to cancel</Text>
+        <Text dimColor>
+          Tab switches fields · Enter on name → workdir · Enter on workdir creates · Esc cancels
+        </Text>
       </Box>
     </Box>
   );

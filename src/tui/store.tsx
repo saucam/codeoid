@@ -116,10 +116,21 @@ function reducer(state: TuiState, action: TuiAction): TuiState {
       const s = state.sessions.get(action.sessionId);
       if (!s) return state;
       const sessions = new Map(state.sessions);
+      // Safety net: when a session goes idle, any message still sitting in
+      // the live region without having been committed is stale — the
+      // turn ended, no more deltas are coming. Clear live so we don't
+      // accumulate orphan `thinking…` spinners across turns. The daemon
+      // also finalizes these on its side; this is belt-and-suspenders for
+      // cases where the daemon's final broadcast dropped or lagged.
+      const shouldClearLive =
+        action.status === "idle" || action.status === "error";
       sessions.set(action.sessionId, {
         ...s,
         info: { ...s.info, status: action.status },
-        pendingApproval: action.status === "waiting_approval" ? s.pendingApproval : null,
+        pendingApproval:
+          action.status === "waiting_approval" ? s.pendingApproval : null,
+        live: shouldClearLive ? [] : s.live,
+        streaming: shouldClearLive ? null : s.streaming,
       });
       return { ...state, sessions };
     }

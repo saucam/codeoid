@@ -28,7 +28,7 @@ import type { AuthContext, ClientMessage, DaemonMessage } from "../protocol/type
 import type { AttachedClient } from "./session.js";
 import type { Frontend, FrontendContext } from "../frontends/types.js";
 import type { Server } from "node:http";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 
 export interface DaemonConfig {
   port: number;
@@ -70,7 +70,6 @@ export class DaemonServer {
   #manager: SessionManager;
   #shutdown: ShutdownManager;
   #memory: MemoryEngine | null = null;
-  #httpServer: ReturnType<typeof createServer> | null = null;
   #bunServer: ReturnType<typeof Bun.serve> | null = null;
   #sockets = new Map<string, AuthenticatedSocket>();
   #frontends: Frontend[] = [];

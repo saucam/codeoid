@@ -12,7 +12,6 @@ import {
   ALL_SCOPES_STRING,
   hasScope,
   hasAllScopes,
-  type Scope,
 } from "../protocol/scopes.js";
 
 describe("SCOPES constants", () => {

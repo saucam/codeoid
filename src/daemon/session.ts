@@ -1742,6 +1742,12 @@ export class Session {
 
         if (event.type === "content_block_start") {
           if (event.content_block?.type === "thinking") {
+            // Multi-call turns (primary agent + subagents + retries) can
+            // interleave their own thinking streams. Our slot is
+            // singular — finalize the previous in-flight block BEFORE
+            // starting a new one, otherwise the old messageId orphans in
+            // the TUI's live region with a spinning cursor forever.
+            this.#finalizeActiveThinking();
             this.#activeThinkingMsg = this.#makeMessage(
               "thinking",
               "",
@@ -1821,6 +1827,12 @@ export class Session {
 
       case "result": {
         this.#flushActiveAssistant();
+        // Also finalize any thinking block that never got its
+        // content_block_stop (happens when the turn ends mid-reasoning
+        // or the API abbreviates the stream). Without this, the TUI's
+        // live region keeps spinning on a thinking message that the
+        // model won't finish emitting.
+        this.#finalizeActiveThinking();
         this.#recordTurnFromResult(msg);
         // Turn complete. In streamInput mode the query() doesn't end — it
         // blocks waiting for more input. If nothing's queued and no
@@ -1962,27 +1974,34 @@ export class Session {
     if (!this.#activeAssistantMsg) return;
     const m = this.#activeAssistantMsg;
     this.#activeAssistantMsg = null;
-    if (m.content && m.content.length > 0) {
-      this.#persistAndBuffer(m);
-      this.#broadcastRaw(m);
+    // Rebroadcast ALWAYS — even with empty content. The TUI's store
+    // looks for "same messageId with content" to move a live-region
+    // entry to committed; an empty rebroadcast wouldn't trigger that,
+    // leaving the spinner stuck. Use a placeholder so commit fires.
+    if (!m.content || m.content.length === 0) {
+      m.content = "(no output)";
     }
+    this.#persistAndBuffer(m);
+    this.#broadcastRaw(m);
   }
 
   /**
    * Finalize the active thinking stream. Same shape as
-   * #flushActiveAssistant — persist + re-broadcast if content present so
-   * the TUI moves it to committed. Prevents stuck `Thinking…` spinners
-   * when Claude is cut off mid-reasoning.
+   * #flushActiveAssistant — always rebroadcast with non-empty content so
+   * the TUI's "same msgId + content → committed" rule fires and the
+   * live-region spinner retires. Prevents stuck `Thinking…` stacks when
+   * multi-call turns overlap or turns end mid-reasoning.
    */
   #finalizeActiveThinking(): void {
     if (!this.#activeThinkingMsg) return;
     const m = this.#activeThinkingMsg;
     this.#activeThinkingMsg = null;
     this.#activeThinkingIndex = null;
-    if (m.content && m.content.length > 0) {
-      this.#persistAndBuffer(m);
-      this.#broadcastRaw(m);
+    if (!m.content || m.content.length === 0) {
+      m.content = "(reasoning elided)";
     }
+    this.#persistAndBuffer(m);
+    this.#broadcastRaw(m);
   }
 
   /** Mark any still-open tool calls as completed — skips ones already closed with a real tool_result. */

@@ -10,7 +10,6 @@ import {
   type SessionMessage,
   type SessionMessageDelta,
   type AuthContext,
-  type MessageIdentity,
   type MessageRole,
   type ContentPart,
   type ToolState,
@@ -421,7 +420,9 @@ describe("DaemonMessage routing", () => {
         case "session.message": return `msg:${msg.role}`;
         case "session.message.delta": return "delta";
         case "session.status_change": return `status:${msg.status}`;
+        case "session.info_update": return `info:${msg.session.id}`;
         case "scrollback.replay": return `replay:${msg.messages.length}`;
+        case "session.search.result": return `search:${msg.sessions.length}`;
       }
     };
 
@@ -449,7 +450,7 @@ describe("ClientMessage", () => {
     expect(msg.type).toBe("session.approve");
     expect((msg as { approvalId: string }).approvalId).toBe("approval-abc");
     // Should NOT have requestId for the approval correlation
-    expect((msg as Record<string, unknown>)["requestId"]).toBeUndefined();
+    expect((msg as unknown as Record<string, unknown>)["requestId"]).toBeUndefined();
   });
 
   test("all client message types have id field", () => {
