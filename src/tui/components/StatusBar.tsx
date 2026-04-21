@@ -6,6 +6,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import type { TuiSession } from "../types.js";
+import { findModel } from "../../daemon/models.js";
 
 interface Props {
   connection: "connecting" | "connected" | "reconnecting" | "error";
@@ -59,6 +60,14 @@ export function StatusBar({ connection, focused, lastError }: Props) {
                 {" (" + focused.info.turnsRemaining + " actions left)"}
               </Text>
             )}
+          {focused.info.model && (
+            <>
+              <Text dimColor>{" · "}</Text>
+              <Text color="cyan">
+                {findModel(focused.info.model)?.alias ?? focused.info.model}
+              </Text>
+            </>
+          )}
           {focused.info.pinnedFiles && focused.info.pinnedFiles.length > 0 && (
             <>
               <Text dimColor>{" · pinned: "}</Text>

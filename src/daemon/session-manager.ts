@@ -131,6 +131,8 @@ export class SessionManager {
         return this.#rotate(msg, auth);
       case "session.search":
         return this.#search(msg, auth);
+      case "session.set_model":
+        return this.#setModel(msg, auth);
     }
   }
 
@@ -440,6 +442,50 @@ export class SessionManager {
       if (!best || s.createdAt > best.createdAt) best = s;
     }
     return best?.workdir ?? null;
+  }
+
+  /**
+   * Switch the model for a session. Reuses SESSION_SEND scope (same as
+   * setMode / rotate — anyone who can drive the session can change its
+   * model). Returns `response.ok` with the resolved model in `data` on
+   * success; rejects with a 400 when the model id is unknown.
+   */
+  async #setModel(
+    msg: Extract<ClientMessage, { type: "session.set_model" }>,
+    auth: AuthContext,
+  ): Promise<DaemonMessage> {
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_SEND)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Missing scope: session:send",
+        code: "forbidden",
+      };
+    }
+    const session = this.#sessions.get(msg.sessionId);
+    if (!session) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Session not found",
+        code: "not_found",
+      };
+    }
+    try {
+      const result = await session.setModel(msg.model, msg.fallbackModel, auth);
+      return {
+        type: "response.ok",
+        requestId: msg.id,
+        data: { model: result.model, fallbackModel: result.fallbackModel },
+      };
+    } catch (err) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: err instanceof Error ? err.message : String(err),
+        code: "invalid_request",
+      };
+    }
   }
 
   /**

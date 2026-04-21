@@ -39,6 +39,9 @@ export class Store {
     this.#addColumnIfMissing("sessions", "claude_code_session_id", "TEXT");
     this.#addColumnIfMissing("sessions", "rotation_count", "INTEGER NOT NULL DEFAULT 0");
     this.#addColumnIfMissing("sessions", "last_rotated_at", "INTEGER");
+    // Model selection — persisted so /model choice survives daemon restart.
+    this.#addColumnIfMissing("sessions", "model", "TEXT");
+    this.#addColumnIfMissing("sessions", "fallback_model", "TEXT");
 
     this.#db.exec(`
 
@@ -207,6 +210,45 @@ export class Store {
          WHERE id = ?`,
       )
       .run(backingId, rotationDelta, rotatedAt ?? null, id);
+  }
+
+  /**
+   * Get the persisted model selection for a session. Either field may be
+   * null if never set — caller falls back to config defaults.
+   */
+  getSessionModel(id: string): { model: string | null; fallbackModel: string | null } {
+    const row = this.#db
+      .prepare(
+        "SELECT model AS m, fallback_model AS f FROM sessions WHERE id = ?",
+      )
+      .get(id) as { m: string | null; f: string | null } | undefined;
+    return { model: row?.m ?? null, fallbackModel: row?.f ?? null };
+  }
+
+  /**
+   * Set the model selection for a session. Passing `null` for either field
+   * clears it (next lookup will return null). Caller is responsible for
+   * validating the id before calling — Store doesn't gatekeep strings.
+   */
+  setSessionModel(
+    id: string,
+    model: string | null,
+    fallbackModel: string | null | undefined = undefined,
+  ): void {
+    if (fallbackModel === undefined) {
+      // Only update primary model; leave fallback untouched.
+      this.#db
+        .prepare(
+          `UPDATE sessions SET model = ?, updated_at = datetime('now') WHERE id = ?`,
+        )
+        .run(model, id);
+      return;
+    }
+    this.#db
+      .prepare(
+        `UPDATE sessions SET model = ?, fallback_model = ?, updated_at = datetime('now') WHERE id = ?`,
+      )
+      .run(model, fallbackModel, id);
   }
 
   /** Rotation counters for a session (for UI display + diagnostics). */

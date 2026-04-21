@@ -138,6 +138,20 @@ export class TuiWsClient {
     });
   }
 
+  setModel(
+    sessionId: string,
+    model: string,
+    fallbackModel?: string | null,
+  ): Promise<DaemonMessage> {
+    return this.#request({
+      type: "session.set_model",
+      id: randomUUID(),
+      sessionId,
+      model,
+      fallbackModel,
+    });
+  }
+
   // ── Internals ─────────────────────────────────────────────────────────
 
   async #connect(): Promise<void> {

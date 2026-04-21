@@ -120,6 +120,20 @@ const TelemetrySchema = z
  * Thresholds are fractions of the context window (1.0 = 1M tokens). Pick
  * sane defaults; users can tune via config or env.
  */
+/**
+ * Per-session model defaults. `defaultModel` is used on session creation;
+ * `fallbackModel` is handed to the SDK's `fallbackModel` option so a 429
+ * or 529 transparently retries with a cheaper/less-loaded model instead of
+ * failing the turn. Both accept aliases (`opus`/`sonnet`/`haiku`) or full
+ * Anthropic model ids.
+ */
+const SessionSchema = z
+  .object({
+    defaultModel: z.string().optional(),
+    fallbackModel: z.string().optional(),
+  })
+  .default({});
+
 const AutoRotateSchema = z
   .object({
     enabled: z.boolean().default(false),
@@ -180,6 +194,7 @@ const RootSchema = z.object({
   labeling: LabelingSchema,
   telemetry: TelemetrySchema,
   autoRotate: AutoRotateSchema,
+  session: SessionSchema,
 });
 
 type ParsedConfig = z.infer<typeof RootSchema>;
@@ -250,6 +265,11 @@ export interface CodeoidConfig {
     minTurnsBeforeRotate: number;
     strategy: "task-anchor";
   };
+  /** Model selection defaults applied when a session is created. */
+  session: {
+    defaultModel?: string;
+    fallbackModel?: string;
+  };
 }
 
 // ── Env-var override map ─────────────────────────────────────────────────
@@ -300,6 +320,8 @@ const ENV_OVERRIDES: readonly EnvOverride[] = [
   { env: "CODEOID_AUTO_ROTATE_PCT", path: "autoRotate.rotatePct", kind: "float" },
   { env: "CODEOID_AUTO_ROTATE_HARD_PCT", path: "autoRotate.hardRotatePct", kind: "float" },
   { env: "CODEOID_AUTO_ROTATE_MIN_TURNS", path: "autoRotate.minTurnsBeforeRotate", kind: "int" },
+  { env: "CODEOID_DEFAULT_MODEL", path: "session.defaultModel", kind: "string" },
+  { env: "CODEOID_FALLBACK_MODEL", path: "session.fallbackModel", kind: "string" },
 ];
 
 // ── Loading ──────────────────────────────────────────────────────────────
@@ -439,6 +461,7 @@ export function loadConfig(opts: LoadOptions = {}): CodeoidConfig {
     labeling: parsed.labeling,
     telemetry: { osc8: osc8Mode },
     autoRotate: parsed.autoRotate,
+    session: parsed.session,
   };
 }
 

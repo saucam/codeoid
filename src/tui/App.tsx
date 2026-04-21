@@ -541,6 +541,27 @@ export function App({ config }: Props) {
         });
         return;
       }
+      case "/model": {
+        // No args → interactive picker modal. With an arg → direct switch
+        // (skip modal, trust the user knows the alias/id they want).
+        if (args.length === 0) {
+          dispatch({ type: "modal.open", modal: { kind: "model" } });
+          return;
+        }
+        if (!client || !focusedSession) return;
+        const chosen = args[0]!;
+        void client
+          .setModel(focusedSession.info.id, chosen)
+          .then((resp) => {
+            if (resp.type === "response.error") {
+              dispatch({ type: "error", message: resp.error });
+            }
+          })
+          .catch((err: Error) =>
+            dispatch({ type: "error", message: err.message }),
+          );
+        return;
+      }
       default: {
         // Workspace command? Expand template and send.
         const wsCmd = workspaceCommands.find((c) => c.name === cmd);
@@ -621,6 +642,20 @@ export function App({ config }: Props) {
       throw new Error(resp.error);
     }
     return [];
+  };
+
+  /**
+   * Model switch handler. Resolves aliases on the daemon side; we just
+   * forward the user's choice. Surfaces server errors (unknown id) so
+   * the modal can show them inline.
+   */
+  const onSetModel = async (model: string): Promise<void> => {
+    const client = wsRef.current;
+    if (!client || !focusedSession) return;
+    const resp = await client.setModel(focusedSession.info.id, model);
+    if (resp.type === "response.error") {
+      throw new Error(resp.error);
+    }
   };
 
   // ── Layout ─────────────────────────────────────────────────────────────
@@ -705,11 +740,13 @@ export function App({ config }: Props) {
         <Modal
           modal={state.modal}
           sessions={orderedSessions}
+          focusedSession={focusedSession}
           onSubmitNewSession={onSubmitNewSession}
           onSelectSession={onSelectSession}
           onConfirmDestroy={onConfirmDestroy}
           onCancel={onCancelModal}
           onSearch={onSearch}
+          onSetModel={onSetModel}
         />
       )}
     </>

@@ -135,6 +135,7 @@ ${CSS}
         <span id="session-name" class="session-title">No session</span>
       </div>
       <div class="topbar-right">
+        <button id="search-btn" class="icon-btn" title="Search (Ctrl+K)">🔍</button>
         <span id="session-status" class="status-dot idle"></span>
         <button id="new-session-btn" class="icon-btn">＋</button>
       </div>
@@ -190,6 +191,22 @@ ${CSS}
         <input id="ns-name" placeholder="Session name (e.g. oracle)" />
         <input id="ns-workdir" placeholder="Working directory (e.g. /Workspace/...)" />
         <button id="ns-create" class="btn-primary">Create</button>
+      </div>
+    </div>
+
+    <!-- Search modal -->
+    <div id="search-modal" class="modal hidden">
+      <div class="modal-content search-modal-content">
+        <div class="modal-header">
+          <span>Search sessions</span>
+          <div class="search-header-right">
+            <kbd class="search-kbd">Ctrl+K</kbd>
+            <button id="search-close" class="icon-btn">✕</button>
+          </div>
+        </div>
+        <input id="search-input" placeholder="Search messages, tools, code..." autocomplete="off" />
+        <div id="search-status" class="search-status">Hybrid search across all sessions in this workspace.</div>
+        <div id="search-results" class="search-results"></div>
       </div>
     </div>
   </div>
@@ -490,6 +507,35 @@ pre {
   color: var(--accent); font-size: 0.8rem; padding: 0.2rem 0.5rem;
   border: 1px solid var(--accent); border-radius: 12px; flex-shrink: 0;
 }
+
+/* Search modal */
+.search-modal-content { max-height: 85dvh; }
+.search-header-right { display: flex; align-items: center; gap: 0.5rem; }
+.search-kbd {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+  padding: 0.15rem 0.4rem; font-size: 0.7rem; color: var(--text-muted);
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+.search-status { font-size: 0.8rem; color: var(--text-muted); min-height: 1.2em; }
+.search-results { display: flex; flex-direction: column; gap: 0.5rem; overflow-y: auto; max-height: 60dvh; }
+.search-hit {
+  background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 0.75rem; cursor: pointer; transition: border-color 0.15s, background 0.15s;
+}
+.search-hit:hover { border-color: var(--accent); }
+.search-hit.selected { border-color: var(--accent); background: var(--bg-surface); }
+.search-hit-header {
+  display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.35rem;
+}
+.search-hit-name { font-weight: 600; font-size: 0.95rem; }
+.search-meta { font-size: 0.75rem; color: var(--text-muted); }
+.search-snippet {
+  font-size: 0.8rem; color: var(--text-muted); line-height: 1.4;
+  padding: 0.25rem 0; border-top: 1px solid var(--border);
+  font-family: 'SF Mono', 'Fira Code', monospace; word-break: break-word;
+}
+.search-snippet-prefix { color: var(--accent); font-weight: 500; }
+.search-workdir { font-size: 0.7rem; color: var(--text-muted); margin-top: 0.25rem; }
 `;
 
 // ── JavaScript ────────────────────────────────────────────────────────────────
@@ -666,6 +712,13 @@ function JS(wsUrl: string, scopesString: string): string {
   let currentIdentity = null;
 
   function handleMessage(msg) {
+    // Route pending search responses before the main switch
+    if (msg.requestId && pendingSearchHandlers[msg.requestId]) {
+      pendingSearchHandlers[msg.requestId](msg);
+      delete pendingSearchHandlers[msg.requestId];
+      return;
+    }
+
     switch (msg.type) {
       case 'auth.ok':
         currentIdentity = msg.identity;
@@ -1211,6 +1264,163 @@ function JS(wsUrl: string, scopesString: string): string {
     voiceBtn.style.color = 'var(--red)';
     recognition.start();
   };
+
+  // ── Search ────────────────────────────────────────────────────────
+  const searchModal = $('#search-modal');
+  const searchInput = $('#search-input');
+  const searchResults = $('#search-results');
+  const searchStatus = $('#search-status');
+  const searchClose = $('#search-close');
+  const searchBtn = $('#search-btn');
+
+  const pendingSearchHandlers = {};
+  let searchSeq = 0;
+  let searchTimer = null;
+  let searchSelectedIdx = 0;
+  let searchHits = [];
+
+  function openSearchModal() {
+    searchModal.classList.remove('hidden');
+    searchInput.value = '';
+    searchResults.innerHTML = '';
+    searchStatus.textContent = 'Hybrid search across all sessions in this workspace.';
+    searchSelectedIdx = 0;
+    searchHits = [];
+    searchInput.focus();
+  }
+
+  function closeSearchModal() {
+    searchModal.classList.add('hidden');
+  }
+
+  searchBtn.onclick = openSearchModal;
+  searchClose.onclick = closeSearchModal;
+  searchModal.addEventListener('click', (e) => {
+    if (e.target === searchModal) closeSearchModal();
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+      e.preventDefault();
+      if (searchModal.classList.contains('hidden')) openSearchModal();
+      else closeSearchModal();
+    }
+    if (e.key === 'Escape' && !searchModal.classList.contains('hidden')) {
+      e.preventDefault();
+      closeSearchModal();
+    }
+  });
+
+  searchInput.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    const q = searchInput.value.trim();
+    if (!q) {
+      searchResults.innerHTML = '';
+      searchStatus.textContent = 'Hybrid search across all sessions in this workspace.';
+      searchHits = [];
+      return;
+    }
+    searchStatus.textContent = 'Searching...';
+    const seq = ++searchSeq;
+    searchTimer = setTimeout(() => {
+      const reqId = newId();
+      pendingSearchHandlers[reqId] = (msg) => {
+        if (seq !== searchSeq) return;
+        if (msg.type === 'session.search.result') {
+          searchHits = msg.sessions || [];
+          searchSelectedIdx = 0;
+          renderSearchResults();
+          searchStatus.textContent = searchHits.length === 0
+            ? 'No matches.'
+            : searchHits.length + ' session' + (searchHits.length === 1 ? '' : 's') + ' matched';
+        } else if (msg.type === 'response.error') {
+          searchStatus.textContent = 'Error: ' + (msg.error || 'unknown');
+          searchHits = [];
+          searchResults.innerHTML = '';
+        }
+      };
+      send({ type: 'session.search', id: reqId, query: q, limit: 10, scope: 'workspace' });
+    }, 250);
+  });
+
+  searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (searchHits.length > 0) {
+        searchSelectedIdx = Math.min(searchHits.length - 1, searchSelectedIdx + 1);
+        renderSearchResults();
+      }
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (searchHits.length > 0) {
+        searchSelectedIdx = Math.max(0, searchSelectedIdx - 1);
+        renderSearchResults();
+      }
+    } else if (e.key === 'Enter' && searchHits[searchSelectedIdx]) {
+      e.preventDefault();
+      const hit = searchHits[searchSelectedIdx];
+      const session = sessions.find(s => s.id === hit.sessionId);
+      if (session) {
+        attachSession(hit.sessionId, session.name);
+        closeSearchModal();
+      }
+    }
+  });
+
+  function renderSearchResults() {
+    searchResults.innerHTML = searchHits.map((hit, i) => {
+      const sel = i === searchSelectedIdx ? ' selected' : '';
+      const when = formatAgo(hit.lastMatchAt);
+      const matchLabel = hit.matchCount + ' match' + (hit.matchCount === 1 ? '' : 'es');
+      const snippetHtml = (hit.snippets || []).slice(0, 3).map(s => {
+        const prefix = s.kind === 'user_turn' ? 'you'
+          : s.kind === 'assistant_turn' ? 'claude'
+          : s.toolName ? s.toolName : 'tool';
+        const excerpt = compactExcerpt(s.excerpt);
+        return '<div class="search-snippet">'
+          + '<span class="search-snippet-prefix">' + esc(prefix) + ':</span> '
+          + esc(excerpt) + '</div>';
+      }).join('');
+      return '<div class="search-hit' + sel + '" data-sid="' + hit.sessionId + '" data-idx="' + i + '">'
+        + '<div class="search-hit-header">'
+        + '<span class="search-hit-name">' + esc(hit.sessionName) + '</span>'
+        + '<span class="search-meta">' + esc(matchLabel) + ' \\u00b7 ' + esc(when) + '</span>'
+        + '</div>'
+        + snippetHtml
+        + '<div class="search-workdir">' + esc(hit.workdir || '') + '</div>'
+        + '</div>';
+    }).join('');
+
+    searchResults.querySelectorAll('.search-hit').forEach(el => {
+      el.onclick = () => {
+        const sid = el.dataset.sid;
+        const session = sessions.find(s => s.id === sid);
+        if (session) {
+          attachSession(sid, session.name);
+          closeSearchModal();
+        }
+      };
+    });
+
+    // Scroll selected into view
+    const selEl = searchResults.querySelector('.search-hit.selected');
+    if (selEl) selEl.scrollIntoView({ block: 'nearest' });
+  }
+
+  function formatAgo(when) {
+    if (!when) return '';
+    const dt = Math.max(0, Date.now() - when);
+    if (dt < 60000) return 'just now';
+    if (dt < 3600000) return Math.round(dt / 60000) + 'm ago';
+    if (dt < 86400000) return Math.round(dt / 3600000) + 'h ago';
+    return Math.round(dt / 86400000) + 'd ago';
+  }
+
+  function compactExcerpt(s) {
+    if (!s) return '';
+    const collapsed = s.replace(/\\s+/g, ' ').trim();
+    return collapsed.length > 140 ? collapsed.slice(0, 137) + '...' : collapsed;
+  }
 
   // ── Helpers ───────────────────────────────────────────────────────
   function esc(text) {

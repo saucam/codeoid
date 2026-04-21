@@ -70,6 +70,14 @@ export interface SessionInfo {
    * Claude can process — useful signal for mid-turn queueing UX.
    */
   queuedMessages?: number;
+  /**
+   * Resolved full model id currently in use for this session. When unset,
+   * the SDK / Claude Code default applies. Frontends typically display
+   * the matching alias + label from the model catalog.
+   */
+  model?: string;
+  /** Fallback model id used on 429/529 capacity errors. */
+  fallbackModel?: string;
 }
 
 /**
@@ -472,7 +480,8 @@ export type ClientMessage =
   | SessionPinMsg
   | SessionUnpinMsg
   | SessionRotateMsg
-  | SessionSearchMsg;
+  | SessionSearchMsg
+  | SessionSetModelMsg;
 
 interface BaseClientMsg {
   /** Request ID for correlating responses */
@@ -597,6 +606,24 @@ export interface SessionUnpinMsg extends BaseClientMsg {
 export interface SessionRotateMsg extends BaseClientMsg {
   type: "session.rotate";
   sessionId: string;
+}
+
+/**
+ * Switch the model (and optionally fallback) for a session. Accepts
+ * aliases (`opus`/`sonnet`/`haiku`) or full Anthropic model ids. Takes
+ * effect on the next send — the current streamInput loop is torn down so
+ * the new model is handed to the fresh `query()` invocation. Switching
+ * invalidates the prompt cache (Anthropic cache is per-model), so the
+ * first turn on the new model is a full re-cache cost.
+ *
+ * Passing `fallbackModel: null` clears any previous fallback; omitting
+ * the field leaves it unchanged.
+ */
+export interface SessionSetModelMsg extends BaseClientMsg {
+  type: "session.set_model";
+  sessionId: string;
+  model: string;
+  fallbackModel?: string | null;
 }
 
 /**

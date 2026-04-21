@@ -35,6 +35,15 @@ function mkConfig(enabled: boolean, overrides: Partial<CodeoidConfig["compress"]
     },
     labeling: {},
     telemetry: { osc8: "auto" },
+    autoRotate: {
+      enabled: false,
+      warnPct: 0.6,
+      rotatePct: 0.8,
+      hardRotatePct: 0.9,
+      minTurnsBeforeRotate: 3,
+      strategy: "task-anchor",
+    },
+    session: {},
   };
 }
 

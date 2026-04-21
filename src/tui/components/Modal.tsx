@@ -9,16 +9,20 @@ import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
 import type { ModalState, TuiSession } from "../types.js";
 import type { SessionSearchHit } from "../../protocol/types.js";
+import { MODEL_CATALOG, findModel, type ModelDescriptor } from "../../daemon/models.js";
 
 interface Props {
   modal: ModalState;
   sessions: TuiSession[];
+  focusedSession: TuiSession | null;
   onSubmitNewSession: (name: string, workdir: string) => void;
   onSelectSession: (sessionId: string) => void;
   onConfirmDestroy: (sessionId: string) => void;
   onCancel: () => void;
   /** Run a full-text + semantic session search. Resolves to result hits. */
   onSearch?: (query: string) => Promise<SessionSearchHit[]>;
+  /** Set the focused session's model. */
+  onSetModel?: (model: string) => Promise<void>;
 }
 
 export function Modal(props: Props) {
@@ -55,6 +59,17 @@ export function Modal(props: Props) {
           query={props.modal.query}
           onSearch={props.onSearch}
           onSelect={props.onSelectSession}
+          onCancel={props.onCancel}
+        />
+      );
+    case "model":
+      return (
+        <ModelModal
+          current={props.focusedSession?.info.model ?? null}
+          onPick={async (modelId) => {
+            if (!props.onSetModel) return;
+            await props.onSetModel(modelId);
+          }}
           onCancel={props.onCancel}
         />
       );
@@ -373,6 +388,121 @@ function compactExcerpt(s: string): string {
   const collapsed = s.replace(/\s+/g, " ").trim();
   return collapsed.length > 120 ? collapsed.slice(0, 117) + "…" : collapsed;
 }
+
+// ── Model picker ────────────────────────────────────────────────────────
+
+function ModelModal({
+  current,
+  onPick,
+  onCancel,
+}: {
+  current: string | null;
+  onPick: (modelId: string) => Promise<void>;
+  onCancel: () => void;
+}) {
+  // Pre-select the current model when present, else default to index 0.
+  const initialIdx = (() => {
+    if (!current) return 0;
+    const hit = MODEL_CATALOG.findIndex(
+      (m) => m.id === current || m.alias === current,
+    );
+    return hit >= 0 ? hit : 0;
+  })();
+  const [idx, setIdx] = useState(initialIdx);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useInput((_input, key) => {
+    if (busy) return;
+    if (key.escape) onCancel();
+    if (key.upArrow) setIdx((i) => Math.max(0, i - 1));
+    if (key.downArrow) setIdx((i) => Math.min(MODEL_CATALOG.length - 1, i + 1));
+    if (key.return) {
+      const pick = MODEL_CATALOG[idx];
+      if (!pick) return;
+      setBusy(true);
+      setError(null);
+      onPick(pick.id)
+        .then(() => onCancel())
+        .catch((err: unknown) => {
+          setError(err instanceof Error ? err.message : String(err));
+          setBusy(false);
+        });
+    }
+  });
+
+  return (
+    <Box
+      flexDirection="column"
+      borderStyle="double"
+      borderColor="cyan"
+      paddingX={1}
+    >
+      <Text bold color="cyan">
+        Select model
+      </Text>
+      <Box marginTop={1} flexDirection="column">
+        {MODEL_CATALOG.map((m, i) => (
+          <ModelRow
+            key={m.id}
+            model={m}
+            selected={i === idx}
+            active={m.id === current}
+          />
+        ))}
+      </Box>
+      {error && (
+        <Box marginTop={1}>
+          <Text color="red">⚠ {error}</Text>
+        </Box>
+      )}
+      <Box marginTop={1}>
+        <Text dimColor>
+          {busy
+            ? "switching…"
+            : "↑↓ navigate · Enter to switch · Esc to cancel · switching invalidates prompt cache"}
+        </Text>
+      </Box>
+    </Box>
+  );
+}
+
+function ModelRow({
+  model,
+  selected,
+  active,
+}: {
+  model: ModelDescriptor;
+  selected: boolean;
+  active: boolean;
+}) {
+  const tierColor =
+    model.tier === "premium"
+      ? "magenta"
+      : model.tier === "balanced"
+        ? "cyan"
+        : "green";
+  const bar = selected ? "▸ " : "  ";
+  const activeBadge = active ? " ●" : "";
+  return (
+    <Box flexDirection="column" marginBottom={0}>
+      <Text color={selected ? "white" : tierColor} bold={selected}>
+        {bar}
+        {model.label}
+        <Text dimColor>
+          {" — " + model.alias + " · " + Math.round(model.contextWindow / 1000) + "k ctx"}
+        </Text>
+        {active && <Text color="green">{activeBadge}</Text>}
+      </Text>
+      <Text dimColor>{"    " + model.description}</Text>
+    </Box>
+  );
+}
+
+// Re-export so callers (App.tsx slash handler) can resolve aliases without
+// reaching into the daemon module directly — keeps the TUI layer's imports
+// predictable.
+export { findModel };
 
 function HelpModal({ onCancel }: { onCancel: () => void }) {
   useInput((_input, key) => {

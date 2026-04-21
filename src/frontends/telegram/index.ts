@@ -23,7 +23,7 @@ import { ALL_SCOPES_STRING } from "../../protocol/scopes.js";
 import type { Frontend, FrontendContext } from "../types.js";
 import type { SessionManager } from "../../daemon/session-manager.js";
 import type { AuthConfig } from "../../daemon/auth.js";
-import type { AuthContext, DaemonMessage } from "../../protocol/types.js";
+import type { AuthContext, DaemonMessage, SessionSearchResultMsg } from "../../protocol/types.js";
 import type { AttachedClient } from "../../daemon/session.js";
 
 interface UserState {
@@ -89,7 +89,8 @@ export class TelegramFrontend implements Frontend {
           "/attach `<name>` — attach\n" +
           "/detach — detach\n" +
           "/interrupt — interrupt agent\n" +
-          "/destroy `<name>` — destroy session\n\n" +
+          "/destroy `<name>` — destroy session\n" +
+          "/search `<query>` — search across sessions\n\n" +
           "Send text to talk to your attached session\\.",
         { parse_mode: "MarkdownV2" },
       ),
@@ -102,6 +103,7 @@ export class TelegramFrontend implements Frontend {
     this.#bot.command("detach", (ctx) => this.#handleDetach(ctx));
     this.#bot.command("interrupt", (ctx) => this.#handleInterrupt(ctx));
     this.#bot.command("destroy", (ctx) => this.#handleDestroy(ctx));
+    this.#bot.command("search", (ctx) => this.#handleSearch(ctx));
 
     this.#bot.on("message:voice", (ctx) => this.#handleVoice(ctx));
     this.#bot.on("message:text", (ctx) => this.#handleText(ctx));
@@ -292,6 +294,82 @@ export class TelegramFrontend implements Frontend {
       state.attachedSessionName = null;
     }
     await ctx.reply(`Session *${esc(name)}* destroyed\\.`, { parse_mode: "MarkdownV2" });
+  }
+
+  // ── Search ──────────────────────────────────────────────────────────────
+
+  async #handleSearch(ctx: Context): Promise<void> {
+    const state = this.#requireAuth(ctx);
+    if (!state) return;
+
+    const query = (ctx.message?.text?.split(/\s+/).slice(1).join(" ") ?? "").trim();
+    if (!query) {
+      await ctx.reply("Usage: /search <query>\n\nSearches across all sessions in the workspace.");
+      return;
+    }
+
+    const resp = await this.#manager.handle(
+      {
+        type: "session.search",
+        id: randomUUID(),
+        query,
+        scope: "workspace",
+        limit: 5,
+      },
+      state.auth!,
+      this.#makeClient(state, ctx),
+    );
+
+    if (resp.type === "response.error") {
+      await ctx.reply(`Search error: ${resp.error}`);
+      return;
+    }
+
+    if (resp.type !== "session.search.result") return;
+
+    const results = resp as SessionSearchResultMsg;
+    if (results.sessions.length === 0) {
+      await ctx.reply(`No results for "${query}".`);
+      return;
+    }
+
+    const lines: string[] = [];
+    lines.push(`🔍 *Search: ${escMd(query)}*\n`);
+
+    for (const hit of results.sessions) {
+      const when = formatAgo(hit.lastMatchAt);
+      const matchLabel = `${hit.matchCount} match${hit.matchCount === 1 ? "" : "es"}`;
+      lines.push(
+        `▸ *${escMd(hit.sessionName)}* — ${escMd(matchLabel)} · ${escMd(when)}`,
+      );
+
+      for (const snippet of hit.snippets.slice(0, 2)) {
+        const prefix =
+          snippet.kind === "user_turn"
+            ? "you"
+            : snippet.kind === "assistant_turn"
+              ? "claude"
+              : snippet.toolName ?? "tool";
+        const excerpt = snippet.excerpt
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 120);
+        lines.push(`  _${escMd(prefix)}:_ ${escMd(excerpt)}`);
+      }
+      lines.push("");
+    }
+
+    lines.push(`Use /attach \\<name\\> to jump into a session\\.`);
+
+    // Telegram has a 4096-char limit; chunk if needed
+    const text = lines.join("\n");
+    if (text.length <= 4096) {
+      await ctx.reply(text, { parse_mode: "MarkdownV2" });
+    } else {
+      // Fall back to plain text for very long results
+      const plain = lines.join("\n").replace(/\\([_*[\]()~`>#+\-=|{}.!\\])/g, "$1");
+      this.#sendChunked(ctx.chat!.id, plain);
+    }
   }
 
   // ── Text & voice ─────────────────────────────────────────────────────
@@ -502,4 +580,13 @@ function escMd(text: string): string {
 /** @deprecated — legacy esc used elsewhere in this file. */
 function esc(text: string): string {
   return text.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, "\\$&");
+}
+
+/** Relative time string from a unix-ms timestamp. */
+function formatAgo(when: number): string {
+  const dt = Math.max(0, Date.now() - when);
+  if (dt < 60_000) return "just now";
+  if (dt < 3_600_000) return Math.round(dt / 60_000) + "m ago";
+  if (dt < 86_400_000) return Math.round(dt / 3_600_000) + "h ago";
+  return Math.round(dt / 86_400_000) + "d ago";
 }

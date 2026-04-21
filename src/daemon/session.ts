@@ -53,6 +53,7 @@ import {
   CompressionRegistry,
   rewriteBashToolInput,
 } from "./compress/index.js";
+import { findModel, resolveModelId } from "./models.js";
 
 /**
  * System-prompt append used when memory is enabled. Deliberately brief and
@@ -123,6 +124,14 @@ export class Session {
   // Compression (Layer B) — toggled via config.compress.enabled.
   #config?: CodeoidConfig;
   #compressionRegistry?: CompressionRegistry;
+
+  // ── Model selection ───────────────────────────────────────────────────
+  // Both fields resolved to full Anthropic model ids (never aliases). Null
+  // means "use whatever the SDK / Claude Code picks as default" — we don't
+  // force a choice if neither session nor config specified one. Takes
+  // effect on the NEXT send() (current stream is torn down on change).
+  #model: string | null = null;
+  #fallbackModel: string | null = null;
 
   // ── Auto-rotation (Layer D) ────────────────────────────────────────────
   // Claude Code's backing session id — distinct from codeoid's public
@@ -256,6 +265,19 @@ export class Session {
     this.#rotationCount = stats.count;
     this.#lastRotatedAt = stats.lastRotatedAt;
 
+    // Model selection — prefer persisted session choice, fall back to
+    // config default, else leave null (SDK default). Always resolve to
+    // full id so downstream code doesn't see aliases.
+    const persistedModel = this.#store.getSessionModel(this.id);
+    this.#model =
+      persistedModel.model ??
+      resolveModelId(opts.config?.session.defaultModel ?? "") ??
+      null;
+    this.#fallbackModel =
+      persistedModel.fallbackModel ??
+      resolveModelId(opts.config?.session.fallbackModel ?? "") ??
+      null;
+
     // Restore any pinned files the user had on this session before.
     try {
       this.#pinnedFiles = this.#store.listPins(this.id);
@@ -338,6 +360,8 @@ export class Session {
   get mode(): SessionMode { return this.#mode; }
   get turnsRemaining(): number | undefined { return this.#turnsRemaining; }
   get pinnedFiles(): readonly string[] { return this.#pinnedFiles; }
+  get model(): string | null { return this.#model; }
+  get fallbackModel(): string | null { return this.#fallbackModel; }
 
   /** Snapshot the active sub-agent tree — used by /who and toInfo(). */
   get subagentSnapshot(): Array<{
@@ -615,6 +639,14 @@ export class Session {
         // TUI's gray reasoning block stays empty. Adaptive = small prompts
         // get no overhead, hard prompts get visible reasoning.
         thinking: { type: "adaptive" as const },
+        // Model selection — null means "leave to Claude Code's default"
+        // (don't force a specific model on users who haven't opted in).
+        // When set, propagates to the SDK subprocess via the `--model` CLI
+        // flag and the Messages API's `model` field.
+        ...(this.#model ? { model: this.#model } : {}),
+        // Fallback model: SDK retries here on 429/529 capacity errors so
+        // the user doesn't see a hard failure during rate-limited windows.
+        ...(this.#fallbackModel ? { fallbackModel: this.#fallbackModel } : {}),
         // Capture subprocess stderr into the daemon log so spawn failures are debuggable.
         stderr: (data: string) => {
           process.stderr.write(`[claude-subprocess ${this.id.slice(0, 8)}] ${data}`);
@@ -1006,6 +1038,8 @@ export class Session {
         claudeCodeSessionId: this.#claudeCodeSessionId,
       },
       queuedMessages: this.#inputQueue?.size ?? 0,
+      model: this.#model ?? undefined,
+      fallbackModel: this.#fallbackModel ?? undefined,
     };
   }
 
@@ -1153,6 +1187,82 @@ export class Session {
       lastTurnCostUsd: mostRecent?.totalCostUsd,
       lastTurnCacheHitRate: mostRecent?.cacheHitRate,
     };
+  }
+
+  /**
+   * Switch the session's model (and optionally its fallback). Resolves
+   * aliases to full ids, persists, tears down the current streamInput
+   * loop so the next send starts with the new model, and emits a scroll-
+   * back warning so the user knows to expect a one-time cache re-seed
+   * cost on the next turn.
+   *
+   * Returns the resolved full model id on success, or throws with a clear
+   * error when the id can't be resolved. Fallback clearing: pass `null`.
+   */
+  async setModel(
+    model: string,
+    fallbackModel: string | null | undefined,
+    sender: AuthContext,
+  ): Promise<{ model: string; fallbackModel: string | null }> {
+    const resolved = resolveModelId(model);
+    if (!resolved) {
+      throw new Error(
+        `Unknown model "${model}". Try opus / sonnet / haiku, or a full claude-* id.`,
+      );
+    }
+    // Fallback semantics:
+    //   undefined → leave current value alone
+    //   null      → clear explicitly
+    //   string    → resolve + set
+    let nextFallback: string | null | undefined = undefined;
+    if (fallbackModel === null) {
+      nextFallback = null;
+    } else if (typeof fallbackModel === "string") {
+      const rf = resolveModelId(fallbackModel);
+      if (!rf) {
+        throw new Error(`Unknown fallback model "${fallbackModel}".`);
+      }
+      nextFallback = rf;
+    }
+
+    const prev = this.#model;
+    this.#model = resolved;
+    if (nextFallback !== undefined) this.#fallbackModel = nextFallback;
+
+    // Persist. Passing `undefined` for the fallback argument means "don't
+    // touch the persisted fallback" — matches our in-memory semantic.
+    this.#store.setSessionModel(this.id, resolved, nextFallback);
+    this.#store.audit(
+      sender.sub,
+      "session.set_model",
+      this.id,
+      `model=${resolved} fallback=${nextFallback ?? "(unchanged)"} from=${prev ?? "(default)"}`,
+    );
+
+    // Tear down current stream so the new model kicks in on next send.
+    // No effect when no loop is active.
+    await this.#teardownQueryLoop();
+
+    const desc = findModel(resolved);
+    const label = desc ? desc.label : resolved;
+    const info = this.#makeMessage(
+      "info",
+      `⎆ Model switched to ${label}${nextFallback !== undefined ? ` (fallback: ${nextFallback ? findModel(nextFallback)?.label ?? nextFallback : "none"})` : ""}. Next turn will re-seed the prompt cache.`,
+      SYSTEM_IDENTITY,
+      undefined,
+      undefined,
+      {
+        event: "session.model_changed",
+        model: resolved,
+        fallback_model: this.#fallbackModel,
+        prev_model: prev,
+      },
+    );
+    this.#persistAndBuffer(info);
+    this.#broadcastRaw(info);
+    this.#broadcastInfoUpdate();
+
+    return { model: resolved, fallbackModel: this.#fallbackModel };
   }
 
   /**
