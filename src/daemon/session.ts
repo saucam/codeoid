@@ -54,6 +54,11 @@ import {
   rewriteBashToolInput,
 } from "./compress/index.js";
 import { findModel, resolveModelId } from "./models.js";
+import {
+  callContextSize,
+  decideRotation,
+  type LLMCallUsage,
+} from "./context-math.js";
 
 /**
  * System-prompt append used when memory is enabled. Deliberately brief and
@@ -203,6 +208,30 @@ export class Session {
 
   // Track whether we've run a query before (for resume vs new session)
   #hasQueried = false;
+
+  // ── Per-turn usage accumulator (primary vs subagent split) ─────────────
+  // SDK's `result.usage` sums ALL API calls in a turn — including any
+  // subagents spawned via the Task tool. But subagents have their own
+  // context windows; summing them into "ctx" would defeat the whole
+  // point of delegating work to subagents (to keep the primary context
+  // clean). We stream `SDKAssistantMessage` events and split by
+  // `parent_tool_use_id`:
+  //   - null → primary agent's LLM call (accumulate into `primary`)
+  //   - non-null → subagent call (accumulate separately, for diagnostics)
+  //
+  // `primary.maxCallContext` is the CURRENT primary context size — the
+  // biggest single primary-agent API call seen this turn. That's the
+  // number we report as `ctx` + use for rotation decisions.
+  #primaryTurnCalls: LLMCallUsage[] = [];
+  #subagentTurnCalls: LLMCallUsage[] = [];
+  /**
+   * Running max of primaryCtx across all turns this session — the real
+   * "peak" indicator. Persisted implicitly via being recomputed from the
+   * Store's aggregated peak as a floor, then bumped as new turns come in.
+   */
+  #primaryPeakContext = 0;
+  /** Running total of cache_read from primary calls only (for honest avg). */
+  #primaryCacheReadCumulative = 0;
 
   // ── Stream input mode (VSCode-style mid-turn messaging) ───────────────
   // One long-running `query()` per (session, backing_session_id). The
@@ -1106,6 +1135,33 @@ export class Session {
     const billable = input + cacheCreate;
     const hitRate = total > 0 ? cacheRead / total : 0;
 
+    // PRIMARY-ONLY CONTEXT SIZE — the honest ctx metric. We streamed
+    // per-call usage from each `SDKAssistantMessage.message.usage` and
+    // bucketed by `parent_tool_use_id` (null = primary). `primaryCtx`
+    // here is the max across those primary calls: the biggest snapshot
+    // of the primary agent's context during this turn = current ctx.
+    //
+    // Fallback: if the SDK didn't give us per-call usage (unlikely but
+    // possible on older Claude Code versions), degrade to the summed
+    // `total` so we still report something — just noted in the log.
+    let primaryCtx = 0;
+    let primaryCacheReadThisTurn = 0;
+    for (const c of this.#primaryTurnCalls) {
+      const size = callContextSize(c);
+      if (size > primaryCtx) primaryCtx = size;
+      primaryCacheReadThisTurn += c.cacheReadTokens;
+    }
+    const subagentCallCount = this.#subagentTurnCalls.length;
+    // Reset accumulators for the next turn (result marks turn end).
+    this.#primaryTurnCalls = [];
+    this.#subagentTurnCalls = [];
+    if (primaryCtx === 0 && total > 0) {
+      // Per-call usage missing — fall back to summed usage but cap at
+      // window so a multi-call sum doesn't report > 100% occupancy.
+      primaryCtx = Math.min(total, Session.CONTEXT_WINDOW);
+      primaryCacheReadThisTurn = cacheRead; // best we can do on fallback
+    }
+
     // If the memory engine isn't enabled we have no durable store — fall
     // back to pure in-memory accumulation so StatusBar still gets usage.
     const store = this.#memory?.store;
@@ -1117,17 +1173,20 @@ export class Session {
       this.#usage.totalCostUsd += turn.total_cost_usd ?? 0;
       this.#usage.durationMs += turn.duration_ms ?? 0;
       this.#usage.numTurns += 1;
+      // PEAK tracks primary-only — ignore subagent contributions so a
+      // subagent-heavy turn doesn't poison the bloat canary.
       this.#usage.peakInputTokens = Math.max(
         this.#usage.peakInputTokens ?? 0,
-        total,
+        primaryCtx,
       );
-      this.#usage.lastTurnInputTokens = total;
+      this.#usage.lastTurnInputTokens = primaryCtx;
       this.#usage.lastTurnOutputTokens = output;
       this.#usage.lastTurnCostUsd = turn.total_cost_usd ?? 0;
       this.#usage.lastTurnCacheHitRate = hitRate;
       this.#broadcastInfoUpdate();
       return;
     }
+    void subagentCallCount; // intentionally tracked for future telemetry
 
     const turnNumber = store.nextTurnNumber(this.id);
     const record: TurnUsage = {
@@ -1157,7 +1216,14 @@ export class Session {
       );
     }
 
-    this.#refreshUsageFromStore(record);
+    // Bump primary peak + cumulative now (before the refresh below
+    // which recomputes derived fields from in-memory + DB state).
+    if (primaryCtx > this.#primaryPeakContext) {
+      this.#primaryPeakContext = primaryCtx;
+    }
+    this.#primaryCacheReadCumulative += primaryCacheReadThisTurn;
+
+    this.#refreshUsageFromStore(record, primaryCtx);
     this.#broadcastInfoUpdate();
   }
 
@@ -1166,8 +1232,15 @@ export class Session {
    * load (daemon restart) and after each turn record so StatusBar stays in
    * sync without caller bookkeeping. Optional `lastTurn` parameter seeds
    * the "last turn" fields when we have fresher data than the DB read.
+   *
+   * `primaryCtxHint` (when present) is the PRIMARY-ONLY context size for
+   * the most recent turn, computed via per-call `SDKAssistantMessage`
+   * usage parsing. It overrides the summed-usage figure (which inflates
+   * on subagent-heavy turns). On session load (no hint), falls back to
+   * the Store's aggregated peak — not ideal but bounded by the new
+   * cap-at-window semantics, so never nonsensical.
    */
-  #refreshUsageFromStore(lastTurn?: TurnUsage): void {
+  #refreshUsageFromStore(lastTurn?: TurnUsage, primaryCtxHint?: number): void {
     const store = this.#memory?.store;
     if (!store) return;
 
@@ -1178,6 +1251,23 @@ export class Session {
     );
     const mostRecent = lastTurn ?? recent[0];
 
+    // ctx metric: primary-only when we have a fresh hint; otherwise fall
+    // back to the stored totalInputTokens capped at the window (no more
+    // "205% of 1M" displays on historical turns with aggregated usage).
+    const fallbackTotal = mostRecent
+      ? Math.min(mostRecent.totalInputTokens, Session.CONTEXT_WINDOW)
+      : undefined;
+    const lastPrimary = primaryCtxHint ?? fallbackTotal;
+
+    // Peak: use our in-memory primary-only tracker if populated (live
+    // session); fall back to the Store's aggregated peak for historical
+    // data, but cap at the window so nothing inflates past 100%.
+    const peakFallback = Math.min(totals.peakInputTokens, Session.CONTEXT_WINDOW);
+    const peakPrimary = Math.max(this.#primaryPeakContext, peakFallback);
+    if (peakPrimary > this.#primaryPeakContext) {
+      this.#primaryPeakContext = peakPrimary; // backfill on first load
+    }
+
     this.#usage = {
       inputTokens: totals.inputTokens,
       outputTokens: totals.outputTokens,
@@ -1187,10 +1277,8 @@ export class Session {
       numTurns: totals.numTurns,
       durationMs: totals.durationMs,
       recentTurns: recent,
-      peakInputTokens: totals.peakInputTokens,
-      // Use the total-context count (not billable) so StatusBar shows the
-      // true context size — that's what drives compaction risk.
-      lastTurnInputTokens: mostRecent?.totalInputTokens,
+      peakInputTokens: peakPrimary,
+      lastTurnInputTokens: lastPrimary,
       lastTurnOutputTokens: mostRecent?.outputTokens,
       lastTurnCostUsd: mostRecent?.totalCostUsd,
       lastTurnCacheHitRate: mostRecent?.cacheHitRate,
@@ -1304,18 +1392,21 @@ export class Session {
   #shouldRotate(): boolean {
     if (!this.#config) return false;
     const ar = this.#config.autoRotate;
-    const lastCtx = this.#usage.lastTurnInputTokens ?? 0;
-    if (lastCtx <= 0) return false;
-    const pct = lastCtx / Session.CONTEXT_WINDOW;
-
-    // Always honor the hard ceiling — regardless of opt-in. This prevents
-    // users from accidentally running into actual compaction.
-    if (pct >= ar.hardRotatePct) {
-      if (this.#usage.numTurns >= ar.minTurnsBeforeRotate) return true;
-    }
-    if (!ar.enabled) return false;
-    if (this.#usage.numTurns < ar.minTurnsBeforeRotate) return false;
-    return pct >= ar.rotatePct;
+    // Uses the primary-only context size (lastTurnInputTokens is already
+    // primary-only post-refactor). Subagent usage is intentionally
+    // excluded — the whole point of subagents is to keep the primary
+    // context clean; rotating because a subagent did heavy work would
+    // defeat that.
+    const decision = decideRotation({
+      primaryLastTurnContext: this.#usage.lastTurnInputTokens ?? 0,
+      numTurns: this.#usage.numTurns,
+      enabled: ar.enabled,
+      rotatePct: ar.rotatePct,
+      hardRotatePct: ar.hardRotatePct,
+      minTurnsBeforeRotate: ar.minTurnsBeforeRotate,
+      contextWindow: Session.CONTEXT_WINDOW,
+    });
+    return decision.shouldRotate;
   }
 
   /**
@@ -1530,6 +1621,39 @@ export class Session {
   #handleAgentMessage(msg: SDKMessage): void {
     switch (msg.type) {
       case "assistant": {
+        // Capture per-LLM-call usage + split by primary vs subagent.
+        // `parent_tool_use_id` null → primary agent's call; non-null →
+        // a subagent worker spawned via a Task tool. Anthropic's
+        // BetaMessage carries per-call `usage` so we can attribute each
+        // call individually rather than relying on the SDK's
+        // end-of-turn SUM (which inflates ctx on subagent-heavy turns).
+        const assistantMsg = msg as unknown as {
+          message: {
+            content: unknown;
+            usage?: {
+              input_tokens?: number;
+              output_tokens?: number;
+              cache_read_input_tokens?: number;
+              cache_creation_input_tokens?: number;
+            };
+          };
+          parent_tool_use_id: string | null;
+        };
+        const perCall = assistantMsg.message?.usage;
+        if (perCall) {
+          const callUsage: LLMCallUsage = {
+            inputTokens: perCall.input_tokens ?? 0,
+            cacheReadTokens: perCall.cache_read_input_tokens ?? 0,
+            cacheCreationTokens: perCall.cache_creation_input_tokens ?? 0,
+            outputTokens: perCall.output_tokens ?? 0,
+          };
+          if (assistantMsg.parent_tool_use_id === null) {
+            this.#primaryTurnCalls.push(callUsage);
+          } else {
+            this.#subagentTurnCalls.push(callUsage);
+          }
+        }
+
         const content = msg.message.content as Array<Record<string, unknown>>;
         const textParts: string[] = [];
         const parts: ContentPart[] = [];

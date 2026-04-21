@@ -126,7 +126,14 @@ export function StatusBar({ connection, focused, lastError }: Props) {
                     color={pickContextColor(usage.peakInputTokens)}
                     dimColor
                   >
-                    {" · peak " + formatTokens(usage.peakInputTokens)}
+                    {" · peak " + formatTokens(Math.min(usage.peakInputTokens, CONTEXT_WINDOW))}
+                    {/* When raw peak exceeds the window, that turn summed
+                        multiple internal API calls (subagents/retries). The
+                        sum isn't a real single-call context size — badge
+                        it so the user knows not to trust the raw figure. */}
+                    {usage.peakInputTokens > CONTEXT_WINDOW && (
+                      <Text color="yellow">{" (Σ multi-call)"}</Text>
+                    )}
                   </Text>
                 )}
               {focused.info.rotation &&

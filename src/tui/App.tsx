@@ -378,6 +378,106 @@ export function App({ config }: Props) {
     dispatch({ type: "input.clear" });
   };
 
+  /**
+   * Render a detailed context-budget breakdown as a local scrollback
+   * info message — mirrors what Claude Code's `/context` does so users
+   * can compare the exact numbers against VSCode/CLI reports.
+   *
+   * We show every field the SDK's `result.usage` gives us (new input,
+   * cache read, cache write) plus derived totals + occupancy. Also makes
+   * explicit what ISN'T visible to us (reserved-for-output budget,
+   * Claude Code's internal microcompaction) so users know why
+   * codeoid's ctx can look lower than a competitor's "used" readout.
+   */
+  const printContextBreakdownMessage = (session: import("./types.js").TuiSession) => {
+    const info = session.info;
+    const u = info.usage;
+    const W = 1_000_000;
+
+    const lines: string[] = [];
+    lines.push(`## Context breakdown for ${info.name}`);
+    lines.push("");
+    if (!u || u.numTurns === 0) {
+      lines.push("No turns completed yet — ctx will populate after Claude's first reply.");
+      dispatch({
+        type: "session.message",
+        sessionId: info.id,
+        message: {
+          type: "session.message",
+          sessionId: info.id,
+          messageId: `local:context:${Date.now()}`,
+          role: "assistant",
+          content: lines.join("\n"),
+          identity: { sub: "system:codeoid", name: "codeoid", type: "system" },
+          timestamp: new Date().toISOString(),
+        },
+      });
+      return;
+    }
+
+    const mostRecent = u.recentTurns?.[0];
+    const lastTotal = u.lastTurnInputTokens ?? 0;
+    // Cap displayed ratios at 100%. Raw numbers can exceed when a turn
+    // aggregates multiple API calls (subagents / retries), but the
+    // per-turn percentage only makes sense bounded to [0, 100].
+    const pct = (n: number) => (Math.min(n / W, 1) * 100).toFixed(1) + "%";
+    const rawPct = (n: number) => ((n / W) * 100).toFixed(1) + "%";
+
+    lines.push(`### Last turn (raw SDK usage)`);
+    if (mostRecent) {
+      lines.push(`- new input (uncached): **${formatK(mostRecent.inputTokens)}** (${pct(mostRecent.inputTokens)})`);
+      lines.push(`- cache read:           **${formatK(mostRecent.cacheReadTokens)}** (${pct(mostRecent.cacheReadTokens)}) — billed ~10%`);
+      lines.push(`- cache creation:       **${formatK(mostRecent.cacheCreationTokens)}** (${pct(mostRecent.cacheCreationTokens)}) — billed ~125%`);
+      lines.push(`- output:               **${formatK(mostRecent.outputTokens)}**`);
+      lines.push(`- **sum processed this turn: ${formatK(lastTotal)} / ${formatK(W)} = ${pct(lastTotal)}**`);
+      lines.push(`- cost: $${mostRecent.totalCostUsd.toFixed(4)} · duration ${(mostRecent.durationMs / 1000).toFixed(1)}s`);
+    }
+    lines.push("");
+    lines.push(`### Session aggregate (${u.numTurns} turns)`);
+    lines.push(`- cumulative input (all kinds): ${formatK(u.inputTokens + u.cacheReadTokens + u.cacheCreationTokens)}`);
+    lines.push(`- cumulative output: ${formatK(u.outputTokens)}`);
+    const cacheRate = Math.round(((u.cacheReadTokens) / Math.max(1, u.inputTokens + u.cacheReadTokens + u.cacheCreationTokens)) * 100);
+    lines.push(`- cache hit rate (all turns): ${cacheRate}%`);
+    const avgCacheRead = u.numTurns > 0 ? Math.round(u.cacheReadTokens / u.numTurns) : 0;
+    lines.push(`- **avg cache_read per turn: ${formatK(avgCacheRead)} (${pct(avgCacheRead)}) — the honest "typical primary context size" signal**`);
+    const peak = u.peakInputTokens ?? 0;
+    const peakOverflow = peak > W;
+    lines.push(`- peak single-turn sum: ${formatK(peak)} (${peakOverflow ? rawPct(peak) + " — ⚠ aggregated multi-call, see note below" : pct(peak)})`);
+    lines.push(`- total cost: $${u.totalCostUsd.toFixed(4)}`);
+    if (info.rotation && info.rotation.count > 0) {
+      lines.push(`- 🔄 rotations: ${info.rotation.count}`);
+    }
+    lines.push("");
+    lines.push(`### ⚠ Important: "sum processed this turn" ≠ "context size"`);
+    lines.push(`The SDK reports ONE \`usage\` object per turn, but a turn can include multiple internal API calls:`);
+    lines.push(`- The primary agent's reply`);
+    lines.push(`- Subagent(s) spawned via the Task / Agent tool (each has its OWN context window)`);
+    lines.push(`- Retries on rate-limit / capacity errors`);
+    lines.push("");
+    lines.push(`The SDK **sums** these usages. A subagent-heavy turn can report 1M+ tokens processed even though no single API call exceeded 300k. The hard 1M context window applies PER API CALL, not per turn.`);
+    lines.push("");
+    lines.push(`**Better signal for "how full is my primary context":** look at \`avg cache_read per turn\` above. The stable prompt prefix (system + tools + CLAUDE.md + conversation history) is what gets cached and re-read every turn. In your session that averages **${formatK(avgCacheRead)} (${pct(avgCacheRead)})** — the real typical context size.`);
+    lines.push("");
+    lines.push(`### Why VSCode extension shows "X% remaining" differently`);
+    lines.push(`1. VSCode probably reports PER API CALL (not summed across subagents). So its "used" tracks primary-only.`);
+    lines.push(`2. VSCode doesn't auto-rotate — it trusts Claude Code's native microcompaction.`);
+    lines.push(`3. Reserved-for-output budget: Claude Code reserves ~32k for Opus replies; VSCode subtracts this from "remaining". We don't.`);
+
+    dispatch({
+      type: "session.message",
+      sessionId: info.id,
+      message: {
+        type: "session.message",
+        sessionId: info.id,
+        messageId: `local:context:${Date.now()}`,
+        role: "assistant",
+        content: lines.join("\n"),
+        identity: { sub: "system:codeoid", name: "codeoid", type: "system" },
+        timestamp: new Date().toISOString(),
+      },
+    });
+  };
+
   const printWhoLocalMessage = (session: import("./types.js").TuiSession) => {
     const info = session.info;
     const lines: string[] = [];
@@ -506,11 +606,12 @@ export function App({ config }: Props) {
         return;
       }
       case "/context": {
-        // One-shot attachments that don't need surrounding prompt text —
-        // send a minimal prompt saying "please review the attached files".
         if (!client || !focusedSession) return;
+        // Overloaded:
+        //   /context               → detailed context-budget breakdown
+        //   /context <path> [...]  → one-shot file attachments for next turn
         if (args.length === 0) {
-          dispatch({ type: "error", message: "usage: /context <path> [more paths]" });
+          printContextBreakdownMessage(focusedSession);
           return;
         }
         const attachments: Attachment[] = args.map((p) => ({
@@ -865,4 +966,13 @@ function extractMentionAttachments(text: string): Attachment[] {
 /** Strip a leading `@` from a user-supplied path argument. */
 function stripMentionPrefix(path: string): string {
   return path.startsWith("@") ? path.slice(1) : path;
+}
+
+/** Compact token count for the /context breakdown — "1234" / "12.3k" / "1.2M". */
+function formatK(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0";
+  if (n < 1_000) return String(Math.round(n));
+  if (n < 10_000) return (n / 1_000).toFixed(1) + "k";
+  if (n < 1_000_000) return Math.round(n / 1_000) + "k";
+  return (n / 1_000_000).toFixed(2) + "M";
 }

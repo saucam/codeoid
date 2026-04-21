@@ -138,22 +138,33 @@ const AutoRotateSchema = z
   .object({
     enabled: z.boolean().default(false),
     /** Below this, no action. */
-    warnPct: z.number().min(0).max(1).default(0.6),
-    /** Suggest rotation in scrollback at this occupancy. */
-    rotatePct: z.number().min(0).max(1).default(0.8),
-    /** Auto-rotate at this occupancy EVEN if `enabled` is false. Safety net. */
-    hardRotatePct: z.number().min(0).max(1).default(0.9),
+    warnPct: z.number().min(0).max(1).default(0.75),
+    /**
+     * Soft rotate at this occupancy (only when `enabled`). Raised from 0.80
+     * → 0.90 after observing that the SDK's per-turn `usage` is the SUM of
+     * all internal API calls (primary + subagents + retries). A subagent
+     * turn can legitimately report 800k+ while no single API call exceeds
+     * 300k — false-positive rotations were firing on otherwise-healthy
+     * sessions.
+     */
+    rotatePct: z.number().min(0).max(1).default(0.9),
+    /**
+     * Hard ceiling — rotate regardless of `enabled`. Lifted from 0.90 →
+     * 0.97 for the same reason. Still a genuine safety net against
+     * actual compaction; just less trigger-happy.
+     */
+    hardRotatePct: z.number().min(0).max(1).default(0.97),
     /** Don't rotate within the first N turns — seed prompt matters. */
-    minTurnsBeforeRotate: z.number().int().nonnegative().default(3),
+    minTurnsBeforeRotate: z.number().int().nonnegative().default(5),
     /** Seed strategy. Only "task-anchor" implemented today (loss-free via recall). */
     strategy: z.enum(["task-anchor"]).default("task-anchor"),
   })
   .default({
     enabled: false,
-    warnPct: 0.6,
-    rotatePct: 0.8,
-    hardRotatePct: 0.9,
-    minTurnsBeforeRotate: 3,
+    warnPct: 0.75,
+    rotatePct: 0.9,
+    hardRotatePct: 0.97,
+    minTurnsBeforeRotate: 5,
     strategy: "task-anchor",
   });
 
