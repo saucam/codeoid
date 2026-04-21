@@ -787,7 +787,14 @@ export function App({ config }: Props) {
       <Static items={staticItems}>
         {(item) => <StaticItemRow key={item.key} item={item} />}
       </Static>
-      <Box flexDirection="column" borderStyle="round" borderColor="gray">
+      {/*
+        No outer border on the cockpit: the round frame's top edge is
+        exactly what stacks in scrollback when Ink's cursor anchor
+        desyncs (stray stdout write, terminal scroll past the frame,
+        etc.). The internal HorizontalRule dividers already delimit
+        sections, so the frame is pure repaint surface.
+      */}
+      <Box flexDirection="column">
         <SessionTabs
           sessions={orderedSessions}
           focusedId={state.focused}
