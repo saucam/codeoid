@@ -10,15 +10,18 @@
 import type { DaemonMessage } from "../protocol/types.js";
 
 export interface ScrollbackConfig {
-  /** Max entries to keep. Default: 500. */
+  /** Max entries to keep. Default: 5000. */
   maxEntries: number;
-  /** Max total bytes. Default: 1MB. */
+  /** Max total bytes. Default: 20MB. */
   maxBytes: number;
 }
 
+// Sized for a native (Ratatui/Rust) frontend doing immediate-mode rendering.
+// The prior 500 / 1MB ceiling was shaped around Ink's React reconciliation
+// budget; a zero-flicker TUI comfortably holds a 10x larger working set.
 const DEFAULT_CONFIG: ScrollbackConfig = {
-  maxEntries: 500,
-  maxBytes: 1_048_576, // 1MB
+  maxEntries: 5000,
+  maxBytes: 20 * 1024 * 1024, // 20MB
 };
 
 export class ScrollbackBuffer {

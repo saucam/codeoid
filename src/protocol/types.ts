@@ -16,6 +16,17 @@
 
 import type { Scope } from "./scopes.js";
 
+/**
+ * Wire-protocol version. Bump on breaking changes (renamed/removed fields,
+ * renamed message kinds, altered semantics). Additive changes (new optional
+ * fields, new message kinds) do NOT require a bump — the "ignore unknown"
+ * discipline covers those.
+ *
+ * Native clients (e.g. the Rust Ratatui frontend) compare this against their
+ * own compiled-in version on `auth.ok` and warn the user if they've drifted.
+ */
+export const PROTOCOL_VERSION = 1;
+
 // =============================================================================
 // Session metadata
 // =============================================================================
@@ -714,6 +725,12 @@ export interface AuthOkMsg {
   /** Authenticated identity */
   identity: MessageIdentity;
   scopes: readonly string[];
+  /**
+   * Wire-protocol version the daemon speaks. Clients compare this against
+   * their own compiled-in `PROTOCOL_VERSION` to detect drift. Older clients
+   * that predate this field will see `undefined` and skip the check.
+   */
+  protocolVersion?: number;
 }
 
 export interface ResponseOkMsg {

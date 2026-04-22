@@ -24,7 +24,7 @@ import {
   createRegistry,
 } from "./compress/index.js";
 import type { CodeoidConfig } from "../config.js";
-import type { AuthContext, ClientMessage, DaemonMessage } from "../protocol/types.js";
+import { PROTOCOL_VERSION, type AuthContext, type ClientMessage, type DaemonMessage } from "../protocol/types.js";
 import type { AttachedClient } from "./session.js";
 import type { Frontend, FrontendContext } from "../frontends/types.js";
 import type { Server } from "node:http";
@@ -304,6 +304,7 @@ export class DaemonServer {
                 type: data.auth.delegationDepth === 0 ? "human" : "agent",
               },
               scopes: data.auth.scopes,
+              protocolVersion: PROTOCOL_VERSION,
             }));
             return;
           }
