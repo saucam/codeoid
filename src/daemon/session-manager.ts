@@ -133,6 +133,8 @@ export class SessionManager {
         return this.#search(msg, auth);
       case "session.set_model":
         return this.#setModel(msg, auth);
+      case "session.rename":
+        return this.#rename(msg, auth);
     }
   }
 
@@ -582,6 +584,43 @@ export class SessionManager {
       };
     }
     session.setMode(msg.mode, msg.maxTurns, auth);
+    return { type: "response.ok", requestId: msg.id };
+  }
+
+  #rename(
+    msg: Extract<ClientMessage, { type: "session.rename" }>,
+    auth: AuthContext,
+  ): DaemonMessage {
+    // Rename reuses the session:approve scope — anyone with write access
+    // to session config qualifies. Stricter scopes can be introduced
+    // later if we split config vs. execution permissions.
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_APPROVE)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Missing scope: session:approve",
+        code: "forbidden",
+      };
+    }
+    const trimmed = msg.name.trim();
+    if (!trimmed) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Session name cannot be empty",
+        code: "invalid_request",
+      };
+    }
+    const session = this.#sessions.get(msg.sessionId);
+    if (!session) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Session not found",
+        code: "not_found",
+      };
+    }
+    session.rename(trimmed, auth);
     return { type: "response.ok", requestId: msg.id };
   }
 

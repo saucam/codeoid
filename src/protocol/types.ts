@@ -504,7 +504,8 @@ export type ClientMessage =
   | SessionUnpinMsg
   | SessionRotateMsg
   | SessionSearchMsg
-  | SessionSetModelMsg;
+  | SessionSetModelMsg
+  | SessionRenameMsg;
 
 interface BaseClientMsg {
   /** Request ID for correlating responses */
@@ -515,6 +516,19 @@ export interface SessionCreateMsg extends BaseClientMsg {
   type: "session.create";
   name: string;
   workdir: string;
+}
+
+/**
+ * Rename a session. Daemon updates `SessionInfo.name` in-memory + in the
+ * transcript store and broadcasts `session.info_update` so every attached
+ * client refreshes its tab label. The sessionId is stable — callers can
+ * keep using it. Rejected with `invalid_request` if `name` is empty or
+ * whitespace-only.
+ */
+export interface SessionRenameMsg extends BaseClientMsg {
+  type: "session.rename";
+  sessionId: string;
+  name: string;
 }
 
 export interface SessionListMsg extends BaseClientMsg {

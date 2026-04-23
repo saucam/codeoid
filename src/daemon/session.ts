@@ -106,7 +106,12 @@ export interface SessionCreateOptions {
 
 export class Session {
   readonly id: string;
-  readonly name: string;
+  /**
+   * User-visible session label. Mutable via `rename()` — callers must go
+   * through the setter so the SessionInfo broadcast fires and transcript
+   * audits record the change.
+   */
+  name: string;
   readonly workdir: string;
   readonly createdBy: string;
   readonly createdAt: string;
@@ -436,6 +441,24 @@ export class Session {
     if (sender) {
       this.#store.audit(sender.sub, "session.set_mode", this.id, `mode=${mode}`);
     }
+    this.#broadcastInfoUpdate();
+  }
+
+  /**
+   * Update the user-visible name. No-ops when `next` matches the current
+   * name. Broadcasts `session.info_update` so every attached client
+   * refreshes its tab label without a separate list roundtrip.
+   */
+  rename(next: string, sender: AuthContext): void {
+    const trimmed = next.trim();
+    if (!trimmed || trimmed === this.name) return;
+    this.#store.audit(
+      sender.sub,
+      "session.rename",
+      this.id,
+      `from=${this.name} to=${trimmed}`,
+    );
+    this.name = trimmed;
     this.#broadcastInfoUpdate();
   }
 
