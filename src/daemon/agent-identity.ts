@@ -88,9 +88,7 @@ export class AgentIdentityManager {
       });
 
       // Issue a scoped token for the agent via delegation
-      const tokenResp = await this.#client.tokens.issue({
-        grant_type: "api_key",
-        api_key: resp.api_key,
+      const tokenResp = await this.#client.tokens.issueApiKey(resp.api_key, {
         scope: AGENT_TOOL_SCOPES.join(" "),
       });
 
@@ -158,9 +156,7 @@ export class AgentIdentityManager {
       // TODO: upgrade to token_exchange (RFC 8693) with actor_token once
       // we generate per-agent EC P-256 key pairs. For now, the delegation
       // chain is tracked via created_by → parent WIMSE URI in the identity.
-      const tokenResp = await this.#client.tokens.issue({
-        grant_type: "api_key",
-        api_key: resp.api_key,
+      const tokenResp = await this.#client.tokens.issueApiKey(resp.api_key, {
         scope: scopes.join(" "),
       });
 
