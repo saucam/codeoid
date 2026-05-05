@@ -5,3 +5,6 @@ dist/
 *.db-shm
 .env
 .env.*
+
+# Runtime logs from `nohup bun src/cli.ts start > .run/daemon.log` etc.
+.run/
