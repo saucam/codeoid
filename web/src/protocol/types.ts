@@ -292,6 +292,21 @@ export interface SessionSearchMsg extends BaseClientMsg {
   limit?: number;
 }
 
+export interface FsListMsg extends BaseClientMsg {
+  type: "fs.list";
+  sessionId: string;
+  /** Path relative to the session's workdir. "" / "." / "/" all = root. */
+  path: string;
+}
+
+export interface FsReadMsg extends BaseClientMsg {
+  type: "fs.read";
+  sessionId: string;
+  path: string;
+  /** Hard cap in bytes; daemon ceiling is 10 MiB. Default 1 MiB. */
+  maxBytes?: number;
+}
+
 export type ClientMessage =
   | SessionCreateMsg
   | SessionRenameMsg
@@ -305,7 +320,9 @@ export type ClientMessage =
   | SessionSetModeMsg
   | SessionRotateMsg
   | SessionSetModelMsg
-  | SessionSearchMsg;
+  | SessionSearchMsg
+  | FsListMsg
+  | FsReadMsg;
 
 // -----------------------------------------------------------------------------
 // Daemon → Client messages
@@ -395,6 +412,38 @@ export interface SessionSearchResultMsg {
   limit: number;
 }
 
+export interface FsEntry {
+  name: string;
+  /** Path relative to the session's workdir. */
+  path: string;
+  kind: "file" | "directory";
+  size?: number;
+  mtimeMs?: number;
+  isSymlink?: boolean;
+}
+
+export interface FsListResultMsg {
+  type: "fs.list.result";
+  requestId: string;
+  /** Echoed `path` (canonicalised, still relative to workdir). */
+  path: string;
+  entries: FsEntry[];
+}
+
+export interface FsReadResultMsg {
+  type: "fs.read.result";
+  requestId: string;
+  path: string;
+  /** UTF-8 text or base64-encoded binary; decide via `encoding`. */
+  content: string;
+  encoding: "utf-8" | "base64";
+  /** Total size on disk; may exceed `content` length when `truncated`. */
+  size: number;
+  /** shiki-compatible language hint, when the daemon could detect one. */
+  language?: string;
+  truncated: boolean;
+}
+
 export type DaemonMessage =
   | AuthOkMsg
   | ResponseOkMsg
@@ -405,4 +454,6 @@ export type DaemonMessage =
   | SessionStatusChangeMsg
   | SessionInfoUpdateMsg
   | ScrollbackReplayMsg
-  | SessionSearchResultMsg;
+  | SessionSearchResultMsg
+  | FsListResultMsg
+  | FsReadResultMsg;

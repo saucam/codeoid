@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "typecheck": "tsc -b --noEmit",
     "lint": "eslint src --ext ts,tsx",
-    "test": "NODE_OPTIONS=\"--max-old-space-size=2048\" vitest run"
+    "test": "NODE_OPTIONS=\"--max-old-space-size=4096\" vitest run --pool=forks --poolOptions.forks.singleFork=true"
   },
   "dependencies": {
     "@floating-ui/dom": "^1.7.6",

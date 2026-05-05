@@ -21,9 +21,30 @@ export interface ResolveOptions {
   apiKey?: string;
   /** ZeroID base URL. Defaults to http://localhost:8899. */
   zeroidUrl?: string;
+  /**
+   * Space-delimited scopes to request when exchanging an api_key.
+   * Defaults to the codeoid web operator set — every verb the UI sends.
+   * ZeroID propagates these into the issued JWT's `scopes` claim, which
+   * the daemon enforces per-message. Without this, JWTs come back with
+   * an empty scope set and every protocol verb is denied.
+   */
+  scope?: string;
   /** AbortSignal for the exchange call. */
   signal?: AbortSignal;
 }
+
+/** Default scope request for the web UI — every codeoid verb it sends. */
+export const DEFAULT_WEB_SCOPES = [
+  "session:list",
+  "session:create",
+  "session:attach",
+  "session:watch",
+  "session:send",
+  "session:interrupt",
+  "session:approve",
+  "session:destroy",
+  "fs:read",
+].join(" ");
 
 export interface ResolvedAuth {
   /** Bearer token to use against the daemon. */
@@ -68,7 +89,11 @@ export async function resolveToken(opts: ResolveOptions): Promise<ResolvedAuth> 
     res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ grant_type: "api_key", api_key: apiKey }),
+      body: new URLSearchParams({
+        grant_type: "api_key",
+        api_key: apiKey,
+        scope: opts.scope ?? DEFAULT_WEB_SCOPES,
+      }),
       signal: opts.signal,
     });
   } catch (err) {

@@ -1,7 +1,6 @@
 /**
- * Left sidebar — session list with per-row metrics, identity, and
- * status. Future-me note: file-tree pane mounts BELOW this in the same
- * column when P5 lands.
+ * Left sidebar — session list (top) + file tree (bottom). Both are
+ * scoped to the focused session.
  */
 
 import { Component, For, Show } from "solid-js";
@@ -14,6 +13,8 @@ import {
   sessionList,
 } from "../state/sessions";
 import type { SessionInfo, SessionStatus } from "../protocol/types";
+
+import FileTree from "./files/FileTree";
 
 const SessionListPane: Component = () => {
   return (
@@ -28,6 +29,11 @@ const SessionListPane: Component = () => {
             {(s) => <SessionRow session={s} />}
           </For>
         </ul>
+      </Show>
+      <Show when={focusedSessionId()}>
+        <div class="mt-2 border-t border-border pt-1">
+          <FileTree />
+        </div>
       </Show>
     </aside>
   );

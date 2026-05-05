@@ -92,9 +92,13 @@ web/
 
 | Header / step | Purpose |
 |---|---|
-| `Authorization: Bearer <jwt>` (Cookie alternative isn't used) | Daemon `verifyToken` validates against ZeroID's JWKS |
-| First WS frame `{ type: "auth", token }` | Required by daemon — connection is closed otherwise |
-| `auth.ok` | Carries identity + scopes + protocol version |
+| `POST /oauth2/token` with `grant_type=api_key` + `scope=…` | ZeroID mints a JWT carrying the requested scopes in `scopes` claim |
+| First WS frame `{ type: "auth", token }` | Daemon `verifyToken` validates against ZeroID JWKS, populates AuthContext.scopes |
+| `auth.ok` | Carries identity + actual granted scopes + protocol version |
+
+The web UI requests `DEFAULT_WEB_SCOPES` on every exchange. Without the
+explicit `scope` parameter, ZeroID would issue a JWT with no scopes and
+the daemon's per-message gates would reject everything.
 
 The JWT is short-lived; on `403 invalid_jwt` we re-exchange the API key.
 
@@ -111,6 +115,8 @@ The JWT is short-lived; on `403 invalid_jwt` we re-exchange the API key.
 - `session.set_model { model, fallbackModel? }`
 - `session.search { query, scope?, workdir?, limit? }`
 - `session.approve { approvalId, approved }`
+- `fs.list { sessionId, path }` — scoped to the session's workdir
+- `fs.read { sessionId, path, maxBytes? }` — UTF-8 text or base64 binary
 
 ## Daemon broadcasts the web UI consumes
 
@@ -120,6 +126,7 @@ The JWT is short-lived; on `403 invalid_jwt` we re-exchange the API key.
 - `scrollback.replay`
 - `session.status_change`, `session.info_update`
 - `response.ok`, `response.error`
+- `fs.list.result`, `fs.read.result`
 
 ## Metrics surface
 
@@ -149,7 +156,7 @@ Phase markers used in commits:
 - **P2 — state stores + minimal layout wired to live data**
 - **P3 — sessions feature (list, create, rename, destroy)**
 - **P4 — transcript + prompt + approvals**
-- **P5 — file explorer + read-only viewer (needs daemon `fs.list`/`fs.read` verbs)**
+- **P5 — file explorer + read-only viewer ✓ daemon `fs.list`/`fs.read` shipped**
 - **P6 — controls (interrupt, rotate, mode, model, search)**
 - **P7 — polish (motion, virtualization, shiki, accessibility)**
 
