@@ -131,17 +131,18 @@ export class SqliteEpisodeStore {
         END;
 
       CREATE TABLE IF NOT EXISTS turn_usage (
-        workspace_id           TEXT NOT NULL,
-        session_id             TEXT NOT NULL,
-        turn_number            INTEGER NOT NULL,
-        created_at             INTEGER NOT NULL,
-        input_tokens           INTEGER NOT NULL DEFAULT 0,
-        output_tokens          INTEGER NOT NULL DEFAULT 0,
-        cache_read_tokens      INTEGER NOT NULL DEFAULT 0,
-        cache_creation_tokens  INTEGER NOT NULL DEFAULT 0,
-        total_cost_usd         REAL    NOT NULL DEFAULT 0,
-        duration_ms            INTEGER NOT NULL DEFAULT 0,
-        stop_reason            TEXT,
+        workspace_id                    TEXT NOT NULL,
+        session_id                      TEXT NOT NULL,
+        turn_number                     INTEGER NOT NULL,
+        created_at                      INTEGER NOT NULL,
+        input_tokens                    INTEGER NOT NULL DEFAULT 0,
+        output_tokens                   INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens               INTEGER NOT NULL DEFAULT 0,
+        cache_creation_tokens           INTEGER NOT NULL DEFAULT 0,
+        total_cost_usd                  REAL    NOT NULL DEFAULT 0,
+        duration_ms                     INTEGER NOT NULL DEFAULT 0,
+        stop_reason                     TEXT,
+        primary_max_call_input_tokens   INTEGER,
         PRIMARY KEY (session_id, turn_number)
       );
 
@@ -164,6 +165,23 @@ export class SqliteEpisodeStore {
       CREATE INDEX IF NOT EXISTS idx_file_reads_recent
         ON file_reads(workspace_id, file_path, read_at DESC);
     `);
+
+    // Idempotent migration: add primary_max_call_input_tokens column to
+    // turn_usage tables created before that field existed. SQLite has no
+    // "ADD COLUMN IF NOT EXISTS"; pragma_table_info gives us the same
+    // effect cheaply.
+    const hasPrimaryMaxCol = (
+      this.#db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM pragma_table_info('turn_usage') WHERE name = 'primary_max_call_input_tokens'",
+        )
+        .get() as { n: number } | undefined
+    )?.n ?? 0;
+    if (!hasPrimaryMaxCol) {
+      this.#db.exec(
+        "ALTER TABLE turn_usage ADD COLUMN primary_max_call_input_tokens INTEGER",
+      );
+    }
   }
 
   // ── Writes ────────────────────────────────────────────────────────────
@@ -224,8 +242,8 @@ export class SqliteEpisodeStore {
         `INSERT INTO turn_usage (
           workspace_id, session_id, turn_number, created_at,
           input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-          total_cost_usd, duration_ms, stop_reason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          total_cost_usd, duration_ms, stop_reason, primary_max_call_input_tokens
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(session_id, turn_number) DO UPDATE SET
           created_at = excluded.created_at,
           input_tokens = excluded.input_tokens,
@@ -234,7 +252,8 @@ export class SqliteEpisodeStore {
           cache_creation_tokens = excluded.cache_creation_tokens,
           total_cost_usd = excluded.total_cost_usd,
           duration_ms = excluded.duration_ms,
-          stop_reason = excluded.stop_reason`,
+          stop_reason = excluded.stop_reason,
+          primary_max_call_input_tokens = excluded.primary_max_call_input_tokens`,
       )
       .run(
         input.workspaceId,
@@ -248,6 +267,7 @@ export class SqliteEpisodeStore {
         input.turn.totalCostUsd,
         input.turn.durationMs,
         input.turn.stopReason ?? null,
+        input.turn.primaryMaxCallInputTokens ?? null,
       );
   }
 
@@ -257,7 +277,8 @@ export class SqliteEpisodeStore {
       .prepare(
         `SELECT turn_number, created_at, input_tokens, output_tokens,
                 cache_read_tokens, cache_creation_tokens,
-                total_cost_usd, duration_ms, stop_reason
+                total_cost_usd, duration_ms, stop_reason,
+                primary_max_call_input_tokens
          FROM turn_usage
          WHERE session_id = ?
          ORDER BY turn_number DESC
@@ -273,6 +294,7 @@ export class SqliteEpisodeStore {
         total_cost_usd: number;
         duration_ms: number;
         stop_reason: string | null;
+        primary_max_call_input_tokens: number | null;
       }>;
 
     return rows.map((r) => this.#rowToTurnUsage(r));
@@ -303,7 +325,10 @@ export class SqliteEpisodeStore {
            COALESCE(SUM(duration_ms), 0)            AS duration_ms,
            COUNT(*)                                  AS num_turns,
            COALESCE(MAX(
-             input_tokens + cache_read_tokens + cache_creation_tokens
+             COALESCE(
+               primary_max_call_input_tokens,
+               input_tokens + cache_read_tokens + cache_creation_tokens
+             )
            ), 0) AS peak_input_tokens
          FROM turn_usage WHERE session_id = ?`,
       )
@@ -351,13 +376,15 @@ export class SqliteEpisodeStore {
     total_cost_usd: number;
     duration_ms: number;
     stop_reason: string | null;
+    primary_max_call_input_tokens: number | null;
   }): TurnUsage {
-    // Anthropic's input_tokens counts NEW bytes only. The actual context
-    // Claude processed is input + cache_read + cache_creation. That sum is
-    // what matters for bloat tracking + cache-hit ratios.
+    // Anthropic's input_tokens counts NEW bytes only. `total` here SUMS
+    // across the multiple internal Messages-API calls a tool-using turn
+    // makes — correct for billing, but overstates single-shot context
+    // size. `primaryMaxCallInputTokens` (when populated) is the honest
+    // per-turn ctx size for "% of window" displays.
     const total =
       row.input_tokens + row.cache_read_tokens + row.cache_creation_tokens;
-    // Full-price equivalent: new input + cache writes (cache reads ~free).
     const billable = row.input_tokens + row.cache_creation_tokens;
     const hit = total > 0 ? row.cache_read_tokens / total : 0;
     return {
@@ -373,6 +400,9 @@ export class SqliteEpisodeStore {
       totalInputTokens: total,
       billableInputTokens: billable,
       cacheHitRate: hit,
+      ...(row.primary_max_call_input_tokens != null
+        ? { primaryMaxCallInputTokens: row.primary_max_call_input_tokens }
+        : {}),
     };
   }
 

@@ -144,17 +144,19 @@ const SessionMetrics: Component = () => {
   );
 };
 
-/** Daemon hardcodes Session.CONTEXT_WINDOW = 1_000_000 today. */
-const CONTEXT_WINDOW = 1_000_000;
+/** Conservative fallback for daemons that don't yet emit usage.contextWindow. */
+const CONTEXT_WINDOW_FALLBACK = 200_000;
 
 const CtxWindowPill: Component = () => (
   <Show when={focusedSession()?.usage?.lastTurnInputTokens}>
     {(ctx) => {
-      const ratio = () => ctx() / CONTEXT_WINDOW;
+      const window = () =>
+        focusedSession()?.usage?.contextWindow ?? CONTEXT_WINDOW_FALLBACK;
+      const ratio = () => ctx() / window();
       return (
         <span
           class={`flex items-center gap-1 ${ctxWindowColorClass(ratio())}`}
-          title={`Last turn context = ${ctx().toLocaleString()} of ${CONTEXT_WINDOW.toLocaleString()} (${formatPercent(ratio(), 1)})`}
+          title={`Last turn context = ${ctx().toLocaleString()} of ${window().toLocaleString()} (${formatPercent(ratio(), 1)})`}
         >
           <span class="text-fg-faint">ctx</span>
           <span>{formatPercent(ratio(), 0)}</span>

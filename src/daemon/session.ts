@@ -39,6 +39,7 @@ import type { Store } from "./store.js";
 import type { AgentIdentityManager } from "./agent-identity.js";
 import { ScrollbackBuffer } from "./scrollback.js";
 import { TranscriptStore } from "./transcript.js";
+import { contextWindowForModel } from "./context-windows.js";
 import {
   EpisodeChunker,
   IndexScheduler,
@@ -1225,6 +1226,11 @@ export class Session {
       totalInputTokens: total,
       billableInputTokens: billable,
       cacheHitRate: hitRate,
+      // Honest per-turn ctx-of-window denominator. > 0 only when the SDK
+      // streamed per-call usage AND we tracked it; 0 fallback ends up
+      // null in storage, so refreshUsageFromStore degrades to legacy
+      // sum-based math for those rows.
+      ...(primaryCtx > 0 ? { primaryMaxCallInputTokens: primaryCtx } : {}),
     };
 
     try {
@@ -1274,11 +1280,17 @@ export class Session {
     );
     const mostRecent = lastTurn ?? recent[0];
 
-    // ctx metric: primary-only when we have a fresh hint; otherwise fall
-    // back to the stored totalInputTokens capped at the window (no more
-    // "205% of 1M" displays on historical turns with aggregated usage).
+    // ctx metric, in priority order:
+    //   1. Fresh in-memory hint from the just-completed turn (live).
+    //   2. Persisted `primaryMaxCallInputTokens` on the most recent row
+    //      — the honest single-call max, set by recordUsageFromTurn for
+    //      every turn since this column was added.
+    //   3. Legacy fallback: `totalInputTokens` (SUM across calls in a
+    //      tool-using turn) capped at the window. Over-reports for
+    //      tool-heavy turns but the only signal we have for old rows.
     const fallbackTotal = mostRecent
-      ? Math.min(mostRecent.totalInputTokens, Session.CONTEXT_WINDOW)
+      ? mostRecent.primaryMaxCallInputTokens ??
+        Math.min(mostRecent.totalInputTokens, Session.CONTEXT_WINDOW)
       : undefined;
     const lastPrimary = primaryCtxHint ?? fallbackTotal;
 
@@ -1305,6 +1317,7 @@ export class Session {
       lastTurnOutputTokens: mostRecent?.outputTokens,
       lastTurnCostUsd: mostRecent?.totalCostUsd,
       lastTurnCacheHitRate: mostRecent?.cacheHitRate,
+      contextWindow: contextWindowForModel(this.#model),
     };
   }
 

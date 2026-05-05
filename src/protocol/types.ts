@@ -138,6 +138,17 @@ export interface SessionUsage {
   lastTurnCostUsd?: number;
   /** Most recent turn's cache-read ratio (cache_read / total_input). */
   lastTurnCacheHitRate?: number;
+  /**
+   * Resolved model's context window in tokens — the denominator for
+   * ctx-occupancy displays. Derived from `SessionInfo.model` via the
+   * daemon's per-model catalog (`contextWindowForModel`). Switching
+   * models mid-session updates this on the next info_update broadcast.
+   *
+   * Optional for back-compat with daemons that pre-date this field;
+   * frontends should fall back to a conservative constant (200k) or
+   * skip the percentage when unset.
+   */
+  contextWindow?: number;
 }
 
 /**
@@ -179,6 +190,18 @@ export interface TurnUsage {
   billableInputTokens: number;
   /** Derived: cacheReadTokens / totalInputTokens. 0-1. */
   cacheHitRate: number;
+  /**
+   * Max single-call context size on the primary agent during this turn —
+   * `max(input + cache_read + cache_creation)` across the SDK's streamed
+   * per-call usage. Authoritative for "% of window" because
+   * `totalInputTokens` SUMS across the multiple internal Messages-API
+   * calls a tool-using turn makes, overstating single-shot context size.
+   *
+   * Optional for back-compat: rows persisted before the daemon began
+   * tracking this leave it `undefined`. Frontends fall back to
+   * `min(totalInputTokens, contextWindow)` (legacy behaviour) for those.
+   */
+  primaryMaxCallInputTokens?: number;
 }
 
 export interface Subagent {

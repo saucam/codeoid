@@ -41,6 +41,12 @@ export interface SessionUsage {
   lastTurnOutputTokens?: number;
   lastTurnCostUsd?: number;
   lastTurnCacheHitRate?: number;
+  /**
+   * Resolved model's context window in tokens — denominator for the
+   * ctx-occupancy display. Optional for back-compat with older daemons;
+   * frontends fall back to a conservative constant when unset.
+   */
+  contextWindow?: number;
 }
 
 export interface TurnUsage {

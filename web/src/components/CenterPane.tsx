@@ -182,8 +182,8 @@ const SubagentChip: Component = () => {
   );
 };
 
-/** Daemon hardcodes Session.CONTEXT_WINDOW = 1_000_000 today. */
-const CONTEXT_WINDOW = 1_000_000;
+/** Conservative fallback for daemons that don't yet emit usage.contextWindow. */
+const CONTEXT_WINDOW_FALLBACK = 200_000;
 
 const UsageStrip: Component = () => (
   <Show when={focusedSession()?.usage}>
@@ -191,7 +191,11 @@ const UsageStrip: Component = () => (
       <div class="grid grid-cols-2 gap-2 text-[11px] sm:grid-cols-4 lg:grid-cols-8">
         <CtxStat />
         <Stat label="Turns" value={String(u().numTurns)} />
-        <Stat label="Input" value={formatTokens(u().inputTokens)} />
+        <Stat
+          label="New input"
+          value={formatTokens(u().inputTokens)}
+          hint="Cumulative NEW (uncached) input tokens. Cache reads are billed separately and live in the Cache read tile."
+        />
         <Stat label="Output" value={formatTokens(u().outputTokens)} />
         <Stat
           label="Cache read"
@@ -242,7 +246,9 @@ const Stat: Component<{
 
 /**
  * Dedicated context-window stat — value comes with a colored progress
- * bar so the user sees their headroom at a glance.
+ * bar so the user sees their headroom at a glance. Window comes from
+ * `usage.contextWindow` (daemon-canonical, derived from session.model)
+ * and falls back to 200k for daemons that don't emit it yet.
  */
 const CtxStat: Component = () => (
   <Show
@@ -250,11 +256,13 @@ const CtxStat: Component = () => (
     fallback={<Stat label="Context" value="—" hint="awaiting first turn" />}
   >
     {(ctx) => {
-      const ratio = () => Math.min(ctx() / CONTEXT_WINDOW, 1);
+      const window = () =>
+        focusedSession()?.usage?.contextWindow ?? CONTEXT_WINDOW_FALLBACK;
+      const ratio = () => Math.min(ctx() / window(), 1);
       return (
         <div
           class="flex flex-col gap-0.5 rounded border border-border bg-bg px-2 py-1.5"
-          title={`Last turn context = ${ctx().toLocaleString()} of ${CONTEXT_WINDOW.toLocaleString()} tokens`}
+          title={`Last turn context = ${ctx().toLocaleString()} of ${window().toLocaleString()} tokens`}
         >
           <span class="flex items-center justify-between text-[10px] uppercase tracking-wider text-fg-faint">
             <span>Context</span>
