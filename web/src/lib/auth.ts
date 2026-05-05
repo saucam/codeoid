@@ -150,3 +150,101 @@ export function forgetApiKey(): void {
 export function rememberedApiKey(): string | null {
   return localStorage.getItem(STORAGE_KEY_API_KEY);
 }
+
+/**
+ * Register a fresh agent identity in ZeroID and return the new API key.
+ *
+ * Used by the SignIn flow's "Register new web agent" affordance so a
+ * brand-new user doesn't have to do CLI gymnastics. Defaults pick
+ * sensible labels (`codeoid-web`) so the connected identity reads as
+ * an actual web client, not a borrowed TUI agent.
+ *
+ * Endpoint: ZeroID's `/api/v1/agents/register`. Today the daemon's
+ * default ZeroID is configured without admin auth on this route — fine
+ * for local dev; production deploys must front it with proper auth.
+ */
+export async function registerWebAgent(opts: {
+  name?: string;
+  accountId?: string;
+  projectId?: string;
+  ownerId?: string;
+  zeroidUrl?: string;
+  signal?: AbortSignal;
+} = {}): Promise<{ apiKey: string; agentUri: string; identityId: string }> {
+  const baseUrl = (opts.zeroidUrl ?? "").replace(/\/+$/, "");
+  const url = baseUrl
+    ? `${baseUrl}/api/v1/agents/register`
+    : "/api/v1/agents/register";
+
+  const accountId = opts.accountId ?? "acct_demo";
+  const projectId = opts.projectId ?? "proj_demo";
+  const ownerId = opts.ownerId ?? "web-user@local";
+  const name = opts.name ?? "codeoid-web";
+  const externalId = `${name}-${Math.random().toString(36).slice(2, 10)}`;
+
+  const body = {
+    name,
+    external_id: externalId,
+    sub_type: "autonomous",
+    trust_level: "first_party",
+    framework: "codeoid-web",
+    publisher: "codeoid",
+    created_by: ownerId,
+  };
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Account-ID": accountId,
+        "X-Project-ID": projectId,
+      },
+      body: JSON.stringify(body),
+      signal: opts.signal,
+    });
+  } catch (err) {
+    throw new AuthError(
+      `cannot reach ZeroID admin endpoint at ${url}`,
+      "exchange_failed",
+      err,
+    );
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new AuthError(
+      `ZeroID rejected the registration (${res.status}): ${text.slice(0, 240) || res.statusText}`,
+      "exchange_failed",
+    );
+  }
+
+  let payload: unknown;
+  try {
+    payload = await res.json();
+  } catch (err) {
+    throw new AuthError("ZeroID returned non-JSON", "exchange_failed", err);
+  }
+
+  if (!payload || typeof payload !== "object") {
+    throw new AuthError("ZeroID response missing fields", "exchange_failed");
+  }
+  const obj = payload as Record<string, unknown>;
+  const apiKey = obj["api_key"];
+  const identity = obj["identity"];
+  if (typeof apiKey !== "string") {
+    throw new AuthError("ZeroID response missing api_key", "exchange_failed");
+  }
+  const identityObj = identity && typeof identity === "object" ? (identity as Record<string, unknown>) : null;
+  const agentUri =
+    typeof identityObj?.["wimse_uri"] === "string"
+      ? (identityObj["wimse_uri"] as string)
+      : "";
+  const identityId =
+    typeof identityObj?.["id"] === "string"
+      ? (identityObj["id"] as string)
+      : "";
+
+  return { apiKey, agentUri, identityId };
+}

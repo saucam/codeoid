@@ -11,12 +11,13 @@
 
 import { Component, Show, createSignal } from "solid-js";
 
-import { rememberApiKey, rememberedApiKey } from "../lib/auth";
+import { registerWebAgent, rememberApiKey, rememberedApiKey } from "../lib/auth";
 import { bootstrap, bootstrapError } from "../state/connection";
 
 const SignIn: Component<{ onSignedIn: () => void }> = (props) => {
   const [apiKey, setApiKey] = createSignal(rememberedApiKey() ?? "");
   const [busy, setBusy] = createSignal(false);
+  const [registerError, setRegisterError] = createSignal<string | null>(null);
   const [advanced, setAdvanced] = createSignal(false);
   const [zeroidUrl, setZeroidUrl] = createSignal(
     (import.meta.env.VITE_ZEROID_URL as string | undefined) ?? "http://localhost:8899",
@@ -34,6 +35,23 @@ const SignIn: Component<{ onSignedIn: () => void }> = (props) => {
       props.onSignedIn();
     } catch {
       // bootstrapError signal carries the message — the form below renders it.
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function registerAndSignIn(): Promise<void> {
+    if (busy()) return;
+    setBusy(true);
+    setRegisterError(null);
+    try {
+      const { apiKey: minted } = await registerWebAgent();
+      rememberApiKey(minted);
+      setApiKey(minted);
+      await bootstrap({ apiKey: minted });
+      props.onSignedIn();
+    } catch (err) {
+      setRegisterError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
@@ -108,6 +126,28 @@ const SignIn: Component<{ onSignedIn: () => void }> = (props) => {
         >
           {busy() ? "Connecting…" : "Sign in"}
         </button>
+
+        <div class="flex items-center gap-3 text-[11px] text-fg-faint">
+          <span class="h-px flex-1 bg-border" />
+          <span>or</span>
+          <span class="h-px flex-1 bg-border" />
+        </div>
+
+        <button
+          type="button"
+          onClick={registerAndSignIn}
+          disabled={busy()}
+          class="w-full rounded border border-border bg-bg px-3 py-2 text-sm font-medium text-fg-muted transition hover:border-accent/40 hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
+          title="Mint a new ZeroID agent identity named codeoid-web and sign in"
+        >
+          {busy() ? "…" : "Register a new web agent"}
+        </button>
+
+        <Show when={registerError()}>
+          <div class="rounded border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
+            {registerError()}
+          </div>
+        </Show>
 
         <p class="text-[11px] text-fg-faint">
           Your key is stored locally in your browser only — never sent anywhere except

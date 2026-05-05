@@ -296,3 +296,22 @@ body {
 @keyframes tool-spin {
   to { transform: rotate(360deg); }
 }
+
+/* Subtle entrance for new transcript rows — eases the abrupt jump when
+   a user sends a message and the assistant placeholder appears. */
+article[data-message-id] {
+  animation: msg-enter 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes msg-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  article[data-message-id] { animation: none; }
+}

@@ -8,7 +8,17 @@
  * @tanstack/solid-virtual once the visible perf pressure is real.
  */
 
-import { Component, For, Show, createEffect, createMemo, createSignal, on } from "solid-js";
+import {
+  Component,
+  For,
+  Show,
+  createEffect,
+  createMemo,
+  createSignal,
+  on,
+  onCleanup,
+  onMount,
+} from "solid-js";
 
 import MessageRow from "./MessageRow";
 import { createMessages } from "../../state/messages";
@@ -20,6 +30,22 @@ const Transcript: Component = () => {
   const messages = createMessages(focusedSessionId);
   let containerRef: HTMLDivElement | undefined;
   const [stuckBottom, setStuckBottom] = createSignal(true);
+
+  // One-shot smoothing — set when the user just submitted a message so
+  // the next auto-scroll uses behavior: "smooth" instead of an instant
+  // snap. We don't animate every streaming delta because that's
+  // visually busy and creates lag perception.
+  let smoothNext = false;
+  function listener(ev: Event): void {
+    void ev;
+    smoothNext = true;
+  }
+  onMount(() => {
+    window.addEventListener("codeoid:smooth-scroll", listener);
+    onCleanup(() =>
+      window.removeEventListener("codeoid:smooth-scroll", listener),
+    );
+  });
 
   // Pinpoint the messageId currently being streamed by the assistant —
   // if any. We render a caret on that one so the user has a clear "still
@@ -56,18 +82,30 @@ const Transcript: Component = () => {
     on(messages, () => {
       if (!containerRef) return;
       if (stuckBottom()) {
+        const smooth = smoothNext;
+        smoothNext = false;
         // Defer one frame so the new DOM has measured.
         queueMicrotask(() => {
-          if (containerRef) containerRef.scrollTop = containerRef.scrollHeight;
+          if (!containerRef) return;
+          if (smooth) {
+            containerRef.scrollTo({
+              top: containerRef.scrollHeight,
+              behavior: "smooth",
+            });
+          } else {
+            containerRef.scrollTop = containerRef.scrollHeight;
+          }
         });
       }
     }),
   );
 
-  // When the focused session changes, snap to bottom.
+  // When the focused session changes, snap to bottom (no animation —
+  // we're swapping content wholesale).
   createEffect(
     on(focusedSessionId, () => {
       setStuckBottom(true);
+      smoothNext = false;
       queueMicrotask(() => {
         if (containerRef) containerRef.scrollTop = containerRef.scrollHeight;
       });

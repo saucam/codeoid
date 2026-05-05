@@ -99,6 +99,10 @@ const PromptBox: Component = () => {
       return;
     }
 
+    // Tell the transcript to use smooth-behavior on the next auto-scroll
+    // so the just-submitted message animates into view rather than
+    // snapping. One-shot — streaming deltas after this stay instant.
+    window.dispatchEvent(new Event("codeoid:smooth-scroll"));
     send({
       type: "session.send",
       id: newRequestId(),
@@ -137,7 +141,7 @@ const PromptBox: Component = () => {
                 ? "Message Claude…  Enter sends · Shift+Enter for newline · /help for commands"
                 : "Select or create a session first."
             }
-            class="flex-1 resize-none bg-transparent font-mono text-sm leading-6 text-fg outline-none placeholder:text-fg-faint"
+            class="flex-1 resize-none bg-transparent font-mono text-sm leading-6 text-fg outline-none placeholder:text-fg-faint transition-[height] duration-150 ease-out"
             disabled={!focusedSession()}
           />
           <button

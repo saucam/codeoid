@@ -26,6 +26,15 @@ export default defineConfig({
           "http://localhost:8899",
         changeOrigin: true,
       },
+      // ZeroID admin endpoints (e.g. /api/v1/agents/register) — same
+      // CORS dodge as /oauth2. Production deploys should put auth in
+      // front of these.
+      "/api/v1": {
+        target:
+          (process.env.VITE_ZEROID_URL as string | undefined) ??
+          "http://localhost:8899",
+        changeOrigin: true,
+      },
     },
   },
   build: {
