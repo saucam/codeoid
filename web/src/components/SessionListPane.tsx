@@ -1,6 +1,8 @@
 /**
  * Left sidebar — session list (top) + file tree (bottom). Both are
- * scoped to the focused session.
+ * scoped to the focused session. Has a "collapse to rail" mode where
+ * the sidebar shrinks to 56px and renders icon-only chrome so the
+ * chat area dominates the viewport.
  */
 
 import { Component, For, Show } from "solid-js";
@@ -12,6 +14,10 @@ import {
   focusSession,
   sessionList,
 } from "../state/sessions";
+import {
+  isLeftCollapsed,
+  toggleLeftCollapsed,
+} from "../state/layout";
 import type { SessionInfo, SessionStatus } from "../protocol/types";
 
 import FileTree from "./files/FileTree";
@@ -19,47 +25,98 @@ import { openNewSessionModal } from "./NewSessionModal";
 
 const SessionListPane: Component = () => {
   return (
-    <aside class="row-start-2 flex flex-col overflow-y-auto border-r border-border bg-bg-elev">
-      <SectionHeader title="Sessions" count={sessionList().length} />
-      <button
-        type="button"
-        onClick={openNewSessionModal}
-        class="mx-3 mt-1 flex items-center gap-2 rounded border border-dashed border-border px-2 py-1.5 text-left text-xs text-fg-muted transition hover:border-accent/40 hover:bg-accent/5 hover:text-fg"
-        title="New session (Ctrl+N)"
-      >
-        <span class="text-base leading-none">＋</span>
-        <span>new session</span>
-        <span class="ml-auto rounded bg-bg px-1 py-0.5 font-mono text-[10px] text-fg-faint">
-          ⌘N
-        </span>
-      </button>
-      <Show
-        when={sessionList().length > 0}
-        fallback={<EmptyState />}
-      >
-        <ul class="flex flex-col py-1">
-          <For each={sessionList()}>
-            {(s) => <SessionRow session={s} />}
-          </For>
-        </ul>
-      </Show>
-      <Show when={focusedSessionId()}>
-        <div class="mt-2 border-t border-border pt-1">
-          <FileTree />
-        </div>
-      </Show>
-    </aside>
+    <Show
+      when={!isLeftCollapsed()}
+      fallback={<CollapsedRail />}
+    >
+      <aside class="row-start-2 col-start-1 flex h-full flex-col overflow-y-auto border-r border-border bg-bg-elev">
+        <SectionHeader title="Sessions" count={sessionList().length} />
+        <button
+          type="button"
+          onClick={openNewSessionModal}
+          class="mx-3 mt-1 flex items-center gap-2 rounded border border-dashed border-border px-2 py-1.5 text-left text-xs text-fg-muted transition hover:border-accent/40 hover:bg-accent/5 hover:text-fg"
+          title="New session (Ctrl+N)"
+        >
+          <span class="text-base leading-none">＋</span>
+          <span>new session</span>
+          <span class="ml-auto rounded bg-bg px-1 py-0.5 font-mono text-[10px] text-fg-faint">
+            ⌘N
+          </span>
+        </button>
+        <Show
+          when={sessionList().length > 0}
+          fallback={<EmptyState />}
+        >
+          <ul class="flex flex-col py-1">
+            <For each={sessionList()}>
+              {(s) => <SessionRow session={s} />}
+            </For>
+          </ul>
+        </Show>
+        <Show when={focusedSessionId()}>
+          <div class="mt-2 border-t border-border pt-1">
+            <FileTree />
+          </div>
+        </Show>
+      </aside>
+    </Show>
   );
 };
 
+const CollapsedRail: Component = () => (
+  <aside class="row-start-2 col-start-1 flex h-full flex-col items-center gap-2 overflow-y-auto border-r border-border bg-bg-elev py-2">
+    <button
+      type="button"
+      onClick={toggleLeftCollapsed}
+      class="rounded p-1.5 text-fg-muted hover:bg-bg-hover hover:text-fg"
+      title="Expand sidebar"
+    >
+      ▸
+    </button>
+    <button
+      type="button"
+      onClick={openNewSessionModal}
+      class="rounded p-1.5 text-fg-muted hover:bg-bg-hover hover:text-fg"
+      title="New session (Ctrl+N)"
+    >
+      ＋
+    </button>
+    <div class="my-1 h-px w-6 bg-border" />
+    <For each={sessionList()}>
+      {(s) => (
+        <button
+          type="button"
+          onClick={() => focusSession(s.id)}
+          class={`flex h-7 w-7 items-center justify-center rounded text-[11px] font-mono transition ${
+            focusedSessionId() === s.id
+              ? "bg-accent/20 text-accent"
+              : "text-fg-muted hover:bg-bg-hover hover:text-fg"
+          }`}
+          title={`${s.name} · ${s.workdir}`}
+        >
+          {s.name.slice(0, 2).toUpperCase()}
+        </button>
+      )}
+    </For>
+  </aside>
+);
+
 const SectionHeader: Component<{ title: string; count: number }> = (props) => (
-  <div class="sticky top-0 z-10 flex items-center justify-between bg-bg-elev/95 px-3 pb-2 pt-3 text-[11px] font-medium uppercase tracking-wider text-fg-faint backdrop-blur">
+  <div class="sticky top-0 z-10 flex items-center justify-between gap-2 bg-bg-elev/95 px-3 pb-2 pt-3 text-[11px] font-medium uppercase tracking-wider text-fg-faint backdrop-blur">
     <span>{props.title}</span>
     <Show when={props.count > 0}>
       <span class="rounded-full bg-bg px-1.5 py-0.5 font-mono text-[10px] text-fg-muted">
         {props.count}
       </span>
     </Show>
+    <button
+      type="button"
+      onClick={toggleLeftCollapsed}
+      class="ml-auto rounded p-0.5 text-fg-faint transition hover:bg-bg-hover hover:text-fg"
+      title="Collapse sidebar"
+    >
+      ◂
+    </button>
   </div>
 );
 

@@ -24,7 +24,7 @@ import { openNewSessionModal } from "./NewSessionModal";
 
 const CenterPane: Component = () => {
   return (
-    <main class="row-start-2 flex min-h-0 min-w-0 flex-col bg-bg">
+    <main class="row-start-2 col-start-3 flex min-h-0 min-w-0 flex-col bg-bg">
       <Show
         when={focusedSession()}
         fallback={

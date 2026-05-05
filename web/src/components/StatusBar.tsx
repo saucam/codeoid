@@ -23,7 +23,7 @@ import { forgetApiKey } from "../lib/auth";
 
 const StatusBar: Component = () => {
   return (
-    <header class="col-span-3 flex items-center gap-3 border-b border-border bg-bg-elev px-4 text-sm text-fg-muted">
+    <header class="col-span-full flex items-center gap-3 border-b border-border bg-bg-elev px-4 text-sm text-fg-muted">
       <span class="select-none font-mono font-semibold text-fg">codeoid</span>
       <Sep />
       <ConnectionPill />

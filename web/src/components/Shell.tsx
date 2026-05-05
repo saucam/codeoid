@@ -7,35 +7,76 @@
  *   │ sidebar  │ center: transcript + prompt  │ file viewer  │
  *   └──────────┴──────────────────────────────┴──────────────┘
  *
- * The right pane is collapsed (column track at 0fr) by default and
- * grows to ~30% of the viewport when a file is opened. The grid-template
- * track interpolates smoothly thanks to the transition declared below.
+ * Pane widths come from `state/layout.ts`. The user can drag the
+ * dividers (4px gutters) to resize, double-click to reset, or click
+ * the collapse button on the sidebar to fold it into a 56px rail.
+ *
+ * The right pane only shows when a file is open (`openedFile()` is
+ * non-null) and gets its own drag handle on the left edge.
  */
 
-import { Component } from "solid-js";
+import { Component, Show, createMemo } from "solid-js";
 
 import CenterPane from "./CenterPane";
 import FileViewer from "./files/FileViewer";
 import NewSessionModal from "./NewSessionModal";
+import ResizeHandle from "./ResizeHandle";
 import SearchModal from "./SearchModal";
 import SessionListPane from "./SessionListPane";
 import StatusBar from "./StatusBar";
 import { openedFile } from "../state/files";
+import {
+  LIMITS_RO,
+  isLeftCollapsed,
+  leftSidebarEffectivePx,
+  rightWidth,
+  setLeftWidth,
+  setRightWidth,
+  sidebarWidth,
+} from "../state/layout";
 
 const Shell: Component = () => {
-  const cols = () =>
-    openedFile()
-      ? "280px minmax(0, 1fr) minmax(0, 36rem)"
-      : "280px minmax(0, 1fr) 0fr";
+  const cols = createMemo(() => {
+    const left = `${leftSidebarEffectivePx()}px`;
+    const right = openedFile() ? `${rightWidth()}px` : "0px";
+    return `${left} 4px minmax(0, 1fr) 4px ${right}`;
+  });
   return (
     <div
-      class="grid h-full grid-rows-[40px_1fr] transition-[grid-template-columns] duration-200 ease-out"
+      class="grid h-full grid-rows-[40px_1fr] transition-[grid-template-columns] duration-150 ease-out"
       style={{ "grid-template-columns": cols() }}
     >
       <StatusBar />
       <SessionListPane />
+      <div class="row-start-2 col-start-2 flex h-full">
+        <Show when={!isLeftCollapsed()}>
+          <ResizeHandle
+            side="right"
+            current={sidebarWidth}
+            onResize={setLeftWidth}
+            onReset={() => setLeftWidth(280)}
+            ariaLabel="Resize sidebar"
+          />
+        </Show>
+      </div>
       <CenterPane />
-      <aside class="row-start-2 overflow-hidden border-l border-border bg-bg-elev">
+      <div class="row-start-2 col-start-4 flex h-full">
+        <Show when={openedFile()}>
+          <ResizeHandle
+            side="left"
+            current={rightWidth}
+            onResize={setRightWidth}
+            onReset={() => setRightWidth(576)}
+            ariaLabel="Resize file viewer"
+          />
+        </Show>
+      </div>
+      <aside
+        class="row-start-2 col-start-5 overflow-hidden border-l border-border bg-bg-elev"
+        style={{
+          "min-width": openedFile() ? `${LIMITS_RO.rightMinPx}px` : undefined,
+        }}
+      >
         <FileViewer />
       </aside>
       <SearchModal />
