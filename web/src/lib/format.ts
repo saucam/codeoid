@@ -64,6 +64,16 @@ export function formatPercent(ratio: number | null | undefined, digits = 0): str
   return `${(ratio * 100).toFixed(digits)}%`;
 }
 
+/**
+ * Context-window utilization color cue. <60% green, 60-85% warn,
+ * >85% danger. Returns Tailwind text-* classes.
+ */
+export function ctxWindowColorClass(ratio: number): string {
+  if (ratio < 0.6) return "text-success";
+  if (ratio < 0.85) return "text-warn";
+  return "text-danger";
+}
+
 /** HH:MM:SS for a timestamp string/number. Best-effort; falls back to the input. */
 export function formatClock(ts: string | number): string {
   const t = typeof ts === "number" ? ts : Date.parse(ts);

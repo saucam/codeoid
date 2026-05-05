@@ -6,6 +6,7 @@
 import { Component, Show } from "solid-js";
 
 import {
+  ctxWindowColorClass,
   formatCostUsd,
   formatDuration,
   formatPercent,
@@ -181,10 +182,14 @@ const SubagentChip: Component = () => {
   );
 };
 
+/** Daemon hardcodes Session.CONTEXT_WINDOW = 1_000_000 today. */
+const CONTEXT_WINDOW = 1_000_000;
+
 const UsageStrip: Component = () => (
   <Show when={focusedSession()?.usage}>
     {(u) => (
-      <div class="grid grid-cols-2 gap-2 text-[11px] sm:grid-cols-4 lg:grid-cols-7">
+      <div class="grid grid-cols-2 gap-2 text-[11px] sm:grid-cols-4 lg:grid-cols-8">
+        <CtxStat />
         <Stat label="Turns" value={String(u().numTurns)} />
         <Stat label="Input" value={formatTokens(u().inputTokens)} />
         <Stat label="Output" value={formatTokens(u().outputTokens)} />
@@ -233,6 +238,49 @@ const Stat: Component<{
       {props.value}
     </span>
   </div>
+);
+
+/**
+ * Dedicated context-window stat — value comes with a colored progress
+ * bar so the user sees their headroom at a glance.
+ */
+const CtxStat: Component = () => (
+  <Show
+    when={focusedSession()?.usage?.lastTurnInputTokens}
+    fallback={<Stat label="Context" value="—" hint="awaiting first turn" />}
+  >
+    {(ctx) => {
+      const ratio = () => Math.min(ctx() / CONTEXT_WINDOW, 1);
+      return (
+        <div
+          class="flex flex-col gap-0.5 rounded border border-border bg-bg px-2 py-1.5"
+          title={`Last turn context = ${ctx().toLocaleString()} of ${CONTEXT_WINDOW.toLocaleString()} tokens`}
+        >
+          <span class="flex items-center justify-between text-[10px] uppercase tracking-wider text-fg-faint">
+            <span>Context</span>
+            <span class={`font-mono ${ctxWindowColorClass(ratio())}`}>
+              {formatPercent(ratio(), 0)}
+            </span>
+          </span>
+          <span class={`font-mono text-sm ${ctxWindowColorClass(ratio())}`}>
+            {formatTokens(ctx())}
+          </span>
+          <div class="mt-1 h-1 w-full overflow-hidden rounded-full bg-bg-active">
+            <div
+              class={`h-full transition-[width] duration-300 ${
+                ratio() < 0.6
+                  ? "bg-success/80"
+                  : ratio() < 0.85
+                    ? "bg-warn/80"
+                    : "bg-danger/80"
+              }`}
+              style={{ width: `${ratio() * 100}%` }}
+            />
+          </div>
+        </div>
+      );
+    }}
+  </Show>
 );
 
 export default CenterPane;
