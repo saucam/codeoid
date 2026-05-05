@@ -15,11 +15,24 @@ import {
 import type { SessionInfo, SessionStatus } from "../protocol/types";
 
 import FileTree from "./files/FileTree";
+import { openNewSessionModal } from "./NewSessionModal";
 
 const SessionListPane: Component = () => {
   return (
     <aside class="row-start-2 flex flex-col overflow-y-auto border-r border-border bg-bg-elev">
       <SectionHeader title="Sessions" count={sessionList().length} />
+      <button
+        type="button"
+        onClick={openNewSessionModal}
+        class="mx-3 mt-1 flex items-center gap-2 rounded border border-dashed border-border px-2 py-1.5 text-left text-xs text-fg-muted transition hover:border-accent/40 hover:bg-accent/5 hover:text-fg"
+        title="New session (Ctrl+N)"
+      >
+        <span class="text-base leading-none">＋</span>
+        <span>new session</span>
+        <span class="ml-auto rounded bg-bg px-1 py-0.5 font-mono text-[10px] text-fg-faint">
+          ⌘N
+        </span>
+      </button>
       <Show
         when={sessionList().length > 0}
         fallback={<EmptyState />}

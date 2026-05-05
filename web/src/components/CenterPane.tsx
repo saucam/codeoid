@@ -12,13 +12,15 @@ import {
   formatTokens,
   relativeTime,
 } from "../lib/format";
-import { sessionAgentLabel, truncateWimseUri } from "../lib/identity";
+import { sessionAgentLabel, shortSub, truncateWimseUri } from "../lib/identity";
 import { focusedSession } from "../state/sessions";
 
 import ApprovalBar from "./transcript/ApprovalBar";
 import PromptBox from "./prompt/PromptBox";
 import SessionControls from "./SessionControls";
 import Transcript from "./transcript/Transcript";
+import WorkerIndicator from "./transcript/WorkerIndicator";
+import { openNewSessionModal } from "./NewSessionModal";
 
 const CenterPane: Component = () => {
   return (
@@ -26,15 +28,26 @@ const CenterPane: Component = () => {
       <Show
         when={focusedSession()}
         fallback={
-          <div class="flex flex-1 items-center justify-center px-6 text-fg-muted">
-            <div class="max-w-md space-y-2 text-center">
-              <p class="text-sm">Select a session from the sidebar.</p>
-              <p class="text-xs text-fg-faint">
-                Or type{" "}
-                <code class="rounded bg-bg-elev px-1 py-0.5 font-mono">
-                  /new &lt;name&gt; [workdir]
-                </code>{" "}
-                in the prompt below to create one.
+          <div class="flex flex-1 items-center justify-center px-6">
+            <div class="max-w-md space-y-4 text-center">
+              <h1 class="text-lg font-semibold text-fg">No active session</h1>
+              <p class="text-sm text-fg-muted">
+                Sessions are persistent Claude conversations rooted at a
+                workdir. The daemon registers a per-session ZeroID identity
+                so any frontend (web, TUI, Telegram) can resume them.
+              </p>
+              <button
+                type="button"
+                onClick={openNewSessionModal}
+                class="rounded bg-accent px-4 py-2 text-sm font-semibold text-bg transition hover:bg-accent-hover"
+              >
+                Create your first session
+              </button>
+              <p class="text-[11px] text-fg-faint">
+                or press <kbd class="rounded border border-border bg-bg-elev px-1 font-mono">⌘N</kbd>{" "}
+                anywhere ·{" "}
+                <kbd class="rounded border border-border bg-bg-elev px-1 font-mono">⌘K</kbd>{" "}
+                to search across sessions
               </p>
             </div>
           </div>
@@ -42,10 +55,8 @@ const CenterPane: Component = () => {
       >
         <SessionHeader />
         <Transcript />
+        <WorkerIndicator />
         <ApprovalBar />
-        <PromptBox />
-      </Show>
-      <Show when={!focusedSession()}>
         <PromptBox />
       </Show>
     </main>
@@ -87,12 +98,31 @@ const SessionHeader: Component = () => (
               ? truncateWimseUri(s().agentUri!)
               : sessionAgentLabel(s())}
           </span>
+          <SubagentChip />
         </div>
         <UsageStrip />
       </div>
     )}
   </Show>
 );
+
+const SubagentChip: Component = () => {
+  const active = () =>
+    focusedSession()?.subagents?.filter((sa) => sa.active) ?? [];
+  return (
+    <Show when={active().length > 0}>
+      <span
+        class="ml-2 flex items-center gap-1 rounded border border-role-tool/30 bg-role-tool/5 px-1.5 py-0.5 text-role-tool"
+        title={active()
+          .map((sa) => `${sa.agentType} · ${shortSub(sa.wimseUri)}`)
+          .join("\n")}
+      >
+        <span>⊕</span>
+        <span class="font-mono text-[10px]">{active().length} sub</span>
+      </span>
+    </Show>
+  );
+};
 
 const UsageStrip: Component = () => (
   <Show when={focusedSession()?.usage}>

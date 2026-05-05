@@ -16,6 +16,7 @@ import { Component } from "solid-js";
 
 import CenterPane from "./CenterPane";
 import FileViewer from "./files/FileViewer";
+import NewSessionModal from "./NewSessionModal";
 import SearchModal from "./SearchModal";
 import SessionListPane from "./SessionListPane";
 import StatusBar from "./StatusBar";
@@ -38,6 +39,7 @@ const Shell: Component = () => {
         <FileViewer />
       </aside>
       <SearchModal />
+      <NewSessionModal />
     </div>
   );
 };
