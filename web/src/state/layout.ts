@@ -14,12 +14,15 @@ interface LayoutState {
   leftSidebarPx: number;
   leftSidebarCollapsed: boolean;
   rightPanePx: number;
+  /** Session header collapse — when true, only a 1-line summary shows. */
+  headerCollapsed: boolean;
 }
 
 const DEFAULTS: LayoutState = {
   leftSidebarPx: 280,
   leftSidebarCollapsed: false,
   rightPanePx: 576, // 36rem-ish
+  headerCollapsed: false,
 };
 
 const LIMITS = {
@@ -49,6 +52,10 @@ function load(): LayoutState {
         typeof parsed.rightPanePx === "number"
           ? clamp(parsed.rightPanePx, LIMITS.rightMinPx, LIMITS.rightMaxPx)
           : DEFAULTS.rightPanePx,
+      headerCollapsed:
+        typeof parsed.headerCollapsed === "boolean"
+          ? parsed.headerCollapsed
+          : DEFAULTS.headerCollapsed,
     };
   } catch {
     return DEFAULTS;
@@ -62,6 +69,9 @@ const [leftSidebarCollapsed, setLeftSidebarCollapsed] = createSignal(
   initial.leftSidebarCollapsed,
 );
 const [rightPanePx, setRightPanePx] = createSignal(initial.rightPanePx);
+const [headerCollapsed, setHeaderCollapsedSig] = createSignal(
+  initial.headerCollapsed,
+);
 
 /** Effective width for the left sidebar accounting for collapse. */
 export function leftSidebarEffectivePx(): number {
@@ -71,6 +81,11 @@ export function leftSidebarEffectivePx(): number {
 export const sidebarWidth = leftSidebarPx;
 export const isLeftCollapsed = leftSidebarCollapsed;
 export const rightWidth = rightPanePx;
+export const isHeaderCollapsed = headerCollapsed;
+
+export function toggleHeaderCollapsed(): void {
+  setHeaderCollapsedSig((v) => !v);
+}
 
 export function setLeftWidth(px: number): void {
   setLeftSidebarPx(clamp(px, LIMITS.leftMinPx, LIMITS.leftMaxPx));
@@ -94,6 +109,7 @@ createEffect(() => {
     leftSidebarPx: leftSidebarPx(),
     leftSidebarCollapsed: leftSidebarCollapsed(),
     rightPanePx: rightPanePx(),
+    headerCollapsed: headerCollapsed(),
   };
   if (typeof localStorage === "undefined") return;
   try {
@@ -115,5 +131,6 @@ export function _resetLayoutForTest(): void {
     setLeftSidebarPx(DEFAULTS.leftSidebarPx);
     setLeftSidebarCollapsed(DEFAULTS.leftSidebarCollapsed);
     setRightPanePx(DEFAULTS.rightPanePx);
+    setHeaderCollapsedSig(DEFAULTS.headerCollapsed);
   });
 }

@@ -14,6 +14,7 @@ import {
 } from "../lib/format";
 import { sessionAgentLabel, shortSub, truncateWimseUri } from "../lib/identity";
 import { focusedSession } from "../state/sessions";
+import { isHeaderCollapsed, toggleHeaderCollapsed } from "../state/layout";
 
 import ApprovalBar from "./transcript/ApprovalBar";
 import PromptBox from "./prompt/PromptBox";
@@ -66,41 +67,97 @@ const CenterPane: Component = () => {
 const SessionHeader: Component = () => (
   <Show when={focusedSession()}>
     {(s) => (
-      <div class="flex flex-col gap-2 border-b border-border bg-bg-elev/60 px-4 py-3">
-        <div class="flex items-center gap-3">
-          <h2 class="font-semibold text-fg">{s().name}</h2>
-          <span class="rounded border border-border bg-bg px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-fg-muted">
-            {s().mode ?? "interactive"}
-          </span>
-          <Show when={s().model}>
-            <span class="rounded border border-accent/30 bg-accent/5 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-accent">
-              {s().model}
+      <Show when={!isHeaderCollapsed()} fallback={<CollapsedHeader />}>
+        <div class="flex flex-col gap-2 border-b border-border bg-bg-elev/60 px-4 py-3">
+          <div class="flex items-center gap-3">
+            <h2 class="font-semibold text-fg">{s().name}</h2>
+            <span class="rounded border border-border bg-bg px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-fg-muted">
+              {s().mode ?? "interactive"}
             </span>
-          </Show>
-          <span class="ml-auto font-mono text-[11px] text-fg-faint">
-            created {relativeTime(s().createdAt)}
+            <Show when={s().model}>
+              <span class="rounded border border-accent/30 bg-accent/5 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-accent">
+                {s().model}
+              </span>
+            </Show>
+            <span class="ml-auto font-mono text-[11px] text-fg-faint">
+              created {relativeTime(s().createdAt)}
+            </span>
+            <button
+              type="button"
+              onClick={toggleHeaderCollapsed}
+              class="rounded p-1 text-fg-faint transition hover:bg-bg-hover hover:text-fg"
+              title="Collapse header"
+            >
+              ▴
+            </button>
+          </div>
+          <SessionControls />
+          <div
+            class="truncate font-mono text-[11px] text-fg-muted"
+            title={s().workdir}
+          >
+            {s().workdir}
+          </div>
+          <div
+            class="flex items-center gap-2 truncate text-[11px] text-fg-faint"
+            title={s().agentUri ?? "anonymous"}
+          >
+            <span>⌬</span>
+            <span class="font-mono">
+              {s().agentUri && !s().agentUri!.startsWith("anonymous:")
+                ? truncateWimseUri(s().agentUri!)
+                : sessionAgentLabel(s())}
+            </span>
+            <SubagentChip />
+          </div>
+          <UsageStrip />
+        </div>
+      </Show>
+    )}
+  </Show>
+);
+
+/** One-line summary header — name · mode · model · turns · cost · expand. */
+const CollapsedHeader: Component = () => (
+  <Show when={focusedSession()}>
+    {(s) => (
+      <div class="flex items-center gap-3 border-b border-border bg-bg-elev/60 px-4 py-1.5 text-[12px]">
+        <span class="font-semibold text-fg">{s().name}</span>
+        <span class="text-fg-faint">·</span>
+        <span class="font-mono uppercase tracking-wider text-fg-muted">
+          {s().mode ?? "interactive"}
+        </span>
+        <Show when={s().model}>
+          <span class="text-fg-faint">·</span>
+          <span class="font-mono uppercase tracking-wider text-accent">
+            {s().model}
           </span>
-        </div>
-        <SessionControls />
-        <div
-          class="truncate font-mono text-[11px] text-fg-muted"
-          title={s().workdir}
+        </Show>
+        <Show when={s().usage}>
+          {(u) => (
+            <>
+              <span class="text-fg-faint">·</span>
+              <span class="font-mono text-fg-muted">
+                {u().numTurns}t · {formatTokens(u().inputTokens)}/
+                {formatTokens(u().outputTokens)}
+              </span>
+              <span class="text-fg-faint">·</span>
+              <span class="font-mono font-semibold text-accent">
+                {formatCostUsd(u().totalCostUsd)}
+              </span>
+            </>
+          )}
+        </Show>
+        <SubagentChip />
+        <span class="ml-auto" />
+        <button
+          type="button"
+          onClick={toggleHeaderCollapsed}
+          class="rounded p-1 text-fg-faint transition hover:bg-bg-hover hover:text-fg"
+          title="Expand header"
         >
-          {s().workdir}
-        </div>
-        <div
-          class="flex items-center gap-2 truncate text-[11px] text-fg-faint"
-          title={s().agentUri ?? "anonymous"}
-        >
-          <span>⌬</span>
-          <span class="font-mono">
-            {s().agentUri && !s().agentUri!.startsWith("anonymous:")
-              ? truncateWimseUri(s().agentUri!)
-              : sessionAgentLabel(s())}
-          </span>
-          <SubagentChip />
-        </div>
-        <UsageStrip />
+          ▾
+        </button>
       </div>
     )}
   </Show>
