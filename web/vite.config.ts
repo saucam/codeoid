@@ -23,6 +23,32 @@ export default defineConfig({
     //   export named 'default' (at create-tokenizer.js)
     // The production build via Rollup is fine without it; this only
     // affects `vite dev` pre-bundling.
-    include: ["debug", "remark-gfm"],
+    include: [
+      // Vite's CJS-ESM interop needs an explicit hint for these — they
+      // ship as CommonJS with default-export semantics that Vite's
+      // pre-bundler doesn't auto-shim, leading to "does not provide an
+      // export named 'default'" runtime errors.
+      "debug",
+      "extend",
+      "bail",
+      "ccount",
+      "decode-named-character-reference",
+      "is-plain-obj",
+      "trough",
+      "inline-style-parser",
+      "property-information",
+      "space-separated-tokens",
+      "comma-separated-tokens",
+      "remark-gfm",
+      "remark-parse",
+      "remark-rehype",
+      "unified",
+      "vfile",
+      "vfile-message",
+    ],
+  },
+  ssr: {
+    // Defensive — in case any plugin spins up SSR-style transforms.
+    noExternal: ["solid-markdown"],
   },
 });
