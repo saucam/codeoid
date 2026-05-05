@@ -1,0 +1,159 @@
+/**
+ * Top status bar. Always visible. Shows:
+ *
+ *   [logo] · [connection pill] · [identity] | [session metrics] | [model badge]
+ *
+ * Identity is shown with full provenance — name + short WIMSE sub on
+ * hover. Session metrics pull straight from `SessionInfo.usage` so the
+ * daemon stays canonical.
+ */
+
+import { Component, Show } from "solid-js";
+
+import {
+  elapsedSince,
+  formatCostUsd,
+  formatDuration,
+  formatTokens,
+} from "../lib/format";
+import { identityLabel, identityColorClass } from "../lib/identity";
+import { authIdentity, connectionStatus, disconnect } from "../state/connection";
+import { focusedSession } from "../state/sessions";
+import { forgetApiKey } from "../lib/auth";
+
+const StatusBar: Component = () => {
+  return (
+    <header class="col-span-3 flex items-center gap-3 border-b border-border bg-bg-elev px-4 text-sm text-fg-muted">
+      <span class="select-none font-mono font-semibold text-fg">codeoid</span>
+      <Sep />
+      <ConnectionPill />
+      <Sep />
+      <IdentityChip />
+      <span class="ml-auto flex items-center gap-3">
+        <SessionMetrics />
+        <SignOut />
+      </span>
+    </header>
+  );
+};
+
+const Sep: Component = () => <span class="text-fg-faint">·</span>;
+
+const ConnectionPill: Component = () => {
+  const dotClass = () => {
+    const s = connectionStatus();
+    switch (s.kind) {
+      case "connected":
+        return "bg-success";
+      case "connecting":
+      case "reconnecting":
+        return "bg-warn animate-pulse";
+      case "failed":
+        return "bg-danger";
+      default:
+        return "bg-fg-faint";
+    }
+  };
+  const label = () => {
+    const s = connectionStatus();
+    switch (s.kind) {
+      case "connected":
+        return "live";
+      case "connecting":
+        return `connecting · #${s.attempt}`;
+      case "reconnecting":
+        return `reconnecting · ${Math.round(s.nextInMs / 1000)}s`;
+      case "failed":
+        return `failed · ${s.reason}`;
+      default:
+        return "idle";
+    }
+  };
+  return (
+    <span class="flex items-center gap-2 font-mono text-xs">
+      <span class={`inline-block h-2 w-2 rounded-full ${dotClass()}`} />
+      <span>{label()}</span>
+    </span>
+  );
+};
+
+const IdentityChip: Component = () => {
+  const id = () => authIdentity()?.identity;
+  return (
+    <Show when={id()}>
+      {(idGetter) => (
+        <span
+          class="flex items-center gap-1.5 truncate"
+          title={`${idGetter().sub} (${idGetter().type})`}
+        >
+          <span class="text-fg-faint">as</span>
+          <span class={`font-medium ${identityColorClass(idGetter().type)}`}>
+            {identityLabel(idGetter())}
+          </span>
+        </span>
+      )}
+    </Show>
+  );
+};
+
+const SessionMetrics: Component = () => {
+  return (
+    <Show when={focusedSession()}>
+      {(s) => {
+        const usage = () => s().usage;
+        return (
+          <span class="flex items-center gap-3 font-mono text-xs">
+            <span title="Wall-clock since session started">
+              <span class="text-fg-faint">⏱</span>{" "}
+              <span>{elapsedSince(s().createdAt)}</span>
+            </span>
+            <span title="Total turns">
+              <span class="text-fg-faint">↻</span>{" "}
+              <span>{usage()?.numTurns ?? 0}</span>
+              <span class="text-fg-faint"> turn(s)</span>
+            </span>
+            <span title="Cumulative input / output tokens">
+              <span class="text-fg-faint">⇣</span>{" "}
+              <span>{formatTokens(usage()?.inputTokens)}</span>
+              <span class="text-fg-faint">/</span>
+              <span class="text-fg-faint">⇡</span>{" "}
+              <span>{formatTokens(usage()?.outputTokens)}</span>
+            </span>
+            <span class="font-semibold text-accent" title="Estimated cost (SDK-reported)">
+              {formatCostUsd(usage()?.totalCostUsd)}
+            </span>
+            <Show when={s().model}>
+              <span class="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-fg-muted">
+                {s().model}
+              </span>
+            </Show>
+            <Show when={usage()?.lastTurnCostUsd != null}>
+              <span class="text-fg-faint" title="Last turn cost / latency">
+                last {formatCostUsd(usage()?.lastTurnCostUsd)} ·{" "}
+                {formatDuration(usage()?.recentTurns?.[0]?.durationMs)}
+              </span>
+            </Show>
+          </span>
+        );
+      }}
+    </Show>
+  );
+};
+
+const SignOut: Component = () => {
+  return (
+    <button
+      class="text-xs text-fg-faint underline-offset-2 hover:text-fg-muted hover:underline"
+      onClick={() => {
+        forgetApiKey();
+        disconnect();
+        // Force the auth gate to re-render. App.tsx subscribes to
+        // authIdentity() being null, so this triggers automatically.
+      }}
+    >
+      sign out
+    </button>
+  );
+};
+
+export default StatusBar;

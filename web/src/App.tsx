@@ -1,40 +1,57 @@
-import { Component } from "solid-js";
+/**
+ * App entrypoint. Owns the auth gate: while there's no live `auth.ok`
+ * from the daemon, render `<SignIn>`; once authenticated, hand off to the
+ * three-pane `<Shell>`.
+ *
+ * Auto-bootstrap behaviour: if a previously-remembered API key exists in
+ * localStorage, attempt the connect on mount. The user only sees the
+ * sign-in form when there's no key OR the saved key is rejected.
+ */
+
+import { Component, Show, createSignal, onMount } from "solid-js";
+
+import { rememberedApiKey } from "./lib/auth";
+import SignIn from "./components/SignIn";
+import Shell from "./components/Shell";
+import { authIdentity, bootstrap } from "./state/connection";
 
 const App: Component = () => {
+  const [tried, setTried] = createSignal(false);
+
+  onMount(async () => {
+    const saved = rememberedApiKey();
+    if (saved) {
+      try {
+        await bootstrap({ apiKey: saved });
+      } catch {
+        // bootstrap surfaces the reason via bootstrapError; SignIn renders it.
+      }
+    }
+    setTried(true);
+  });
+
   return (
-    <div class="grid h-full grid-cols-[260px_1fr_0fr] grid-rows-[36px_1fr] transition-[grid-template-columns] duration-200 ease-out">
-      {/* Status bar */}
-      <header class="col-span-3 flex items-center gap-3 border-b border-border bg-bg-elev px-3 text-sm text-fg-muted">
-        <span class="font-mono text-fg">codeoid</span>
-        <span class="text-fg-faint">·</span>
-        <span class="text-fg-faint">scaffold ok</span>
-      </header>
-
-      {/* Left sidebar — sessions + files */}
-      <aside class="row-start-2 overflow-y-auto border-r border-border bg-bg-elev p-3">
-        <div class="mb-3 text-[11px] font-medium uppercase tracking-wider text-fg-faint">
-          Sessions
-        </div>
-        <div class="text-fg-muted">— no sessions yet —</div>
-      </aside>
-
-      {/* Center pane — transcript + prompt */}
-      <main class="row-start-2 flex flex-col">
-        <div class="flex-1 overflow-y-auto p-6 text-fg-muted">
-          <div class="mx-auto max-w-3xl">
-            <h1 class="mb-2 text-lg font-semibold text-fg">Codeoid web</h1>
-            <p>Solid + Vite + Tailwind 4 scaffold loaded. Wire-up coming next.</p>
-          </div>
-        </div>
-        <footer class="border-t border-border bg-bg-elev p-3 text-xs text-fg-faint">
-          prompt area placeholder
-        </footer>
-      </main>
-
-      {/* Right pane — file viewer (collapsed by default; the column width is 0fr until a file opens) */}
-      <aside class="row-start-2 overflow-hidden border-l border-border bg-bg-elev" />
-    </div>
+    <Show
+      when={authIdentity()}
+      fallback={
+        // Avoid a flash of SignIn before the silent auto-bootstrap completes.
+        <Show when={tried()} fallback={<BootSplash />}>
+          <SignIn onSignedIn={() => undefined} />
+        </Show>
+      }
+    >
+      <Shell />
+    </Show>
   );
 };
+
+const BootSplash: Component = () => (
+  <div class="flex h-full items-center justify-center bg-bg">
+    <span class="font-mono text-sm text-fg-faint">
+      <span class="inline-block h-2 w-2 animate-pulse rounded-full bg-accent" />{" "}
+      &nbsp;codeoid · connecting…
+    </span>
+  </div>
+);
 
 export default App;
