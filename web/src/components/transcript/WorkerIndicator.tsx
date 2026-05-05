@@ -46,24 +46,27 @@ const WorkerIndicator: Component = () => {
 
   return (
     <Show when={visible()}>
-      <div class="border-t border-border/50 bg-bg-elev/40 px-4 py-2">
-        <div class="mx-auto flex max-w-3xl items-center gap-2 text-[12px] text-fg-muted">
-          <Spinner />
+      <div class="border-t border-accent/30 bg-accent/[0.04] px-4 py-2.5">
+        <div class="mx-auto flex max-w-3xl items-center gap-2.5 text-[13px] text-fg">
+          <Show when={liveTool()} fallback={<ThinkingDots />}>
+            <ToolSpinner />
+          </Show>
           <Show
             when={liveTool()}
             fallback={
-              <span>
-                <span class="text-role-thinking italic">{verb()}…</span>
+              <span class="font-medium">
+                <span class="italic text-fg-muted">{verb()}</span>
+                <span class="thinking-ellipsis text-fg-muted" />
               </span>
             }
           >
             {(t) => (
-              <span>
+              <span class="font-medium">
                 running{" "}
-                <span class="font-mono text-role-tool">{t().name}</span>
+                <span class="font-mono font-semibold text-role-tool">{t().name}</span>
                 <Show when={(t().state as { progress?: string }).progress}>
                   {" — "}
-                  <span class="text-fg-faint">
+                  <span class="font-mono text-fg-muted">
                     {(t().state as { progress?: string }).progress}
                   </span>
                 </Show>
@@ -76,11 +79,18 @@ const WorkerIndicator: Component = () => {
   );
 };
 
-const Spinner: Component = () => (
-  <span class="relative inline-flex h-2.5 w-2.5">
-    <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-warn opacity-75" />
-    <span class="relative inline-flex h-2.5 w-2.5 rounded-full bg-warn" />
+/** Three-dot bouncing thinking indicator — Claude Code style. */
+const ThinkingDots: Component = () => (
+  <span class="inline-flex items-end gap-[3px]" aria-label="thinking">
+    <span class="thinking-dot thinking-dot-1" />
+    <span class="thinking-dot thinking-dot-2" />
+    <span class="thinking-dot thinking-dot-3" />
   </span>
+);
+
+/** Rotating spinner used while a tool is executing. */
+const ToolSpinner: Component = () => (
+  <span class="tool-spinner" aria-label="running tool" />
 );
 
 export default WorkerIndicator;

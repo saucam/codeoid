@@ -40,9 +40,9 @@ const ROLE_BORDER: Record<MessageRole, string> = {
   info: "border-l-fg-faint",
 };
 
-const MessageRow: Component<{ msg: SessionMessage }> = (props) => {
+const MessageRow: Component<{ msg: SessionMessage; streaming?: boolean }> = (props) => {
   const m = () => props.msg;
-  const skip = () => isPlaceholder(m());
+  const skip = () => isPlaceholder(m()) && !props.streaming;
   return (
     <Show when={!skip()}>
       <article
@@ -50,7 +50,7 @@ const MessageRow: Component<{ msg: SessionMessage }> = (props) => {
         class={`group rounded border-l-2 ${ROLE_BORDER[m().role]} bg-bg-elev/30 px-3 py-2 transition hover:bg-bg-elev/60`}
       >
         <Header msg={m()} />
-        <Body msg={m()} />
+        <Body msg={m()} streaming={props.streaming} />
       </article>
     </Show>
   );
@@ -75,7 +75,7 @@ const Header: Component<{ msg: SessionMessage }> = (props) => (
   </header>
 );
 
-const Body: Component<{ msg: SessionMessage }> = (props) => {
+const Body: Component<{ msg: SessionMessage; streaming?: boolean }> = (props) => {
   const m = () => props.msg;
   return (
     <Switch fallback={<Plain text={m().content} />}>
@@ -86,10 +86,10 @@ const Body: Component<{ msg: SessionMessage }> = (props) => {
         <ToolResult msg={m()} />
       </Match>
       <Match when={m().role === "thinking"}>
-        <ThinkingBlock text={m().content} />
+        <ThinkingBlock text={m().content} streaming={props.streaming} />
       </Match>
       <Match when={m().role === "assistant"}>
-        <MarkdownBlock text={m().content} />
+        <MarkdownBlock text={m().content} streaming={props.streaming} />
       </Match>
       <Match when={m().role === "info"}>
         <InfoBlock msg={m()} />
@@ -107,20 +107,26 @@ const Plain: Component<{ text: string }> = (props) => (
   </div>
 );
 
-const MarkdownBlock: Component<{ text: string }> = (props) => (
-  <div class="prose prose-sm max-w-none text-fg [&>*]:my-1.5 [&_a]:text-accent [&_code]:rounded [&_code]:bg-bg-active [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[12px] [&_pre]:rounded [&_pre]:bg-bg-active [&_pre]:p-3 [&_pre]:font-mono [&_pre]:text-[12px] [&_pre_code]:bg-transparent [&_pre_code]:p-0">
+const MarkdownBlock: Component<{ text: string; streaming?: boolean }> = (props) => (
+  <div class="md-prose">
     <SolidMarkdown
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       remarkPlugins={[remarkGfm as any]}
       children={props.text}
     />
+    <Show when={props.streaming}>
+      <span class="md-streaming-caret" aria-label="streaming" />
+    </Show>
   </div>
 );
 
-const ThinkingBlock: Component<{ text: string }> = (props) => (
-  <details class="text-[12px] italic text-role-thinking">
+const ThinkingBlock: Component<{ text: string; streaming?: boolean }> = (props) => (
+  <details class="text-[12px] italic text-role-thinking" open={props.streaming}>
     <summary class="cursor-pointer select-none text-fg-faint hover:text-fg-muted">
       reasoning ({props.text.split("\n").length} lines)
+      <Show when={props.streaming}>
+        <span class="md-streaming-caret ml-1" aria-label="streaming" />
+      </Show>
     </summary>
     <div class="mt-1 whitespace-pre-wrap pl-3">{props.text}</div>
   </details>

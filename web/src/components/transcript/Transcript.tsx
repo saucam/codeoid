@@ -8,11 +8,11 @@
  * @tanstack/solid-virtual once the visible perf pressure is real.
  */
 
-import { Component, For, Show, createEffect, createSignal, on } from "solid-js";
+import { Component, For, Show, createEffect, createMemo, createSignal, on } from "solid-js";
 
 import MessageRow from "./MessageRow";
 import { createMessages } from "../../state/messages";
-import { focusedSessionId } from "../../state/sessions";
+import { focusedSession, focusedSessionId } from "../../state/sessions";
 
 const SCROLL_STICKY_THRESHOLD_PX = 80;
 
@@ -20,6 +20,26 @@ const Transcript: Component = () => {
   const messages = createMessages(focusedSessionId);
   let containerRef: HTMLDivElement | undefined;
   const [stuckBottom, setStuckBottom] = createSignal(true);
+
+  // Pinpoint the messageId currently being streamed by the assistant —
+  // if any. We render a caret on that one so the user has a clear "still
+  // typing" cue at the actual end of the text. Logic: session is busy
+  // (thinking | tool_running) AND there's a trailing assistant message
+  // that hasn't transitioned to a terminal role yet.
+  const streamingMessageId = createMemo<string | null>(() => {
+    const status = focusedSession()?.status;
+    if (status !== "thinking" && status !== "tool_running") return null;
+    const arr = messages();
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const m = arr[i];
+      if (!m) continue;
+      if (m.role === "assistant" || m.role === "thinking") return m.messageId;
+      // Tool calls / results between user and final assistant are fine —
+      // keep walking up to the assistant if there is one.
+      if (m.role === "user") return null;
+    }
+    return null;
+  });
 
   function isAtBottom(el: HTMLDivElement): boolean {
     const remaining = el.scrollHeight - el.scrollTop - el.clientHeight;
@@ -69,7 +89,14 @@ const Transcript: Component = () => {
         }
       >
         <ol class="mx-auto flex max-w-3xl flex-col gap-2">
-          <For each={messages()}>{(m) => <MessageRow msg={m} />}</For>
+          <For each={messages()}>
+            {(m) => (
+              <MessageRow
+                msg={m}
+                streaming={m.messageId === streamingMessageId()}
+              />
+            )}
+          </For>
         </ol>
       </Show>
       <Show when={!stuckBottom()}>
