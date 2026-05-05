@@ -11,9 +11,11 @@
 import { Component, Show } from "solid-js";
 
 import {
+  ctxWindowColorClass,
   elapsedSince,
   formatCostUsd,
   formatDuration,
+  formatPercent,
   formatTokens,
 } from "../lib/format";
 import { identityLabel, identityColorClass } from "../lib/identity";
@@ -113,6 +115,7 @@ const SessionMetrics: Component = () => {
               <span>{usage()?.numTurns ?? 0}</span>
               <span class="text-fg-faint"> turn(s)</span>
             </span>
+            <CtxWindowPill />
             <span title="Cumulative input / output tokens">
               <span class="text-fg-faint">⇣</span>{" "}
               <span>{formatTokens(usage()?.inputTokens)}</span>
@@ -140,6 +143,26 @@ const SessionMetrics: Component = () => {
     </Show>
   );
 };
+
+/** Daemon hardcodes Session.CONTEXT_WINDOW = 1_000_000 today. */
+const CONTEXT_WINDOW = 1_000_000;
+
+const CtxWindowPill: Component = () => (
+  <Show when={focusedSession()?.usage?.lastTurnInputTokens}>
+    {(ctx) => {
+      const ratio = () => ctx() / CONTEXT_WINDOW;
+      return (
+        <span
+          class={`flex items-center gap-1 ${ctxWindowColorClass(ratio())}`}
+          title={`Last turn context = ${ctx().toLocaleString()} of ${CONTEXT_WINDOW.toLocaleString()} (${formatPercent(ratio(), 1)})`}
+        >
+          <span class="text-fg-faint">ctx</span>
+          <span>{formatPercent(ratio(), 0)}</span>
+        </span>
+      );
+    }}
+  </Show>
+);
 
 const SearchHotkey: Component = () => (
   <button
