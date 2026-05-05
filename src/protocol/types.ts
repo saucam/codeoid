@@ -505,7 +505,9 @@ export type ClientMessage =
   | SessionRotateMsg
   | SessionSearchMsg
   | SessionSetModelMsg
-  | SessionRenameMsg;
+  | SessionRenameMsg
+  | FsListMsg
+  | FsReadMsg;
 
 interface BaseClientMsg {
   /** Request ID for correlating responses */
@@ -719,6 +721,66 @@ export interface SessionSearchSnippet {
 }
 
 // =============================================================================
+// File system — read-only access scoped to a session's workdir.
+//
+// Path semantics: `path` is relative to `session.workdir`. Empty string,
+// "." or "/" all mean "the workdir root". Daemon canonicalises and rejects
+// any path that resolves outside the workdir (symlink escapes blocked).
+// =============================================================================
+
+export interface FsListMsg extends BaseClientMsg {
+  type: "fs.list";
+  sessionId: string;
+  /** Path relative to the session's workdir. */
+  path: string;
+}
+
+export interface FsReadMsg extends BaseClientMsg {
+  type: "fs.read";
+  sessionId: string;
+  path: string;
+  /** Hard cap in bytes; daemon also enforces an absolute ceiling. Default 1 MiB. */
+  maxBytes?: number;
+}
+
+export interface FsEntry {
+  /** Just the file or directory name (no path). */
+  name: string;
+  /** Path relative to the session's workdir. */
+  path: string;
+  kind: "file" | "directory";
+  /** Bytes for files; undefined for directories. */
+  size?: number;
+  /** Modified time as Unix ms. */
+  mtimeMs?: number;
+  /** True when this entry is a symlink (kind reflects the resolved target). */
+  isSymlink?: boolean;
+}
+
+export interface FsListResultMsg {
+  type: "fs.list.result";
+  requestId: string;
+  /** Echoed `path` (canonicalised, still relative to workdir). */
+  path: string;
+  entries: FsEntry[];
+}
+
+export interface FsReadResultMsg {
+  type: "fs.read.result";
+  requestId: string;
+  path: string;
+  /** UTF-8 text. Binary files come back base64-encoded with `encoding: "base64"`. */
+  content: string;
+  encoding: "utf-8" | "base64";
+  /** Total size on disk in bytes (may be larger than content if `truncated`). */
+  size: number;
+  /** Detected language hint for syntax highlighting (best-effort, may be undefined). */
+  language?: string;
+  /** True when content was clipped at maxBytes. */
+  truncated: boolean;
+}
+
+// =============================================================================
 // Daemon → Client messages
 // =============================================================================
 
@@ -732,7 +794,9 @@ export type DaemonMessage =
   | SessionStatusChangeMsg
   | SessionInfoUpdateMsg
   | ScrollbackReplayMsg
-  | SessionSearchResultMsg;
+  | SessionSearchResultMsg
+  | FsListResultMsg
+  | FsReadResultMsg;
 
 export interface AuthOkMsg {
   type: "auth.ok";

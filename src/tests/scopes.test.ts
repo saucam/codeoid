@@ -15,8 +15,8 @@ import {
 } from "../protocol/scopes.js";
 
 describe("SCOPES constants", () => {
-  test("all 8 scopes are defined", () => {
-    expect(Object.keys(SCOPES)).toHaveLength(8);
+  test("all 9 scopes are defined", () => {
+    expect(Object.keys(SCOPES)).toHaveLength(9);
     expect(SCOPES.SESSION_CREATE).toBe("session:create");
     expect(SCOPES.SESSION_ATTACH).toBe("session:attach");
     expect(SCOPES.SESSION_WATCH).toBe("session:watch");
@@ -25,10 +25,11 @@ describe("SCOPES constants", () => {
     expect(SCOPES.SESSION_APPROVE).toBe("session:approve");
     expect(SCOPES.SESSION_DESTROY).toBe("session:destroy");
     expect(SCOPES.SESSION_LIST).toBe("session:list");
+    expect(SCOPES.FS_READ).toBe("fs:read");
   });
 
-  test("ALL_SCOPES contains all 8", () => {
-    expect(ALL_SCOPES).toHaveLength(8);
+  test("ALL_SCOPES contains all 9", () => {
+    expect(ALL_SCOPES).toHaveLength(9);
     for (const scope of Object.values(SCOPES)) {
       expect(ALL_SCOPES).toContain(scope);
     }
@@ -36,7 +37,7 @@ describe("SCOPES constants", () => {
 
   test("ALL_SCOPES_STRING is space-delimited", () => {
     const parts = ALL_SCOPES_STRING.split(" ");
-    expect(parts).toHaveLength(8);
+    expect(parts).toHaveLength(9);
     for (const scope of ALL_SCOPES) {
       expect(parts).toContain(scope);
     }
@@ -44,10 +45,11 @@ describe("SCOPES constants", () => {
 });
 
 describe("WATCHER_SCOPES (least privilege)", () => {
-  test("only has list and watch", () => {
-    expect(WATCHER_SCOPES).toHaveLength(2);
+  test("has list, watch, and fs:read", () => {
+    expect(WATCHER_SCOPES).toHaveLength(3);
     expect(WATCHER_SCOPES).toContain(SCOPES.SESSION_LIST);
     expect(WATCHER_SCOPES).toContain(SCOPES.SESSION_WATCH);
+    expect(WATCHER_SCOPES).toContain(SCOPES.FS_READ);
   });
 
   test("cannot create sessions", () => {

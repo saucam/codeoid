@@ -1,0 +1,282 @@
+/**
+ * Codeoid daemon WebSocket client.
+ *
+ * Owns the entire transport lifecycle — connect, auth handshake, request /
+ * response correlation, broadcast subscription, exponential-backoff reconnect.
+ * Components subscribe to `onMessage` and call typed verb wrappers; they
+ * never touch the raw socket.
+ *
+ * Auth flow on connect: client sends `auth.hello { token }` immediately, then
+ * waits for `auth.ok` before resolving the connect promise. Mirrors the Rust
+ * client.
+ */
+
+import type {
+  AuthOkMsg,
+  ClientMessage,
+  DaemonMessage,
+  ResponseErrorMsg,
+  ResponseOkMsg,
+} from "../protocol/types";
+
+export type ClientStatus =
+  | { kind: "idle" }
+  | { kind: "connecting"; attempt: number }
+  | { kind: "connected"; auth: AuthOkMsg }
+  | { kind: "reconnecting"; attempt: number; nextInMs: number; reason: string }
+  | { kind: "failed"; reason: string };
+
+export interface ConnectOptions {
+  url: string; // ws://host:port — daemon's WS endpoint
+  token: string;
+  /** Bounded reconnect attempts; once exhausted we land in `failed`. */
+  maxAttempts?: number;
+  /** Logger for transport-level diagnostics. */
+  log?: (level: "debug" | "info" | "warn" | "error", msg: string, ctx?: unknown) => void;
+}
+
+type StatusHandler = (status: ClientStatus) => void;
+type MessageHandler = (msg: DaemonMessage) => void;
+
+interface PendingRequest {
+  resolve: (ok: ResponseOkMsg) => void;
+  reject: (err: ResponseErrorMsg | Error) => void;
+  /** When true, ResponseOk/Error doesn't resolve — we wait for a typed result message. */
+  waitForResult?: (msg: DaemonMessage) => DaemonMessage | undefined;
+  /** Aborts auto-reject after timeoutMs. */
+  timer?: ReturnType<typeof setTimeout>;
+}
+
+const DEFAULT_TIMEOUT_MS = 30_000;
+const MIN_BACKOFF_MS = 500;
+const MAX_BACKOFF_MS = 15_000;
+
+export class CodeoidClient {
+  #opts: ConnectOptions;
+  #ws: WebSocket | null = null;
+  #pending = new Map<string, PendingRequest>();
+  #statusHandlers = new Set<StatusHandler>();
+  #messageHandlers = new Set<MessageHandler>();
+  #status: ClientStatus = { kind: "idle" };
+  #reqCounter = 0;
+  #shutdown = false;
+
+  constructor(opts: ConnectOptions) {
+    this.#opts = opts;
+  }
+
+  /** Subscribe to status changes. Returns an unsubscribe fn. */
+  onStatus(handler: StatusHandler): () => void {
+    this.#statusHandlers.add(handler);
+    handler(this.#status);
+    return () => this.#statusHandlers.delete(handler);
+  }
+
+  /** Subscribe to incoming daemon messages. Returns an unsubscribe fn. */
+  onMessage(handler: MessageHandler): () => void {
+    this.#messageHandlers.add(handler);
+    return () => this.#messageHandlers.delete(handler);
+  }
+
+  /** Connect and complete the auth handshake. Resolves on `auth.ok`. */
+  async connect(): Promise<AuthOkMsg> {
+    if (this.#status.kind === "connected") return this.#status.auth;
+    return this.#connectWithBackoff(1);
+  }
+
+  /** Send a fire-and-forget client message. */
+  send(msg: ClientMessage): void {
+    if (this.#status.kind !== "connected") {
+      throw new Error(`cannot send while ${this.#status.kind}`);
+    }
+    this.#ws!.send(JSON.stringify(msg));
+  }
+
+  /**
+   * Send a request and resolve with the daemon's response. By default the
+   * `response.ok`/`response.error` for the request id resolves the promise;
+   * pass `waitForResult` to instead resolve on a typed broadcast (e.g.
+   * `session.list.result`) that carries `requestId`.
+   */
+  request<T extends DaemonMessage = ResponseOkMsg>(
+    msg: ClientMessage,
+    options: { timeoutMs?: number; waitForResult?: (m: DaemonMessage) => T | undefined } = {},
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      if (this.#status.kind !== "connected") {
+        reject(new Error(`cannot request while ${this.#status.kind}`));
+        return;
+      }
+      const id = msg.id;
+      const timer = setTimeout(() => {
+        this.#pending.delete(id);
+        reject(new Error(`request ${id} timed out`));
+      }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+
+      this.#pending.set(id, {
+        resolve: (ok) => resolve(ok as unknown as T),
+        reject: (e) => reject(e instanceof Error ? e : new Error(e.error)),
+        waitForResult: options.waitForResult,
+        timer,
+      });
+      this.#ws!.send(JSON.stringify(msg));
+    });
+  }
+
+  /** Generate a unique request id. Monotonic + random suffix for safety across reconnects. */
+  nextId(): string {
+    this.#reqCounter += 1;
+    return `${Date.now().toString(36)}-${this.#reqCounter}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  /** Close the connection. No further reconnects after this. */
+  shutdown(): void {
+    this.#shutdown = true;
+    if (this.#ws) {
+      try {
+        this.#ws.close(1000, "client shutdown");
+      } catch {
+        /* ignore */
+      }
+      this.#ws = null;
+    }
+    for (const [, p] of this.#pending) {
+      if (p.timer) clearTimeout(p.timer);
+      p.reject(new Error("client shutdown"));
+    }
+    this.#pending.clear();
+    this.#setStatus({ kind: "idle" });
+  }
+
+  // ---------- internals ----------
+
+  #setStatus(next: ClientStatus): void {
+    this.#status = next;
+    for (const h of this.#statusHandlers) h(next);
+  }
+
+  #log(level: "debug" | "info" | "warn" | "error", msg: string, ctx?: unknown): void {
+    this.#opts.log?.(level, msg, ctx);
+  }
+
+  async #connectWithBackoff(attempt: number): Promise<AuthOkMsg> {
+    const max = this.#opts.maxAttempts ?? 5;
+    while (!this.#shutdown && attempt <= max) {
+      try {
+        this.#setStatus({ kind: "connecting", attempt });
+        const auth = await this.#connectOnce();
+        this.#setStatus({ kind: "connected", auth });
+        return auth;
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        if (attempt >= max) {
+          this.#setStatus({ kind: "failed", reason });
+          throw err;
+        }
+        const backoff = Math.min(MAX_BACKOFF_MS, MIN_BACKOFF_MS * 2 ** (attempt - 1));
+        this.#log("warn", `connect attempt ${attempt} failed: ${reason}; retry in ${backoff}ms`);
+        this.#setStatus({ kind: "reconnecting", attempt, nextInMs: backoff, reason });
+        await delay(backoff);
+        attempt += 1;
+      }
+    }
+    throw new Error("shutdown during reconnect");
+  }
+
+  #connectOnce(): Promise<AuthOkMsg> {
+    return new Promise<AuthOkMsg>((resolve, reject) => {
+      const ws = new WebSocket(this.#opts.url);
+      this.#ws = ws;
+
+      let authResolved = false;
+      const onOpen = () => {
+        // Daemon requires the first frame to carry an auth token. Shape
+        // matches the existing Rust client: `{ type: "auth", token }`.
+        // (Daemon only checks the `token` field; `type` is ignored.)
+        ws.send(JSON.stringify({ type: "auth", token: this.#opts.token }));
+      };
+      const onMessage = (ev: MessageEvent<string>) => {
+        let msg: DaemonMessage;
+        try {
+          msg = JSON.parse(ev.data) as DaemonMessage;
+        } catch (err) {
+          this.#log("error", "non-JSON frame from daemon", { err });
+          return;
+        }
+        if (!authResolved && msg.type === "auth.ok") {
+          authResolved = true;
+          resolve(msg);
+          // From here on, dispatch normally.
+          this.#routeMessage(msg);
+          return;
+        }
+        if (!authResolved && msg.type === "response.error") {
+          authResolved = true;
+          reject(new Error(`auth rejected: ${msg.error}`));
+          return;
+        }
+        this.#routeMessage(msg);
+      };
+      const onClose = (ev: CloseEvent) => {
+        const reason = ev.reason || `socket closed (code ${ev.code})`;
+        if (!authResolved) {
+          reject(new Error(reason));
+          return;
+        }
+        if (this.#shutdown) return;
+        this.#log("warn", "connection dropped, attempting reconnect", { code: ev.code });
+        // Asynchronously kick off reconnect — caller already moved on.
+        void this.#connectWithBackoff(1).catch((e) => {
+          this.#log("error", "reconnect exhausted", { e });
+        });
+      };
+      const onError = (ev: Event) => {
+        if (!authResolved) reject(new Error("websocket error during connect"));
+        this.#log("error", "websocket error", { ev });
+      };
+
+      ws.addEventListener("open", onOpen);
+      ws.addEventListener("message", onMessage);
+      ws.addEventListener("close", onClose);
+      ws.addEventListener("error", onError);
+    });
+  }
+
+  #routeMessage(msg: DaemonMessage): void {
+    // Request/response correlation first.
+    if (msg.type === "response.ok" || msg.type === "response.error") {
+      const pending = this.#pending.get(msg.requestId);
+      if (pending) {
+        if (msg.type === "response.ok" && !pending.waitForResult) {
+          if (pending.timer) clearTimeout(pending.timer);
+          this.#pending.delete(msg.requestId);
+          pending.resolve(msg);
+          return;
+        }
+        if (msg.type === "response.error") {
+          if (pending.timer) clearTimeout(pending.timer);
+          this.#pending.delete(msg.requestId);
+          pending.reject(msg);
+          return;
+        }
+      }
+    }
+    // Typed result correlation: list/search/etc carry their own requestId.
+    for (const [id, pending] of this.#pending) {
+      if (pending.waitForResult) {
+        const matched = pending.waitForResult(msg);
+        if (matched) {
+          if (pending.timer) clearTimeout(pending.timer);
+          this.#pending.delete(id);
+          pending.resolve(matched as ResponseOkMsg);
+          break;
+        }
+      }
+    }
+    for (const h of this.#messageHandlers) h(msg);
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}

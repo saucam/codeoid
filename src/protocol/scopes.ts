@@ -22,6 +22,8 @@ export const SCOPES = {
   SESSION_DESTROY: "session:destroy",
   /** List sessions and their status */
   SESSION_LIST: "session:list",
+  /** Read files and list directories under a session's workdir */
+  FS_READ: "fs:read",
 } as const;
 
 export type Scope = (typeof SCOPES)[keyof typeof SCOPES];
@@ -33,6 +35,7 @@ export const ALL_SCOPES: readonly Scope[] = Object.values(SCOPES);
 export const WATCHER_SCOPES: readonly Scope[] = [
   SCOPES.SESSION_LIST,
   SCOPES.SESSION_WATCH,
+  SCOPES.FS_READ,
 ];
 
 /** Operator — full control except destroy */
@@ -44,6 +47,7 @@ export const OPERATOR_SCOPES: readonly Scope[] = [
   SCOPES.SESSION_SEND,
   SCOPES.SESSION_INTERRUPT,
   SCOPES.SESSION_APPROVE,
+  SCOPES.FS_READ,
 ];
 
 /** All scopes as a space-delimited string (for OAuth scope parameter) */

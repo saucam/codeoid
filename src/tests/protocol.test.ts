@@ -423,6 +423,8 @@ describe("DaemonMessage routing", () => {
         case "session.info_update": return `info:${msg.session.id}`;
         case "scrollback.replay": return `replay:${msg.messages.length}`;
         case "session.search.result": return `search:${msg.sessions.length}`;
+        case "fs.list.result": return `fs.list:${msg.entries.length}`;
+        case "fs.read.result": return `fs.read:${msg.size}`;
       }
     };
 

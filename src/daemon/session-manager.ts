@@ -13,6 +13,7 @@ import { Store } from "./store.js";
 import { hasScope, SCOPES } from "../protocol/scopes.js";
 import { RateLimiter } from "./rate-limit.js";
 import { TranscriptStore } from "./transcript.js";
+import { FsAccessError, handleFsList, handleFsRead } from "./fs.js";
 import type { AgentIdentityManager } from "./agent-identity.js";
 import { type MemoryEngine, workspaceIdFromPath } from "./memory/index.js";
 import type { CodeoidConfig } from "../config.js";
@@ -135,7 +136,81 @@ export class SessionManager {
         return this.#setModel(msg, auth);
       case "session.rename":
         return this.#rename(msg, auth);
+      case "fs.list":
+        return this.#fsList(msg, auth);
+      case "fs.read":
+        return this.#fsRead(msg, auth);
     }
+  }
+
+  // ---------- fs verbs ----------
+
+  async #fsList(
+    msg: Extract<ClientMessage, { type: "fs.list" }>,
+    auth: AuthContext,
+  ): Promise<DaemonMessage> {
+    if (!hasScope(auth.scopes as string[], SCOPES.FS_READ)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Missing scope: fs:read",
+        code: "forbidden",
+      };
+    }
+    const session = this.#sessions.get(msg.sessionId);
+    if (!session) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Session not found",
+        code: "not_found",
+      };
+    }
+    try {
+      return await handleFsList(msg, session.workdir);
+    } catch (err) {
+      return this.#fsErr(msg.id, err);
+    }
+  }
+
+  async #fsRead(
+    msg: Extract<ClientMessage, { type: "fs.read" }>,
+    auth: AuthContext,
+  ): Promise<DaemonMessage> {
+    if (!hasScope(auth.scopes as string[], SCOPES.FS_READ)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Missing scope: fs:read",
+        code: "forbidden",
+      };
+    }
+    const session = this.#sessions.get(msg.sessionId);
+    if (!session) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Session not found",
+        code: "not_found",
+      };
+    }
+    try {
+      return await handleFsRead(msg, session.workdir);
+    } catch (err) {
+      return this.#fsErr(msg.id, err);
+    }
+  }
+
+  #fsErr(requestId: string, err: unknown): DaemonMessage {
+    if (err instanceof FsAccessError) {
+      return { type: "response.error", requestId, error: err.message, code: err.code };
+    }
+    return {
+      type: "response.error",
+      requestId,
+      error: err instanceof Error ? err.message : String(err),
+      code: "internal",
+    };
   }
 
   /** Inject the MemoryEngine after construction (embedder init is async). */
