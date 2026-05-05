@@ -530,7 +530,8 @@ export type ClientMessage =
   | SessionSetModelMsg
   | SessionRenameMsg
   | FsListMsg
-  | FsReadMsg;
+  | FsReadMsg
+  | FsBrowseDirMsg;
 
 interface BaseClientMsg {
   /** Request ID for correlating responses */
@@ -758,6 +759,18 @@ export interface FsListMsg extends BaseClientMsg {
   path: string;
 }
 
+/**
+ * Session-less directory browse. Used by the new-session UI to let the
+ * user pick a workdir without typing a full path. Daemon resolves
+ * `path` (or HOME when omitted) against a configured root (HOME by
+ * default), canonicalises, and rejects paths that escape it.
+ */
+export interface FsBrowseDirMsg extends BaseClientMsg {
+  type: "fs.browse_dir";
+  /** Absolute path to browse. Defaults to the daemon user's HOME. */
+  path?: string;
+}
+
 export interface FsReadMsg extends BaseClientMsg {
   type: "fs.read";
   sessionId: string;
@@ -803,6 +816,19 @@ export interface FsReadResultMsg {
   truncated: boolean;
 }
 
+export interface FsBrowseDirResultMsg {
+  type: "fs.browse_dir.result";
+  requestId: string;
+  /** Canonical absolute path that was browsed. */
+  path: string;
+  /** Configured root that bounds the browse (HOME by default). */
+  root: string;
+  /** Parent path (canonical) — null when `path` is at the root. */
+  parent: string | null;
+  /** Directory entries; daemon only emits directories for this verb. */
+  entries: FsEntry[];
+}
+
 // =============================================================================
 // Daemon → Client messages
 // =============================================================================
@@ -819,7 +845,8 @@ export type DaemonMessage =
   | ScrollbackReplayMsg
   | SessionSearchResultMsg
   | FsListResultMsg
-  | FsReadResultMsg;
+  | FsReadResultMsg
+  | FsBrowseDirResultMsg;
 
 export interface AuthOkMsg {
   type: "auth.ok";

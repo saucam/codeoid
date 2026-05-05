@@ -21,9 +21,12 @@
  */
 
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import type {
+  FsBrowseDirMsg,
+  FsBrowseDirResultMsg,
   FsEntry,
   FsListMsg,
   FsListResultMsg,
@@ -249,6 +252,128 @@ export async function handleFsRead(
     size: stat.size,
     truncated,
     ...(language ? { language } : {}),
+  };
+}
+
+/**
+ * Configured root for `fs.browse_dir`. The user picks workdirs for new
+ * sessions from anywhere under this; the daemon rejects paths that
+ * resolve outside.
+ *
+ * Default: the daemon process's HOME directory. Override via
+ * `CODEOID_FS_BROWSE_ROOT` env var (e.g. `/workspaces` for a
+ * containerised setup).
+ */
+function browseRoot(): string {
+  const override = process.env["CODEOID_FS_BROWSE_ROOT"];
+  if (override && override.trim().length > 0) return override;
+  return os.homedir();
+}
+
+export async function handleFsBrowseDir(
+  msg: Pick<FsBrowseDirMsg, "id" | "path">,
+): Promise<FsBrowseDirResultMsg> {
+  let canonicalRoot: string;
+  try {
+    canonicalRoot = await fs.realpath(browseRoot());
+  } catch {
+    throw new FsAccessError(
+      `browse root does not exist: ${browseRoot()}`,
+      "internal",
+    );
+  }
+
+  const requested = msg.path && msg.path.trim().length > 0 ? msg.path : canonicalRoot;
+  // path.resolve handles relative-to-root + absolute paths uniformly.
+  const joined = path.isAbsolute(requested)
+    ? requested
+    : path.resolve(canonicalRoot, requested);
+
+  let resolved: string;
+  try {
+    resolved = await fs.realpath(joined);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      throw new FsAccessError(`no such path: ${requested}`, "not_found");
+    }
+    throw new FsAccessError(
+      `cannot resolve path: ${(err as Error).message}`,
+      "internal",
+    );
+  }
+
+  if (
+    resolved !== canonicalRoot &&
+    !resolved.startsWith(canonicalRoot + path.sep)
+  ) {
+    throw new FsAccessError(
+      `path escapes browse root (${canonicalRoot}): ${requested}`,
+      "forbidden",
+    );
+  }
+
+  let stat;
+  try {
+    stat = await fs.stat(resolved);
+  } catch (err) {
+    throw new FsAccessError(
+      `cannot stat: ${(err as Error).message}`,
+      "internal",
+    );
+  }
+  if (!stat.isDirectory()) {
+    throw new FsAccessError(`not a directory: ${requested}`, "invalid_request");
+  }
+
+  let dirents;
+  try {
+    dirents = await fs.readdir(resolved, { withFileTypes: true });
+  } catch (err) {
+    throw new FsAccessError(
+      `cannot read directory: ${(err as Error).message}`,
+      "internal",
+    );
+  }
+
+  const out: FsEntry[] = [];
+  for (const dirent of dirents) {
+    if (out.length >= MAX_LIST_ENTRIES) break;
+    if (DEFAULT_HIDDEN.has(dirent.name)) continue;
+    if (dirent.name.startsWith(".")) continue; // hide all dotfiles in browse mode
+    const childAbs = path.join(resolved, dirent.name);
+    let isSymlink = dirent.isSymbolicLink();
+    let isDirectory = dirent.isDirectory();
+    let mtimeMs: number | undefined;
+    try {
+      const childStat = await fs.stat(childAbs);
+      isDirectory = childStat.isDirectory();
+      mtimeMs = childStat.mtimeMs;
+    } catch {
+      // Broken symlink or race — keep dirent's view.
+    }
+    if (!isDirectory) continue; // browse mode = directories only
+    out.push({
+      name: dirent.name,
+      path: childAbs, // ABSOLUTE here so client can dispatch directly
+      kind: "directory",
+      ...(mtimeMs !== undefined ? { mtimeMs } : {}),
+      ...(isSymlink ? { isSymlink: true } : {}),
+    });
+  }
+
+  out.sort((a, b) => a.name.localeCompare(b.name));
+
+  const parent =
+    resolved === canonicalRoot ? null : path.dirname(resolved);
+
+  return {
+    type: "fs.browse_dir.result",
+    requestId: msg.id,
+    path: resolved,
+    root: canonicalRoot,
+    parent,
+    entries: out,
   };
 }
 

@@ -13,7 +13,12 @@ import { Store } from "./store.js";
 import { hasScope, SCOPES } from "../protocol/scopes.js";
 import { RateLimiter } from "./rate-limit.js";
 import { TranscriptStore } from "./transcript.js";
-import { FsAccessError, handleFsList, handleFsRead } from "./fs.js";
+import {
+  FsAccessError,
+  handleFsBrowseDir,
+  handleFsList,
+  handleFsRead,
+} from "./fs.js";
 import type { AgentIdentityManager } from "./agent-identity.js";
 import { type MemoryEngine, workspaceIdFromPath } from "./memory/index.js";
 import type { CodeoidConfig } from "../config.js";
@@ -140,6 +145,27 @@ export class SessionManager {
         return this.#fsList(msg, auth);
       case "fs.read":
         return this.#fsRead(msg, auth);
+      case "fs.browse_dir":
+        return this.#fsBrowseDir(msg, auth);
+    }
+  }
+
+  async #fsBrowseDir(
+    msg: Extract<ClientMessage, { type: "fs.browse_dir" }>,
+    auth: AuthContext,
+  ): Promise<DaemonMessage> {
+    if (!hasScope(auth.scopes as string[], SCOPES.FS_READ)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Missing scope: fs:read",
+        code: "forbidden",
+      };
+    }
+    try {
+      return await handleFsBrowseDir(msg);
+    } catch (err) {
+      return this.#fsErr(msg.id, err);
     }
   }
 

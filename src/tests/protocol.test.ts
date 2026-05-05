@@ -425,6 +425,7 @@ describe("DaemonMessage routing", () => {
         case "session.search.result": return `search:${msg.sessions.length}`;
         case "fs.list.result": return `fs.list:${msg.entries.length}`;
         case "fs.read.result": return `fs.read:${msg.size}`;
+        case "fs.browse_dir.result": return `fs.browse:${msg.entries.length}`;
       }
     };
 

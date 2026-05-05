@@ -313,6 +313,12 @@ export interface FsReadMsg extends BaseClientMsg {
   maxBytes?: number;
 }
 
+export interface FsBrowseDirMsg extends BaseClientMsg {
+  type: "fs.browse_dir";
+  /** Absolute path to browse. Defaults to the daemon user's HOME. */
+  path?: string;
+}
+
 export type ClientMessage =
   | SessionCreateMsg
   | SessionRenameMsg
@@ -328,7 +334,8 @@ export type ClientMessage =
   | SessionSetModelMsg
   | SessionSearchMsg
   | FsListMsg
-  | FsReadMsg;
+  | FsReadMsg
+  | FsBrowseDirMsg;
 
 // -----------------------------------------------------------------------------
 // Daemon → Client messages
@@ -450,6 +457,15 @@ export interface FsReadResultMsg {
   truncated: boolean;
 }
 
+export interface FsBrowseDirResultMsg {
+  type: "fs.browse_dir.result";
+  requestId: string;
+  path: string;
+  root: string;
+  parent: string | null;
+  entries: FsEntry[];
+}
+
 export type DaemonMessage =
   | AuthOkMsg
   | ResponseOkMsg
@@ -462,4 +478,5 @@ export type DaemonMessage =
   | ScrollbackReplayMsg
   | SessionSearchResultMsg
   | FsListResultMsg
-  | FsReadResultMsg;
+  | FsReadResultMsg
+  | FsBrowseDirResultMsg;
