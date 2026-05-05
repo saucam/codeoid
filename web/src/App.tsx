@@ -8,12 +8,18 @@
  * sign-in form when there's no key OR the saved key is rejected.
  */
 
-import { Component, Show, createSignal, onMount } from "solid-js";
+import { Component, Show, createEffect, createSignal, on, onMount } from "solid-js";
 
 import { rememberedApiKey } from "./lib/auth";
 import SignIn from "./components/SignIn";
 import Shell from "./components/Shell";
-import { authIdentity, bootstrap } from "./state/connection";
+import {
+  authIdentity,
+  bootstrap,
+  newRequestId,
+  send,
+} from "./state/connection";
+import { focusedSessionId } from "./state/sessions";
 
 const App: Component = () => {
   const [tried, setTried] = createSignal(false);
@@ -29,6 +35,24 @@ const App: Component = () => {
     }
     setTried(true);
   });
+
+  // Attach to the focused session whenever it changes (or when we first
+  // sign in). The daemon only broadcasts to attached clients — without
+  // this we'd see the list but no transcript or streaming deltas.
+  const attached = new Set<string>();
+  createEffect(
+    on([authIdentity, focusedSessionId], () => {
+      const auth = authIdentity();
+      const id = focusedSessionId();
+      if (!auth || !id || attached.has(id)) return;
+      try {
+        send({ type: "session.attach", id: newRequestId(), sessionId: id });
+        attached.add(id);
+      } catch (err) {
+        console.warn("[codeoid] attach failed:", err);
+      }
+    }),
+  );
 
   return (
     <Show

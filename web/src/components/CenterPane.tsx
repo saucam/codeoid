@@ -1,7 +1,6 @@
 /**
- * Center pane — transcript + prompt. P2 stub: shows the focused session's
- * header with full metrics + identity context. Transcript renderer + prompt
- * land in P4.
+ * Center pane — header (with full UsageStrip) → transcript →
+ * approval bar (when active) → prompt.
  */
 
 import { Component, Show } from "solid-js";
@@ -14,40 +13,39 @@ import {
   relativeTime,
 } from "../lib/format";
 import { sessionAgentLabel, truncateWimseUri } from "../lib/identity";
-import { createMessages } from "../state/messages";
-import { focusedSession, focusedSessionId } from "../state/sessions";
+import { focusedSession } from "../state/sessions";
+
+import ApprovalBar from "./transcript/ApprovalBar";
+import PromptBox from "./prompt/PromptBox";
+import Transcript from "./transcript/Transcript";
 
 const CenterPane: Component = () => {
-  const messages = createMessages(focusedSessionId);
   return (
     <main class="row-start-2 flex flex-col bg-bg">
       <Show
         when={focusedSession()}
         fallback={
           <div class="flex flex-1 items-center justify-center px-6 text-fg-muted">
-            <p class="text-sm">Select a session from the sidebar.</p>
+            <div class="max-w-md space-y-2 text-center">
+              <p class="text-sm">Select a session from the sidebar.</p>
+              <p class="text-xs text-fg-faint">
+                Or type{" "}
+                <code class="rounded bg-bg-elev px-1 py-0.5 font-mono">
+                  /new &lt;name&gt; [workdir]
+                </code>{" "}
+                in the prompt below to create one.
+              </p>
+            </div>
           </div>
         }
       >
-        {(s) => (
-          <>
-            <SessionHeader />
-            <section class="flex-1 overflow-y-auto px-6 py-4">
-              <div class="mx-auto max-w-3xl space-y-3 text-sm text-fg-muted">
-                <p>
-                  Showing{" "}
-                  <span class="text-fg">{messages().length}</span> message(s) for{" "}
-                  <span class="text-fg">{s().name}</span>.
-                </p>
-                <p class="text-xs text-fg-faint">
-                  Transcript renderer arrives in phase 4. Workdir:{" "}
-                  <span class="font-mono">{s().workdir}</span>
-                </p>
-              </div>
-            </section>
-            <PromptStub />
-          </>
-        )}
+        <SessionHeader />
+        <Transcript />
+        <ApprovalBar />
+        <PromptBox />
+      </Show>
+      <Show when={!focusedSession()}>
+        <PromptBox />
       </Show>
     </main>
   );
@@ -146,12 +144,6 @@ const Stat: Component<{
       {props.value}
     </span>
   </div>
-);
-
-const PromptStub: Component = () => (
-  <footer class="border-t border-border bg-bg-elev px-4 py-3 text-xs text-fg-faint">
-    Prompt arrives in phase 4 — Enter sends, Shift+Enter newline.
-  </footer>
 );
 
 export default CenterPane;
