@@ -22,11 +22,14 @@ import { identityLabel, identityColorClass } from "../lib/identity";
 import { authIdentity, connectionStatus, disconnect } from "../state/connection";
 import { focusedSession } from "../state/sessions";
 import { forgetApiKey } from "../lib/auth";
+import { openIdentityDrawer } from "./IdentityDrawer";
+import { shortSub } from "../lib/identity";
 
 const StatusBar: Component = () => {
   return (
     <header class="col-span-full flex items-center gap-3 border-b border-border bg-bg-elev px-4 text-sm text-fg-muted">
       <span class="select-none font-mono font-semibold text-fg">codeoid</span>
+      <FrontendBadge />
       <Sep />
       <ConnectionPill />
       <Sep />
@@ -80,20 +83,34 @@ const ConnectionPill: Component = () => {
   );
 };
 
+const FrontendBadge: Component = () => (
+  <span
+    class="rounded border border-accent/30 bg-accent/5 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-accent"
+    title="You're connected via the web frontend"
+  >
+    web
+  </span>
+);
+
 const IdentityChip: Component = () => {
   const id = () => authIdentity()?.identity;
   return (
     <Show when={id()}>
       {(idGetter) => (
-        <span
-          class="flex items-center gap-1.5 truncate"
-          title={`${idGetter().sub} (${idGetter().type})`}
+        <button
+          type="button"
+          onClick={openIdentityDrawer}
+          class="flex items-center gap-1.5 truncate rounded px-1 py-0.5 transition hover:bg-bg-hover"
+          title={`Click for full identity · /who\n${idGetter().sub}`}
         >
           <span class="text-fg-faint">as</span>
           <span class={`font-medium ${identityColorClass(idGetter().type)}`}>
             {identityLabel(idGetter())}
           </span>
-        </span>
+          <span class="hidden font-mono text-[10px] text-fg-faint md:inline">
+            ⌬ {shortSub(idGetter().sub)}
+          </span>
+        </button>
       )}
     </Show>
   );

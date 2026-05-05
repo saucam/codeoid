@@ -49,6 +49,8 @@ describe("parseSlash", () => {
     expect(parseSlash("/rotate")).toEqual({ kind: "rotate" });
     expect(parseSlash("/help")).toEqual({ kind: "help" });
     expect(parseSlash("/clear")).toEqual({ kind: "clear" });
+    expect(parseSlash("/who")).toEqual({ kind: "who" });
+    expect(parseSlash("/whoami")).toEqual({ kind: "who" });
   });
 
   it("parses /mode with single-letter aliases", () => {
@@ -139,6 +141,14 @@ describe("dispatchSlash", () => {
     const c = ctx();
     dispatchSlash({ kind: "help" }, c);
     dispatchSlash({ kind: "clear" }, c);
+    expect(c.sent).toEqual([]);
+  });
+
+  it("/who invokes the identity hook and emits nothing", () => {
+    const showIdentity = vi.fn();
+    const c = { ...ctx(), showIdentity };
+    dispatchSlash({ kind: "who" }, c);
+    expect(showIdentity).toHaveBeenCalledTimes(1);
     expect(c.sent).toEqual([]);
   });
 });

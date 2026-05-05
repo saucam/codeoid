@@ -19,6 +19,7 @@ import { Component, Show, createMemo } from "solid-js";
 
 import CenterPane from "./CenterPane";
 import FileViewer from "./files/FileViewer";
+import IdentityDrawer from "./IdentityDrawer";
 import NewSessionModal from "./NewSessionModal";
 import ResizeHandle from "./ResizeHandle";
 import SearchModal from "./SearchModal";
@@ -81,6 +82,7 @@ const Shell: Component = () => {
       </aside>
       <SearchModal />
       <NewSessionModal />
+      <IdentityDrawer />
     </div>
   );
 };

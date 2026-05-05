@@ -28,7 +28,8 @@ export type SlashCommand =
   | { kind: "mode"; mode: SessionMode; maxTurns?: number }
   | { kind: "model"; model: string; fallback?: string | null }
   | { kind: "help" }
-  | { kind: "clear" };
+  | { kind: "clear" }
+  | { kind: "who" };
 
 export function parseSlash(raw: string): SlashCommand | null {
   const trimmed = raw.trim();
@@ -91,6 +92,9 @@ export function parseSlash(raw: string): SlashCommand | null {
       return { kind: "help" };
     case "clear":
       return { kind: "clear" };
+    case "who":
+    case "whoami":
+      return { kind: "who" };
     default:
       throw new Error(`unknown slash command: /${verb}`);
   }
@@ -101,6 +105,9 @@ export interface SlashContext {
   send: (msg: ClientMessage) => void;
   newRequestId: () => string;
   removeSession: (id: string) => void;
+  /** Optional UI hooks — caller provides as needed. */
+  showHelp?: () => void;
+  showIdentity?: () => void;
 }
 
 export function dispatchSlash(cmd: SlashCommand, ctx: SlashContext): void {
@@ -163,10 +170,13 @@ export function dispatchSlash(cmd: SlashCommand, ctx: SlashContext): void {
       });
       return;
     case "help":
-      // Caller surfaces the modal; nothing to send.
+      ctx.showHelp?.();
       return;
     case "clear":
       // Pure UI side-effect handled by the caller.
+      return;
+    case "who":
+      ctx.showIdentity?.();
       return;
   }
 }

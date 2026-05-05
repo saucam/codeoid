@@ -27,6 +27,7 @@ import {
   focusedSessionId,
   removeSession,
 } from "../../state/sessions";
+import { openIdentityDrawer } from "../IdentityDrawer";
 import { dispatchSlash, parseSlash } from "./slash";
 
 const PromptBox: Component = () => {
@@ -85,6 +86,9 @@ const PromptBox: Component = () => {
           send,
           newRequestId,
           removeSession,
+          showIdentity: openIdentityDrawer,
+          // showHelp left undefined for now — wired in P7 alongside the
+          // help modal.
         });
         clearDraft(draftKey());
         setText("");
@@ -151,7 +155,7 @@ const PromptBox: Component = () => {
         </Show>
         <div class="px-1 text-[10px] text-fg-faint">
           /new {"<name>"} {"[workdir]"} · /rename {"<name>"} · /interrupt ·
-          /rotate · /mode {"<i|a|x>"} · /model {"<id>"} · /destroy
+          /rotate · /mode {"<i|a|x>"} · /model {"<id>"} · /who · /destroy
         </div>
       </div>
     </footer>
