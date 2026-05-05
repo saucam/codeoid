@@ -7,9 +7,26 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
-    // Daemon WebSocket lives at ws://127.0.0.1:7400. We hit it directly from
-    // the client; no proxy needed (browser handles cross-origin WS upgrade
-    // and the daemon's CORS is permissive on localhost).
+    // ZeroID's /oauth2/token doesn't emit CORS headers, so the browser
+    // blocks cross-origin POSTs from :5173 → :8899. Proxying through
+    // Vite makes the request same-origin from the browser's POV.
+    //
+    // Daemon WebSocket on :7400 is unaffected — WebSocket upgrades
+    // bypass CORS preflight and we connect to it directly.
+    proxy: {
+      "/oauth2": {
+        target:
+          (process.env.VITE_ZEROID_URL as string | undefined) ??
+          "http://localhost:8899",
+        changeOrigin: true,
+      },
+      "/.well-known": {
+        target:
+          (process.env.VITE_ZEROID_URL as string | undefined) ??
+          "http://localhost:8899",
+        changeOrigin: true,
+      },
+    },
   },
   build: {
     outDir: "dist",

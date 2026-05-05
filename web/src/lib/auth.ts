@@ -81,8 +81,16 @@ export async function resolveToken(opts: ResolveOptions): Promise<ResolvedAuth> 
     );
   }
 
-  const zeroidUrl = opts.zeroidUrl ?? "http://localhost:8899";
-  const url = `${zeroidUrl.replace(/\/+$/, "")}/oauth2/token`;
+  // Default to a same-origin URL ("/oauth2/token") so the browser doesn't
+  // hit ZeroID cross-origin (ZeroID's /oauth2/token doesn't return CORS
+  // headers). In dev, Vite's proxy intercepts /oauth2/* and forwards to
+  // ZEROID_URL server-side. In prod, the deploy is expected to do the
+  // same (ingress / nginx). An explicit `zeroidUrl` override still
+  // works for absolute URLs.
+  const zeroidUrl = opts.zeroidUrl ?? "";
+  const url = zeroidUrl
+    ? `${zeroidUrl.replace(/\/+$/, "")}/oauth2/token`
+    : "/oauth2/token";
 
   let res: Response;
   try {

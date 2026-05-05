@@ -30,9 +30,12 @@ import {
 const DAEMON_URL =
   (import.meta.env.VITE_CODEOID_URL as string | undefined) ??
   "ws://127.0.0.1:7400";
+// Empty default → auth.ts uses a same-origin /oauth2/token URL that
+// Vite's dev proxy (or a prod ingress) forwards to ZeroID. Set
+// VITE_ZEROID_URL only if you intentionally want a cross-origin
+// exchange and ZeroID is sending CORS headers.
 const ZEROID_URL =
-  (import.meta.env.VITE_ZEROID_URL as string | undefined) ??
-  "http://localhost:8899";
+  (import.meta.env.VITE_ZEROID_URL as string | undefined) ?? "";
 
 const [status, setStatus] = createSignal<ClientStatus>({ kind: "idle" });
 const [auth, setAuth] = createSignal<AuthOkMsg | null>(null);
