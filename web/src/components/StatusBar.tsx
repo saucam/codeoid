@@ -31,6 +31,7 @@ const StatusBar: Component = () => {
       <IdentityChip />
       <span class="ml-auto flex items-center gap-3">
         <SessionMetrics />
+        <SearchHotkey />
         <SignOut />
       </span>
     </header>
@@ -139,6 +140,29 @@ const SessionMetrics: Component = () => {
     </Show>
   );
 };
+
+const SearchHotkey: Component = () => (
+  <button
+    type="button"
+    onClick={() => {
+      // Same chord SearchModal listens for — synthesize it so the user
+      // can mouse-click and still trigger the modal.
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "k",
+          code: "KeyK",
+          ctrlKey: true,
+          bubbles: true,
+        }),
+      );
+    }}
+    class="flex items-center gap-1 rounded border border-border bg-bg px-1.5 py-0.5 text-[11px] text-fg-muted hover:border-accent/40 hover:text-fg"
+    title="Search across sessions (Ctrl+K)"
+  >
+    <span>🔍</span>
+    <span class="font-mono">Ctrl K</span>
+  </button>
+);
 
 const SignOut: Component = () => {
   return (

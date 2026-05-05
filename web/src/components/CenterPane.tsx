@@ -17,6 +17,7 @@ import { focusedSession } from "../state/sessions";
 
 import ApprovalBar from "./transcript/ApprovalBar";
 import PromptBox from "./prompt/PromptBox";
+import SessionControls from "./SessionControls";
 import Transcript from "./transcript/Transcript";
 
 const CenterPane: Component = () => {
@@ -69,6 +70,7 @@ const SessionHeader: Component = () => (
             created {relativeTime(s().createdAt)}
           </span>
         </div>
+        <SessionControls />
         <div
           class="truncate font-mono text-[11px] text-fg-muted"
           title={s().workdir}

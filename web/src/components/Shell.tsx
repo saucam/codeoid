@@ -16,6 +16,7 @@ import { Component } from "solid-js";
 
 import CenterPane from "./CenterPane";
 import FileViewer from "./files/FileViewer";
+import SearchModal from "./SearchModal";
 import SessionListPane from "./SessionListPane";
 import StatusBar from "./StatusBar";
 import { openedFile } from "../state/files";
@@ -36,6 +37,7 @@ const Shell: Component = () => {
       <aside class="row-start-2 overflow-hidden border-l border-border bg-bg-elev">
         <FileViewer />
       </aside>
+      <SearchModal />
     </div>
   );
 };
