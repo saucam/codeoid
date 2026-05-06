@@ -852,7 +852,7 @@ export class Session {
             this.#persistAndBuffer(autoMsg);
             this.#broadcastRaw(autoMsg);
             this.#store.audit(sender.sub, "session.auto_approve", this.id, `tool=${toolName} mode=${this.#mode}`);
-            return { behavior: "allow" as const };
+            return { behavior: "allow" as const, updatedInput: inputObj };
           }
 
           // Emit tool_call message with waiting_confirmation state
@@ -895,8 +895,16 @@ export class Session {
             this.#store.audit(sender.sub, "session.approve", this.id, `tool=${toolName} approvalId=${approvalId}`);
 
             // Schedule completion delta after tool finishes (tracked by tool_use_id from SDK)
-            // We'll update this in handleAgentMessage when we see the tool result
-            return { behavior: "allow" as const };
+            // We'll update this in handleAgentMessage when we see the tool result.
+            //
+            // updatedInput must be present even when we don't change anything —
+            // SDK's runtime Zod schema rejects `{behavior:"allow"}` without it,
+            // even though the published TS types say it's optional. Passing
+            // back the original input is the no-op equivalent. Without this,
+            // ExitPlanMode (and any tool routed through canUseTool) errors
+            // out with "Tool permission request failed: ZodError" and Claude
+            // sees a tool_result that says it's a "technical issue."
+            return { behavior: "allow" as const, updatedInput: inputObj };
           }
 
           this.#store.audit(sender.sub, "session.deny", this.id, `tool=${toolName} approvalId=${approvalId}`);
