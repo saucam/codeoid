@@ -1037,6 +1037,17 @@ export class Session {
       resolve(false);
     }
     this.#pendingApprovals.clear();
+
+    const infoMsg = this.#makeMessage(
+      "info",
+      `⏹ Session interrupted by ${sender.sub}. The current turn was aborted; send a new message to continue.`,
+      SYSTEM_IDENTITY,
+      undefined,
+      undefined,
+      { event: "session.interrupt", sub: sender.sub },
+    );
+    this.#persistAndBuffer(infoMsg);
+    this.#broadcastRaw(infoMsg);
   }
 
   approve(approvalId: string, approved: boolean, sender: AuthContext): void {

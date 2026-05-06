@@ -76,7 +76,7 @@ const InterruptButton: Component<{
           ? "border-danger/50 text-danger hover:bg-danger/10"
           : "border-border text-fg-faint opacity-60"
       }`}
-      title="Interrupt the running turn (Ctrl+X)"
+      title="Interrupt the running turn (Ctrl+X / Cmd+X)"
     >
       ⏹ interrupt
     </button>

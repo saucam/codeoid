@@ -8,7 +8,7 @@
  * sign-in form when there's no key OR the saved key is rejected.
  */
 
-import { Component, Show, createEffect, createSignal, on, onMount } from "solid-js";
+import { Component, Show, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
 
 import { rememberedApiKey } from "./lib/auth";
 import SignIn from "./components/SignIn";
@@ -19,7 +19,7 @@ import {
   newRequestId,
   send,
 } from "./state/connection";
-import { focusedSessionId } from "./state/sessions";
+import { focusedSession, focusedSessionId } from "./state/sessions";
 import { resetClaudeConfig } from "./state/claude-config";
 
 const App: Component = () => {
@@ -62,6 +62,40 @@ const App: Component = () => {
       if (prev !== undefined && prev !== sid) resetClaudeConfig();
     }),
   );
+
+  // Global Ctrl+X (or Cmd+X on macOS) — interrupt the focused session if
+  // it's mid-turn. We swallow the event before it bubbles into the prompt
+  // textarea, which would otherwise eat the shortcut as a clipboard cut.
+  // No-op when no session is busy or focus is in an editable field that
+  // would conflict with a real cut intent (input/textarea with selection).
+  onMount(() => {
+    function onKey(ev: KeyboardEvent): void {
+      if (ev.key.toLowerCase() !== "x") return;
+      if (!(ev.ctrlKey || ev.metaKey)) return;
+      const s = focusedSession();
+      if (!s) return;
+      if (s.status !== "thinking" && s.status !== "tool_running") return;
+
+      // Don't hijack a real "cut" the user intended. If the active element
+      // is a text field with a non-empty selection, defer to the browser.
+      const el = document.activeElement;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA")) {
+        const ta = el as HTMLInputElement | HTMLTextAreaElement;
+        if (
+          typeof ta.selectionStart === "number" &&
+          typeof ta.selectionEnd === "number" &&
+          ta.selectionEnd > ta.selectionStart
+        ) {
+          return;
+        }
+      }
+
+      ev.preventDefault();
+      send({ type: "session.interrupt", id: newRequestId(), sessionId: s.id });
+    }
+    window.addEventListener("keydown", onKey);
+    onCleanup(() => window.removeEventListener("keydown", onKey));
+  });
 
   return (
     <Show
