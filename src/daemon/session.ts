@@ -277,6 +277,13 @@ export class Session {
   // update preserves the original tool input.
   #toolCallMessages = new Map<string, SessionMessage>();
 
+  // Live MCP state captured from the SDK's `system/init` events. The SDK
+  // emits one init per query, so these are refreshed on every send(). Keyed
+  // by the SDK-reported server name (which matches what we read from
+  // ~/.claude.json). Empty until the first turn starts.
+  #sdkMcpStatus = new Map<string, string>();
+  #sdkMcpTools = new Map<string, string[]>();
+
   constructor(opts: SessionCreateOptions) {
     this.id = opts.existingId ?? randomUUID();
     this.name = opts.name;
@@ -391,6 +398,16 @@ export class Session {
 
   get status(): SessionStatus { return this.#status; }
   get attachedClientCount(): number { return this.#clients.size; }
+
+  /**
+   * Snapshot of the SDK-reported MCP state for this session, captured
+   * from the most recent `system/init` event. `claude.config` merges this
+   * over the static config we read from disk so the drawer can show live
+   * connection status + the actual tools available to the agent.
+   */
+  get sdkMcpSnapshot(): { status: Map<string, string>; tools: Map<string, string[]> } {
+    return { status: this.#sdkMcpStatus, tools: this.#sdkMcpTools };
+  }
   get agentUri(): string | undefined { return this.#agentIdentity.sub; }
   get mode(): SessionMode { return this.#mode; }
   get turnsRemaining(): number | undefined { return this.#turnsRemaining; }
@@ -1060,13 +1077,47 @@ export class Session {
         this.#store.audit(sender.sub, approved ? "session.approve" : "session.deny", this.id, `approvalId=${firstId}`);
         firstResolve(approved);
         this.#pendingApprovals.delete(firstId);
+        return;
       }
+      // No live approval matches. Most likely a stale tool_call left in
+      // `waiting_confirmation` after a daemon restart or failed
+      // canUseTool — the SDK will never call us back for it. Walk
+      // scrollback, find the matching tool_call by approvalId, and flip
+      // it to cancelled so the ApprovalBar dismisses.
+      this.#dismissStaleApproval(approvalId, sender);
       return;
     }
 
     this.#store.audit(sender.sub, approved ? "session.approve" : "session.deny", this.id, `approvalId=${approvalId}`);
     resolve(approved);
     this.#pendingApprovals.delete(approvalId);
+  }
+
+  #dismissStaleApproval(approvalId: string, sender: AuthContext): void {
+    const messages = this.#scrollback.read() as SessionMessage[];
+    let target: SessionMessage | null = null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (!m || m.role !== "tool_call" || !m.tool) continue;
+      const state = m.tool.state;
+      if (state.phase === "waiting_confirmation" && state.approvalId === approvalId) {
+        target = m;
+        break;
+      }
+    }
+    if (!target) return;
+    this.#store.audit(sender.sub, "session.deny_stale", this.id, `approvalId=${approvalId}`);
+    this.#broadcastRaw({
+      type: "session.message.delta",
+      sessionId: this.id,
+      messageId: target.messageId,
+      toolStateUpdate: {
+        phase: "cancelled",
+        reason: "interrupted",
+        message: "approval was no longer pending",
+      },
+      timestamp: new Date().toISOString(),
+    });
   }
 
   async destroy(sender: AuthContext): Promise<void> {
@@ -1086,9 +1137,32 @@ export class Session {
 
   restoreScrollback(messages: DaemonMessage[]): void {
     for (const msg of messages) {
-      if (msg.type === "session.message") {
-        this.#scrollback.push(msg);
+      if (msg.type !== "session.message") continue;
+      // Any tool_call still in `waiting_confirmation` after a daemon restart
+      // is orphaned — `#pendingApprovals` lives in memory only, so the SDK
+      // will never call canUseTool again for this approvalId. Rewrite to
+      // `cancelled` before persisting so the ApprovalBar doesn't resurrect a
+      // ghost prompt the user can't actually answer.
+      if (
+        msg.role === "tool_call" &&
+        msg.tool &&
+        msg.tool.state.phase === "waiting_confirmation"
+      ) {
+        const stale: SessionMessage = {
+          ...msg,
+          tool: {
+            ...msg.tool,
+            state: {
+              phase: "cancelled",
+              reason: "interrupted",
+              message: "approval lost on daemon restart",
+            },
+          },
+        };
+        this.#scrollback.push(stale);
+        continue;
       }
+      this.#scrollback.push(msg);
     }
     // A session with prior scrollback already exists in Claude Code's own
     // persistent session store — next send() must use `resume`, not re-create.
@@ -1906,6 +1980,35 @@ export class Session {
 
       case "system": {
         const subtype = (msg as { subtype?: string }).subtype;
+        if (subtype === "init") {
+          // Capture per-turn MCP state. The SDK reports each configured
+          // server's connection status plus the flat list of tools it
+          // ended up exposing. Bucket the tools by server name (from the
+          // `mcp__<server>__<tool>` prefix) so the drawer can show
+          // "highflame-platform: connected · 12 tools" with a tool list
+          // expandable underneath.
+          const init = msg as {
+            mcp_servers?: { name: string; status: string }[];
+            tools?: string[];
+          };
+          this.#sdkMcpStatus.clear();
+          this.#sdkMcpTools.clear();
+          for (const s of init.mcp_servers ?? []) {
+            this.#sdkMcpStatus.set(s.name, s.status);
+            this.#sdkMcpTools.set(s.name, []);
+          }
+          for (const t of init.tools ?? []) {
+            if (!t.startsWith("mcp__")) continue;
+            const rest = t.slice("mcp__".length);
+            const sep = rest.indexOf("__");
+            if (sep <= 0) continue;
+            const server = rest.slice(0, sep);
+            const bucket = this.#sdkMcpTools.get(server) ?? [];
+            bucket.push(t);
+            this.#sdkMcpTools.set(server, bucket);
+          }
+          break;
+        }
         if (subtype === "api_retry") {
           const retryMsg = msg as { attempt?: number; retry_delay_ms?: number; error_status?: number | null };
           const infoMsg = this.#makeMessage(

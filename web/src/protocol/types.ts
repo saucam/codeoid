@@ -519,6 +519,10 @@ export interface ClaudeConfigMcpServer {
   type: string | null;
   /** HTTP-type MCP servers' header keys (values redacted at the daemon). */
   headerKeys?: string[];
+  /** SDK-reported live connection status (e.g. "connected", "failed"). */
+  liveStatus?: string;
+  /** Fully-qualified MCP tool names exposed by this server in the active session. */
+  liveTools?: string[];
 }
 
 export interface ClaudeConfigHook {

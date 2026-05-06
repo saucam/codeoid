@@ -306,6 +306,7 @@ const McpList: Component<{ items: ClaudeConfigMcpServer[] }> = (props) => (
                   {m.type}
                 </span>
               </Show>
+              <McpStatusBadge status={m.liveStatus} toolCount={m.liveTools?.length} />
             </div>
             <Show when={m.command}>
               <div class="mt-1 break-all font-mono text-[11px] text-fg-muted">
@@ -327,11 +328,58 @@ const McpList: Component<{ items: ClaudeConfigMcpServer[] }> = (props) => (
                 header keys (values redacted): {m.headerKeys!.join(", ")}
               </div>
             </Show>
+            <Show when={m.liveTools && m.liveTools.length > 0}>
+              <details class="mt-2">
+                <summary class="cursor-pointer font-mono text-[11px] text-fg-muted hover:text-fg">
+                  tools available this session ({m.liveTools!.length})
+                </summary>
+                <ul class="mt-1 flex flex-col gap-0.5 pl-3">
+                  <For each={m.liveTools}>
+                    {(tn) => (
+                      <li class="font-mono text-[11px] text-fg-muted">{tn}</li>
+                    )}
+                  </For>
+                </ul>
+              </details>
+            </Show>
+            <Show when={m.liveStatus !== undefined && (!m.liveTools || m.liveTools.length === 0)}>
+              <div class="mt-1 text-[11px] italic text-fg-faint">
+                no tools exposed this session
+              </div>
+            </Show>
             <PathRow path={m.path} />
           </li>
         )}
       </For>
     </ul>
+  </Show>
+);
+
+const McpStatusBadge: Component<{ status?: string; toolCount?: number }> = (props) => (
+  <Show when={props.status !== undefined}>
+    {(() => {
+      const s = props.status!;
+      const lower = s.toLowerCase();
+      const cls =
+        lower === "connected"
+          ? "border-success/40 text-success"
+          : lower === "failed" || lower === "error"
+            ? "border-danger/40 text-danger"
+            : lower === "pending" || lower === "connecting"
+              ? "border-warn/40 text-warn animate-pulse"
+              : "border-border text-fg-muted";
+      return (
+        <span
+          class={`rounded border px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider ${cls}`}
+          title="SDK-reported status from the most recent turn"
+        >
+          {s}
+          <Show when={props.toolCount !== undefined}>
+            <span class="ml-1 normal-case text-fg-faint">· {props.toolCount} tools</span>
+          </Show>
+        </span>
+      );
+    })()}
   </Show>
 );
 

@@ -856,6 +856,22 @@ export interface ClaudeConfigMcpServer {
   /** Just the keys of the `headers` block for http-type servers
    * (values are bearer tokens / API keys, never returned). */
   headerKeys?: string[];
+  /**
+   * Live connection status the SDK reported for this server name on the
+   * most recent `system/init` event for this session. `undefined` when the
+   * SDK hasn't started a turn yet (drawer opened before first send) or the
+   * server name didn't match any SDK-reported entry. The SDK uses values
+   * like `"connected"`, `"failed"`, `"pending"` — we surface the string
+   * verbatim so we don't lock in an enum.
+   */
+  liveStatus?: string;
+  /**
+   * MCP tool names the SDK exposed in this session for this server,
+   * fully-qualified (`mcp__<server>__<tool>`). Empty array means the server
+   * connected but exposed no tools; `undefined` means we have no SDK-side
+   * data yet.
+   */
+  liveTools?: string[];
 }
 
 export interface ClaudeConfigHook {

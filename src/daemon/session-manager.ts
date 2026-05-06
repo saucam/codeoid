@@ -382,13 +382,23 @@ export class SessionManager {
     }
     try {
       const snapshot = await readClaudeConfig(session.workdir);
+      const live = session.sdkMcpSnapshot;
+      const mcpServers = snapshot.mcpServers.map((s) => {
+        const liveStatus = live.status.get(s.name);
+        const liveTools = live.tools.get(s.name);
+        return {
+          ...s,
+          ...(liveStatus !== undefined ? { liveStatus } : {}),
+          ...(liveTools !== undefined ? { liveTools } : {}),
+        };
+      });
       return {
         type: "claude.config.result",
         requestId: msg.id,
         workdir: session.workdir,
         agents: snapshot.agents,
         skills: snapshot.skills,
-        mcpServers: snapshot.mcpServers,
+        mcpServers,
         hooks: snapshot.hooks,
       };
     } catch (err) {
