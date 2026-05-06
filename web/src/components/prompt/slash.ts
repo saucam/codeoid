@@ -30,7 +30,10 @@ export type SlashCommand =
   | { kind: "help" }
   | { kind: "clear" }
   | { kind: "who" }
-  | { kind: "capabilities"; tab: "agents" | "skills" | "mcp" | "hooks" };
+  | { kind: "capabilities"; tab: "agents" | "skills" | "mcp" | "hooks" }
+  | { kind: "export" }
+  | { kind: "import" }
+  | { kind: "fork" };
 
 export function parseSlash(raw: string): SlashCommand | null {
   const trimmed = raw.trim();
@@ -107,6 +110,13 @@ export function parseSlash(raw: string): SlashCommand | null {
     case "hooks":
     case "hook":
       return { kind: "capabilities", tab: "hooks" };
+    case "export":
+    case "share":
+      return { kind: "export" };
+    case "import":
+      return { kind: "import" };
+    case "fork":
+      return { kind: "fork" };
     default:
       throw new Error(`unknown slash command: /${verb}`);
   }
@@ -121,6 +131,8 @@ export interface SlashContext {
   showHelp?: () => void;
   showIdentity?: () => void;
   showCapabilities?: (tab: "agents" | "skills" | "mcp" | "hooks") => void;
+  showExport?: () => void;
+  showImport?: () => void;
 }
 
 export function dispatchSlash(cmd: SlashCommand, ctx: SlashContext): void {
@@ -193,6 +205,13 @@ export function dispatchSlash(cmd: SlashCommand, ctx: SlashContext): void {
       return;
     case "capabilities":
       ctx.showCapabilities?.(cmd.tab);
+      return;
+    case "export":
+      ctx.showExport?.();
+      return;
+    case "import":
+    case "fork":
+      ctx.showImport?.();
       return;
   }
 }

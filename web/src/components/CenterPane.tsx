@@ -23,6 +23,7 @@ import SessionControls from "./SessionControls";
 import Transcript from "./transcript/Transcript";
 import WorkerIndicator from "./transcript/WorkerIndicator";
 import { openNewSessionModal } from "./NewSessionModal";
+import { openImportModal } from "./SessionImportModal";
 
 const CenterPane: Component = () => {
   return (
@@ -38,18 +39,28 @@ const CenterPane: Component = () => {
                 workdir. The daemon registers a per-session ZeroID identity
                 so any frontend (web, TUI, Telegram) can resume them.
               </p>
-              <button
-                type="button"
-                onClick={openNewSessionModal}
-                class="rounded bg-accent px-4 py-2 text-sm font-semibold text-bg transition hover:bg-accent-hover"
-              >
-                Create your first session
-              </button>
+              <div class="flex items-center justify-center gap-2">
+                <button
+                  type="button"
+                  onClick={openNewSessionModal}
+                  class="rounded bg-accent px-4 py-2 text-sm font-semibold text-bg transition hover:bg-accent-hover"
+                >
+                  Create your first session
+                </button>
+                <button
+                  type="button"
+                  onClick={openImportModal}
+                  class="rounded border border-border px-3 py-2 text-sm text-fg-muted transition hover:border-accent/40 hover:text-fg"
+                  title="Import a session bundle exported by a teammate"
+                >
+                  Fork from bundle…
+                </button>
+              </div>
               <p class="text-[11px] text-fg-faint">
-                or press <kbd class="rounded border border-border bg-bg-elev px-1 font-mono">⌘N</kbd>{" "}
-                anywhere ·{" "}
+                <kbd class="rounded border border-border bg-bg-elev px-1 font-mono">⌘N</kbd>{" "}
+                new ·{" "}
                 <kbd class="rounded border border-border bg-bg-elev px-1 font-mono">⌘K</kbd>{" "}
-                to search across sessions
+                search · /import to fork an existing bundle
               </p>
             </div>
           </div>

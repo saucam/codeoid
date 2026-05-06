@@ -532,7 +532,9 @@ export type ClientMessage =
   | FsListMsg
   | FsReadMsg
   | FsBrowseDirMsg
-  | ClaudeConfigMsg;
+  | ClaudeConfigMsg
+  | SessionExportMsg
+  | SessionImportMsg;
 
 interface BaseClientMsg {
   /** Request ID for correlating responses */
@@ -781,6 +783,42 @@ export interface ClaudeConfigMsg extends BaseClientMsg {
   sessionId: string;
 }
 
+/**
+ * Export a session as a `ShareBundle` JSON. Daemon resolves a workdir
+ * alias (from git remote when available), rewrites every absolute path
+ * to `${alias}/${relative}`, and returns either the full bundle inline
+ * (small sessions) or writes it to `~/.codeoid/exports/` and returns
+ * the on-disk path.
+ */
+export interface SessionExportMsg extends BaseClientMsg {
+  type: "session.export";
+  sessionId: string;
+  /** Slice memory episodes for this session into the bundle. Default true. */
+  includeMemory?: boolean;
+  /** Snapshot pinned files into the bundle. Default false (size). */
+  includePinnedFiles?: boolean;
+  /** Override the auto-resolved alias. Useful for non-git workdirs. */
+  aliasOverride?: string;
+  /** Force on-disk file output regardless of size. Default: file when > 5 MB. */
+  toFile?: boolean;
+}
+
+/**
+ * Import a session bundle into a fresh session id. The importer's
+ * `targetWorkdir` is the local path the bundle anchors to —
+ * `${alias}/...` paths get rewritten to this workdir on the way in.
+ */
+export interface SessionImportMsg extends BaseClientMsg {
+  type: "session.import";
+  /** Either inline bundle JSON (object) OR a path to a previously-saved file. */
+  source: { kind: "inline"; bundle: unknown } | { kind: "file"; path: string };
+  targetWorkdir: string;
+  /** Override the imported session's name. Default = original name. */
+  nameOverride?: string;
+  /** Materialise pinnedFiles into targetWorkdir. Default false. */
+  writePinnedFiles?: boolean;
+}
+
 export type ClaudeConfigScope = "global" | "workdir";
 
 export interface ClaudeConfigAgent {
@@ -910,6 +948,48 @@ export interface ClaudeConfigResultMsg {
   hooks: ClaudeConfigHook[];
 }
 
+export interface SessionExportResultMsg {
+  type: "session.export.result";
+  requestId: string;
+  /** Manifest preview — same shape that ships inside the bundle. */
+  manifest: {
+    exportedAt: string;
+    session: {
+      id: string;
+      name: string;
+      createdAt: string;
+      model?: string;
+      mode?: string;
+    };
+    workdir: { alias: string; aliasSource: string; originalAbsolute: string };
+    counts: {
+      messages: number;
+      episodes: number;
+      turns: number;
+      pinnedFiles: number;
+    };
+  };
+  /**
+   * The bundle itself. Either inline as a JSON-encoded object (for small
+   * sessions) OR `{ kind: "file"; path }` pointing at a file the daemon
+   * wrote under `~/.codeoid/exports/`.
+   */
+  payload:
+    | { kind: "inline"; bundle: unknown; sizeBytes: number }
+    | { kind: "file"; path: string; sizeBytes: number };
+}
+
+export interface SessionImportResultMsg {
+  type: "session.import.result";
+  requestId: string;
+  newSessionId: string;
+  importedMessages: number;
+  importedEpisodes: number;
+  importedTurns: number;
+  pinnedFilesWritten: number;
+  warnings: string[];
+}
+
 // =============================================================================
 // Daemon → Client messages
 // =============================================================================
@@ -928,7 +1008,9 @@ export type DaemonMessage =
   | FsListResultMsg
   | FsReadResultMsg
   | FsBrowseDirResultMsg
-  | ClaudeConfigResultMsg;
+  | ClaudeConfigResultMsg
+  | SessionExportResultMsg
+  | SessionImportResultMsg;
 
 export interface AuthOkMsg {
   type: "auth.ok";

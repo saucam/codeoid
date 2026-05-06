@@ -18,6 +18,7 @@ import {
 } from "../state/connection";
 import { focusedSession, removeSession } from "../state/sessions";
 import type { SessionMode } from "../protocol/types";
+import { openExportModal } from "./SessionExportModal";
 
 const MODE_OPTIONS: { value: SessionMode; label: string; hint: string }[] = [
   { value: "interactive", label: "interactive", hint: "every tool asks first" },
@@ -45,6 +46,7 @@ const SessionControls: Component = () => {
           <RotateButton sessionId={s().id} />
           <ModePicker sessionId={s().id} current={s().mode ?? "interactive"} />
           <ModelPicker sessionId={s().id} current={s().model} />
+          <ExportButton />
           <span class="ml-auto" />
           <DestroyButton sessionId={s().id} name={s().name} />
         </div>
@@ -80,6 +82,17 @@ const InterruptButton: Component<{
     </button>
   );
 };
+
+const ExportButton: Component = () => (
+  <button
+    type="button"
+    onClick={openExportModal}
+    class="rounded border border-border px-2 py-1 font-mono uppercase tracking-wider text-fg-muted transition hover:border-accent/40 hover:bg-accent/5 hover:text-fg"
+    title="Export session as a portable bundle (/export)"
+  >
+    ⤓ export
+  </button>
+);
 
 const RotateButton: Component<{ sessionId: string }> = (props) => (
   <button

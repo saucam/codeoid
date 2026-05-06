@@ -162,6 +162,25 @@ describe("dispatchSlash", () => {
     expect(parseSlash("/hook")).toEqual({ kind: "capabilities", tab: "hooks" });
   });
 
+  it("parses /export and /import + alias forms", () => {
+    expect(parseSlash("/export")).toEqual({ kind: "export" });
+    expect(parseSlash("/share")).toEqual({ kind: "export" });
+    expect(parseSlash("/import")).toEqual({ kind: "import" });
+    expect(parseSlash("/fork")).toEqual({ kind: "fork" });
+  });
+
+  it("dispatchSlash routes /export and /import to UI hooks", () => {
+    const showExport = vi.fn();
+    const showImport = vi.fn();
+    const c = { ...ctx(), showExport, showImport };
+    dispatchSlash({ kind: "export" }, c);
+    dispatchSlash({ kind: "import" }, c);
+    dispatchSlash({ kind: "fork" }, c);
+    expect(showExport).toHaveBeenCalledTimes(1);
+    expect(showImport).toHaveBeenCalledTimes(2);
+    expect(c.sent).toEqual([]);
+  });
+
   it("dispatchSlash routes /agents /skills /mcp /hooks to showCapabilities", () => {
     const showCapabilities = vi.fn();
     const c = { ...ctx(), showCapabilities };

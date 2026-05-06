@@ -324,6 +324,23 @@ export interface ClaudeConfigMsg extends BaseClientMsg {
   sessionId: string;
 }
 
+export interface SessionExportMsg extends BaseClientMsg {
+  type: "session.export";
+  sessionId: string;
+  includeMemory?: boolean;
+  includePinnedFiles?: boolean;
+  aliasOverride?: string;
+  toFile?: boolean;
+}
+
+export interface SessionImportMsg extends BaseClientMsg {
+  type: "session.import";
+  source: { kind: "inline"; bundle: unknown } | { kind: "file"; path: string };
+  targetWorkdir: string;
+  nameOverride?: string;
+  writePinnedFiles?: boolean;
+}
+
 export type ClientMessage =
   | SessionCreateMsg
   | SessionRenameMsg
@@ -341,7 +358,9 @@ export type ClientMessage =
   | FsListMsg
   | FsReadMsg
   | FsBrowseDirMsg
-  | ClaudeConfigMsg;
+  | ClaudeConfigMsg
+  | SessionExportMsg
+  | SessionImportMsg;
 
 // -----------------------------------------------------------------------------
 // Daemon → Client messages
@@ -521,6 +540,42 @@ export interface ClaudeConfigResultMsg {
   hooks: ClaudeConfigHook[];
 }
 
+export interface SessionExportResultMsg {
+  type: "session.export.result";
+  requestId: string;
+  manifest: {
+    exportedAt: string;
+    session: {
+      id: string;
+      name: string;
+      createdAt: string;
+      model?: string;
+      mode?: string;
+    };
+    workdir: { alias: string; aliasSource: string; originalAbsolute: string };
+    counts: {
+      messages: number;
+      episodes: number;
+      turns: number;
+      pinnedFiles: number;
+    };
+  };
+  payload:
+    | { kind: "inline"; bundle: unknown; sizeBytes: number }
+    | { kind: "file"; path: string; sizeBytes: number };
+}
+
+export interface SessionImportResultMsg {
+  type: "session.import.result";
+  requestId: string;
+  newSessionId: string;
+  importedMessages: number;
+  importedEpisodes: number;
+  importedTurns: number;
+  pinnedFilesWritten: number;
+  warnings: string[];
+}
+
 export type DaemonMessage =
   | AuthOkMsg
   | ResponseOkMsg
@@ -535,4 +590,6 @@ export type DaemonMessage =
   | FsListResultMsg
   | FsReadResultMsg
   | FsBrowseDirResultMsg
-  | ClaudeConfigResultMsg;
+  | ClaudeConfigResultMsg
+  | SessionExportResultMsg
+  | SessionImportResultMsg;

@@ -20,6 +20,13 @@ import {
   handleFsRead,
 } from "./fs.js";
 import { readClaudeConfig } from "./claude-config.js";
+import {
+  packSession,
+  unpackBundle,
+  validateBundle,
+  writeBundleToFile,
+  type ImportedSessionInit,
+} from "./share/index.js";
 import type { AgentIdentityManager } from "./agent-identity.js";
 import { type MemoryEngine, workspaceIdFromPath } from "./memory/index.js";
 import type { CodeoidConfig } from "../config.js";
@@ -150,6 +157,202 @@ export class SessionManager {
         return this.#fsBrowseDir(msg, auth);
       case "claude.config":
         return this.#claudeConfig(msg, auth);
+      case "session.export":
+        return this.#sessionExport(msg, auth);
+      case "session.import":
+        return this.#sessionImport(msg, auth);
+    }
+  }
+
+  async #sessionExport(
+    msg: Extract<ClientMessage, { type: "session.export" }>,
+    auth: AuthContext,
+  ): Promise<DaemonMessage> {
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_LIST)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Missing scope: session:list",
+        code: "forbidden",
+      };
+    }
+    const session = this.#sessions.get(msg.sessionId);
+    if (!session) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Session not found",
+        code: "not_found",
+      };
+    }
+    try {
+      const info = session.toInfo();
+      const bundle = await packSession(
+        {
+          session: {
+            id: info.id,
+            name: info.name,
+            workdir: info.workdir,
+            createdAt: info.createdAt,
+            ...(info.model ? { model: info.model } : {}),
+            ...(info.fallbackModel ? { fallbackModel: info.fallbackModel } : {}),
+            ...(info.mode ? { mode: info.mode } : {}),
+            ...(info.rotation ? { rotation: { count: info.rotation.count } } : {}),
+            ...(info.pinnedFiles ? { pinnedFiles: info.pinnedFiles } : {}),
+          },
+          exporter: auth,
+          includeMemory: msg.includeMemory ?? true,
+          includePinnedFiles: msg.includePinnedFiles ?? false,
+          ...(msg.aliasOverride ? { aliasOverride: msg.aliasOverride } : {}),
+        },
+        {
+          transcript: this.#transcriptStore,
+          store: this.#store,
+          memory: this.#memory ?? null,
+          workspaceIdFor: workspaceIdFromPath,
+        },
+      );
+
+      // Inline below 5 MiB; otherwise spill to disk so a clipboard
+      // round-trip stays sane.
+      const json = JSON.stringify(bundle);
+      const sizeBytes = Buffer.byteLength(json, "utf-8");
+      const inlineCap = 5 * 1024 * 1024;
+      const useFile = msg.toFile === true || sizeBytes > inlineCap;
+
+      const manifest = {
+        exportedAt: bundle.manifest.exportedAt,
+        session: {
+          id: bundle.manifest.session.id,
+          name: bundle.manifest.session.name,
+          createdAt: bundle.manifest.session.createdAt,
+          ...(bundle.manifest.session.model ? { model: bundle.manifest.session.model } : {}),
+          ...(bundle.manifest.session.mode ? { mode: bundle.manifest.session.mode } : {}),
+        },
+        workdir: {
+          alias: bundle.manifest.workdir.alias,
+          aliasSource: bundle.manifest.workdir.aliasSource,
+          originalAbsolute: bundle.manifest.workdir.originalAbsolute,
+        },
+        counts: bundle.manifest.counts,
+      };
+
+      if (useFile) {
+        const written = await writeBundleToFile(bundle);
+        return {
+          type: "session.export.result",
+          requestId: msg.id,
+          manifest,
+          payload: { kind: "file", path: written.path, sizeBytes: written.sizeBytes },
+        };
+      }
+      return {
+        type: "session.export.result",
+        requestId: msg.id,
+        manifest,
+        payload: { kind: "inline", bundle, sizeBytes },
+      };
+    } catch (err) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: err instanceof Error ? err.message : String(err),
+        code: "internal",
+      };
+    }
+  }
+
+  async #sessionImport(
+    msg: Extract<ClientMessage, { type: "session.import" }>,
+    auth: AuthContext,
+  ): Promise<DaemonMessage> {
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_CREATE)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Missing scope: session:create",
+        code: "forbidden",
+      };
+    }
+    try {
+      // Resolve the bundle JSON from inline payload or a saved file.
+      let bundleRaw: unknown;
+      if (msg.source.kind === "inline") {
+        bundleRaw = msg.source.bundle;
+      } else {
+        const fs = await import("node:fs");
+        const text = await fs.promises.readFile(msg.source.path, "utf-8");
+        bundleRaw = JSON.parse(text);
+      }
+      const v = validateBundle(bundleRaw);
+      if (!v.ok) {
+        return {
+          type: "response.error",
+          requestId: msg.id,
+          error: v.reason,
+          code: "invalid_request",
+        };
+      }
+      const bundle = v.bundle;
+
+      const result = await unpackBundle(
+        {
+          bundle,
+          targetWorkdir: msg.targetWorkdir,
+          ...(msg.nameOverride ? { nameOverride: msg.nameOverride } : {}),
+          writePinnedFiles: msg.writePinnedFiles ?? false,
+          importer: auth,
+        },
+        {
+          transcript: this.#transcriptStore,
+          memory: this.#memory ?? null,
+          workspaceIdFor: workspaceIdFromPath,
+          registerSession: async (init: ImportedSessionInit) => {
+            // Create the Session shell first so we have an id; we don't
+            // start() its query loop — the importer attaches via the
+            // normal session.attach flow afterwards.
+            const session = new Session({
+              name: init.name,
+              workdir: init.workdir,
+              auth,
+              store: this.#store,
+              transcriptStore: this.#transcriptStore,
+              ...(this.#identityManager
+                ? { identityManager: this.#identityManager }
+                : {}),
+              ...(this.#memory ? { memory: this.#memory } : {}),
+              config: this.#config,
+              compressionRegistry: this.#compressionRegistry,
+            });
+            this.#sessions.set(session.id, session);
+            this.#store.audit(
+              auth.sub,
+              "session.import",
+              session.id,
+              `forked-from=${init.forkedFrom.alias}@session:${init.forkedFrom.sessionId} exporter=${init.forkedFrom.exporterIdentity.sub}`,
+            );
+            return session.id;
+          },
+        },
+      );
+
+      return {
+        type: "session.import.result",
+        requestId: msg.id,
+        newSessionId: result.newSessionId,
+        importedMessages: result.importedMessages,
+        importedEpisodes: result.importedEpisodes,
+        importedTurns: result.importedTurns,
+        pinnedFilesWritten: result.pinnedFilesWritten,
+        warnings: result.warnings,
+      };
+    } catch (err) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: err instanceof Error ? err.message : String(err),
+        code: "internal",
+      };
     }
   }
 

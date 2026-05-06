@@ -441,6 +441,16 @@ export class SqliteEpisodeStore {
     return rows.map((r) => this.#rowToEpisode(r));
   }
 
+  /** All episodes for one session, oldest first — used by share.pack. */
+  listEpisodesForSession(sessionId: string): Episode[] {
+    const rows = this.#db
+      .prepare(
+        "SELECT * FROM episodes WHERE session_id = ? ORDER BY created_at ASC",
+      )
+      .all(sessionId) as EpisodeRow[];
+    return rows.map((r) => this.#rowToEpisode(r));
+  }
+
   /**
    * Workspace-level counters used by the index builder. One round-trip; cheap
    * even on many-thousand-episode stores because the idx_episodes_workspace

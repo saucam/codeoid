@@ -24,6 +24,8 @@ import IdentityDrawer from "./IdentityDrawer";
 import NewSessionModal from "./NewSessionModal";
 import ResizeHandle from "./ResizeHandle";
 import SearchModal from "./SearchModal";
+import SessionExportModal from "./SessionExportModal";
+import SessionImportModal from "./SessionImportModal";
 import SessionListPane from "./SessionListPane";
 import StatusBar from "./StatusBar";
 import { openedFile } from "../state/files";
@@ -85,6 +87,8 @@ const Shell: Component = () => {
       <NewSessionModal />
       <IdentityDrawer />
       <CapabilitiesDrawer />
+      <SessionExportModal />
+      <SessionImportModal />
     </div>
   );
 };

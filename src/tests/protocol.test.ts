@@ -428,6 +428,10 @@ describe("DaemonMessage routing", () => {
         case "fs.browse_dir.result": return `fs.browse:${msg.entries.length}`;
         case "claude.config.result":
           return `cc:${msg.agents.length}/${msg.skills.length}`;
+        case "session.export.result":
+          return `export:${msg.manifest.counts.messages}`;
+        case "session.import.result":
+          return `import:${msg.newSessionId}`;
       }
     };
 
