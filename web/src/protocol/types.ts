@@ -498,6 +498,8 @@ export interface ClaudeConfigMcpServer {
   envKeys: string[];
   url: string | null;
   type: string | null;
+  /** HTTP-type MCP servers' header keys (values redacted at the daemon). */
+  headerKeys?: string[];
 }
 
 export interface ClaudeConfigHook {

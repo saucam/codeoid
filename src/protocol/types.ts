@@ -803,7 +803,8 @@ export interface ClaudeConfigSkill {
 export interface ClaudeConfigMcpServer {
   name: string;
   scope: ClaudeConfigScope;
-  /** Absolute path to the source `settings.json` that declared it. */
+  /** Absolute path to the source file that declared it
+   * (`~/.claude.json`, `settings.json`, `.mcp.json`, …). */
   path: string;
   /** stdio command, when present. */
   command: string | null;
@@ -814,6 +815,9 @@ export interface ClaudeConfigMcpServer {
   url: string | null;
   /** Optional `type` field (e.g. "http"). */
   type: string | null;
+  /** Just the keys of the `headers` block for http-type servers
+   * (values are bearer tokens / API keys, never returned). */
+  headerKeys?: string[];
 }
 
 export interface ClaudeConfigHook {

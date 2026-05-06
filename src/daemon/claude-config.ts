@@ -67,20 +67,116 @@ export async function readClaudeConfig(workdir: string): Promise<ClaudeConfigSna
       { path: path.join(r, "settings.json"), scope: "workdir" as const },
       { path: path.join(r, "settings.local.json"), scope: "workdir" as const },
     ]),
+    // Claude Code's `claude mcp add` writes here, NOT settings.json.
+    // Workdir-scoped entries come via the optional `.mcp.json` file
+    // committed to the repo (per Anthropic's docs).
+    { path: path.join(workdir, ".mcp.json"), scope: "workdir" as const },
   ];
   const settingsLists = await Promise.all(
     settingsFiles.map((s) => readSettings(s.path, s.scope)),
   );
 
+  // Claude Code's main config (`~/.claude.json`) is a separate file
+  // outside `~/.claude/`. It carries `mcpServers` at the top level AND
+  // per-project under `projects[<workdir>].mcpServers`.
+  const claudeJson = await readClaudeJson(home, workdir);
+
   const agents = dedupByPath(agentsLists.flat());
   const skills = dedupByPath(skillsLists.flat());
   const mcpServers = dedupBy(
-    settingsLists.flatMap((s) => s.mcpServers),
+    [...settingsLists.flatMap((s) => s.mcpServers), ...claudeJson.mcpServers],
     (m) => `${m.scope}:${m.name}`,
   );
   const hooks = settingsLists.flatMap((s) => s.hooks);
 
   return { agents, skills, mcpServers, hooks };
+}
+
+/**
+ * Read MCP servers from `~/.claude.json` — Claude Code's primary config.
+ * Top-level `mcpServers` is global; `projects[<workdir>].mcpServers` is
+ * scoped to that workdir.
+ *
+ * The HTTP MCP shape carries a `headers` block (bearer tokens, API
+ * keys). We surface only the key names; values are never returned.
+ */
+async function readClaudeJson(
+  home: string,
+  workdir: string,
+): Promise<{ mcpServers: ClaudeConfigMcpServer[] }> {
+  const filePath = path.join(home, ".claude.json");
+  const content = await safeReadFile(filePath);
+  if (content == null) return { mcpServers: [] };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return { mcpServers: [] };
+  }
+  if (!parsed || typeof parsed !== "object") return { mcpServers: [] };
+  const obj = parsed as Record<string, unknown>;
+
+  const out: ClaudeConfigMcpServer[] = [];
+
+  // Top-level mcpServers — global scope.
+  const topMcp = obj["mcpServers"];
+  if (topMcp && typeof topMcp === "object" && !Array.isArray(topMcp)) {
+    for (const [name, def] of Object.entries(topMcp as Record<string, unknown>)) {
+      if (name.startsWith("_")) continue;
+      const m = parseMcpServer(name, def, "global", filePath);
+      if (m) out.push(m);
+    }
+  }
+
+  // Per-workdir mcpServers under projects[<workdir>].mcpServers.
+  const projects = obj["projects"];
+  if (projects && typeof projects === "object" && !Array.isArray(projects)) {
+    const proj = (projects as Record<string, unknown>)[workdir];
+    if (proj && typeof proj === "object" && !Array.isArray(proj)) {
+      const projMcp = (proj as Record<string, unknown>)["mcpServers"];
+      if (projMcp && typeof projMcp === "object" && !Array.isArray(projMcp)) {
+        for (const [name, def] of Object.entries(projMcp as Record<string, unknown>)) {
+          if (name.startsWith("_")) continue;
+          const m = parseMcpServer(name, def, "workdir", filePath);
+          if (m) out.push(m);
+        }
+      }
+    }
+  }
+
+  return { mcpServers: out };
+}
+
+function parseMcpServer(
+  name: string,
+  def: unknown,
+  scope: ClaudeConfigScope,
+  sourcePath: string,
+): ClaudeConfigMcpServer | null {
+  if (!def || typeof def !== "object") return null;
+  const d = def as Record<string, unknown>;
+  return {
+    name,
+    scope,
+    path: sourcePath,
+    command: typeof d["command"] === "string" ? (d["command"] as string) : null,
+    args: Array.isArray(d["args"])
+      ? (d["args"] as unknown[]).filter((x): x is string => typeof x === "string")
+      : [],
+    envKeys:
+      d["env"] && typeof d["env"] === "object" && !Array.isArray(d["env"])
+        ? Object.keys(d["env"] as Record<string, unknown>)
+        : [],
+    url: typeof d["url"] === "string" ? (d["url"] as string) : null,
+    type: typeof d["type"] === "string" ? (d["type"] as string) : null,
+    ...(d["headers"] &&
+    typeof d["headers"] === "object" &&
+    !Array.isArray(d["headers"])
+      ? {
+          headerKeys: Object.keys(d["headers"] as Record<string, unknown>),
+        }
+      : {}),
+  };
 }
 
 // ---------- Agents ----------
@@ -202,23 +298,8 @@ async function readSettings(
   if (mcpRaw && typeof mcpRaw === "object" && !Array.isArray(mcpRaw)) {
     for (const [name, def] of Object.entries(mcpRaw as Record<string, unknown>)) {
       if (name.startsWith("_")) continue;
-      if (!def || typeof def !== "object") continue;
-      const d = def as Record<string, unknown>;
-      mcpServers.push({
-        name,
-        scope,
-        path: filePath,
-        command: typeof d["command"] === "string" ? (d["command"] as string) : null,
-        args: Array.isArray(d["args"])
-          ? (d["args"] as unknown[]).filter((x): x is string => typeof x === "string")
-          : [],
-        envKeys:
-          d["env"] && typeof d["env"] === "object" && !Array.isArray(d["env"])
-            ? Object.keys(d["env"] as Record<string, unknown>)
-            : [],
-        url: typeof d["url"] === "string" ? (d["url"] as string) : null,
-        type: typeof d["type"] === "string" ? (d["type"] as string) : null,
-      });
+      const m = parseMcpServer(name, def, scope, filePath);
+      if (m) mcpServers.push(m);
     }
   }
 
@@ -303,7 +384,16 @@ function parseTools(raw: unknown): string[] {
 
 // ---------- Filesystem helpers ----------
 
-async function safeReaddir(dir: string): Promise<{ name: string; isFile(): boolean; isDirectory(): boolean }[]> {
+async function safeReaddir(
+  dir: string,
+): Promise<
+  {
+    name: string;
+    isFile(): boolean;
+    isDirectory(): boolean;
+    isSymbolicLink(): boolean;
+  }[]
+> {
   try {
     return await fs.readdir(dir, { withFileTypes: true });
   } catch {

@@ -322,6 +322,11 @@ const McpList: Component<{ items: ClaudeConfigMcpServer[] }> = (props) => (
                 env keys (values redacted): {m.envKeys.join(", ")}
               </div>
             </Show>
+            <Show when={m.headerKeys && m.headerKeys.length > 0}>
+              <div class="mt-1 text-[10px] text-fg-faint">
+                header keys (values redacted): {m.headerKeys!.join(", ")}
+              </div>
+            </Show>
             <PathRow path={m.path} />
           </li>
         )}

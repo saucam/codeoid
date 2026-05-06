@@ -191,6 +191,80 @@ describe("readClaudeConfig", () => {
     expect(snap.hooks).toEqual([]);
   });
 
+  test("reads MCP servers from ~/.claude.json (Claude Code primary config)", async () => {
+    const workdir = path.join(tmp, "workdir");
+    await fs.mkdir(workdir, { recursive: true });
+    const claudeJson = {
+      mcpServers: {
+        "highflame-platform": {
+          type: "http",
+          url: "https://mcp.example/highflame-platform",
+          headers: { "X-Highflame-APIKey": "should-not-leak" },
+        },
+        "stdio-tool": {
+          command: "/usr/local/bin/some-mcp",
+          args: ["--flag", "x"],
+          env: { TOKEN: "also-should-not-leak" },
+        },
+      },
+      projects: {
+        [workdir]: {
+          mcpServers: {
+            "workdir-only": {
+              type: "http",
+              url: "http://localhost:9000/mcp",
+            },
+          },
+        },
+      },
+    };
+    await fs.writeFile(
+      path.join(tmp, "home", ".claude.json"),
+      JSON.stringify(claudeJson),
+    );
+
+    const snap = await readClaudeConfig(workdir);
+    const byName = new Map(snap.mcpServers.map((m) => [m.name, m]));
+    expect(byName.size).toBe(3);
+
+    const hf = byName.get("highflame-platform")!;
+    expect(hf.scope).toBe("global");
+    expect(hf.type).toBe("http");
+    expect(hf.url).toBe("https://mcp.example/highflame-platform");
+    expect(hf.headerKeys).toEqual(["X-Highflame-APIKey"]);
+
+    const stdio = byName.get("stdio-tool")!;
+    expect(stdio.command).toBe("/usr/local/bin/some-mcp");
+    expect(stdio.args).toEqual(["--flag", "x"]);
+    expect(stdio.envKeys).toEqual(["TOKEN"]);
+
+    const wd = byName.get("workdir-only")!;
+    expect(wd.scope).toBe("workdir");
+
+    // Bearer / API key values must NEVER be in the wire payload.
+    const wireJson = JSON.stringify(snap.mcpServers);
+    expect(wireJson).not.toContain("should-not-leak");
+    expect(wireJson).not.toContain("also-should-not-leak");
+  });
+
+  test(".mcp.json in workdir is treated as a workdir-scoped settings file", async () => {
+    const workdir = path.join(tmp, "workdir");
+    await fs.mkdir(workdir, { recursive: true });
+    await fs.writeFile(
+      path.join(workdir, ".mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          local: { command: "./run-mcp.sh" },
+        },
+      }),
+    );
+    const snap = await readClaudeConfig(workdir);
+    expect(snap.mcpServers).toHaveLength(1);
+    expect(snap.mcpServers[0]!.name).toBe("local");
+    expect(snap.mcpServers[0]!.scope).toBe("workdir");
+    expect(snap.mcpServers[0]!.path.endsWith(".mcp.json")).toBe(true);
+  });
+
   test("missing .claude tree yields empty snapshot", async () => {
     const workdir = path.join(tmp, "fresh-workdir");
     await fs.mkdir(workdir, { recursive: true });
