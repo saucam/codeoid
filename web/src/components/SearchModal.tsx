@@ -18,6 +18,7 @@ import {
 
 import { getClient, newRequestId } from "../state/connection";
 import { focusSession, focusedSession } from "../state/sessions";
+import { setPendingSearchJump } from "../state/search-jump";
 import { relativeTime } from "../lib/format";
 import type {
   SessionSearchHit,
@@ -118,6 +119,16 @@ const SearchModal: Component = () => {
   function pick(idx: number): void {
     const hit = hits()[idx];
     if (!hit) return;
+    // Queue the jump BEFORE focusSession so the Transcript's effect sees
+    // the target on the same tick its messages list switches over —
+    // otherwise the auto-scroll-to-bottom on session focus runs first
+    // and the jump fights it.
+    const topSnippet = hit.snippets[0];
+    setPendingSearchJump({
+      sessionId: hit.sessionId,
+      query: query().trim(),
+      excerpt: topSnippet?.excerpt,
+    });
     focusSession(hit.sessionId);
     setOpen(false);
   }

@@ -23,6 +23,11 @@ import {
 import MessageRow from "./MessageRow";
 import { createMessages, epochOf } from "../../state/messages";
 import { focusedSession, focusedSessionId } from "../../state/sessions";
+import {
+  findJumpTarget,
+  pendingSearchJump,
+  setPendingSearchJump,
+} from "../../state/search-jump";
 
 const SCROLL_STICKY_THRESHOLD_PX = 80;
 
@@ -109,9 +114,14 @@ const Transcript: Component = () => {
   );
 
   // When the focused session changes, snap to bottom (no animation —
-  // we're swapping content wholesale).
+  // we're swapping content wholesale). Skipped when a search jump is
+  // queued for that exact session — the jump effect below will scroll
+  // to the matching message instead.
   createEffect(
     on(focusedSessionId, () => {
+      const jump = pendingSearchJump();
+      const sid = focusedSessionId();
+      if (jump && jump.sessionId === sid) return;
       setStuckBottom(true);
       smoothNext = false;
       queueMicrotask(() => {
@@ -119,6 +129,39 @@ const Transcript: Component = () => {
       });
     }),
   );
+
+  // Search jump: when SearchModal queues a target for this session, look
+  // up the matching messageId and scroll its row into view. Watches both
+  // the pending signal and the messages list, since the message we're
+  // looking for might not have arrived yet (scrollback replays after
+  // attach, async). Gives up after 4 s — by then the user has scrolled
+  // away or the daemon never returned the message.
+  createEffect(() => {
+    const jump = pendingSearchJump();
+    if (!jump) return;
+    const sid = focusedSessionId();
+    if (!sid || jump.sessionId !== sid) return;
+    if (Date.now() - jump.setAt > 4000) {
+      setPendingSearchJump(null);
+      return;
+    }
+    const arr = messages();
+    if (arr.length === 0) return;
+    const targetId = findJumpTarget(arr, jump);
+    if (!targetId) return;
+    setPendingSearchJump(null);
+    queueMicrotask(() => {
+      if (!containerRef) return;
+      const row = containerRef.querySelector<HTMLElement>(
+        `[data-message-id="${CSS.escape(targetId)}"]`,
+      );
+      if (!row) return;
+      row.scrollIntoView({ behavior: "smooth", block: "center" });
+      row.classList.add("search-jump-flash");
+      setTimeout(() => row.classList.remove("search-jump-flash"), 1800);
+      setStuckBottom(false);
+    });
+  });
 
   return (
     <div

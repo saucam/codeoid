@@ -315,3 +315,17 @@ article[data-message-id] {
 @media (prefers-reduced-motion: reduce) {
   article[data-message-id] { animation: none; }
 }
+
+/* Brief highlight flash for the message you searched for — fades after
+   ~1.8 s, anchored on the row Transcript.tsx scrolls into view. */
+.search-jump-flash {
+  animation: search-jump-flash 1800ms ease-out;
+}
+@keyframes search-jump-flash {
+  0%   { box-shadow: 0 0 0 2px var(--color-accent), 0 0 24px 0 var(--color-accent); }
+  60%  { box-shadow: 0 0 0 2px var(--color-accent), 0 0 12px 0 var(--color-accent); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .search-jump-flash { animation: none; }
+}

@@ -4,7 +4,7 @@
  * (P3 stub uses solid-markdown with shiki coming in P7).
  */
 
-import { Component, Match, Show, Switch } from "solid-js";
+import { Component, Match, Show, Switch, createMemo, createSignal } from "solid-js";
 import { SolidMarkdown } from "solid-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -248,9 +248,7 @@ const ToolStateBody: Component<{
     </Match>
     <Match when={props.state.phase === "completed"}>
       <Show when={(props.state as { output?: string }).output}>
-        <pre class="whitespace-pre-wrap break-words rounded bg-bg-active/40 px-2 py-1.5 font-mono text-[12px] text-fg">
-          {(props.state as { output?: string }).output}
-        </pre>
+        <CollapsibleOutput text={(props.state as { output: string }).output} />
       </Show>
     </Match>
     <Match when={props.state.phase === "cancelled"}>
@@ -265,10 +263,73 @@ const ToolStateBody: Component<{
 );
 
 const ToolResult: Component<{ msg: SessionMessage }> = (props) => (
-  <pre class="whitespace-pre-wrap break-words rounded border-l-2 border-l-role-tool/40 bg-bg-active/30 px-3 py-2 font-mono text-[12px] text-fg">
-    {props.msg.content}
-  </pre>
+  <div class="border-l-2 border-l-role-tool/40">
+    <CollapsibleOutput text={props.msg.content} variant="result" />
+  </div>
 );
+
+/**
+ * Tool output renderer that collapses long output by default. Mirrors the
+ * Claude Code VSCode extension's "show first N lines" behaviour so user/
+ * assistant turns stay readable when the agent runs `find` over the repo
+ * or dumps a 200-line cargo build. Click the footer to expand inline; the
+ * full text is always copy-able regardless of state.
+ */
+const COLLAPSED_LINE_COUNT = 8;
+const COLLAPSED_CHAR_BUDGET = 600;
+
+const CollapsibleOutput: Component<{
+  text: string;
+  variant?: "tool" | "result";
+}> = (props) => {
+  const [expanded, setExpanded] = createSignal(false);
+  const text = () => props.text ?? "";
+  const lines = createMemo(() => text().split("\n"));
+  const totalLines = () => lines().length;
+  const overLineLimit = () => totalLines() > COLLAPSED_LINE_COUNT;
+  const overCharLimit = () => text().length > COLLAPSED_CHAR_BUDGET;
+  const truncatable = () => overLineLimit() || overCharLimit();
+  const collapsed = createMemo(() => {
+    if (overLineLimit()) {
+      return lines().slice(0, COLLAPSED_LINE_COUNT).join("\n");
+    }
+    if (overCharLimit()) {
+      return text().slice(0, COLLAPSED_CHAR_BUDGET);
+    }
+    return text();
+  });
+  const hidden = () => totalLines() - COLLAPSED_LINE_COUNT;
+  const bgClass = () => (props.variant === "result" ? "bg-bg-active/30" : "bg-bg-active/40");
+  return (
+    <div class={`overflow-hidden rounded ${bgClass()}`}>
+      <pre
+        class={`whitespace-pre-wrap break-words px-2 py-1.5 font-mono text-[12px] text-fg ${
+          truncatable() && !expanded() ? "max-h-[14rem] overflow-hidden" : ""
+        }`}
+      >
+        {expanded() || !truncatable() ? text() : collapsed()}
+      </pre>
+      <Show when={truncatable()}>
+        <button
+          type="button"
+          onClick={() => setExpanded(!expanded())}
+          class="flex w-full items-center justify-between border-t border-border/40 bg-bg-active/20 px-2 py-1 text-[10px] font-mono uppercase tracking-wider text-fg-muted transition hover:bg-bg-active/40 hover:text-fg"
+        >
+          <span>
+            {expanded()
+              ? "▴ collapse"
+              : overLineLimit()
+                ? `▾ show ${hidden()} more line${hidden() === 1 ? "" : "s"}`
+                : `▾ show full output (${text().length} chars)`}
+          </span>
+          <span class="text-fg-faint">
+            {totalLines()} line{totalLines() === 1 ? "" : "s"} · {text().length}b
+          </span>
+        </button>
+      </Show>
+    </div>
+  );
+};
 
 const InfoBlock: Component<{ msg: SessionMessage }> = (props) => {
   const event = (props.msg.metadata?.["event"] as string | undefined) ?? "";
