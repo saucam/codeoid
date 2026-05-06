@@ -20,6 +20,7 @@ import {
   send,
 } from "./state/connection";
 import { focusedSessionId } from "./state/sessions";
+import { resetClaudeConfig } from "./state/claude-config";
 
 const App: Component = () => {
   const [tried, setTried] = createSignal(false);
@@ -51,6 +52,14 @@ const App: Component = () => {
       } catch (err) {
         console.warn("[codeoid] attach failed:", err);
       }
+    }),
+  );
+
+  // Drop the cached claude-config snapshot when the focused session
+  // changes — the next time the user opens the drawer, we refetch.
+  createEffect(
+    on(focusedSessionId, (sid, prev) => {
+      if (prev !== undefined && prev !== sid) resetClaudeConfig();
     }),
   );
 

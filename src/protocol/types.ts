@@ -531,7 +531,8 @@ export type ClientMessage =
   | SessionRenameMsg
   | FsListMsg
   | FsReadMsg
-  | FsBrowseDirMsg;
+  | FsBrowseDirMsg
+  | ClaudeConfigMsg;
 
 interface BaseClientMsg {
   /** Request ID for correlating responses */
@@ -771,6 +772,71 @@ export interface FsBrowseDirMsg extends BaseClientMsg {
   path?: string;
 }
 
+/**
+ * Request a Claude Code configuration snapshot for the focused
+ * session — agents, skills, MCP servers, hooks. Read-only.
+ */
+export interface ClaudeConfigMsg extends BaseClientMsg {
+  type: "claude.config";
+  sessionId: string;
+}
+
+export type ClaudeConfigScope = "global" | "workdir";
+
+export interface ClaudeConfigAgent {
+  name: string;
+  description: string | null;
+  /** Absolute path to the source `*.md` file. */
+  path: string;
+  scope: ClaudeConfigScope;
+  /** Comma-separated tools list parsed from frontmatter, when set. */
+  tools?: string[];
+}
+
+export interface ClaudeConfigSkill {
+  name: string;
+  description: string | null;
+  path: string;
+  scope: ClaudeConfigScope;
+}
+
+export interface ClaudeConfigMcpServer {
+  name: string;
+  scope: ClaudeConfigScope;
+  /** Absolute path to the source `settings.json` that declared it. */
+  path: string;
+  /** stdio command, when present. */
+  command: string | null;
+  args: string[];
+  /** Just the keys of the `env` block (values are secrets, never returned). */
+  envKeys: string[];
+  /** http URL for non-stdio servers. */
+  url: string | null;
+  /** Optional `type` field (e.g. "http"). */
+  type: string | null;
+}
+
+export interface ClaudeConfigHook {
+  /** Hook event name (e.g. "PreToolUse", "PostToolUse"). */
+  event: string;
+  scope: ClaudeConfigScope;
+  /** Absolute path to the source `settings.json`. */
+  path: string;
+  /** Tool-name matcher pattern, when present. */
+  matcher: string | null;
+  /** Hook kind ("command" today; future-proof). */
+  kind: string;
+  /** The shell command to run. */
+  command: string;
+}
+
+export interface ClaudeConfigSnapshot {
+  agents: ClaudeConfigAgent[];
+  skills: ClaudeConfigSkill[];
+  mcpServers: ClaudeConfigMcpServer[];
+  hooks: ClaudeConfigHook[];
+}
+
 export interface FsReadMsg extends BaseClientMsg {
   type: "fs.read";
   sessionId: string;
@@ -829,6 +895,17 @@ export interface FsBrowseDirResultMsg {
   entries: FsEntry[];
 }
 
+export interface ClaudeConfigResultMsg {
+  type: "claude.config.result";
+  requestId: string;
+  /** Workdir the snapshot was taken against. */
+  workdir: string;
+  agents: ClaudeConfigAgent[];
+  skills: ClaudeConfigSkill[];
+  mcpServers: ClaudeConfigMcpServer[];
+  hooks: ClaudeConfigHook[];
+}
+
 // =============================================================================
 // Daemon → Client messages
 // =============================================================================
@@ -846,7 +923,8 @@ export type DaemonMessage =
   | SessionSearchResultMsg
   | FsListResultMsg
   | FsReadResultMsg
-  | FsBrowseDirResultMsg;
+  | FsBrowseDirResultMsg
+  | ClaudeConfigResultMsg;
 
 export interface AuthOkMsg {
   type: "auth.ok";

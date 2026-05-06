@@ -319,6 +319,11 @@ export interface FsBrowseDirMsg extends BaseClientMsg {
   path?: string;
 }
 
+export interface ClaudeConfigMsg extends BaseClientMsg {
+  type: "claude.config";
+  sessionId: string;
+}
+
 export type ClientMessage =
   | SessionCreateMsg
   | SessionRenameMsg
@@ -335,7 +340,8 @@ export type ClientMessage =
   | SessionSearchMsg
   | FsListMsg
   | FsReadMsg
-  | FsBrowseDirMsg;
+  | FsBrowseDirMsg
+  | ClaudeConfigMsg;
 
 // -----------------------------------------------------------------------------
 // Daemon → Client messages
@@ -466,6 +472,53 @@ export interface FsBrowseDirResultMsg {
   entries: FsEntry[];
 }
 
+export type ClaudeConfigScope = "global" | "workdir";
+
+export interface ClaudeConfigAgent {
+  name: string;
+  description: string | null;
+  path: string;
+  scope: ClaudeConfigScope;
+  tools?: string[];
+}
+
+export interface ClaudeConfigSkill {
+  name: string;
+  description: string | null;
+  path: string;
+  scope: ClaudeConfigScope;
+}
+
+export interface ClaudeConfigMcpServer {
+  name: string;
+  scope: ClaudeConfigScope;
+  path: string;
+  command: string | null;
+  args: string[];
+  envKeys: string[];
+  url: string | null;
+  type: string | null;
+}
+
+export interface ClaudeConfigHook {
+  event: string;
+  scope: ClaudeConfigScope;
+  path: string;
+  matcher: string | null;
+  kind: string;
+  command: string;
+}
+
+export interface ClaudeConfigResultMsg {
+  type: "claude.config.result";
+  requestId: string;
+  workdir: string;
+  agents: ClaudeConfigAgent[];
+  skills: ClaudeConfigSkill[];
+  mcpServers: ClaudeConfigMcpServer[];
+  hooks: ClaudeConfigHook[];
+}
+
 export type DaemonMessage =
   | AuthOkMsg
   | ResponseOkMsg
@@ -479,4 +532,5 @@ export type DaemonMessage =
   | SessionSearchResultMsg
   | FsListResultMsg
   | FsReadResultMsg
-  | FsBrowseDirResultMsg;
+  | FsBrowseDirResultMsg
+  | ClaudeConfigResultMsg;

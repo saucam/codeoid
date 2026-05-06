@@ -151,4 +151,29 @@ describe("dispatchSlash", () => {
     expect(showIdentity).toHaveBeenCalledTimes(1);
     expect(c.sent).toEqual([]);
   });
+
+  it("parses capabilities aliases into the right tab", () => {
+    expect(parseSlash("/agents")).toEqual({ kind: "capabilities", tab: "agents" });
+    expect(parseSlash("/agent")).toEqual({ kind: "capabilities", tab: "agents" });
+    expect(parseSlash("/skills")).toEqual({ kind: "capabilities", tab: "skills" });
+    expect(parseSlash("/skill")).toEqual({ kind: "capabilities", tab: "skills" });
+    expect(parseSlash("/mcp")).toEqual({ kind: "capabilities", tab: "mcp" });
+    expect(parseSlash("/hooks")).toEqual({ kind: "capabilities", tab: "hooks" });
+    expect(parseSlash("/hook")).toEqual({ kind: "capabilities", tab: "hooks" });
+  });
+
+  it("dispatchSlash routes /agents /skills /mcp /hooks to showCapabilities", () => {
+    const showCapabilities = vi.fn();
+    const c = { ...ctx(), showCapabilities };
+    dispatchSlash({ kind: "capabilities", tab: "agents" }, c);
+    dispatchSlash({ kind: "capabilities", tab: "skills" }, c);
+    dispatchSlash({ kind: "capabilities", tab: "mcp" }, c);
+    dispatchSlash({ kind: "capabilities", tab: "hooks" }, c);
+    expect(showCapabilities).toHaveBeenCalledTimes(4);
+    expect(showCapabilities).toHaveBeenNthCalledWith(1, "agents");
+    expect(showCapabilities).toHaveBeenNthCalledWith(2, "skills");
+    expect(showCapabilities).toHaveBeenNthCalledWith(3, "mcp");
+    expect(showCapabilities).toHaveBeenNthCalledWith(4, "hooks");
+    expect(c.sent).toEqual([]);
+  });
 });

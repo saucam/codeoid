@@ -426,6 +426,8 @@ describe("DaemonMessage routing", () => {
         case "fs.list.result": return `fs.list:${msg.entries.length}`;
         case "fs.read.result": return `fs.read:${msg.size}`;
         case "fs.browse_dir.result": return `fs.browse:${msg.entries.length}`;
+        case "claude.config.result":
+          return `cc:${msg.agents.length}/${msg.skills.length}`;
       }
     };
 

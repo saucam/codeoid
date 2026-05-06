@@ -19,6 +19,7 @@ import {
   handleFsList,
   handleFsRead,
 } from "./fs.js";
+import { readClaudeConfig } from "./claude-config.js";
 import type { AgentIdentityManager } from "./agent-identity.js";
 import { type MemoryEngine, workspaceIdFromPath } from "./memory/index.js";
 import type { CodeoidConfig } from "../config.js";
@@ -147,6 +148,53 @@ export class SessionManager {
         return this.#fsRead(msg, auth);
       case "fs.browse_dir":
         return this.#fsBrowseDir(msg, auth);
+      case "claude.config":
+        return this.#claudeConfig(msg, auth);
+    }
+  }
+
+  async #claudeConfig(
+    msg: Extract<ClientMessage, { type: "claude.config" }>,
+    auth: AuthContext,
+  ): Promise<DaemonMessage> {
+    // Reuse fs:read since this only reads ~/.claude/ + workdir/.claude/ —
+    // strictly broader than session.workdir, but the data is descriptive
+    // (no secrets — env values are stripped, only key names returned).
+    if (!hasScope(auth.scopes as string[], SCOPES.FS_READ)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Missing scope: fs:read",
+        code: "forbidden",
+      };
+    }
+    const session = this.#sessions.get(msg.sessionId);
+    if (!session) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Session not found",
+        code: "not_found",
+      };
+    }
+    try {
+      const snapshot = await readClaudeConfig(session.workdir);
+      return {
+        type: "claude.config.result",
+        requestId: msg.id,
+        workdir: session.workdir,
+        agents: snapshot.agents,
+        skills: snapshot.skills,
+        mcpServers: snapshot.mcpServers,
+        hooks: snapshot.hooks,
+      };
+    } catch (err) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: err instanceof Error ? err.message : String(err),
+        code: "internal",
+      };
     }
   }
 
