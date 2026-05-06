@@ -37,6 +37,9 @@ const PromptBox: Component = () => {
   let textareaRef: HTMLTextAreaElement | undefined;
   const [text, setText] = createSignal("");
   const [error, setError] = createSignal<string | null>(null);
+  const [transientPlaceholder, setTransientPlaceholder] = createSignal<string | null>(
+    null,
+  );
   const draftKey = () => focusedSessionId() ?? "__none__";
 
   // Hydrate from the persisted draft on session change.
@@ -48,10 +51,17 @@ const PromptBox: Component = () => {
   onMount(() => {
     hydrate();
     const onFocus = () => textareaRef?.focus();
+    const onFocusWithHint = (e: Event) => {
+      const detail = (e as CustomEvent<{ hint?: string }>).detail;
+      if (detail?.hint) setTransientPlaceholder(detail.hint);
+      requestAnimationFrame(() => textareaRef?.focus());
+    };
     window.addEventListener("codeoid:focus-prompt", onFocus);
-    onCleanup(() =>
-      window.removeEventListener("codeoid:focus-prompt", onFocus),
-    );
+    window.addEventListener("codeoid:focus-prompt-with-hint", onFocusWithHint);
+    onCleanup(() => {
+      window.removeEventListener("codeoid:focus-prompt", onFocus);
+      window.removeEventListener("codeoid:focus-prompt-with-hint", onFocusWithHint);
+    });
   });
 
   // Re-hydrate from localStorage when the focused session id changes.
@@ -68,6 +78,8 @@ const PromptBox: Component = () => {
     setError(null);
     setText(ev.currentTarget.value);
     setDraft(draftKey(), ev.currentTarget.value);
+    // Once the user starts typing, drop the transient hint placeholder.
+    if (ev.currentTarget.value.length > 0) setTransientPlaceholder(null);
     autosize();
   }
 
@@ -117,6 +129,7 @@ const PromptBox: Component = () => {
     });
     clearDraft(draftKey());
     setText("");
+    setTransientPlaceholder(null);
     autosize();
   }
 
@@ -143,9 +156,10 @@ const PromptBox: Component = () => {
             onKeyDown={onKeyDown}
             rows={1}
             placeholder={
-              focusedSession()
+              transientPlaceholder() ??
+              (focusedSession()
                 ? "Message Claude…  Enter sends · Shift+Enter for newline · /help for commands"
-                : "Select or create a session first."
+                : "Select or create a session first.")
             }
             class="flex-1 resize-none bg-transparent font-mono text-sm leading-6 text-fg outline-none placeholder:text-fg-faint transition-[height] duration-150 ease-out"
             disabled={!focusedSession()}

@@ -141,8 +141,63 @@ const ToolBlock: Component<{ msg: SessionMessage }> = (props) => {
         <PhaseBadge state={t().state} />
         <span class="ml-auto text-fg-faint">{shortSub(t().toolId)}</span>
       </div>
-      <ToolStateBody state={t().state} description={props.msg.content} />
+      <ToolStateBody
+        state={t().state}
+        description={props.msg.content}
+        toolName={t().name}
+      />
     </div>
+  );
+};
+
+/**
+ * Waiting-confirmation body. For `ExitPlanMode` we make the plan
+ * content the *primary* surface (markdown-rendered) — that's what the
+ * user actually needs to read before approving. For every other tool
+ * we show the description and a collapsible JSON view of the full
+ * `input` so the user can audit exactly what the tool will do.
+ */
+const WaitingConfirmationBody: Component<{
+  state: Extract<ToolState, { phase: "waiting_confirmation" }>;
+  toolName: string;
+}> = (props) => {
+  const isPlanMode = () =>
+    props.toolName === "ExitPlanMode" || props.toolName === "exit_plan_mode";
+  const plan = () => {
+    const input = props.state.input;
+    if (input && typeof input === "object" && "plan" in input) {
+      const p = (input as { plan: unknown }).plan;
+      return typeof p === "string" ? p : null;
+    }
+    return null;
+  };
+  return (
+    <Switch>
+      <Match when={isPlanMode() && plan()}>
+        <div class="rounded border border-accent/30 bg-accent/[0.04] p-3">
+          <div class="mb-1 flex items-center gap-2 text-[11px] uppercase tracking-wider text-accent">
+            <span>📋</span>
+            <span class="font-semibold">Proposed plan</span>
+          </div>
+          <MarkdownBlock text={plan()!} />
+        </div>
+      </Match>
+      <Match when={!isPlanMode()}>
+        <div class="space-y-1.5">
+          <div class="rounded bg-bg-active/50 px-2 py-1.5 text-sm text-fg">
+            {props.state.description}
+          </div>
+          <details class="text-[11px]">
+            <summary class="cursor-pointer text-fg-faint hover:text-fg-muted">
+              full input
+            </summary>
+            <pre class="mt-1 whitespace-pre-wrap break-words rounded border border-border bg-bg-active/40 p-2 font-mono text-[11px] text-fg-muted">
+              {JSON.stringify(props.state.input, null, 2)}
+            </pre>
+          </details>
+        </div>
+      </Match>
+    </Switch>
   );
 };
 
@@ -170,12 +225,14 @@ const PhaseBadge: Component<{ state: ToolState }> = (props) => {
 const ToolStateBody: Component<{
   state: ToolState;
   description: string;
+  toolName: string;
 }> = (props) => (
   <Switch fallback={<Plain text={props.description} />}>
     <Match when={props.state.phase === "waiting_confirmation"}>
-      <div class="rounded bg-bg-active/50 px-2 py-1.5 text-sm text-fg">
-        {(props.state as { description: string }).description}
-      </div>
+      <WaitingConfirmationBody
+        state={props.state as Extract<ToolState, { phase: "waiting_confirmation" }>}
+        toolName={props.toolName}
+      />
     </Match>
     <Match when={props.state.phase === "executing"}>
       <Show when={(props.state as { progress?: string }).progress}>
