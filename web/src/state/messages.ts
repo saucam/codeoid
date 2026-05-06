@@ -30,11 +30,21 @@ interface MessagesState {
   bySession: Record<string, SessionMessage[]>;
   /** messageId -> monotonic version counter. */
   versions: Record<string, number>;
+  /**
+   * Per-session epoch counter, bumped on EVERY mutation that touches a
+   * session — including in-place delta patches. Use this signal to
+   * trigger effects that need to re-fire on streaming content updates,
+   * not just on array-reference changes (Solid's store reactivity is
+   * path-grained, so mutating `buf[idx].content` in place won't
+   * re-trigger an `on(messages, …)` effect).
+   */
+  epochBySession: Record<string, number>;
 }
 
 const [state, setState] = createStore<MessagesState>({
   bySession: {},
   versions: {},
+  epochBySession: {},
 });
 
 /** Reactive slice — components consume this. */
@@ -55,6 +65,18 @@ export function versionOf(messageId: string): number {
   return state.versions[messageId] ?? 0;
 }
 
+/**
+ * Per-session epoch — reactive. Bumped on every applyMessage /
+ * applyDelta / replaceScrollback so effects keyed on this signal
+ * re-fire even when in-place mutation leaves the array reference
+ * unchanged. Use as the trigger for auto-scroll, render-cache
+ * invalidation, etc.
+ */
+export function epochOf(sessionId: string | null | undefined): number {
+  if (!sessionId) return 0;
+  return state.epochBySession[sessionId] ?? 0;
+}
+
 const EMPTY: SessionMessage[] = [];
 
 // ---------- broadcast ingest ----------
@@ -68,6 +90,8 @@ export function applyMessage(msg: SessionMessage): void {
         if (existing >= 0) buf[existing] = msg;
         else buf.push(msg);
         s.versions[msg.messageId] = (s.versions[msg.messageId] ?? 0) + 1;
+        s.epochBySession[msg.sessionId] =
+          (s.epochBySession[msg.sessionId] ?? 0) + 1;
       }),
     );
   });
@@ -112,6 +136,8 @@ export function applyDelta(delta: SessionMessageDelta): void {
         target.timestamp = delta.timestamp;
 
         s.versions[delta.messageId] = (s.versions[delta.messageId] ?? 0) + 1;
+        s.epochBySession[delta.sessionId] =
+          (s.epochBySession[delta.sessionId] ?? 0) + 1;
       }),
     );
   });
@@ -125,6 +151,7 @@ export function replaceScrollback(sessionId: string, messages: readonly SessionM
         for (const m of messages) {
           s.versions[m.messageId] = (s.versions[m.messageId] ?? 0) + 1;
         }
+        s.epochBySession[sessionId] = (s.epochBySession[sessionId] ?? 0) + 1;
       }),
     );
   });
@@ -140,5 +167,5 @@ export function hasMessage(sessionId: string, messageId: string): boolean {
 
 // Test hook — reset the entire store between tests.
 export function _resetMessagesForTest(): void {
-  setState({ bySession: {}, versions: {} });
+  setState({ bySession: {}, versions: {}, epochBySession: {} });
 }

@@ -21,7 +21,7 @@ import {
 } from "solid-js";
 
 import MessageRow from "./MessageRow";
-import { createMessages } from "../../state/messages";
+import { createMessages, epochOf } from "../../state/messages";
 import { focusedSession, focusedSessionId } from "../../state/sessions";
 
 const SCROLL_STICKY_THRESHOLD_PX = 80;
@@ -77,9 +77,17 @@ const Transcript: Component = () => {
     setStuckBottom(isAtBottom(containerRef));
   }
 
-  // Auto-scroll on new content, but only if the user was already at the bottom.
+  // Auto-scroll on new content, but only if the user was already at
+  // the bottom. We track BOTH the messages signal AND the per-session
+  // epoch so streaming deltas (which mutate fields in place — array
+  // ref unchanged) still re-trigger this effect.
+  const scrollTrigger = () => {
+    const arr = messages();
+    const epoch = epochOf(focusedSessionId());
+    return [arr, epoch] as const;
+  };
   createEffect(
-    on(messages, () => {
+    on(scrollTrigger, () => {
       if (!containerRef) return;
       if (stuckBottom()) {
         const smooth = smoothNext;

@@ -3,6 +3,7 @@ import {
   _resetMessagesForTest,
   applyDelta,
   applyMessage,
+  epochOf,
   hasMessage,
   messagesFor,
   replaceScrollback,
@@ -175,5 +176,36 @@ describe("messages store", () => {
     applyMessage(makeMsg({ messageId: "m1" }));
     expect(hasMessage("s1", "m1")).toBe(true);
     expect(hasMessage("s2", "m1")).toBe(false);
+  });
+
+  it("epochOf bumps on every applyMessage / applyDelta / replaceScrollback", () => {
+    expect(epochOf("s1")).toBe(0);
+    applyMessage(makeMsg({ messageId: "m1" }));
+    expect(epochOf("s1")).toBe(1);
+    applyMessage(makeMsg({ messageId: "m2" }));
+    expect(epochOf("s1")).toBe(2);
+
+    // Delta mutating in place must still bump — that's the bug we
+    // shipped this for (auto-scroll wasn't firing on streaming).
+    applyDelta({
+      type: "session.message.delta",
+      sessionId: "s1",
+      messageId: "m1",
+      contentAppend: " more",
+      timestamp: "2026-05-04T08:00:01Z",
+    });
+    expect(epochOf("s1")).toBe(3);
+
+    replaceScrollback("s1", [makeMsg({ messageId: "m3" })]);
+    expect(epochOf("s1")).toBe(4);
+
+    // Other sessions stay at 0.
+    expect(epochOf("s2")).toBe(0);
+  });
+
+  it("epochOf returns 0 for unknown / nullish sessions", () => {
+    expect(epochOf(null)).toBe(0);
+    expect(epochOf(undefined)).toBe(0);
+    expect(epochOf("never-seen")).toBe(0);
   });
 });
