@@ -918,7 +918,7 @@ export class SessionManager {
       return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
     }
 
-    session.approve(msg.approvalId, msg.approved, auth);
+    session.approve(msg.approvalId, msg.approved, auth, msg.updatedInput);
     return { type: "response.ok", requestId: msg.id };
   }
 

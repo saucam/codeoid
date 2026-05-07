@@ -260,8 +260,13 @@ export class Session {
   // only finalize it on the matching content_block_stop).
   #activeThinkingIndex: number | null = null;
 
-  // Pending tool approvals: approvalId → resolve(boolean)
-  #pendingApprovals = new Map<string, (approved: boolean) => void>();
+  // Pending tool approvals: approvalId → resolve({approved, updatedInput?})
+  // `updatedInput` is the form-data patch the client may attach (e.g.
+  // AskUserQuestion's `answers` map) — see SessionApproveMsg.
+  #pendingApprovals = new Map<
+    string,
+    (result: { approved: boolean; updatedInput?: Record<string, unknown> }) => void
+  >();
 
   // Active tool call messageIds — completed when next assistant message arrives
   #activeToolMsgIds: string[] = [];
@@ -893,7 +898,7 @@ export class Session {
           this.#broadcastRaw(toolMsg);
           this.#setStatus("waiting_approval");
 
-          const approved = await this.#waitForApproval(approvalId);
+          const { approved, updatedInput } = await this.#waitForApproval(approvalId);
           this.#setStatus("working");
 
           // Emit tool state transition
@@ -911,17 +916,18 @@ export class Session {
           if (approved) {
             this.#store.audit(sender.sub, "session.approve", this.id, `tool=${toolName} approvalId=${approvalId}`);
 
-            // Schedule completion delta after tool finishes (tracked by tool_use_id from SDK)
-            // We'll update this in handleAgentMessage when we see the tool result.
-            //
             // updatedInput must be present even when we don't change anything —
             // SDK's runtime Zod schema rejects `{behavior:"allow"}` without it,
-            // even though the published TS types say it's optional. Passing
-            // back the original input is the no-op equivalent. Without this,
-            // ExitPlanMode (and any tool routed through canUseTool) errors
-            // out with "Tool permission request failed: ZodError" and Claude
-            // sees a tool_result that says it's a "technical issue."
-            return { behavior: "allow" as const, updatedInput: inputObj };
+            // even though the published TS types say it's optional. For
+            // form-style tools (AskUserQuestion) the client also attaches a
+            // patch with the user's `answers`; we shallow-merge it over the
+            // original input so the SDK's tool.call sees the answers as part
+            // of its input. For binary tools the patch is undefined and we
+            // pass input through unchanged.
+            const merged: Record<string, unknown> = updatedInput
+              ? { ...inputObj, ...updatedInput }
+              : inputObj;
+            return { behavior: "allow" as const, updatedInput: merged };
           }
 
           this.#store.audit(sender.sub, "session.deny", this.id, `tool=${toolName} approvalId=${approvalId}`);
@@ -1051,7 +1057,7 @@ export class Session {
     // early prevents any pending push from sneaking in between.
     this.#inputQueue?.close();
     for (const resolve of this.#pendingApprovals.values()) {
-      resolve(false);
+      resolve({ approved: false });
     }
     this.#pendingApprovals.clear();
 
@@ -1067,7 +1073,12 @@ export class Session {
     this.#broadcastRaw(infoMsg);
   }
 
-  approve(approvalId: string, approved: boolean, sender: AuthContext): void {
+  approve(
+    approvalId: string,
+    approved: boolean,
+    sender: AuthContext,
+    updatedInput?: Record<string, unknown>,
+  ): void {
     const resolve = this.#pendingApprovals.get(approvalId);
     if (!resolve) {
       // Fallback: resolve first pending (for clients that don't send approvalId)
@@ -1075,7 +1086,7 @@ export class Session {
       if (!first.done) {
         const [firstId, firstResolve] = first.value;
         this.#store.audit(sender.sub, approved ? "session.approve" : "session.deny", this.id, `approvalId=${firstId}`);
-        firstResolve(approved);
+        firstResolve({ approved, updatedInput });
         this.#pendingApprovals.delete(firstId);
         return;
       }
@@ -1089,7 +1100,7 @@ export class Session {
     }
 
     this.#store.audit(sender.sub, approved ? "session.approve" : "session.deny", this.id, `approvalId=${approvalId}`);
-    resolve(approved);
+    resolve({ approved, updatedInput });
     this.#pendingApprovals.delete(approvalId);
   }
 
@@ -1126,7 +1137,7 @@ export class Session {
     // don't leave a zombie SDK subprocess alive holding the transcript file.
     await this.#teardownQueryLoop();
     for (const resolve of this.#pendingApprovals.values()) {
-      resolve(false);
+      resolve({ approved: false });
     }
     this.#pendingApprovals.clear();
     this.#clients.clear();
@@ -1741,8 +1752,10 @@ export class Session {
 
   // ── Internals ─────────────────────────────────────────────────────────
 
-  #waitForApproval(approvalId: string): Promise<boolean> {
-    return new Promise<boolean>((resolve) => {
+  #waitForApproval(
+    approvalId: string,
+  ): Promise<{ approved: boolean; updatedInput?: Record<string, unknown> }> {
+    return new Promise((resolve) => {
       this.#pendingApprovals.set(approvalId, resolve);
     });
   }

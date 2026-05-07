@@ -6,9 +6,23 @@
  * Rendering one at a time matches the daemon's serialized approval
  * pipeline; if multiple tools are waiting (rare with stream-input
  * mode), the oldest pending one wins.
+ *
+ * Two distinct shapes:
+ *
+ *   - Binary tools (Bash, Edit, ExitPlanMode, …): tool description +
+ *     approve/refine/deny buttons. Returns just `approved: boolean`.
+ *
+ *   - Form tools (AskUserQuestion): full question form rendered inline
+ *     with radio buttons for single-select / checkboxes for
+ *     multi-select, plus an always-available "Other" free-text option.
+ *     Submitting builds an `answers` map keyed by question text and
+ *     ships it to the daemon as `updatedInput`. The daemon then
+ *     shallow-merges that into the SDK's tool input so Claude actually
+ *     sees the user's answers — without it, the SDK's tool returns
+ *     `answers: {}` and Claude reports "user answered nothing".
  */
 
-import { Component, Show, createMemo } from "solid-js";
+import { Component, For, Show, createMemo, createSignal } from "solid-js";
 
 import { newRequestId, send } from "../../state/connection";
 import { createMessages } from "../../state/messages";
@@ -20,6 +34,40 @@ function focusPromptWithHint(hint: string): void {
   window.dispatchEvent(
     new CustomEvent("codeoid:focus-prompt-with-hint", { detail: { hint } }),
   );
+}
+
+interface AskQuestion {
+  question: string;
+  header?: string;
+  multiSelect?: boolean;
+  options: { label: string; description?: string }[];
+}
+
+function isAskUserQuestion(name: string): boolean {
+  return name === "AskUserQuestion" || name === "ask_user_question";
+}
+
+function extractQuestions(input: unknown): AskQuestion[] {
+  if (!input || typeof input !== "object") return [];
+  const qs = (input as { questions?: unknown }).questions;
+  if (!Array.isArray(qs)) return [];
+  return qs
+    .filter(
+      (q): q is AskQuestion =>
+        !!q &&
+        typeof q === "object" &&
+        typeof (q as AskQuestion).question === "string" &&
+        Array.isArray((q as AskQuestion).options),
+    )
+    .map((q) => ({
+      question: q.question,
+      header: q.header,
+      multiSelect: q.multiSelect ?? false,
+      options: q.options.filter(
+        (o): o is { label: string; description?: string } =>
+          !!o && typeof o === "object" && typeof o.label === "string",
+      ),
+    }));
 }
 
 const ApprovalBar: Component = () => {
@@ -42,80 +90,257 @@ const ApprovalBar: Component = () => {
             description: string;
             approvalId: string;
           };
+        const toolName = () => m().tool!.name;
         const isPlanMode = () =>
-          m().tool!.name === "ExitPlanMode" || m().tool!.name === "exit_plan_mode";
+          toolName() === "ExitPlanMode" || toolName() === "exit_plan_mode";
+        const isAsk = () => isAskUserQuestion(toolName());
         const sid = focusedSessionId;
-        const handleApprove = () =>
-          approve(sid()!, state().approvalId, true);
-        const handleDeny = () =>
-          approve(sid()!, state().approvalId, false);
-        const handleRefine = () => {
-          // Deny the call, then focus the prompt with a hint asking the
-          // user what to change. The next message they send is read by
-          // Claude as the refinement request.
-          approve(sid()!, state().approvalId, false);
-          focusPromptWithHint(
-            isPlanMode()
-              ? "What should change in the plan?"
-              : "What would you like Claude to do instead?",
-          );
-        };
-
         return (
-          <div class="border-t border-accent/30 bg-accent/5 px-4 py-3">
-            <div class="mx-auto flex max-w-3xl items-center gap-2">
-              <div class="flex flex-1 flex-col min-w-0">
-                <div class="flex items-center gap-2 text-xs text-accent">
-                  <span class="font-semibold uppercase tracking-wider">
-                    {isPlanMode() ? "Plan ready" : "Approval needed"}
-                  </span>
-                  <span class="font-mono">{m().tool!.name}</span>
-                </div>
-                <div class="mt-1 truncate text-sm text-fg">
-                  {isPlanMode()
-                    ? "Review the plan above. Approve to start coding, refine to give Claude feedback."
-                    : state().description}
-                </div>
-              </div>
-              <button
-                type="button"
-                class="rounded bg-success/90 px-3 py-1.5 text-xs font-semibold text-bg transition hover:bg-success"
-                onClick={handleApprove}
-                title="Approve · Alt+Y"
-              >
-                {isPlanMode() ? "approve plan" : "approve"}
-              </button>
-              <button
-                type="button"
-                class="rounded border border-accent/60 bg-bg px-3 py-1.5 text-xs font-semibold text-accent transition hover:bg-accent/10"
-                onClick={handleRefine}
-                title="Deny + focus prompt for follow-up feedback"
-              >
-                refine
-              </button>
-              <button
-                type="button"
-                class="rounded border border-danger/60 bg-bg px-3 py-1.5 text-xs font-semibold text-danger transition hover:bg-danger/10"
-                onClick={handleDeny}
-                title="Deny · Alt+D"
-              >
-                {isPlanMode() ? "cancel" : "deny"}
-              </button>
-            </div>
-          </div>
+          <Show when={isAsk()} fallback={
+            <BinaryBar
+              toolName={toolName()}
+              description={state().description}
+              isPlanMode={isPlanMode()}
+              onApprove={() => approve(sid()!, state().approvalId, true)}
+              onRefine={() => {
+                approve(sid()!, state().approvalId, false);
+                focusPromptWithHint(
+                  isPlanMode()
+                    ? "What should change in the plan?"
+                    : "What would you like Claude to do instead?",
+                );
+              }}
+              onDeny={() => approve(sid()!, state().approvalId, false)}
+            />
+          }>
+            <AskUserQuestionForm
+              questions={extractQuestions(state().input)}
+              onSubmit={(answers) =>
+                approve(sid()!, state().approvalId, true, { answers })
+              }
+              onCancel={() => approve(sid()!, state().approvalId, false)}
+            />
+          </Show>
         );
       }}
     </Show>
   );
 };
 
-export function approve(sessionId: string, approvalId: string, approved: boolean): void {
+const BinaryBar: Component<{
+  toolName: string;
+  description: string;
+  isPlanMode: boolean;
+  onApprove: () => void;
+  onRefine: () => void;
+  onDeny: () => void;
+}> = (props) => (
+  <div class="border-t border-accent/30 bg-accent/5 px-4 py-3">
+    <div class="mx-auto flex max-w-3xl items-center gap-2">
+      <div class="flex flex-1 flex-col min-w-0">
+        <div class="flex items-center gap-2 text-xs text-accent">
+          <span class="font-semibold uppercase tracking-wider">
+            {props.isPlanMode ? "Plan ready" : "Approval needed"}
+          </span>
+          <span class="font-mono">{props.toolName}</span>
+        </div>
+        <div class="mt-1 truncate text-sm text-fg">
+          {props.isPlanMode
+            ? "Review the plan above. Approve to start coding, refine to give Claude feedback."
+            : props.description}
+        </div>
+      </div>
+      <button
+        type="button"
+        class="rounded bg-success/90 px-3 py-1.5 text-xs font-semibold text-bg transition hover:bg-success"
+        onClick={props.onApprove}
+        title="Approve · Alt+Y"
+      >
+        {props.isPlanMode ? "approve plan" : "approve"}
+      </button>
+      <button
+        type="button"
+        class="rounded border border-accent/60 bg-bg px-3 py-1.5 text-xs font-semibold text-accent transition hover:bg-accent/10"
+        onClick={props.onRefine}
+        title="Deny + focus prompt for follow-up feedback"
+      >
+        refine
+      </button>
+      <button
+        type="button"
+        class="rounded border border-danger/60 bg-bg px-3 py-1.5 text-xs font-semibold text-danger transition hover:bg-danger/10"
+        onClick={props.onDeny}
+        title="Deny · Alt+D"
+      >
+        {props.isPlanMode ? "cancel" : "deny"}
+      </button>
+    </div>
+  </div>
+);
+
+const AskUserQuestionForm: Component<{
+  questions: AskQuestion[];
+  onSubmit: (answers: Record<string, string>) => void;
+  onCancel: () => void;
+}> = (props) => {
+  // Per-question state. Single-select: stored as the selected label (or
+  // "" if the user hasn't picked yet). Multi-select: comma-joined labels.
+  // "Other" answers live in their own per-question text field; if non-empty
+  // they replace the radio/checkbox value at submit time.
+  const [selections, setSelections] = createSignal<Record<string, string[]>>({});
+  const [otherText, setOtherText] = createSignal<Record<string, string>>({});
+
+  function setSelection(q: string, labels: string[]): void {
+    setSelections({ ...selections(), [q]: labels });
+  }
+  function setOther(q: string, text: string): void {
+    setOtherText({ ...otherText(), [q]: text });
+  }
+  function toggleMulti(q: string, label: string): void {
+    const cur = selections()[q] ?? [];
+    if (cur.includes(label)) setSelection(q, cur.filter((l) => l !== label));
+    else setSelection(q, [...cur, label]);
+  }
+  function setSingle(q: string, label: string): void {
+    setSelection(q, [label]);
+  }
+
+  const allAnswered = createMemo(() => {
+    return props.questions.every((q) => {
+      const picks = selections()[q.question] ?? [];
+      const other = (otherText()[q.question] ?? "").trim();
+      return picks.length > 0 || other.length > 0;
+    });
+  });
+
+  function handleSubmit(): void {
+    const answers: Record<string, string> = {};
+    for (const q of props.questions) {
+      const other = (otherText()[q.question] ?? "").trim();
+      if (other) {
+        answers[q.question] = other;
+      } else {
+        const picks = selections()[q.question] ?? [];
+        answers[q.question] = picks.join(", ");
+      }
+    }
+    props.onSubmit(answers);
+  }
+
+  return (
+    <div class="border-t border-accent/30 bg-accent/5 px-4 py-3">
+      <div class="mx-auto flex max-w-3xl flex-col gap-3">
+        <div class="flex items-center gap-2 text-xs text-accent">
+          <span class="font-semibold uppercase tracking-wider">
+            Claude is asking
+          </span>
+          <span class="font-mono">AskUserQuestion</span>
+          <Show when={props.questions.length > 1}>
+            <span class="text-fg-muted">· {props.questions.length} questions</span>
+          </Show>
+        </div>
+        <For each={props.questions}>
+          {(q) => (
+            <fieldset class="rounded border border-border bg-bg/60 p-3">
+              <legend class="px-1 text-sm font-medium text-fg">
+                <Show when={q.header}>
+                  <span class="mr-2 rounded bg-accent/20 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-accent">
+                    {q.header}
+                  </span>
+                </Show>
+                {q.question}
+                <Show when={q.multiSelect}>
+                  <span class="ml-2 text-[10px] text-fg-faint">(pick one or more)</span>
+                </Show>
+              </legend>
+              <ul class="mt-1 flex flex-col gap-1">
+                <For each={q.options}>
+                  {(opt) => {
+                    const picks = () => selections()[q.question] ?? [];
+                    const checked = () => picks().includes(opt.label);
+                    return (
+                      <li>
+                        <label class="flex cursor-pointer items-start gap-2 rounded px-2 py-1 text-sm hover:bg-bg-active/40">
+                          <input
+                            type={q.multiSelect ? "checkbox" : "radio"}
+                            name={`q-${q.question}`}
+                            class="mt-1 accent-accent"
+                            checked={checked()}
+                            onChange={() => {
+                              if (q.multiSelect) toggleMulti(q.question, opt.label);
+                              else setSingle(q.question, opt.label);
+                            }}
+                          />
+                          <span class="flex flex-1 flex-col">
+                            <span class="text-fg">{opt.label}</span>
+                            <Show when={opt.description}>
+                              <span class="text-[11px] text-fg-muted">
+                                {opt.description}
+                              </span>
+                            </Show>
+                          </span>
+                        </label>
+                      </li>
+                    );
+                  }}
+                </For>
+                <li>
+                  <label class="flex cursor-text items-start gap-2 rounded px-2 py-1 text-sm">
+                    <span class="mt-1 text-fg-muted">Other:</span>
+                    <input
+                      type="text"
+                      class="flex-1 rounded border border-border bg-bg px-2 py-1 text-sm text-fg outline-none focus:border-accent"
+                      placeholder="type a custom answer…"
+                      value={otherText()[q.question] ?? ""}
+                      onInput={(e) => setOther(q.question, e.currentTarget.value)}
+                    />
+                  </label>
+                </li>
+              </ul>
+            </fieldset>
+          )}
+        </For>
+        <div class="flex items-center justify-end gap-2">
+          <button
+            type="button"
+            class="rounded border border-danger/60 bg-bg px-3 py-1.5 text-xs font-semibold text-danger transition hover:bg-danger/10"
+            onClick={props.onCancel}
+            title="Cancel — Claude will see this as a denied tool call"
+          >
+            cancel
+          </button>
+          <button
+            type="button"
+            disabled={!allAnswered()}
+            class="rounded bg-success/90 px-3 py-1.5 text-xs font-semibold text-bg transition hover:bg-success disabled:cursor-not-allowed disabled:opacity-50"
+            onClick={handleSubmit}
+            title={
+              allAnswered()
+                ? "Submit answers"
+                : "Pick an option (or type into Other) for every question first"
+            }
+          >
+            submit answers
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export function approve(
+  sessionId: string,
+  approvalId: string,
+  approved: boolean,
+  updatedInput?: Record<string, unknown>,
+): void {
   send({
     type: "session.approve",
     id: newRequestId(),
     sessionId,
     approvalId,
     approved,
+    ...(updatedInput ? { updatedInput } : {}),
   });
 }
 

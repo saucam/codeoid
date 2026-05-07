@@ -264,6 +264,12 @@ export interface SessionApproveMsg extends BaseClientMsg {
   sessionId: string;
   approvalId: string;
   approved: boolean;
+  /**
+   * Patch shallow-merged into the original tool input before the SDK
+   * runs the tool. Required for AskUserQuestion (carries `answers`).
+   * Omitted for binary approvals.
+   */
+  updatedInput?: Record<string, unknown>;
 }
 
 export interface SessionDestroyMsg extends BaseClientMsg {

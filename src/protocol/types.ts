@@ -630,6 +630,19 @@ export interface SessionApproveMsg extends BaseClientMsg {
   /** Correlates to ToolWaitingConfirmationState.approvalId */
   approvalId: string;
   approved: boolean;
+  /**
+   * Optional patch to merge into the original tool input before the SDK
+   * runs the tool's `call()`. Required for form-style tools like
+   * `AskUserQuestion` where the user's answers ARE the input the tool
+   * needs to produce its tool_result. For binary approvals (Bash, Edit,
+   * etc.) this is omitted and the daemon passes input through unchanged.
+   *
+   * Shape is tool-specific. For `AskUserQuestion`:
+   *   `{ answers: { "<question text>": "<answer or comma-joined>" } }`
+   * The daemon shallow-merges this over the original `input` before
+   * returning `{ behavior: "allow", updatedInput: ... }` to the SDK.
+   */
+  updatedInput?: Record<string, unknown>;
 }
 
 export interface SessionDestroyMsg extends BaseClientMsg {
