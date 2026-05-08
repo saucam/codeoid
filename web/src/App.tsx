@@ -21,9 +21,16 @@ import {
 } from "./state/connection";
 import { focusedSession, focusedSessionId } from "./state/sessions";
 import { resetClaudeConfig } from "./state/claude-config";
+import { installApprovalNotifications } from "./state/desktop-notifications";
 
 const App: Component = () => {
   const [tried, setTried] = createSignal(false);
+
+  // Wire desktop-notification watcher once. It self-checks for
+  // permission + tab visibility before firing so it stays quiet by
+  // default — the `Enable notifications` button in the status bar is
+  // what actually requests permission.
+  installApprovalNotifications();
 
   onMount(async () => {
     const saved = rememberedApiKey();

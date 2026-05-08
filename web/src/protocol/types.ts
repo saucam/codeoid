@@ -182,6 +182,12 @@ export interface ToolInfo {
   toolId: string;
   name: string;
   state: ToolState;
+  /**
+   * Original tool input from the model. Persists across phase
+   * transitions so the diff renderer can show the proposed Edit /
+   * Write even after the tool moves out of waiting_confirmation.
+   */
+  input?: unknown;
 }
 
 // -----------------------------------------------------------------------------

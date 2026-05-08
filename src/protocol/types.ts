@@ -447,6 +447,14 @@ export interface ToolInfo {
   name: string;
   /** Current state */
   state: ToolState;
+  /**
+   * The original tool input as provided by the model. Lives on
+   * `ToolInfo` (not just on `WaitingConfirmation`) so it survives
+   * phase transitions — clients that want to render Edit-as-diff in
+   * the completed phase need it after approval, and we don't want to
+   * pay a round-trip to fetch it back.
+   */
+  input?: unknown;
 }
 
 // =============================================================================

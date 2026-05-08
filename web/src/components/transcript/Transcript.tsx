@@ -4,8 +4,13 @@
  * approval bars appear inline; top-level approvals can also surface in
  * the prompt area.
  *
- * P3 keeps it un-virtualized for simplicity; P7 swaps in
- * @tanstack/solid-virtual once the visible perf pressure is real.
+ * Virtualized via @tanstack/solid-virtual so a 5 000-message bash-heavy
+ * session doesn't melt the renderer. The virtualizer measures each row
+ * dynamically (heights vary wildly: a 2-line user message vs. a
+ * 200-line bash output) and rebuilds its index when the message list
+ * changes. Streaming deltas mutate row content in place; we wire the
+ * per-session epoch into the virtualizer's `getItemKey` so it
+ * remeasures the affected row without thrashing the rest.
  */
 
 import {
@@ -19,9 +24,10 @@ import {
   onCleanup,
   onMount,
 } from "solid-js";
+import { createVirtualizer } from "@tanstack/solid-virtual";
 
 import MessageRow from "./MessageRow";
-import { createMessages, epochOf } from "../../state/messages";
+import { createMessages, epochOf, versionOf } from "../../state/messages";
 import { focusedSession, focusedSessionId } from "../../state/sessions";
 import {
   findJumpTarget,
@@ -82,6 +88,35 @@ const Transcript: Component = () => {
     setStuckBottom(isAtBottom(containerRef));
   }
 
+  // Drive the virtualizer off the messages array. `getItemKey` blends
+  // messageId + version so streaming deltas (which mutate content in
+  // place — same id, bumped version) cause that one row to remeasure
+  // without invalidating its neighbours.
+  const virtualizer = createVirtualizer({
+    count: messages().length,
+    getScrollElement: () => containerRef ?? null,
+    estimateSize: () => 96,
+    overscan: 8,
+    getItemKey: (index) => {
+      const m = messages()[index];
+      if (!m) return index;
+      return `${m.messageId}:${versionOf(m.messageId)}`;
+    },
+  });
+
+  // Re-sync the virtualizer when the messages array length changes.
+  // The virtualizer reads `count` from its options on creation; we
+  // need to push updates explicitly when messages stream in.
+  createEffect(() => {
+    const len = messages().length;
+    epochOf(focusedSessionId()); // re-fire on in-place mutations too
+    virtualizer.setOptions({
+      ...virtualizer.options,
+      count: len,
+    });
+    queueMicrotask(() => virtualizer.measure());
+  });
+
   // Auto-scroll on new content, but only if the user was already at
   // the bottom. We track BOTH the messages signal AND the per-session
   // epoch so streaming deltas (which mutate fields in place — array
@@ -131,11 +166,9 @@ const Transcript: Component = () => {
   );
 
   // Search jump: when SearchModal queues a target for this session, look
-  // up the matching messageId and scroll its row into view. Watches both
-  // the pending signal and the messages list, since the message we're
-  // looking for might not have arrived yet (scrollback replays after
-  // attach, async). Gives up after 4 s — by then the user has scrolled
-  // away or the daemon never returned the message.
+  // up the matching messageId and scroll its row into view. Goes through
+  // virtualizer.scrollToIndex so the item gets mounted before we try
+  // to add the flash class.
   createEffect(() => {
     const jump = pendingSearchJump();
     if (!jump) return;
@@ -149,18 +182,29 @@ const Transcript: Component = () => {
     if (arr.length === 0) return;
     const targetId = findJumpTarget(arr, jump);
     if (!targetId) return;
+    const idx = arr.findIndex((m) => m.messageId === targetId);
+    if (idx < 0) return;
     setPendingSearchJump(null);
-    queueMicrotask(() => {
+    setStuckBottom(false);
+    virtualizer.scrollToIndex(idx, { align: "center", behavior: "smooth" });
+    // Wait for the row to be mounted by the virtualizer (next 2
+    // frames is usually enough for measure + layout).
+    let attempts = 0;
+    const tryFlash = () => {
       if (!containerRef) return;
       const row = containerRef.querySelector<HTMLElement>(
         `[data-message-id="${CSS.escape(targetId)}"]`,
       );
-      if (!row) return;
-      row.scrollIntoView({ behavior: "smooth", block: "center" });
-      row.classList.add("search-jump-flash");
-      setTimeout(() => row.classList.remove("search-jump-flash"), 1800);
-      setStuckBottom(false);
-    });
+      if (row) {
+        row.classList.add("search-jump-flash");
+        setTimeout(() => row.classList.remove("search-jump-flash"), 1800);
+        return;
+      }
+      if (attempts++ < 20) {
+        requestAnimationFrame(tryFlash);
+      }
+    };
+    requestAnimationFrame(tryFlash);
   });
 
   return (
@@ -177,16 +221,33 @@ const Transcript: Component = () => {
           </div>
         }
       >
-        <ol class="mx-auto flex max-w-3xl flex-col gap-2">
-          <For each={messages()}>
-            {(m) => (
-              <MessageRow
-                msg={m}
-                streaming={m.messageId === streamingMessageId()}
-              />
-            )}
+        <div
+          class="relative mx-auto w-full max-w-3xl"
+          style={{ height: `${virtualizer.getTotalSize()}px` }}
+        >
+          <For each={virtualizer.getVirtualItems()}>
+            {(item) => {
+              const m = () => messages()[item.index];
+              return (
+                <Show when={m()}>
+                  {(msg) => (
+                    <div
+                      data-index={item.index}
+                      ref={(el) => queueMicrotask(() => virtualizer.measureElement(el))}
+                      class="absolute left-0 top-0 w-full pb-2"
+                      style={{ transform: `translateY(${item.start}px)` }}
+                    >
+                      <MessageRow
+                        msg={msg()}
+                        streaming={msg().messageId === streamingMessageId()}
+                      />
+                    </div>
+                  )}
+                </Show>
+              );
+            }}
           </For>
-        </ol>
+        </div>
       </Show>
       <Show when={!stuckBottom()}>
         <ScrollLatchPill onClick={() => {

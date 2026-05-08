@@ -23,6 +23,7 @@ import { authIdentity, connectionStatus, disconnect } from "../state/connection"
 import { focusedSession } from "../state/sessions";
 import { forgetApiKey } from "../lib/auth";
 import { openIdentityDrawer } from "./IdentityDrawer";
+import { notifyPermission, requestEnable } from "../state/desktop-notifications";
 
 const StatusBar: Component = () => {
   return (
@@ -35,6 +36,7 @@ const StatusBar: Component = () => {
       <span class="ml-auto flex items-center gap-3">
         <SessionMetrics />
         <SearchHotkey />
+        <NotifyToggle />
         <SignOut />
       </span>
     </header>
@@ -205,6 +207,38 @@ const SignOut: Component = () => {
     >
       sign out
     </button>
+  );
+};
+
+const NotifyToggle: Component = () => {
+  const state = () => notifyPermission();
+  return (
+    <Show when={state() !== "unsupported"}>
+      <Show
+        when={state() === "default"}
+        fallback={
+          <Show when={state() === "denied"}>
+            <span
+              class="text-[11px] text-fg-faint"
+              title="Browser notifications were denied. Re-enable from your browser's site settings."
+            >
+              🔕
+            </span>
+          </Show>
+        }
+      >
+        <button
+          type="button"
+          class="text-xs text-fg-muted underline-offset-2 hover:text-fg hover:underline"
+          onClick={() => {
+            void requestEnable();
+          }}
+          title="Get a desktop notification when an approval is pending and the tab is in the background"
+        >
+          🔔 enable notifications
+        </button>
+      </Show>
+    </Show>
   );
 };
 

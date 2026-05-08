@@ -9,46 +9,7 @@ import { Component, Show, createResource } from "solid-js";
 
 import { closeFile, openedFile } from "../../state/files";
 import { formatTokens } from "../../lib/format";
-
-// Shiki theme + bundled languages we ship. Any new language we want to
-// support gets added here; the daemon's detectLanguage already returns
-// shiki-compatible ids.
-const SHIKI_THEME = "github-dark";
-
-// Lazy import shiki on first use so the initial bundle stays small.
-async function getHighlighter() {
-  const { createHighlighter } = await import("shiki");
-  return createHighlighter({
-    themes: [SHIKI_THEME],
-    langs: [
-      "ts",
-      "tsx",
-      "js",
-      "jsx",
-      "json",
-      "yaml",
-      "toml",
-      "rust",
-      "go",
-      "python",
-      "ruby",
-      "java",
-      "c",
-      "cpp",
-      "csharp",
-      "bash",
-      "md",
-      "html",
-      "css",
-      "scss",
-      "sql",
-      "graphql",
-      "dockerfile",
-      "ini",
-      "xml",
-    ],
-  });
-}
+import { SHIKI_THEME, getHighlighter } from "../../lib/shiki";
 
 const FileViewer: Component = () => {
   return (

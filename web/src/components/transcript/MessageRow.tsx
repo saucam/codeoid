@@ -19,6 +19,7 @@ import type {
   SessionMessage,
   ToolState,
 } from "../../protocol/types";
+import { EditDiff, WriteFile, isEditInput, isWriteInput } from "./EditDiff";
 
 const ROLE_LABEL: Record<MessageRole, string> = {
   user: "you",
@@ -134,6 +135,26 @@ const ThinkingBlock: Component<{ text: string; streaming?: boolean }> = (props) 
 
 const ToolBlock: Component<{ msg: SessionMessage }> = (props) => {
   const t = () => props.msg.tool!;
+  // Edit / Write get a dedicated diff renderer that survives across
+  // phase transitions (waiting_confirmation → executing → completed).
+  // The proposed change is the same artifact in every phase; what
+  // changes is the surrounding chrome (approval pill before, "applied"
+  // badge after). Keeping the diff as the body makes the message
+  // legible without scrolling the user up to find the original input.
+  const editInput = () => {
+    const t0 = t();
+    const fromState =
+      t0.state.phase === "waiting_confirmation" ? t0.state.input : undefined;
+    const candidate = t0.input ?? fromState;
+    return isEditInput(candidate) ? candidate : null;
+  };
+  const writeInput = () => {
+    const t0 = t();
+    const fromState =
+      t0.state.phase === "waiting_confirmation" ? t0.state.input : undefined;
+    const candidate = t0.input ?? fromState;
+    return isWriteInput(candidate) ? candidate : null;
+  };
   return (
     <div class="space-y-1">
       <div class="flex items-center gap-2 font-mono text-xs">
@@ -141,11 +162,31 @@ const ToolBlock: Component<{ msg: SessionMessage }> = (props) => {
         <PhaseBadge state={t().state} />
         <span class="ml-auto text-fg-faint">{shortSub(t().toolId)}</span>
       </div>
-      <ToolStateBody
-        state={t().state}
-        description={props.msg.content}
-        toolName={t().name}
-      />
+      <Show when={editInput()} fallback={
+        <Show when={writeInput()} fallback={
+          <ToolStateBody
+            state={t().state}
+            description={props.msg.content}
+            toolName={t().name}
+          />
+        }>
+          {(w) => <WriteFile input={w()} />}
+        </Show>
+      }>
+        {(e) => <EditDiff input={e()} />}
+      </Show>
+      <Show
+        when={
+          (editInput() || writeInput()) &&
+          t().state.phase === "completed" &&
+          (t().state as { success: boolean }).success === false
+        }
+      >
+        <div class="rounded border border-danger/40 bg-danger/10 px-2 py-1.5 text-xs text-danger">
+          edit failed —{" "}
+          {(t().state as { output?: string }).output ?? "no error message"}
+        </div>
+      </Show>
     </div>
   );
 };

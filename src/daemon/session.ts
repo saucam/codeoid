@@ -866,6 +866,7 @@ export class Session {
               {
                 toolId,
                 name: toolName,
+                input: inputObj,
                 state: { phase: "executing", input: inputObj } as unknown as ToolState,
               },
             );
@@ -886,6 +887,7 @@ export class Session {
             {
               toolId,
               name: toolName,
+              input: inputObj,
               state: {
                 phase: "waiting_confirmation",
                 input: inputObj,

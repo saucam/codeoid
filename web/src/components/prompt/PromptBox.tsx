@@ -8,6 +8,7 @@
 
 import {
   Component,
+  For,
   Show,
   createEffect,
   createSignal,
@@ -33,6 +34,78 @@ import { openExportModal } from "../SessionExportModal";
 import { openImportModal } from "../SessionImportModal";
 import { dispatchSlash, parseSlash } from "./slash";
 
+interface PendingAttachment {
+  /** Local key for solid `For` reactivity (random — files can repeat). */
+  key: string;
+  /** Filename only — full path isn't available from the browser drag API. */
+  path: string;
+  size: number;
+  mimeType: string;
+  /** UTF-8 contents for text files; populated lazily after drop. */
+  content?: string;
+  /** Base64 contents for binary files; populated lazily after drop. */
+  data?: string;
+  /** True until the file has been read into memory. */
+  loading: boolean;
+  /** Read error, if the file wouldn't load. */
+  error?: string;
+}
+
+const MAX_ATTACH_BYTES = 1024 * 1024; // 1 MiB per file
+const TEXT_MIME_PATTERN = /^(text\/|application\/(json|xml|x-yaml|x-toml|javascript|typescript))/i;
+
+function isProbablyText(file: File): boolean {
+  if (TEXT_MIME_PATTERN.test(file.type)) return true;
+  if (!file.type) {
+    // Browser doesn't recognise the type — guess by extension.
+    return /\.(md|txt|json|yaml|yml|toml|js|jsx|ts|tsx|rs|go|py|rb|java|c|h|cc|cpp|hpp|cs|sh|bash|zsh|html|css|scss|sql|graphql|gql|ini|conf|xml|csv|log|env|cfg|lock)$/i.test(
+      file.name,
+    );
+  }
+  return false;
+}
+
+async function readAttachment(file: File): Promise<PendingAttachment> {
+  const key = `${file.name}-${file.size}-${Math.random().toString(36).slice(2, 8)}`;
+  const base: PendingAttachment = {
+    key,
+    path: file.name,
+    size: file.size,
+    mimeType: file.type || "application/octet-stream",
+    loading: true,
+  };
+  if (file.size > MAX_ATTACH_BYTES) {
+    return {
+      ...base,
+      loading: false,
+      error: `too large (${file.size} B > ${MAX_ATTACH_BYTES} B cap)`,
+    };
+  }
+  try {
+    if (isProbablyText(file)) {
+      const content = await file.text();
+      return { ...base, content, loading: false };
+    }
+    const buf = await file.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]!);
+    return { ...base, data: btoa(binary), loading: false };
+  } catch (err) {
+    return {
+      ...base,
+      loading: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
 const PromptBox: Component = () => {
   let textareaRef: HTMLTextAreaElement | undefined;
   const [text, setText] = createSignal("");
@@ -40,7 +113,25 @@ const PromptBox: Component = () => {
   const [transientPlaceholder, setTransientPlaceholder] = createSignal<string | null>(
     null,
   );
+  const [attachments, setAttachments] = createSignal<PendingAttachment[]>([]);
+  const [dragging, setDragging] = createSignal(false);
   const draftKey = () => focusedSessionId() ?? "__none__";
+
+  async function ingestFiles(files: FileList | null): Promise<void> {
+    if (!files || files.length === 0) return;
+    setError(null);
+    const arr = Array.from(files);
+    const reads = await Promise.all(arr.map(readAttachment));
+    setAttachments([...attachments(), ...reads]);
+  }
+
+  function removeAttachment(key: string): void {
+    setAttachments(attachments().filter((a) => a.key !== key));
+  }
+
+  function clearAttachments(): void {
+    setAttachments([]);
+  }
 
   // Hydrate from the persisted draft on session change.
   function hydrate() {
@@ -90,7 +181,14 @@ const PromptBox: Component = () => {
       return;
     }
     const raw = text().trim();
-    if (!raw) return;
+    if (!raw && attachments().length === 0) return;
+    // Block submit while any attachment is still being read; the user
+    // dragged something in and we don't want to ship a half-loaded
+    // payload.
+    if (attachments().some((a) => a.loading)) {
+      setError("attachments still loading…");
+      return;
+    }
 
     // Slash commands intercepted client-side.
     const slash = parseSlash(raw);
@@ -121,15 +219,24 @@ const PromptBox: Component = () => {
     // so the just-submitted message animates into view rather than
     // snapping. One-shot — streaming deltas after this stay instant.
     window.dispatchEvent(new Event("codeoid:smooth-scroll"));
+    const ready = attachments().filter((a) => !a.loading && !a.error);
+    const payload = ready.map((a) => ({
+      path: a.path,
+      mimeType: a.mimeType,
+      ...(a.content !== undefined ? { content: a.content } : {}),
+      ...(a.data !== undefined ? { data: a.data } : {}),
+    }));
     send({
       type: "session.send",
       id: newRequestId(),
       sessionId: session.id,
       text: raw,
+      ...(payload.length > 0 ? { attachments: payload } : {}),
     });
     clearDraft(draftKey());
     setText("");
     setTransientPlaceholder(null);
+    clearAttachments();
     autosize();
   }
 
@@ -146,8 +253,63 @@ const PromptBox: Component = () => {
   }
 
   return (
-    <footer class="border-t border-border bg-bg-elev/60 px-4 py-3">
+    <footer
+      class="relative border-t border-border bg-bg-elev/60 px-4 py-3"
+      onDragEnter={(e) => {
+        if (!e.dataTransfer || !e.dataTransfer.types.includes("Files")) return;
+        e.preventDefault();
+        setDragging(true);
+      }}
+      onDragOver={(e) => {
+        if (!e.dataTransfer || !e.dataTransfer.types.includes("Files")) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+        setDragging(true);
+      }}
+      onDragLeave={(e) => {
+        // Only reset when leaving the footer itself, not just a child.
+        if (e.currentTarget === e.target) setDragging(false);
+      }}
+      onDrop={(e) => {
+        if (!e.dataTransfer || !e.dataTransfer.types.includes("Files")) return;
+        e.preventDefault();
+        setDragging(false);
+        void ingestFiles(e.dataTransfer.files);
+      }}
+    >
       <div class="mx-auto max-w-3xl space-y-1">
+        <Show when={attachments().length > 0}>
+          <ul class="flex flex-wrap gap-1.5 px-1 pb-1">
+            <For each={attachments()}>
+              {(att) => (
+                <li
+                  class={`flex items-center gap-1.5 rounded border px-2 py-1 font-mono text-[11px] ${
+                    att.error
+                      ? "border-danger/40 bg-danger/10 text-danger"
+                      : att.loading
+                        ? "border-warn/40 bg-warn/10 text-warn"
+                        : "border-border bg-bg-active/40 text-fg"
+                  }`}
+                  title={att.error ? `${att.path}: ${att.error}` : att.path}
+                >
+                  <span class="text-fg-faint">📎</span>
+                  <span class="max-w-[20ch] truncate">{att.path}</span>
+                  <span class="text-fg-faint">
+                    {att.loading ? "…" : att.error ? "✕" : formatBytes(att.size)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => removeAttachment(att.key)}
+                    class="text-fg-faint transition hover:text-danger"
+                    title="Remove"
+                  >
+                    ×
+                  </button>
+                </li>
+              )}
+            </For>
+          </ul>
+        </Show>
         <div class="flex items-end gap-2 rounded border border-border bg-bg px-3 py-2 focus-within:border-accent">
           <textarea
             ref={textareaRef}
@@ -158,7 +320,7 @@ const PromptBox: Component = () => {
             placeholder={
               transientPlaceholder() ??
               (focusedSession()
-                ? "Message Claude…  Enter sends · Shift+Enter for newline · /help for commands"
+                ? "Message Claude…  Enter sends · Shift+Enter for newline · drop files to attach · /help for commands"
                 : "Select or create a session first.")
             }
             class="flex-1 resize-none bg-transparent font-mono text-sm leading-6 text-fg outline-none placeholder:text-fg-faint transition-[height] duration-150 ease-out"
@@ -167,7 +329,9 @@ const PromptBox: Component = () => {
           <button
             type="button"
             onClick={submit}
-            disabled={!text().trim() || !focusedSession()}
+            disabled={
+              (!text().trim() && attachments().length === 0) || !focusedSession()
+            }
             class="self-end rounded bg-accent px-3 py-1 text-xs font-semibold text-bg transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-40"
             title="Send (Enter)"
           >
@@ -182,6 +346,13 @@ const PromptBox: Component = () => {
           /import · /who · /agents · /skills · /mcp · /hooks · /destroy
         </div>
       </div>
+      <Show when={dragging() && focusedSession()}>
+        <div
+          class="pointer-events-none absolute inset-2 flex items-center justify-center rounded-lg border-2 border-dashed border-accent bg-accent/10 text-sm font-semibold text-accent"
+        >
+          drop to attach
+        </div>
+      </Show>
     </footer>
   );
 };
