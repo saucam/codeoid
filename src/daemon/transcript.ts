@@ -60,6 +60,8 @@ export class TranscriptStore {
    * window.
    */
   #metaWriteChain = new Map<string, Promise<void>>();
+  /** Per-session promise chain for `append()`. See append() docs. */
+  #appendChain = new Map<string, Promise<void>>();
 
   constructor(transcriptDir: string) {
     this.#dir = transcriptDir;
@@ -99,7 +101,29 @@ export class TranscriptStore {
     // O(n²) over a session lifetime. A 5 000-message session burned
     // tens of MB of write amplification for nothing. `appendFile`
     // resolves to a single open(O_APPEND) + write under the hood.
-    await appendFile(path, line, "utf-8");
+    //
+    // CONCURRENCY: callers fire-and-forget multiple appends per turn
+    // with monotonically-increasing `seq`. `appendFile`'s O_APPEND
+    // makes individual writes atomic, but the LOGICAL order of
+    // overlapping calls isn't guaranteed — so a `seq=42` write can
+    // hit disk before `seq=41`'s. `loadTranscript` then merges by
+    // messageId in file order; "later" tool state may be replaced
+    // by "earlier" state, leaving tool calls stuck `executing` after
+    // restart. Chain per-session so writes for the same session
+    // serialize. Different sessions still write in parallel.
+    const prev = this.#appendChain.get(sessionId) ?? Promise.resolve();
+    const next = prev
+      .catch(() => undefined)
+      .then(() => appendFile(path, line, "utf-8"));
+    this.#appendChain.set(
+      sessionId,
+      next.finally(() => {
+        if (this.#appendChain.get(sessionId) === next) {
+          this.#appendChain.delete(sessionId);
+        }
+      }),
+    );
+    return next;
   }
 
   /**

@@ -169,6 +169,13 @@ export class Session {
   // "X total rotations" display without hitting SQLite on every broadcast.
   #rotationCount = 0;
   #lastRotatedAt: number | null = null;
+  /**
+   * Turns elapsed since the last rotation (or since session start
+   * if we've never rotated). The auto-rotate min-turns guard now
+   * uses THIS instead of `usage.numTurns` (which is cumulative
+   * across rotations and can't gate the post-rotation thrash).
+   */
+  #turnsSinceLastRotation = 0;
   // Last user turn BEFORE rotation — seeded into the new session's opening
   // prompt so the agent knows what it was working on. Captured inside
   // rotate() from the most recent user_turn episode.
@@ -525,7 +532,40 @@ export class Session {
 
   // ── Agent interaction ─────────────────────────────────────────────────
 
+  /**
+   * Per-Session promise chain that serializes `send()` invocations.
+   * Without it, two near-simultaneous sends both await `#rotate` /
+   * `#ensureQueryLoop` and observe the same pre-rotation state —
+   * both rotate, both call `query()`, two SDK subprocesses fight
+   * over the same input queue. Chaining ensures the second send
+   * sees the first send's full state transition.
+   *
+   * Different sessions still run in parallel (each Session instance
+   * has its own chain).
+   */
+  #sendChain: Promise<void> = Promise.resolve();
+
   async send(
+    text: string,
+    sender: AuthContext,
+    attachments?: readonly Attachment[],
+    priority?: "now" | "next" | "later",
+  ): Promise<void> {
+    // Funnel through the chain. The next send awaits the previous
+    // send's full settle (success or thrown). Errors propagate to the
+    // caller of THIS send only — the chain itself absorbs them so a
+    // failed send doesn't poison subsequent sends.
+    const next = this.#sendChain
+      .catch(() => undefined)
+      .then(() => this.#sendInner(text, sender, attachments, priority));
+    this.#sendChain = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
+
+  async #sendInner(
     text: string,
     sender: AuthContext,
     attachments?: readonly Attachment[],
@@ -852,9 +892,14 @@ export class Session {
               const input = rawInput as SubagentStopHookInput;
               const agentId = input.agent_id ?? "unknown";
               await im?.deactivateSubagent(sessionId, agentId);
-              const entry = this.#subagents.get(agentId);
-              if (entry) {
-                entry.active = false;
+              // Drop the entry entirely instead of marking inactive.
+              // The previous behaviour kept every spawned subagent in
+              // the map for the session's lifetime; long sessions with
+              // many tool-using turns leaked O(turns) entries, and
+              // `toInfo()` walked the whole map on every status flip.
+              // ZeroID identity manager already records terminal
+              // state via deactivateSubagent.
+              if (this.#subagents.delete(agentId)) {
                 this.#broadcastInfoUpdate();
               }
               return {};
@@ -1341,6 +1386,7 @@ export class Session {
       this.#usage.totalCostUsd += turn.total_cost_usd ?? 0;
       this.#usage.durationMs += turn.duration_ms ?? 0;
       this.#usage.numTurns += 1;
+      this.#turnsSinceLastRotation += 1;
       // PEAK tracks primary-only — ignore subagent contributions so a
       // subagent-heavy turn doesn't poison the bloat canary.
       this.#usage.peakInputTokens = Math.max(
@@ -1579,7 +1625,11 @@ export class Session {
     // defeat that.
     const decision = decideRotation({
       primaryLastTurnContext: this.#usage.lastTurnInputTokens ?? 0,
-      numTurns: this.#usage.numTurns,
+      // Pass turns-since-last-rotation, not cumulative numTurns —
+      // the min-turns guard exists to avoid rotating right after
+      // we just rotated. Cumulative numTurns saturates past the
+      // threshold and the guard becomes a no-op forever.
+      numTurns: this.#turnsSinceLastRotation,
       enabled: ar.enabled,
       rotatePct: ar.rotatePct,
       hardRotatePct: ar.hardRotatePct,
@@ -1620,6 +1670,19 @@ export class Session {
     // CRITICAL: reset hasQueried so the SDK creates a fresh session rather
     // than trying to resume an id that has no persisted history.
     this.#hasQueried = false;
+    // Reset rotation-trigger inputs so the next #shouldRotate()
+    // doesn't immediately fire on the SAME usage figures that just
+    // triggered THIS rotation. Without this:
+    //   - lastTurnInputTokens is still ~95% of window (the value
+    //     that triggered us). Next send → shouldRotate → true →
+    //     another rotation, repeat.
+    //   - numTurns is cumulative; minTurnsBeforeRotate doesn't help
+    //     because we've passed it long ago.
+    // After a rotation the new backing session starts fresh; the
+    // ctx denominator is genuinely 0 until the first turn lands a
+    // real usage row, so 0 is the right value to seed.
+    this.#usage.lastTurnInputTokens = 0;
+    this.#turnsSinceLastRotation = 0;
 
     // Persist + audit.
     try {
@@ -2129,6 +2192,14 @@ export class Session {
   #closeToolCallWithOutput(messageId: string, output: string, success: boolean): void {
     if (this.#toolCallsClosedByResult.has(messageId)) return;
     this.#toolCallsClosedByResult.add(messageId);
+    // Remove from the active list IMMEDIATELY after marking closed —
+    // before any of the broadcast/persist work below. The fallback
+    // `#completeActiveTools` reads both sets to decide whether to
+    // emit a synthetic `success:true, output:""`. Closing the window
+    // synchronously means even a future call site that introduces an
+    // await between the add and the broadcast can't race a
+    // synthetic completion ahead of the real one.
+    this.#activeToolMsgIds = this.#activeToolMsgIds.filter((id) => id !== messageId);
 
     const original = this.#toolCallMessages.get(messageId);
     if (!original || !original.tool) return;
@@ -2164,8 +2235,22 @@ export class Session {
       timestamp: updated.timestamp,
     });
 
-    // Remove from active list so the fallback completer doesn't clobber us.
-    this.#activeToolMsgIds = this.#activeToolMsgIds.filter((id) => id !== messageId);
+    // Already removed from #activeToolMsgIds at the top of this fn;
+    // clean up the per-tool tracking maps too. Without these
+    // deletes, long sessions accumulate O(tool_use_count) entries
+    // across `#toolUseIdToMessageId`, `#toolUseAgentId`, and
+    // `#toolCallMessages` — each hot map (`#toolUseAgentId` is
+    // consulted on every PreToolUse, `#toolCallsClosedByResult`
+    // grows monotonically). Drop the tool_use_id mappings now that
+    // the tool has terminated; keep `#toolCallsClosedByResult` as a
+    // dedup guard against double-close (it's bounded per-session
+    // anyway by tool count, but we GC older entries below).
+    for (const [tuid, mid] of this.#toolUseIdToMessageId) {
+      if (mid === messageId) {
+        this.#toolUseIdToMessageId.delete(tuid);
+        this.#toolUseAgentId.delete(tuid);
+      }
+    }
     this.#toolCallMessages.delete(messageId);
   }
 

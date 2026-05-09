@@ -594,28 +594,35 @@ export class SessionManager {
   /**
    * Graceful drain — wait for all in-flight sessions to reach idle.
    * Used during shutdown.
+   *
+   * Each working session is interrupted **once**. The previous loop
+   * re-interrupted on every poll iteration; if the SDK subprocess
+   * was mid HTTP retry and didn't respond within 500 ms, drain
+   * piled up duplicate "interrupted by system:shutdown" info rows
+   * (up to 20 in a 10-s window) and 20× the audit log churn. Track
+   * a per-session "already interrupted" set, then poll status until
+   * idle or deadline.
    */
   async drain(timeoutMs: number = 10_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
-
+    const systemAuth: AuthContext = {
+      sub: "system:shutdown",
+      scopes: [],
+      delegationDepth: 0,
+      accountId: "",
+      projectId: "",
+    };
+    const interrupted = new Set<string>();
     while (Date.now() < deadline) {
       const working = [...this.#sessions.values()].filter(
         (s) => s.status === "working" || s.status === "waiting_approval",
       );
-
       if (working.length === 0) return;
-
-      // Interrupt all working sessions
       for (const session of working) {
-        session.interrupt({
-          sub: "system:shutdown",
-          scopes: [],
-          delegationDepth: 0,
-          accountId: "",
-          projectId: "",
-        });
+        if (interrupted.has(session.id)) continue;
+        session.interrupt(systemAuth);
+        interrupted.add(session.id);
       }
-
       await Bun.sleep(500);
     }
   }
