@@ -49,7 +49,9 @@ interface PendingRequest {
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MIN_BACKOFF_MS = 500;
-const MAX_BACKOFF_MS = 15_000;
+const MAX_BACKOFF_MS = 30_000;
+/** Decorrelated jitter envelope: pick uniformly in [min, computed * factor]. */
+const JITTER_FACTOR = 1.5;
 
 export class CodeoidClient {
   #opts: ConnectOptions;
@@ -160,8 +162,16 @@ export class CodeoidClient {
   }
 
   async #connectWithBackoff(attempt: number): Promise<AuthOkMsg> {
-    const max = this.#opts.maxAttempts ?? 5;
-    while (!this.#shutdown && attempt <= max) {
+    // `maxAttempts: 0` (or undefined) means "never give up" — the
+    // common case is a laptop lid closing for an hour, the daemon
+    // bouncing during dev, or a flaky home wifi. Capping at 5
+    // attempts used to leave the user staring at "failed" until
+    // they refreshed; that's worse than waiting longer between
+    // attempts. Callers that explicitly want a bound can still set
+    // `maxAttempts` to a positive number.
+    const max = this.#opts.maxAttempts ?? 0;
+    const isBounded = max > 0;
+    while (!this.#shutdown && (!isBounded || attempt <= max)) {
       try {
         this.#setStatus({ kind: "connecting", attempt });
         const auth = await this.#connectOnce();
@@ -169,11 +179,17 @@ export class CodeoidClient {
         return auth;
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
-        if (attempt >= max) {
+        if (isBounded && attempt >= max) {
           this.#setStatus({ kind: "failed", reason });
           throw err;
         }
-        const backoff = Math.min(MAX_BACKOFF_MS, MIN_BACKOFF_MS * 2 ** (attempt - 1));
+        // Exponential backoff with full jitter — picks uniformly in
+        // [MIN_BACKOFF_MS, computed * JITTER_FACTOR] to break thundering
+        // herds when many clients reconnect at once (post-restart) and
+        // to avoid the "wakes up exactly on the second" pattern.
+        const ceiling = Math.min(MAX_BACKOFF_MS, MIN_BACKOFF_MS * 2 ** (attempt - 1));
+        const upper = Math.min(MAX_BACKOFF_MS, Math.floor(ceiling * JITTER_FACTOR));
+        const backoff = MIN_BACKOFF_MS + Math.floor(Math.random() * (upper - MIN_BACKOFF_MS));
         this.#log("warn", `connect attempt ${attempt} failed: ${reason}; retry in ${backoff}ms`);
         this.#setStatus({ kind: "reconnecting", attempt, nextInMs: backoff, reason });
         await delay(backoff);

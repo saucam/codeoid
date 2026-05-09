@@ -233,7 +233,17 @@ const Transcript: Component = () => {
                   {(msg) => (
                     <div
                       data-index={item.index}
-                      ref={(el) => queueMicrotask(() => virtualizer.measureElement(el))}
+                      // Hand the element directly to the virtualizer's
+                      // ResizeObserver. The previous `queueMicrotask`
+                      // wrap caused first-frame measurements to land
+                      // before layout (heights came back as 0 / the
+                      // estimateSize default), so streaming markdown
+                      // rows mounted with the wrong bounds and the
+                      // virtualizer's spacer math jittered for the
+                      // first few deltas. ResizeObserver picks up
+                      // subsequent growth automatically — no manual
+                      // remeasure needed even as the row swells.
+                      ref={(el) => virtualizer.measureElement(el)}
                       class="absolute left-0 top-0 w-full pb-2"
                       style={{ transform: `translateY(${item.start}px)` }}
                     >

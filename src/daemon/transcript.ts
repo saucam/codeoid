@@ -14,6 +14,7 @@
  */
 
 import { existsSync, mkdirSync } from "node:fs";
+import { appendFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { DaemonMessage, SessionStatus } from "../protocol/types.js";
 
@@ -82,10 +83,12 @@ export class TranscriptStore {
     const path = this.transcriptPath(sessionId);
     const line = JSON.stringify(entry) + "\n";
 
-    // Append to JSONL file
-    const file = Bun.file(path);
-    const existing = await file.exists() ? await file.text() : "";
-    await Bun.write(path, existing + line);
+    // True append. The previous implementation read the entire file
+    // and rewrote it with the new line concatenated — O(n) per append,
+    // O(n²) over a session lifetime. A 5 000-message session burned
+    // tens of MB of write amplification for nothing. `appendFile`
+    // resolves to a single open(O_APPEND) + write under the hood.
+    await appendFile(path, line, "utf-8");
   }
 
   /**

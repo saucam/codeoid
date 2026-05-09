@@ -122,11 +122,16 @@ const PromptBox: Component = () => {
     setError(null);
     const arr = Array.from(files);
     const reads = await Promise.all(arr.map(readAttachment));
-    setAttachments([...attachments(), ...reads]);
+    // Functional setter — concurrent drops both await Promise.all and
+    // both call this. With a snapshot setter the second drop overwrites
+    // the first because both read `attachments()` before either wrote.
+    // Functional updates serialize against Solid's signal queue, so
+    // each set sees the previous one's result.
+    setAttachments((prev) => [...prev, ...reads]);
   }
 
   function removeAttachment(key: string): void {
-    setAttachments(attachments().filter((a) => a.key !== key));
+    setAttachments((prev) => prev.filter((a) => a.key !== key));
   }
 
   function clearAttachments(): void {

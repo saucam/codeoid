@@ -100,7 +100,12 @@ export class SessionManager {
         session.restoreScrollback(messages);
 
         this.#sessions.set(session.id, session);
-        this.#rateLimiter.recordCreation(meta.createdBy);
+        // Resume is NOT a creation — don't burn a slot in the
+        // per-user concurrency cap. Otherwise restarting with N
+        // persisted sessions saturates the limit on the spot and the
+        // next legitimate `session.create` fails with
+        // "Concurrent session limit reached" until the user
+        // /destroys some.
         resumed++;
       } catch {
         // Skip sessions that fail to resume

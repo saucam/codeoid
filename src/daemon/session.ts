@@ -116,6 +116,17 @@ export class Session {
   readonly workdir: string;
   readonly createdBy: string;
   readonly createdAt: string;
+  /**
+   * Tenancy stamps captured at session creation (or restored from disk
+   * on resume). Persisted alongside the transcript meta on every
+   * `setStatus` so a daemon restart picks them back up — without this
+   * the fields drift to "" the moment the first status flip after
+   * resume happens, and any future multi-tenant scoping on the
+   * `Store.listSessions(accountId, projectId)` filter would
+   * silently drop everything that's been resumed.
+   */
+  readonly accountId: string;
+  readonly projectId: string;
 
   #status: SessionStatus = "idle";
   #clients = new Map<string, AttachedClient>();
@@ -295,6 +306,8 @@ export class Session {
     this.workdir = opts.workdir;
     this.createdBy = opts.auth.sub;
     this.createdAt = new Date().toISOString();
+    this.accountId = opts.auth.accountId;
+    this.projectId = opts.auth.projectId;
     this.#store = opts.store;
     this.#transcriptStore = opts.transcriptStore;
     this.#identityManager = opts.identityManager;
@@ -998,8 +1011,8 @@ export class Session {
             sub: "system",
             scopes: [],
             delegationDepth: 0,
-            accountId: "",
-            projectId: "",
+            accountId: this.accountId,
+            projectId: this.projectId,
           };
           for (const [aid, resolveFn] of this.#pendingApprovals.entries()) {
             resolveFn({ approved: false });
@@ -2281,8 +2294,8 @@ export class Session {
       createdAt: this.createdAt,
       lastStatus: status,
       lastActivityAt: new Date().toISOString(),
-      accountId: "",
-      projectId: "",
+      accountId: this.accountId,
+      projectId: this.projectId,
     }).catch(() => {});
 
     this.#broadcastRaw({

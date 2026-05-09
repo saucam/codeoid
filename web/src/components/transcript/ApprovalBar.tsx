@@ -80,45 +80,61 @@ const ApprovalBar: Component = () => {
     return null;
   });
 
+  // Resolve the pending state once and gate every callback on its
+  // *captured* approvalId. Without this, a stray click that races a
+  // delta promoting the tool to `executing` would read
+  // `state().approvalId` AFTER the cast — returning `undefined` —
+  // and the resulting `session.approve` would either bounce off
+  // stale-cleanup or, before the P0 fix, hijack the wrong approval.
+  // Each callback also re-checks the current pending: if the bar is
+  // still showing but the state already flipped, we no-op rather
+  // than firing a doomed request.
+  const snapshot = createMemo(() => {
+    const m = pending();
+    if (!m || !m.tool) return null;
+    const s = m.tool.state;
+    if (s.phase !== "waiting_confirmation") return null;
+    return {
+      approvalId: s.approvalId,
+      description: s.description,
+      input: s.input,
+      toolName: m.tool.name,
+    };
+  });
   return (
-    <Show when={pending()}>
-      {(m) => {
-        const state = () =>
-          m().tool!.state as {
-            phase: "waiting_confirmation";
-            input: unknown;
-            description: string;
-            approvalId: string;
-          };
-        const toolName = () => m().tool!.name;
+    <Show when={snapshot()}>
+      {(snap) => {
         const isPlanMode = () =>
-          toolName() === "ExitPlanMode" || toolName() === "exit_plan_mode";
-        const isAsk = () => isAskUserQuestion(toolName());
+          snap().toolName === "ExitPlanMode" || snap().toolName === "exit_plan_mode";
+        const isAsk = () => isAskUserQuestion(snap().toolName);
         const sid = focusedSessionId;
+        const safeApprove = (approved: boolean, updatedInput?: Record<string, unknown>) => {
+          const cur = snapshot();
+          if (!cur || cur.approvalId !== snap().approvalId) return;
+          approve(sid()!, snap().approvalId, approved, updatedInput);
+        };
         return (
           <Show when={isAsk()} fallback={
             <BinaryBar
-              toolName={toolName()}
-              description={state().description}
+              toolName={snap().toolName}
+              description={snap().description}
               isPlanMode={isPlanMode()}
-              onApprove={() => approve(sid()!, state().approvalId, true)}
+              onApprove={() => safeApprove(true)}
               onRefine={() => {
-                approve(sid()!, state().approvalId, false);
+                safeApprove(false);
                 focusPromptWithHint(
                   isPlanMode()
                     ? "What should change in the plan?"
                     : "What would you like Claude to do instead?",
                 );
               }}
-              onDeny={() => approve(sid()!, state().approvalId, false)}
+              onDeny={() => safeApprove(false)}
             />
           }>
             <AskUserQuestionForm
-              questions={extractQuestions(state().input)}
-              onSubmit={(answers) =>
-                approve(sid()!, state().approvalId, true, { answers })
-              }
-              onCancel={() => approve(sid()!, state().approvalId, false)}
+              questions={extractQuestions(snap().input)}
+              onSubmit={(answers) => safeApprove(true, { answers })}
+              onCancel={() => safeApprove(false)}
             />
           </Show>
         );
