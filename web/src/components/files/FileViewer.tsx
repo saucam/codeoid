@@ -9,7 +9,7 @@ import { Component, Show, createResource } from "solid-js";
 
 import { closeFile, openedFile } from "../../state/files";
 import { formatTokens } from "../../lib/format";
-import { SHIKI_THEME, getHighlighter } from "../../lib/shiki";
+import { SHIKI_THEME, ensureLang } from "../../lib/shiki";
 
 const FileViewer: Component = () => {
   return (
@@ -74,9 +74,10 @@ const Body: Component = () => {
     async (input) => {
       if (!input) return null;
       try {
-        const hl = await getHighlighter();
-        const lang = input.language && hl.getLoadedLanguages().includes(input.language as never)
-          ? input.language
+        const requested = input.language ?? "text";
+        const hl = await ensureLang(requested);
+        const lang = hl.getLoadedLanguages().includes(requested as never)
+          ? requested
           : "text";
         return hl.codeToHtml(input.content, {
           lang,

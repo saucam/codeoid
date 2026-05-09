@@ -24,7 +24,7 @@
 import { Component, For, createMemo, createResource } from "solid-js";
 import * as Diff from "diff";
 
-import { getHighlighter, langForFilename } from "../../lib/shiki";
+import { ensureLang, langForFilename } from "../../lib/shiki";
 
 interface EditInput {
   file_path: string;
@@ -137,6 +137,49 @@ function withCollapsedContext(lines: DiffLine[]): (DiffLine | null)[] {
   return out;
 }
 
+interface DiffIndices {
+  /** Map from each non-added DiffLine reference → its index in the OLD-side buffer. */
+  oldIndex: Map<DiffLine, number>;
+  /** Map from each non-removed DiffLine reference → its index in the NEW-side buffer. */
+  newIndex: Map<DiffLine, number>;
+  /** OLD-side joined text — passed to shiki once, sliced per row. */
+  oldText: string;
+  /** NEW-side joined text. */
+  newText: string;
+}
+
+/**
+ * Build two side-buckets out of the line list AND a (line → bucket
+ * index) map per side. The previous renderer recomputed
+ * `lines.filter(...)` and `[].indexOf(...)` per row — O(n²) filters
+ * on top of O(n) indexOf, total O(n³) for a diff with N lines.
+ * Doing it once at the parent and looking up via Map cuts every
+ * lookup to O(1).
+ */
+function buildDiffIndices(lines: (DiffLine | null)[]): DiffIndices {
+  const oldIndex = new Map<DiffLine, number>();
+  const newIndex = new Map<DiffLine, number>();
+  const oldTextLines: string[] = [];
+  const newTextLines: string[] = [];
+  for (const l of lines) {
+    if (!l) continue;
+    if (l.kind !== "added") {
+      oldIndex.set(l, oldTextLines.length);
+      oldTextLines.push(l.text);
+    }
+    if (l.kind !== "removed") {
+      newIndex.set(l, newTextLines.length);
+      newTextLines.push(l.text);
+    }
+  }
+  return {
+    oldIndex,
+    newIndex,
+    oldText: oldTextLines.join("\n"),
+    newText: newTextLines.join("\n"),
+  };
+}
+
 const EditDiff: Component<{ input: EditInput }> = (props) => {
   const lang = createMemo(() => langForFilename(props.input.file_path));
   const lines = createMemo(() =>
@@ -144,22 +187,14 @@ const EditDiff: Component<{ input: EditInput }> = (props) => {
       buildLineDiff(props.input.old_string, props.input.new_string),
     ),
   );
+  const indices = createMemo(() => buildDiffIndices(lines()));
 
   const [highlighted] = createResource(
-    () => ({ lines: lines(), lang: lang() }),
-    async ({ lines, lang }) => {
-      const hl = await getHighlighter();
-      // Highlight the OLD and NEW sides independently so each line
-      // already carries its own colour spans. Cheaper than re-running
-      // shiki per row, and the shiki output is HTML we slice apart.
-      const oldText = lines
-        .filter((l) => l && l.kind !== "added")
-        .map((l) => l!.text)
-        .join("\n");
-      const newText = lines
-        .filter((l) => l && l.kind !== "removed")
-        .map((l) => l!.text)
-        .join("\n");
+    () => ({ idx: indices(), lang: lang() }),
+    async ({ idx, lang }) => {
+      const hl = await ensureLang(lang);
+      const oldText = idx.oldText;
+      const newText = idx.newText;
       const safeLang = hl.getLoadedLanguages().includes(lang) ? lang : "text";
       try {
         const oldHtml = hl.codeToHtml(oldText, {
@@ -190,13 +225,11 @@ const EditDiff: Component<{ input: EditInput }> = (props) => {
       </header>
       <div class="flex flex-col">
         <For each={lines()}>
-          {(line, i) => (
+          {(line) => (
             <DiffRow
               line={line}
-              index={i()}
+              indices={indices()}
               highlighted={highlighted()}
-              oldLines={lines().filter((l) => l && l.kind !== "added")}
-              newLines={lines().filter((l) => l && l.kind !== "removed")}
             />
           )}
         </For>
@@ -207,10 +240,8 @@ const EditDiff: Component<{ input: EditInput }> = (props) => {
 
 const DiffRow: Component<{
   line: DiffLine | null;
-  index: number;
+  indices: DiffIndices;
   highlighted: { oldRows: string[]; newRows: string[] } | null | undefined;
-  oldLines: (DiffLine | null)[];
-  newLines: (DiffLine | null)[];
 }> = (props) => {
   if (props.line === null) {
     return (
@@ -235,28 +266,26 @@ const DiffRow: Component<{
         ? "text-danger"
         : "text-fg-faint";
 
-  // Pull the matching shiki-highlighted row out of either the OLD or
-  // NEW buffer (whichever side this row lives on). Falls back to the
-  // raw text when the highlight resource is still loading or failed.
+  // O(1) Map lookup against the precomputed side buckets. The
+  // previous code re-filtered `lines` per row AND walked each side
+  // bucket with `[].indexOf` to find this exact reference — O(n²)
+  // filters layered on O(n) indexOf, total O(n³) renders for a
+  // single diff. For added lines we want the NEW-side row; for
+  // removed/context we prefer OLD-side. Context exists on both
+  // sides; shiki produces identical output for unchanged text so
+  // the choice is cosmetic.
   let highlightedRow: string | null = null;
   if (props.highlighted) {
     if (line.kind === "removed" || line.kind === "context") {
-      // Index in the OLD buffer.
-      let oldIdx = 0;
-      for (let i = 0; i < props.index; i++) {
-        const l = props.oldLines[i];
-        if (l && (l === line || (l.kind !== "added" && l !== line))) oldIdx++;
-      }
-      // Recompute by walking oldLines for this exact line reference.
-      const idx = props.oldLines.indexOf(line);
-      if (idx >= 0 && props.highlighted.oldRows[idx]) {
-        highlightedRow = props.highlighted.oldRows[idx];
+      const idx = props.indices.oldIndex.get(line);
+      if (idx !== undefined) {
+        highlightedRow = props.highlighted.oldRows[idx] ?? null;
       }
     }
     if (line.kind === "added" || (line.kind === "context" && !highlightedRow)) {
-      const idx = props.newLines.indexOf(line);
-      if (idx >= 0 && props.highlighted.newRows[idx]) {
-        highlightedRow = props.highlighted.newRows[idx];
+      const idx = props.indices.newIndex.get(line);
+      if (idx !== undefined) {
+        highlightedRow = props.highlighted.newRows[idx] ?? null;
       }
     }
   }
@@ -304,7 +333,7 @@ const WriteFile: Component<{ input: WriteInput }> = (props) => {
   const [rendered] = createResource(
     () => ({ content: props.input.content, lang: lang() }),
     async ({ content, lang }) => {
-      const hl = await getHighlighter();
+      const hl = await ensureLang(lang);
       const safeLang = hl.getLoadedLanguages().includes(lang) ? lang : "text";
       try {
         const html = hl.codeToHtml(content, {

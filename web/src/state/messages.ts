@@ -60,6 +60,35 @@ export function createMessages(sessionId: () => string | null) {
   });
 }
 
+/**
+ * Singleton memo for the focused session's messages.
+ *
+ * Multiple components (Transcript, ApprovalBar, WorkerIndicator,
+ * desktop-notifications) used to each call `createMessages(
+ * focusedSessionId)`, instantiating four separate memos that
+ * recomputed on every delta and each held their own subscriber. This
+ * shared accessor is the single computation; consumers all hang off
+ * one node in the dependency graph instead of four.
+ *
+ * Wiring runs once via `setFocusedSessionAccessor()` from `sessions.ts`
+ * during its module-init so we avoid a top-level import cycle (this
+ * file holds the message store; `sessions.ts` already pokes at it on
+ * session-destroy and would otherwise import-back).
+ */
+let focusedSessionIdAccessor: (() => string | null) | null = null;
+let focusedMessagesMemo: (() => SessionMessage[]) | null = null;
+export function setFocusedSessionAccessor(fn: () => string | null): void {
+  focusedSessionIdAccessor = fn;
+  focusedMessagesMemo = null; // re-bind on next call
+}
+export function focusedSessionMessages(): SessionMessage[] {
+  if (!focusedSessionIdAccessor) return EMPTY;
+  if (!focusedMessagesMemo) {
+    focusedMessagesMemo = createMessages(focusedSessionIdAccessor);
+  }
+  return focusedMessagesMemo();
+}
+
 /** Monotonic version for a message (cache key). 0 = never seen. */
 export function versionOf(messageId: string): number {
   return state.versions[messageId] ?? 0;

@@ -103,8 +103,18 @@ export function setLeftCollapsed(v: boolean): void {
   setLeftSidebarCollapsed(v);
 }
 
-// Persist on every change. Single effect — no per-setter writes.
+// Persist on every change — debounced. Resize drag handlers used to
+// pump `setLeftWidth` on every pointermove (60 calls/sec on a typical
+// trackpad), which fired this effect 60×/sec, which JSON-stringified
+// + wrote localStorage 60×/sec. localStorage writes are synchronous,
+// so the resize cursor felt sluggish on slower machines and the
+// browser logged "Forced reflow" warnings. Coalesce via a 150 ms
+// trailing debounce; drag commits land cleanly when the user releases,
+// no per-pointer-event writes.
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
 createEffect(() => {
+  // Read inside the effect so we still track every signal — debounce
+  // affects only the write side.
   const snapshot: LayoutState = {
     leftSidebarPx: leftSidebarPx(),
     leftSidebarCollapsed: leftSidebarCollapsed(),
@@ -112,12 +122,39 @@ createEffect(() => {
     headerCollapsed: headerCollapsed(),
   };
   if (typeof localStorage === "undefined") return;
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
-  } catch {
-    // Quota / private mode — drop silently.
-  }
+  if (persistTimer !== null) clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+    } catch {
+      // Quota / private mode — drop silently.
+    }
+  }, 150);
 });
+
+// Best-effort flush before unload so the user doesn't lose the last
+// drag position if they close the tab within the debounce window.
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", () => {
+    if (persistTimer === null) return;
+    clearTimeout(persistTimer);
+    persistTimer = null;
+    try {
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({
+          leftSidebarPx: leftSidebarPx(),
+          leftSidebarCollapsed: leftSidebarCollapsed(),
+          rightPanePx: rightPanePx(),
+          headerCollapsed: headerCollapsed(),
+        }),
+      );
+    } catch {
+      /* unload-time best effort */
+    }
+  });
+}
 
 export const LIMITS_RO = LIMITS;
 

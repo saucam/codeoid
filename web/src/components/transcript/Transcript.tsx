@@ -27,7 +27,7 @@ import {
 import { createVirtualizer } from "@tanstack/solid-virtual";
 
 import MessageRow from "./MessageRow";
-import { createMessages, epochOf, versionOf } from "../../state/messages";
+import { epochOf, focusedSessionMessages, versionOf } from "../../state/messages";
 import { focusedSession, focusedSessionId } from "../../state/sessions";
 import {
   findJumpTarget,
@@ -38,7 +38,7 @@ import {
 const SCROLL_STICKY_THRESHOLD_PX = 80;
 
 const Transcript: Component = () => {
-  const messages = createMessages(focusedSessionId);
+  const messages = focusedSessionMessages;
   let containerRef: HTMLDivElement | undefined;
   const [stuckBottom, setStuckBottom] = createSignal(true);
 

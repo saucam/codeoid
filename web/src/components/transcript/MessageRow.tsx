@@ -228,17 +228,37 @@ const WaitingConfirmationBody: Component<{
           <div class="rounded bg-bg-active/50 px-2 py-1.5 text-sm text-fg">
             {props.state.description}
           </div>
-          <details class="text-[11px]">
-            <summary class="cursor-pointer text-fg-faint hover:text-fg-muted">
-              full input
-            </summary>
-            <pre class="mt-1 whitespace-pre-wrap break-words rounded border border-border bg-bg-active/40 p-2 font-mono text-[11px] text-fg-muted">
-              {JSON.stringify(props.state.input, null, 2)}
-            </pre>
-          </details>
+          <LazyJsonDetails value={props.state.input} />
         </div>
       </Match>
     </Switch>
+  );
+};
+
+/**
+ * Defer the `JSON.stringify` of a tool input until the `<details>` is
+ * actually opened. The previous render shape ran a 10-100 KB stringify
+ * (Write payloads, Bash outputs piped through input) on every parent
+ * re-render even when the disclosure was closed — the disclosure is
+ * mostly closed during normal use, so that's pure waste.
+ */
+const LazyJsonDetails: Component<{ value: unknown }> = (props) => {
+  const [opened, setOpened] = createSignal(false);
+  const json = createMemo(() => (opened() ? JSON.stringify(props.value, null, 2) : ""));
+  return (
+    <details
+      class="text-[11px]"
+      onToggle={(e) => setOpened((e.currentTarget as HTMLDetailsElement).open)}
+    >
+      <summary class="cursor-pointer text-fg-faint hover:text-fg-muted">
+        full input
+      </summary>
+      <Show when={opened()}>
+        <pre class="mt-1 whitespace-pre-wrap break-words rounded border border-border bg-bg-active/40 p-2 font-mono text-[11px] text-fg-muted">
+          {json()}
+        </pre>
+      </Show>
+    </details>
   );
 };
 

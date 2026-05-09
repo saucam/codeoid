@@ -24,7 +24,7 @@
 
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
 
-import { createMessages, epochOf } from "./messages";
+import { epochOf, focusedSessionMessages } from "./messages";
 import { focusedSession, focusedSessionId } from "./sessions";
 
 export type NotifyState = "default" | "granted" | "denied" | "unsupported";
@@ -79,12 +79,10 @@ export function installApprovalNotifications(): void {
     });
   });
 
-  // Single shared reactive accessor for the focused session's
-  // messages. Reading both `messages()` and the per-session epoch
-  // inside the effect makes Solid re-fire on mutations even when the
-  // array reference is stable (deltas mutate in place).
-  const messages = createMessages(focusedSessionId);
-
+  // Use the shared focused-messages memo. Reading both the messages
+  // accessor AND the per-session epoch inside the effect makes Solid
+  // re-fire on mutations even when the array reference is stable
+  // (deltas mutate in place).
   createEffect(() => {
     permission(); // track
     const sid = focusedSessionId();
@@ -92,7 +90,7 @@ export function installApprovalNotifications(): void {
     if (!sid) return;
     const session = focusedSession();
     if (!session) return;
-    const arr = messages();
+    const arr = focusedSessionMessages();
     let pending: {
       approvalId: string;
       toolName: string;

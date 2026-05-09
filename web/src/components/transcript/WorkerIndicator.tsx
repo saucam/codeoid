@@ -11,13 +11,12 @@
 
 import { Component, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
-import { createMessages } from "../../state/messages";
-import { focusedSession, focusedSessionId } from "../../state/sessions";
+import { focusedSessionMessages } from "../../state/messages";
+import { focusedSession } from "../../state/sessions";
 
 const VERBS = ["thinking", "drafting", "considering", "researching", "weighing"];
 
 const WorkerIndicator: Component = () => {
-  const messages = createMessages(focusedSessionId);
   const [tick, setTick] = createSignal(0);
 
   onMount(() => {
@@ -32,7 +31,7 @@ const WorkerIndicator: Component = () => {
   // Latest in-flight tool call (executing / streaming).
   const liveTool = createMemo(() => {
     if (status() !== "tool_running") return null;
-    const arr = messages();
+    const arr = focusedSessionMessages();
     for (let i = arr.length - 1; i >= 0; i--) {
       const m = arr[i];
       if (!m || m.role !== "tool_call" || !m.tool) continue;

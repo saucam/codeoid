@@ -25,7 +25,7 @@
 import { Component, For, Show, createMemo, createSignal } from "solid-js";
 
 import { newRequestId, send } from "../../state/connection";
-import { createMessages } from "../../state/messages";
+import { focusedSessionMessages } from "../../state/messages";
 import { focusedSessionId } from "../../state/sessions";
 import type { SessionMessage } from "../../protocol/types";
 
@@ -71,9 +71,8 @@ function extractQuestions(input: unknown): AskQuestion[] {
 }
 
 const ApprovalBar: Component = () => {
-  const messages = createMessages(focusedSessionId);
   const pending = createMemo<SessionMessage | null>(() => {
-    for (const m of messages()) {
+    for (const m of focusedSessionMessages()) {
       if (m.role !== "tool_call" || !m.tool) continue;
       if (m.tool.state.phase === "waiting_confirmation") return m;
     }

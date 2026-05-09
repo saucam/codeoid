@@ -10,6 +10,7 @@ import { batch, createMemo, createSignal } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 
 import type { SessionInfo, SessionStatus } from "../protocol/types";
+import { setFocusedSessionAccessor } from "./messages";
 
 interface SessionsState {
   byId: Record<string, SessionInfo>;
@@ -27,6 +28,11 @@ export const sessionList = createMemo<SessionInfo[]>(() => {
 
 /** Currently-focused session id (null if none). */
 export const focusedSessionId = focusedId;
+
+// Wire the singleton focused-messages memo in messages.ts. Done once
+// at module load so all consumers can pull the shared accessor
+// instead of each one creating its own memo.
+setFocusedSessionAccessor(focusedSessionId);
 
 /** Currently-focused session record (null if missing or none focused). */
 export const focusedSession = createMemo<SessionInfo | null>(() => {
