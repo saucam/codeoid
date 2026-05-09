@@ -985,6 +985,28 @@ export class Session {
         this.#inputQueue?.close();
         this.#inputQueue = null;
         this.#consumerTask = null;
+        // Resolve any pending tool approvals — they're awaiting
+        // canUseTool callbacks that will never fire on a torn-down
+        // SDK loop. Without this, the client-side `await
+        // session.approve(...)` hangs and the awaiter promise leaks.
+        // Also flips the matching tool_call rows in scrollback to
+        // `cancelled/interrupted` so the ApprovalBar dismisses.
+        if (this.#pendingApprovals.size > 0) {
+          // Synthetic auth context — only used as the audit subject
+          // for the cancelled deltas we're about to broadcast.
+          const systemAuth: AuthContext = {
+            sub: "system",
+            scopes: [],
+            delegationDepth: 0,
+            accountId: "",
+            projectId: "",
+          };
+          for (const [aid, resolveFn] of this.#pendingApprovals.entries()) {
+            resolveFn({ approved: false });
+            this.#dismissStaleApproval(aid, systemAuth);
+          }
+          this.#pendingApprovals.clear();
+        }
         if (this.#status !== "error") this.#setStatus("idle");
       }
     })();
@@ -1083,20 +1105,17 @@ export class Session {
   ): void {
     const resolve = this.#pendingApprovals.get(approvalId);
     if (!resolve) {
-      // Fallback: resolve first pending (for clients that don't send approvalId)
-      const first = this.#pendingApprovals.entries().next();
-      if (!first.done) {
-        const [firstId, firstResolve] = first.value;
-        this.#store.audit(sender.sub, approved ? "session.approve" : "session.deny", this.id, `approvalId=${firstId}`);
-        firstResolve({ approved, updatedInput });
-        this.#pendingApprovals.delete(firstId);
-        return;
-      }
-      // No live approval matches. Most likely a stale tool_call left in
-      // `waiting_confirmation` after a daemon restart or failed
+      // SECURITY: do NOT fall back to "resolve the first pending" any
+      // more. The old fallback let any client with `session:approve`
+      // resolve another client's pending approval just by sending an
+      // unrelated id. Every UI we ship now sends the real id; if a
+      // future client doesn't, fail closed rather than mis-resolving.
+      //
+      // No live approval matches. Most likely a stale tool_call left
+      // in `waiting_confirmation` after a daemon restart or failed
       // canUseTool — the SDK will never call us back for it. Walk
-      // scrollback, find the matching tool_call by approvalId, and flip
-      // it to cancelled so the ApprovalBar dismisses.
+      // scrollback, find the matching tool_call by approvalId, and
+      // flip it to cancelled so the ApprovalBar dismisses.
       this.#dismissStaleApproval(approvalId, sender);
       return;
     }

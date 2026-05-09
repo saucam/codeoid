@@ -90,6 +90,20 @@ export async function refreshSessions(): Promise<SessionInfo[]> {
  */
 export async function bootstrap(opts: { apiKey?: string; token?: string } = {}): Promise<void> {
   setBootError(null);
+  // Tear down any prior client BEFORE creating a new one. Without
+  // this, calling bootstrap twice (a stale key being replaced, the
+  // user re-entering a different one, or a recovery retry) leaves the
+  // old CodeoidClient running its own reconnect loop in parallel with
+  // the new one — every broadcast double-fires and neither gets
+  // garbage-collected.
+  if (client) {
+    try {
+      client.shutdown();
+    } catch {
+      /* shutdown is best-effort */
+    }
+    client = null;
+  }
   try {
     const resolved = await resolveToken({
       apiKey: opts.apiKey,

@@ -162,15 +162,52 @@ export async function unpackBundle(
   }
 
   // ---------- Pinned files ----------
+  // SECURITY: a malicious bundle can encode `<alias>/../../../etc/foo`
+  // or `<external>/etc/passwd` and `decodePath` will dutifully return
+  // an absolute path outside `targetWorkdir`. Without a containment
+  // check the writeFile below would happily clobber arbitrary host
+  // files. We resolve every candidate under the canonical workdir and
+  // refuse anything that escapes; `<external>/...` is rejected
+  // wholesale because it has no relation to the importer's workspace
+  // and the importer can fetch those files themselves if they want.
   let pinnedFilesWritten = 0;
   if (input.writePinnedFiles && bundle.pinnedFiles) {
+    let workdirReal: string;
+    try {
+      workdirReal = await fs.realpath(targetWorkdir);
+    } catch {
+      // Workdir doesn't exist or isn't readable — refuse to materialise
+      // anything rather than guessing.
+      warnings.push(`targetWorkdir ${targetWorkdir} not resolvable; skipped pinned-file write`);
+      workdirReal = "";
+    }
+    const workdirPrefix = workdirReal ? workdirReal.replace(/\/+$/, "") + path.sep : "";
     for (const [encodedPath, snap] of Object.entries(bundle.pinnedFiles)) {
       const localAbs = decodePath(encodedPath, alias, targetWorkdir);
+      if (!workdirPrefix) continue;
+      // Reject `<external>/...` decodings unconditionally.
+      if (encodedPath.startsWith("<external>/")) {
+        warnings.push(`pinned file ${encodedPath} skipped — external paths refused on import`);
+        continue;
+      }
+      // Resolve symlinks/.. components and require the result to live
+      // strictly under the importer's workdir. `path.resolve` collapses
+      // `..` lexically but doesn't follow symlinks; we additionally
+      // realpath the parent below before writing so symlinked dirs
+      // can't pivot us out.
+      const lexicallyResolved = path.resolve(localAbs);
+      if (
+        lexicallyResolved !== workdirReal &&
+        !lexicallyResolved.startsWith(workdirPrefix)
+      ) {
+        warnings.push(`pinned file ${encodedPath} skipped — would write outside workdir`);
+        continue;
+      }
       try {
         // Don't clobber existing files unless they're identical.
         let existing: Buffer | null = null;
         try {
-          existing = await fs.readFile(localAbs);
+          existing = await fs.readFile(lexicallyResolved);
         } catch {
           /* missing — fine */
         }
@@ -179,17 +216,32 @@ export async function unpackBundle(
             ? Buffer.from(snap.content, "base64")
             : Buffer.from(snap.content, "utf-8");
         if (existing && !existing.equals(incoming)) {
-          warnings.push(`pinned file ${localAbs} already exists with different content — skipped`);
+          warnings.push(`pinned file ${lexicallyResolved} already exists with different content — skipped`);
           continue;
         }
         if (!existing) {
-          await fs.mkdir(path.dirname(localAbs), { recursive: true });
-          await fs.writeFile(localAbs, incoming);
+          // Realpath the parent (after mkdir) and re-check containment;
+          // a pre-existing symlinked directory under workdir could
+          // otherwise redirect the write target.
+          const parent = path.dirname(lexicallyResolved);
+          await fs.mkdir(parent, { recursive: true });
+          let parentReal: string;
+          try {
+            parentReal = await fs.realpath(parent);
+          } catch {
+            warnings.push(`pinned file ${lexicallyResolved} parent unresolvable — skipped`);
+            continue;
+          }
+          if (parentReal !== workdirReal && !parentReal.startsWith(workdirPrefix)) {
+            warnings.push(`pinned file ${lexicallyResolved} parent escapes workdir — skipped`);
+            continue;
+          }
+          await fs.writeFile(lexicallyResolved, incoming);
         }
         pinnedFilesWritten += 1;
       } catch (err) {
         warnings.push(
-          `pinned file ${localAbs} failed: ${err instanceof Error ? err.message : String(err)}`,
+          `pinned file ${lexicallyResolved} failed: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }

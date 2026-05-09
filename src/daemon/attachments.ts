@@ -16,8 +16,9 @@ import {
   constants,
   mkdirSync,
   writeFileSync,
+  realpathSync,
 } from "node:fs";
-import { isAbsolute, resolve as resolvePath, join as joinPath } from "node:path";
+import { isAbsolute, resolve as resolvePath, join as joinPath, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { Attachment } from "../protocol/types.js";
 
@@ -231,7 +232,53 @@ function resolveOne(
   }
 
   // Case 2: read from disk.
-  const absPath = isAbsolute(a.path) ? a.path : resolvePath(workdir, a.path);
+  // SECURITY: bound the read to the session workdir. Without this, any
+  // client with `session:send` (and thus `attachments:`) can stuff
+  // `/etc/passwd` or `~/.aws/credentials` into the attachment list and
+  // the contents flow into the prompt + scrollback + transcript +
+  // memory. Resolves both lexically and via realpath so symlinked
+  // shortcuts under workdir can't pivot out.
+  const lexicallyResolved = isAbsolute(a.path)
+    ? resolvePath(a.path)
+    : resolvePath(workdir, a.path);
+  let canonicalWorkdir: string;
+  try {
+    canonicalWorkdir = realpathSync(workdir);
+  } catch {
+    return {
+      path: a.path,
+      error: `workdir unresolvable; refusing attachment read`,
+      bytes: 0,
+    };
+  }
+  const workdirPrefix = canonicalWorkdir.replace(/\/+$/, "") + sep;
+  if (
+    lexicallyResolved !== canonicalWorkdir &&
+    !lexicallyResolved.startsWith(workdirPrefix)
+  ) {
+    return {
+      path: a.path,
+      error: `attachment path escapes workdir: ${a.path}`,
+      bytes: 0,
+    };
+  }
+  let absPath: string;
+  try {
+    absPath = realpathSync(lexicallyResolved);
+  } catch {
+    return {
+      path: a.path,
+      error: `unreadable or missing: ${a.path}`,
+      bytes: 0,
+    };
+  }
+  if (absPath !== canonicalWorkdir && !absPath.startsWith(workdirPrefix)) {
+    return {
+      path: a.path,
+      error: `attachment path resolves outside workdir: ${a.path}`,
+      bytes: 0,
+    };
+  }
   try {
     accessSync(absPath, constants.R_OK);
   } catch {

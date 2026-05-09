@@ -434,5 +434,21 @@ function errorPage(error: string): string {
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Error</title>
 <style>body{font-family:system-ui;background:#0a0a0f;color:#ef4444;display:flex;align-items:center;justify-content:center;height:100vh;}</style>
-</head><body><div><h2>Authorization Failed</h2><p>${error}</p><p><a href="/app" style="color:#6366f1">Back to Codeoid</a></p></div></body></html>`;
+</head><body><div><h2>Authorization Failed</h2><p>${escapeHtml(error)}</p><p><a href="/app" style="color:#6366f1">Back to Codeoid</a></p></div></body></html>`;
+}
+
+/**
+ * HTML-escape user-controlled text destined for an HTML response body.
+ * `error` arrives via query string from an upstream OAuth provider — a
+ * tampered redirect can stuff `<script>` in there, and the daemon's
+ * origin holds the codeoid token in localStorage, so reflection here
+ * is reachable XSS.
+ */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }

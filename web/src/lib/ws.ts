@@ -224,6 +224,15 @@ export class CodeoidClient {
           return;
         }
         if (this.#shutdown) return;
+        // Reject any in-flight requests so the UI doesn't hang on a
+        // dead socket waiting for the 30s default timeout — drawers
+        // and modals freeze otherwise. Reconnect kicks off below; the
+        // caller can simply retry once `connected` returns.
+        for (const [, p] of this.#pending) {
+          if (p.timer) clearTimeout(p.timer);
+          p.reject(new Error(`connection lost (${reason})`));
+        }
+        this.#pending.clear();
         this.#log("warn", "connection dropped, attempting reconnect", { code: ev.code });
         // Asynchronously kick off reconnect — caller already moved on.
         void this.#connectWithBackoff(1).catch((e) => {
