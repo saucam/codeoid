@@ -111,8 +111,17 @@ const SessionImportModal: Component = () => {
             ? (identity["sub"] as string)
             : "—",
     });
-    // Suggest a workdir from sessions that share the alias if any.
-    const candidate = sessionList().find(() => true);
+    // Suggest a workdir from sessions that share the alias, falling
+    // back to the focused session's workdir. Previously the predicate
+    // was `() => true`, which meant any session at all — usually the
+    // most recent — masquerading as an alias match.
+    const aliasFromBundle =
+      typeof workdir["alias"] === "string" ? (workdir["alias"] as string) : null;
+    const aliasMatch = aliasFromBundle
+      ? sessionList().find((s) => s.workdir.endsWith(`/${aliasFromBundle}`))
+      : null;
+    const fallback = sessionList()[0] ?? null;
+    const candidate = aliasMatch ?? fallback;
     if (candidate) setTargetWorkdir(candidate.workdir);
   }
 

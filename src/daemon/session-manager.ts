@@ -116,6 +116,34 @@ export class SessionManager {
   }
 
   /**
+   * Resolve a session by id, gated on tenancy. Returns null when:
+   *
+   *   - the id doesn't exist, OR
+   *   - the requester's `(accountId, projectId)` doesn't match the
+   *     session's owner.
+   *
+   * Both cases collapse to the same "not found" response at the
+   * caller, so we don't leak session-id existence across tenants —
+   * an account-A user trying to attach to an account-B sessionId
+   * gets the same shape they'd get for a typo. Sessions whose
+   * owner has empty tenancy (e.g. a malformed resume) only match
+   * an auth context with empty tenancy, which doesn't happen in
+   * normal flows; those sessions remain only visible to system /
+   * resume paths.
+   */
+  #getOwnedSession(sessionId: string, auth: AuthContext): Session | null {
+    const session = this.#sessions.get(sessionId);
+    if (!session) return null;
+    if (
+      session.accountId !== auth.accountId ||
+      session.projectId !== auth.projectId
+    ) {
+      return null;
+    }
+    return session;
+  }
+
+  /**
    * Handle an inbound client message, enforce scopes, and return a response.
    */
   async handle(
@@ -181,7 +209,7 @@ export class SessionManager {
         code: "forbidden",
       };
     }
-    const session = this.#sessions.get(msg.sessionId);
+    const session = this.#getOwnedSession(msg.sessionId, auth);
     if (!session) {
       return {
         type: "response.error",
@@ -279,14 +307,51 @@ export class SessionManager {
         code: "forbidden",
       };
     }
+    // Same per-user rate limit as session.create — import allocates a
+    // fresh Session, SDK identity, and DB rows. Without this gate a
+    // tight loop of inline imports OOMs the daemon.
+    const rateCheck = this.#rateLimiter.check(auth.sub);
+    if (!rateCheck.allowed) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: rateCheck.reason,
+        code: "rate_limited",
+      };
+    }
     try {
       // Resolve the bundle JSON from inline payload or a saved file.
       let bundleRaw: unknown;
       if (msg.source.kind === "inline") {
         bundleRaw = msg.source.bundle;
       } else {
+        // SECURITY: bound the file-source path to a fixed import dir.
+        // Without this any client with `session:create` can read any
+        // file the daemon can — `/etc/passwd`, `~/.aws/credentials`,
+        // sibling sessions' transcripts. The fixed dir is created on
+        // first use and realpath-checked to defeat symlink pivots.
+        const safe = await resolveImportPath(msg.source.path);
+        if (!safe.ok) {
+          return {
+            type: "response.error",
+            requestId: msg.id,
+            error: safe.reason,
+            code: "invalid_request",
+          };
+        }
         const fs = await import("node:fs");
-        const text = await fs.promises.readFile(msg.source.path, "utf-8");
+        // Cap the read at 100 MB to bound memory pressure under
+        // pathological bundles.
+        const stat = await fs.promises.stat(safe.path);
+        if (stat.size > 100 * 1024 * 1024) {
+          return {
+            type: "response.error",
+            requestId: msg.id,
+            error: `bundle too large (${stat.size} bytes; cap 100 MB)`,
+            code: "invalid_request",
+          };
+        }
+        const text = await fs.promises.readFile(safe.path, "utf-8");
         bundleRaw = JSON.parse(text);
       }
       const v = validateBundle(bundleRaw);
@@ -330,6 +395,7 @@ export class SessionManager {
               compressionRegistry: this.#compressionRegistry,
             });
             this.#sessions.set(session.id, session);
+            this.#rateLimiter.recordCreation(auth.sub);
             this.#store.audit(
               auth.sub,
               "session.import",
@@ -376,7 +442,7 @@ export class SessionManager {
         code: "forbidden",
       };
     }
-    const session = this.#sessions.get(msg.sessionId);
+    const session = this.#getOwnedSession(msg.sessionId, auth);
     if (!session) {
       return {
         type: "response.error",
@@ -449,7 +515,7 @@ export class SessionManager {
         code: "forbidden",
       };
     }
-    const session = this.#sessions.get(msg.sessionId);
+    const session = this.#getOwnedSession(msg.sessionId, auth);
     if (!session) {
       return {
         type: "response.error",
@@ -477,7 +543,7 @@ export class SessionManager {
         code: "forbidden",
       };
     }
-    const session = this.#sessions.get(msg.sessionId);
+    const session = this.#getOwnedSession(msg.sessionId, auth);
     if (!session) {
       return {
         type: "response.error",
@@ -602,6 +668,14 @@ export class SessionManager {
 
     const sessions: SessionInfo[] = [];
     for (const session of this.#sessions.values()) {
+      // Tenancy filter — never enumerate sessions belonging to a
+      // different account/project. Same shape as #getOwnedSession.
+      if (
+        session.accountId !== auth.accountId ||
+        session.projectId !== auth.projectId
+      ) {
+        continue;
+      }
       const info = session.toInfo();
       sessions.push({ ...info, attachedClients: session.attachedClientCount });
     }
@@ -620,7 +694,7 @@ export class SessionManager {
       return { type: "response.error", requestId: msg.id, error: "Missing scope: session:attach or session:watch", code: "forbidden" };
     }
 
-    const session = this.#sessions.get(msg.sessionId);
+    const session = this.#getOwnedSession(msg.sessionId, auth);
     if (!session) {
       return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
     }
@@ -633,7 +707,7 @@ export class SessionManager {
     msg: Extract<ClientMessage, { type: "session.detach" }>,
     client: AttachedClient,
   ): DaemonMessage {
-    const session = this.#sessions.get(msg.sessionId);
+    const session = this.#getOwnedSession(msg.sessionId, client.auth);
     if (!session) {
       return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
     }
@@ -650,7 +724,7 @@ export class SessionManager {
       return { type: "response.error", requestId: msg.id, error: "Missing scope: session:send", code: "forbidden" };
     }
 
-    const session = this.#sessions.get(msg.sessionId);
+    const session = this.#getOwnedSession(msg.sessionId, auth);
     if (!session) {
       return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
     }
@@ -677,7 +751,7 @@ export class SessionManager {
         code: "forbidden",
       };
     }
-    const session = this.#sessions.get(msg.sessionId);
+    const session = this.#getOwnedSession(msg.sessionId, auth);
     if (!session) {
       return {
         type: "response.error",
@@ -702,7 +776,7 @@ export class SessionManager {
         code: "forbidden",
       };
     }
-    const session = this.#sessions.get(msg.sessionId);
+    const session = this.#getOwnedSession(msg.sessionId, auth);
     if (!session) {
       return {
         type: "response.error",
@@ -764,8 +838,11 @@ export class SessionManager {
     }
 
     // Provide a session-name map so the ranker can boost exact-name hits.
+    // Only include sessions visible to this caller — name leakage across
+    // tenants is the same disclosure as `session.list` would be.
     const sessionNames = new Map<string, string>();
     for (const s of this.#sessions.values()) {
+      if (s.accountId !== auth.accountId || s.projectId !== auth.projectId) continue;
       sessionNames.set(s.id, s.name);
     }
 
@@ -778,9 +855,12 @@ export class SessionManager {
     });
 
     // Enrich each hit with sessionName + workdir from the in-memory map
-    // (store has the rest; we just want ergonomic display).
+    // (store has the rest; we just want ergonomic display). Hits that
+    // resolve to a session belonging to a different tenant render as
+    // "(unknown)" — same shape we already use for sessions that aren't
+    // live in memory.
     const enriched = hits.map((h) => {
-      const liveSession = this.#sessions.get(h.sessionId);
+      const liveSession = this.#getOwnedSession(h.sessionId, auth);
       return {
         ...h,
         sessionName: liveSession?.name ?? "(unknown)",
@@ -831,7 +911,7 @@ export class SessionManager {
         code: "forbidden",
       };
     }
-    const session = this.#sessions.get(msg.sessionId);
+    const session = this.#getOwnedSession(msg.sessionId, auth);
     if (!session) {
       return {
         type: "response.error",
@@ -876,7 +956,7 @@ export class SessionManager {
         code: "forbidden",
       };
     }
-    const session = this.#sessions.get(msg.sessionId);
+    const session = this.#getOwnedSession(msg.sessionId, auth);
     if (!session) {
       return {
         type: "response.error",
@@ -901,7 +981,7 @@ export class SessionManager {
       return { type: "response.error", requestId: msg.id, error: "Missing scope: session:interrupt", code: "forbidden" };
     }
 
-    const session = this.#sessions.get(msg.sessionId);
+    const session = this.#getOwnedSession(msg.sessionId, auth);
     if (!session) {
       return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
     }
@@ -918,7 +998,7 @@ export class SessionManager {
       return { type: "response.error", requestId: msg.id, error: "Missing scope: session:approve", code: "forbidden" };
     }
 
-    const session = this.#sessions.get(msg.sessionId);
+    const session = this.#getOwnedSession(msg.sessionId, auth);
     if (!session) {
       return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
     }
@@ -941,7 +1021,7 @@ export class SessionManager {
         code: "forbidden",
       };
     }
-    const session = this.#sessions.get(msg.sessionId);
+    const session = this.#getOwnedSession(msg.sessionId, auth);
     if (!session) {
       return {
         type: "response.error",
@@ -978,7 +1058,7 @@ export class SessionManager {
         code: "invalid_request",
       };
     }
-    const session = this.#sessions.get(msg.sessionId);
+    const session = this.#getOwnedSession(msg.sessionId, auth);
     if (!session) {
       return {
         type: "response.error",
@@ -991,22 +1071,79 @@ export class SessionManager {
     return { type: "response.ok", requestId: msg.id };
   }
 
-  #destroySession(
+  async #destroySession(
     msg: Extract<ClientMessage, { type: "session.destroy" }>,
     auth: AuthContext,
-  ): DaemonMessage {
+  ): Promise<DaemonMessage> {
     if (!hasScope(auth.scopes as string[], SCOPES.SESSION_DESTROY)) {
       return { type: "response.error", requestId: msg.id, error: "Missing scope: session:destroy", code: "forbidden" };
     }
 
-    const session = this.#sessions.get(msg.sessionId);
+    const session = this.#getOwnedSession(msg.sessionId, auth);
     if (!session) {
       return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
     }
 
-    session.destroy(auth);
+    // Await teardown so the OK response only goes out AFTER:
+    //   1. SDK subprocess fully aborts
+    //   2. ZeroID identity is deactivated
+    //   3. Transcript/meta files are unlinked
+    //
+    // Otherwise a client recreating a session by name immediately
+    // races the still-running consumer task and the appendFile that
+    // landed in P1 #10 — ENOENT or partially-written final lines on
+    // the new session.
+    await session.destroy(auth);
     this.#sessions.delete(msg.sessionId);
     this.#rateLimiter.recordDestruction(auth.sub);
     return { type: "response.ok", requestId: msg.id };
   }
+}
+
+/**
+ * Bound `session.import {kind:"file", path}` to a fixed import dir
+ * under `~/.codeoid/imports/`. Without this any client with
+ * `session:create` can read any file the daemon can — `/etc/passwd`,
+ * `~/.aws/credentials`, sibling sessions' transcripts, our own
+ * SQLite files. Same realpath + prefix pattern attachments.ts
+ * already uses for workdir bounding.
+ *
+ * The dir is created on first call (`mkdir -p`) so users don't have
+ * to set it up manually; the user moves bundles in via `mv`.
+ */
+async function resolveImportPath(
+  requested: string,
+): Promise<{ ok: true; path: string } | { ok: false; reason: string }> {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const os = await import("node:os");
+  const importsDir = path.join(os.homedir(), ".codeoid", "imports");
+  try {
+    await fs.promises.mkdir(importsDir, { recursive: true });
+  } catch {
+    return { ok: false, reason: "import dir not writable" };
+  }
+  let canonicalRoot: string;
+  try {
+    canonicalRoot = await fs.promises.realpath(importsDir);
+  } catch {
+    return { ok: false, reason: "import dir not resolvable" };
+  }
+  const lexicallyResolved = path.isAbsolute(requested)
+    ? path.resolve(requested)
+    : path.resolve(canonicalRoot, requested);
+  let resolved: string;
+  try {
+    resolved = await fs.promises.realpath(lexicallyResolved);
+  } catch {
+    return { ok: false, reason: `bundle not found: ${requested}` };
+  }
+  const rootPrefix = canonicalRoot.replace(/\/+$/, "") + path.sep;
+  if (resolved !== canonicalRoot && !resolved.startsWith(rootPrefix)) {
+    return {
+      ok: false,
+      reason: `import path must live under ${importsDir}`,
+    };
+  }
+  return { ok: true, path: resolved };
 }

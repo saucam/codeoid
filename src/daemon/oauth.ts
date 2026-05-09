@@ -44,22 +44,66 @@ interface PendingAuth {
   createdAt: number;
 }
 
+/**
+ * Cap on the in-memory `#pending` map. A faster-than-1Hz attacker
+ * hitting `/auth/authorize` outpaces the 1-min cleanup sweep; without
+ * a cap, ~360 k entries per 10 min × ~150 B each ≈ 50 MB until the
+ * 10-min TTL kicks in. LRU eviction at the cap keeps steady-state
+ * memory bounded even under abuse.
+ */
+const PENDING_AUTH_MAX = 10_000;
+const PENDING_AUTH_TTL_MS = 600_000;
+const PENDING_AUTH_SWEEP_MS = 60_000;
+
 export class OAuthHandler {
   #config: OAuthConfig;
   #idp: IdentityProvider;
   #pending = new Map<string, PendingAuth>();
+  #sweepTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(config: OAuthConfig, idp?: IdentityProvider) {
     this.#config = config;
     this.#idp = idp ?? new LocalProvider();
 
-    // Clean up expired pending auths every 60s
-    setInterval(() => {
-      const cutoff = Date.now() - 600_000;
+    // Clean up expired pending auths every 60s. `unref()` so the
+    // timer doesn't hold the Bun event loop open after `stop()`.
+    this.#sweepTimer = setInterval(() => {
+      const cutoff = Date.now() - PENDING_AUTH_TTL_MS;
       for (const [key, auth] of this.#pending) {
         if (auth.createdAt < cutoff) this.#pending.delete(key);
       }
-    }, 60_000);
+    }, PENDING_AUTH_SWEEP_MS);
+    // Bun supports `Timer.unref` via the Node-compat API.
+    (this.#sweepTimer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  /**
+   * Cancel the sweep timer and clear pending state. Call from the
+   * ShutdownManager so the process can exit cleanly even if the
+   * OAuthHandler is still alive at hot-reload / test teardown time.
+   */
+  stop(): void {
+    if (this.#sweepTimer !== null) {
+      clearInterval(this.#sweepTimer);
+      this.#sweepTimer = null;
+    }
+    this.#pending.clear();
+  }
+
+  /**
+   * Insert into `#pending` with LRU eviction at the cap. Keeps the
+   * abuse-driven worst case bounded at ~PENDING_AUTH_MAX entries
+   * regardless of inbound rate.
+   */
+  #setPending(key: string, value: PendingAuth): void {
+    while (this.#pending.size >= PENDING_AUTH_MAX) {
+      // Map iteration order is insertion order, so .keys().next() is
+      // the oldest. O(1) drop.
+      const oldest = this.#pending.keys().next();
+      if (oldest.done) break;
+      this.#pending.delete(oldest.value);
+    }
+    this.#pending.set(key, value);
   }
 
   get providerName(): string {
@@ -112,9 +156,9 @@ export class OAuthHandler {
       return new Response("PKCE code_challenge (S256) required", { status: 400 });
     }
 
-    // Store pending auth
+    // Store pending auth — LRU-bounded via #setPending.
     const internalState = randomBytes(16).toString("hex");
-    this.#pending.set(internalState, {
+    this.#setPending(internalState, {
       redirectUri,
       codeChallenge,
       scope,

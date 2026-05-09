@@ -175,7 +175,17 @@ const Transcript: Component = () => {
     const sid = focusedSessionId();
     if (!sid || jump.sessionId !== sid) return;
     if (Date.now() - jump.setAt > 4000) {
+      // Expired without finding a match. Drop the jump AND fall
+      // through to the auto-scroll-to-bottom that the focus effect
+      // skipped (it deferred to us, but we never made it). Without
+      // this, switching to a session whose jump expires leaves the
+      // user stuck mid-transcript at whatever scroll the previous
+      // session had.
       setPendingSearchJump(null);
+      setStuckBottom(true);
+      queueMicrotask(() => {
+        if (containerRef) containerRef.scrollTop = containerRef.scrollHeight;
+      });
       return;
     }
     const arr = messages();

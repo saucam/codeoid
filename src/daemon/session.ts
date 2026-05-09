@@ -932,15 +932,21 @@ export class Session {
             this.#store.audit(sender.sub, "session.approve", this.id, `tool=${toolName} approvalId=${approvalId}`);
 
             // updatedInput must be present even when we don't change anything —
-            // SDK's runtime Zod schema rejects `{behavior:"allow"}` without it,
-            // even though the published TS types say it's optional. For
-            // form-style tools (AskUserQuestion) the client also attaches a
-            // patch with the user's `answers`; we shallow-merge it over the
-            // original input so the SDK's tool.call sees the answers as part
-            // of its input. For binary tools the patch is undefined and we
-            // pass input through unchanged.
-            const merged: Record<string, unknown> = updatedInput
-              ? { ...inputObj, ...updatedInput }
+            // SDK's runtime Zod schema rejects `{behavior:"allow"}` without
+            // it, even though the published TS types say it's optional.
+            //
+            // SECURITY: only allow `updatedInput` to inject NEW fields the
+            // tool legitimately needs from a form-style approval. Without a
+            // whitelist, a client with `session:approve` could swap a Bash
+            // tool's `command` at the moment of approval — UI shows the
+            // user `Bash(ls)` (the input recorded in the
+            // waiting_confirmation state), they approve, but the daemon
+            // hands the SDK whatever patch the client supplied. Per-tool
+            // allowlist below: AskUserQuestion answers map only;
+            // everything else falls through to the original input.
+            const sanitizedPatch = sanitizeApprovalPatch(toolName, updatedInput);
+            const merged: Record<string, unknown> = sanitizedPatch
+              ? { ...inputObj, ...sanitizedPatch }
               : inputObj;
             return { behavior: "allow" as const, updatedInput: merged };
           }
@@ -2349,4 +2355,40 @@ function extractToolResultText(content: unknown): string {
     }
   }
   return parts.join("\n");
+}
+
+/**
+ * Per-tool whitelist for the `updatedInput` patch a client may send
+ * with `session.approve`.
+ *
+ * The shallow-merge inside `canUseTool` would otherwise let any
+ * client field land in the SDK's tool input — including overriding
+ * the very fields the user just inspected and approved. We allow
+ * patches only for tools where the user's response IS a form input
+ * (AskUserQuestion), and even then restrict the keys.
+ *
+ * Returns `undefined` when the patch should be ignored entirely
+ * (binary-approve tools, or empty input). Returns the sanitized
+ * subset of fields the tool legitimately needs from approval.
+ */
+function sanitizeApprovalPatch(
+  toolName: string,
+  patch: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!patch || typeof patch !== "object") return undefined;
+  if (toolName === "AskUserQuestion" || toolName === "ask_user_question") {
+    const answers = (patch as { answers?: unknown }).answers;
+    if (!answers || typeof answers !== "object") return undefined;
+    // The SDK's AskUserQuestion expects `answers: Record<string,string>`.
+    // Drop anything that doesn't fit the shape silently — the tool's
+    // input schema will validate the rest.
+    const clean: Record<string, string> = {};
+    for (const [q, a] of Object.entries(answers as Record<string, unknown>)) {
+      if (typeof a === "string") clean[q] = a;
+    }
+    return Object.keys(clean).length > 0 ? { answers: clean } : undefined;
+  }
+  // Every other tool: no client-side patch is meaningful at approval
+  // time. The user reviewed the original input; that's what runs.
+  return undefined;
 }

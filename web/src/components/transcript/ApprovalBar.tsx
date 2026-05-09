@@ -26,7 +26,6 @@ import { Component, For, Show, createMemo, createSignal } from "solid-js";
 
 import { newRequestId, send } from "../../state/connection";
 import { focusedSessionMessages } from "../../state/messages";
-import { focusedSessionId } from "../../state/sessions";
 import type { SessionMessage } from "../../protocol/types";
 
 /** Custom event the prompt listens for so "Refine" can focus + hint. */
@@ -94,6 +93,13 @@ const ApprovalBar: Component = () => {
     const s = m.tool.state;
     if (s.phase !== "waiting_confirmation") return null;
     return {
+      // Capture sessionId as part of the snapshot so the click sends
+      // approval to the SAME session whose pending we rendered —
+      // even if the user switches focus between mouseDown and the
+      // settled microtask firing the click. Reading
+      // `focusedSessionId()` at click time was the agent's race; we
+      // now bind it once at snapshot time alongside `approvalId`.
+      sessionId: m.sessionId,
       approvalId: s.approvalId,
       description: s.description,
       input: s.input,
@@ -106,11 +112,11 @@ const ApprovalBar: Component = () => {
         const isPlanMode = () =>
           snap().toolName === "ExitPlanMode" || snap().toolName === "exit_plan_mode";
         const isAsk = () => isAskUserQuestion(snap().toolName);
-        const sid = focusedSessionId;
         const safeApprove = (approved: boolean, updatedInput?: Record<string, unknown>) => {
           const cur = snapshot();
           if (!cur || cur.approvalId !== snap().approvalId) return;
-          approve(sid()!, snap().approvalId, approved, updatedInput);
+          if (cur.sessionId !== snap().sessionId) return;
+          approve(snap().sessionId, snap().approvalId, approved, updatedInput);
         };
         return (
           <Show when={isAsk()} fallback={
@@ -205,16 +211,25 @@ const AskUserQuestionForm: Component<{
   const [selections, setSelections] = createSignal<Record<string, string[]>>({});
   const [otherText, setOtherText] = createSignal<Record<string, string>>({});
 
+  // Functional setters everywhere — two rapid clicks across different
+  // questions both used to read the same `selections()` snapshot and
+  // both wrote back, second overwriting the first's update for the
+  // OTHER question. Same pattern PromptBox already adopted; missed
+  // here in the original.
   function setSelection(q: string, labels: string[]): void {
-    setSelections({ ...selections(), [q]: labels });
+    setSelections((prev) => ({ ...prev, [q]: labels }));
   }
   function setOther(q: string, text: string): void {
-    setOtherText({ ...otherText(), [q]: text });
+    setOtherText((prev) => ({ ...prev, [q]: text }));
   }
   function toggleMulti(q: string, label: string): void {
-    const cur = selections()[q] ?? [];
-    if (cur.includes(label)) setSelection(q, cur.filter((l) => l !== label));
-    else setSelection(q, [...cur, label]);
+    setSelections((prev) => {
+      const cur = prev[q] ?? [];
+      const next = cur.includes(label)
+        ? cur.filter((l) => l !== label)
+        : [...cur, label];
+      return { ...prev, [q]: next };
+    });
   }
   function setSingle(q: string, label: string): void {
     setSelection(q, [label]);

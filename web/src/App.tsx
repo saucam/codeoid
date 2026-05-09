@@ -16,6 +16,7 @@ import Shell from "./components/Shell";
 import {
   authIdentity,
   bootstrap,
+  connectionStatus,
   newRequestId,
   send,
 } from "./state/connection";
@@ -47,12 +48,34 @@ const App: Component = () => {
   // Attach to the focused session whenever it changes (or when we first
   // sign in). The daemon only broadcasts to attached clients — without
   // this we'd see the list but no transcript or streaming deltas.
+  //
+  // The set is cleared whenever the connection drops or auth flips —
+  // attaches don't survive across daemon restarts (the daemon's
+  // session-clients map is wiped) and across reconnect we need to
+  // re-attach. Without this clear, post-bounce focus to a session
+  // silently no-ops here because `attached.has(id)` is still true,
+  // and the user appears subscribed but receives no deltas.
   const attached = new Set<string>();
+  createEffect(
+    on(connectionStatus, (s) => {
+      if (s.kind !== "connected") attached.clear();
+    }),
+  );
+  createEffect(
+    on(authIdentity, (auth) => {
+      if (!auth) attached.clear();
+    }),
+  );
   createEffect(
     on([authIdentity, focusedSessionId], () => {
       const auth = authIdentity();
       const id = focusedSessionId();
       if (!auth || !id || attached.has(id)) return;
+      // Don't try to attach while the socket is reconnecting — the
+      // request would queue against a dead client. The connection
+      // effect above clears `attached` on transition out of
+      // connected, so a follow-up reconnect re-fires this effect.
+      if (connectionStatus().kind !== "connected") return;
       try {
         send({ type: "session.attach", id: newRequestId(), sessionId: id });
         attached.add(id);

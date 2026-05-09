@@ -14,7 +14,7 @@
  */
 
 import { existsSync, mkdirSync } from "node:fs";
-import { appendFile } from "node:fs/promises";
+import { appendFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { DaemonMessage, SessionStatus } from "../protocol/types.js";
 
@@ -49,6 +49,17 @@ const PERSISTED_TYPES = new Set([
 
 export class TranscriptStore {
   #dir: string;
+  /**
+   * Per-session promise chain for `saveMeta`. setStatus fires many
+   * times per turn (working → waiting_approval → working → idle),
+   * each as a fire-and-forget `saveMeta`; without serialization two
+   * overlapping writes interleave the open(O_WRONLY|O_TRUNC) +
+   * write sequence, leaving a truncated JSON file. `loadAllMeta`
+   * silently drops unparseable files, so the session goes missing
+   * on next restart. Chaining + atomic temp+rename eliminates the
+   * window.
+   */
+  #metaWriteChain = new Map<string, Promise<void>>();
 
   constructor(transcriptDir: string) {
     this.#dir = transcriptDir;
@@ -101,11 +112,44 @@ export class TranscriptStore {
   }
 
   /**
-   * Save session metadata for fast resume.
+   * Save session metadata for fast resume. Atomic + serialized:
+   *
+   * - **Atomic.** Writes to `.meta.json.tmp` then `rename`s — POSIX
+   *   guarantees rename-over-existing is atomic, so a crash mid-
+   *   write leaves either the old or the new file, never a partial
+   *   one.
+   * - **Serialized per session.** `setStatus` fires fire-and-forget,
+   *   often multiple times per turn. Two concurrent `Bun.write`s
+   *   used to open+truncate+write twice and interleave; the second
+   *   could clobber the first half-written. Chain on the existing
+   *   promise so writes for the same session run end-to-end.
+   *
+   * Different sessions still write in parallel — the chain map is
+   * keyed by sessionId.
    */
   async saveMeta(meta: TranscriptMeta): Promise<void> {
+    const id = meta.sessionId;
+    const prev = this.#metaWriteChain.get(id) ?? Promise.resolve();
+    const next = prev.then(() => this.#writeMetaAtomic(meta));
+    this.#metaWriteChain.set(
+      id,
+      next.finally(() => {
+        // Clear the chain entry once this leaf settles, so the map
+        // doesn't grow without bound for sessions whose metas land
+        // in steady state.
+        if (this.#metaWriteChain.get(id) === next) {
+          this.#metaWriteChain.delete(id);
+        }
+      }),
+    );
+    return next;
+  }
+
+  async #writeMetaAtomic(meta: TranscriptMeta): Promise<void> {
     const path = this.metaPath(meta.sessionId);
-    await Bun.write(path, JSON.stringify(meta, null, 2));
+    const tmp = `${path}.tmp`;
+    await writeFile(tmp, JSON.stringify(meta, null, 2), "utf-8");
+    await rename(tmp, path);
   }
 
   /**
