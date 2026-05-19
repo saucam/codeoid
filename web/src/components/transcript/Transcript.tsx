@@ -8,9 +8,10 @@
  * session doesn't melt the renderer. The virtualizer measures each row
  * dynamically (heights vary wildly: a 2-line user message vs. a
  * 200-line bash output) and rebuilds its index when the message list
- * changes. Streaming deltas mutate row content in place; we wire the
- * per-session epoch into the virtualizer's `getItemKey` so it
- * remeasures the affected row without thrashing the rest.
+ * changes. Streaming deltas mutate row content in place under a STABLE
+ * per-message key; the per-element ResizeObserver plus the epoch-driven
+ * `virtualizer.measure()` effect remeasure the affected row as it grows,
+ * without evicting its cached size (see the `getItemKey` note below).
  */
 
 import {
@@ -27,7 +28,7 @@ import {
 import { createVirtualizer } from "@tanstack/solid-virtual";
 
 import MessageRow from "./MessageRow";
-import { epochOf, focusedSessionMessages, versionOf } from "../../state/messages";
+import { epochOf, focusedSessionMessages } from "../../state/messages";
 import { focusedSession, focusedSessionId } from "../../state/sessions";
 import {
   findJumpTarget,
@@ -88,19 +89,48 @@ const Transcript: Component = () => {
     setStuckBottom(isAtBottom(containerRef));
   }
 
-  // Drive the virtualizer off the messages array. `getItemKey` blends
-  // messageId + version so streaming deltas (which mutate content in
-  // place — same id, bumped version) cause that one row to remeasure
-  // without invalidating its neighbours.
+  // Drive the virtualizer off the messages array.
+  //
+  // `getItemKey` returns a STABLE id (messageId only). tanstack-virtual
+  // keys its measurement cache by item key: the previous code blended the
+  // streaming `version` into the key, so every delta minted a new key,
+  // evicted the growing row's cached size, and dropped it back to
+  // estimateSize (96px) on every tick while it actually painted much
+  // taller — the streaming row overlapped its neighbours until the stream
+  // ended. With a stable key the row is never cache-evicted; its in-place
+  // growth is picked up by the per-element ResizeObserver (`measureElement`
+  // + the ref below) and the epoch-driven `virtualizer.measure()` effect,
+  // with no estimate fallback. MessageRow is fine-grained reactive, so it
+  // doesn't need a key change to re-render its content.
+  //
+  // `measureElement`: rows are absolutely positioned via
+  // translateY(item.start), where item.start is the cumulative sum of
+  // measured heights. The core default does Math.round(blockSize): on
+  // fractional display scaling / browser zoom (heights like 96.667px) it
+  // can round *down*, so a row reserves less than it paints and the next
+  // row's offset lands on top of it — visible overlap, but only on some
+  // DPIs (hence "fine on my other laptop"). Ceil instead: reserved space
+  // is always >= painted height, so overlap is impossible (worst case an
+  // imperceptible sub-pixel gap). Keep the ResizeObserver borderBoxSize
+  // path so streaming rows still remeasure as they grow.
   const virtualizer = createVirtualizer({
     count: messages().length,
     getScrollElement: () => containerRef ?? null,
     estimateSize: () => 96,
     overscan: 8,
+    measureElement: (element, entry, instance) => {
+      const box = entry?.borderBoxSize?.[0];
+      const raw = box
+        ? box[instance.options.horizontal ? "inlineSize" : "blockSize"]
+        : element.getBoundingClientRect()[
+            instance.options.horizontal ? "width" : "height"
+          ];
+      return Math.ceil(raw);
+    },
     getItemKey: (index) => {
       const m = messages()[index];
       if (!m) return index;
-      return `${m.messageId}:${versionOf(m.messageId)}`;
+      return m.messageId;
     },
   });
 
