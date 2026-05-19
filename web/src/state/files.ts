@@ -15,7 +15,7 @@
  */
 
 import { batch, createSignal } from "solid-js";
-import { createStore, produce } from "solid-js/store";
+import { createStore } from "solid-js/store";
 
 import { getClient, newRequestId } from "./connection";
 import type {
@@ -44,25 +44,28 @@ interface FilesState {
 const [state, setState] = createStore<FilesState>({ bySession: {} });
 
 function ensureNode(sessionId: string, path: string): NodeState {
-  setState(
-    "bySession",
-    sessionId,
-    produce<SessionFileState>((m) => {
-      // We don't access `m[path]` directly here — Solid's produce wraps
-      // the path-index access at write time. The next setState call on
-      // the path key creates the entry if needed.
-      void m;
-    }),
-  );
-  setState("bySession", sessionId, path, (cur) =>
-    cur ?? {
+  // The session map must exist as an object before we can set a path
+  // key under it. A no-op `produce` does NOT create it, and a
+  // function-updater leaf set (`setState(..., path, cur => ...)`) does
+  // not auto-create an `undefined` intermediate — so the first call for
+  // a freshly-focused session left `bySession[sessionId]` undefined and
+  // the return below threw on `undefined[path]`. Create each level
+  // explicitly, and only when absent so existing siblings/nodes (their
+  // entries, expanded, loading) are never clobbered.
+  if (!state.bySession[sessionId]) {
+    setState("bySession", sessionId, {});
+  }
+  if (!state.bySession[sessionId]?.[path]) {
+    setState("bySession", sessionId, path, {
       loading: false,
       entries: null,
       expanded: false,
       error: null,
-    },
-  );
-  return state.bySession[sessionId]![path]!;
+    });
+  }
+  // Both levels are guaranteed to exist after the writes above; the
+  // PLACEHOLDER fallback only satisfies the type and is never returned.
+  return state.bySession[sessionId]?.[path] ?? PLACEHOLDER;
 }
 
 export function getNode(sessionId: string, path: string): NodeState | undefined {
