@@ -27,7 +27,7 @@ import {
 import { createVirtualizer } from "@tanstack/solid-virtual";
 
 import MessageRow from "./MessageRow";
-import { epochOf, focusedSessionMessages, versionOf } from "../../state/messages";
+import { epochOf, focusedSessionMessages } from "../../state/messages";
 import { focusedSession, focusedSessionId } from "../../state/sessions";
 import {
   findJumpTarget,
@@ -90,25 +90,23 @@ const Transcript: Component = () => {
 
   // Drive the virtualizer off the messages array.
   //
-  // `getItemKey` blends messageId + version. This is LOAD-BEARING: a
-  // stable messageId-only key was tried and regressed badly — the
-  // virtualizer kept stale (too-small) cached heights for rows that grew
-  // in place, so every following row's translateY offset was wrong and
-  // rows overlapped wholesale. Bumping the key per streaming delta is
-  // what forces tanstack-virtual to re-measure the affected row. The
-  // streaming row itself still briefly overlaps during a burst (it falls
-  // back to estimateSize between remeasures) — that residual is tracked
-  // separately; do NOT "fix" it by removing the version from the key.
+  // `getItemKey` is a STABLE per-message id. tanstack-virtual stores each
+  // measured height in `itemSizeCache` keyed by the item key and reads it
+  // back by `getItemKey(i)` in getMeasurements. A key that changes on
+  // content mutation (the old `messageId:version`) orphans the cached
+  // size on every streaming delta, so getMeasurements permanently falls
+  // back to estimateSize and every row is mispositioned. A row that grows
+  // in place is remeasured by the per-element ResizeObserver under its
+  // stable key — no key churn needed, and the new size persists.
   //
   // `measureElement`: rows are absolutely positioned via
-  // translateY(item.start), where item.start is the cumulative sum of
-  // measured heights. The core default does Math.round(blockSize): on
-  // fractional display scaling / browser zoom (heights like 96.667px) it
-  // can round *down*, so a row reserves less than it paints and the next
-  // row's offset lands on top of it — visible overlap, but only on some
-  // DPIs (hence "fine on my other laptop"). Ceil instead: reserved space
-  // is always >= painted height. Keeps the ResizeObserver borderBoxSize
-  // path intact.
+  // translateY(item.start), the cumulative sum of measured heights. The
+  // core default does Math.round(blockSize): on fractional display
+  // scaling / browser zoom (e.g. 96.667px) it can round *down*, so a row
+  // reserves less than it paints and the next row's offset lands on top
+  // of it (DPI-dependent — "fine on my other laptop"). Ceil so reserved
+  // space is always >= painted height. Keeps the ResizeObserver
+  // borderBoxSize path intact.
   const virtualizer = createVirtualizer({
     count: messages().length,
     getScrollElement: () => containerRef ?? null,
@@ -126,21 +124,29 @@ const Transcript: Component = () => {
     getItemKey: (index) => {
       const m = messages()[index];
       if (!m) return index;
-      return `${m.messageId}:${versionOf(m.messageId)}`;
+      return m.messageId;
     },
   });
 
-  // Re-sync the virtualizer when the messages array length changes.
-  // The virtualizer reads `count` from its options on creation; we
-  // need to push updates explicitly when messages stream in.
+  // Push the row COUNT into the virtualizer when messages are appended.
+  // `count` is read from the options object at creation, so a plain
+  // `createVirtualizer({ count: messages().length })` never updates — we
+  // re-apply it here on length change only.
+  //
+  // Deliberately does NOT call `virtualizer.measure()`: that method wipes
+  // the entire itemSizeCache (`this.itemSizeCache = new Map()`), and this
+  // effect previously also tracked the per-session epoch, so it ran on
+  // every streaming delta — nuking every measured height and forcing all
+  // rows back to the 96px estimate (universal overlap). The ResizeObserver
+  // wired via `measureElement` already keeps sizes current; appended rows
+  // use estimateSize only until their observer fires once. So: depend on
+  // length alone, never on epoch, never measure().
   createEffect(() => {
     const len = messages().length;
-    epochOf(focusedSessionId()); // re-fire on in-place mutations too
     virtualizer.setOptions({
       ...virtualizer.options,
       count: len,
     });
-    queueMicrotask(() => virtualizer.measure());
   });
 
   // Auto-scroll on new content, but only if the user was already at
@@ -263,23 +269,37 @@ const Transcript: Component = () => {
         >
           <For each={virtualizer.getVirtualItems()}>
             {(item) => {
+              // `count` is pushed to the virtualizer in a separate
+              // reactive tick from when measurements recompute, so the
+              // store-backed getVirtualItems() can momentarily contain an
+              // `undefined` entry (an in-range index whose measurement
+              // object doesn't exist yet). Render nothing for that slot;
+              // reconcile fills it on the next tick and For re-renders.
+              if (!item) return null;
               const m = () => messages()[item.index];
               return (
                 <Show when={m()}>
                   {(msg) => (
                     <div
                       data-index={item.index}
-                      // Hand the element directly to the virtualizer's
-                      // ResizeObserver. The previous `queueMicrotask`
-                      // wrap caused first-frame measurements to land
-                      // before layout (heights came back as 0 / the
-                      // estimateSize default), so streaming markdown
-                      // rows mounted with the wrong bounds and the
-                      // virtualizer's spacer math jittered for the
-                      // first few deltas. ResizeObserver picks up
-                      // subsequent growth automatically — no manual
-                      // remeasure needed even as the row swells.
-                      ref={(el) => virtualizer.measureElement(el)}
+                      // virtual-core's measureElement reads `data-index`
+                      // off the DOM to map the resize back to an item.
+                      // The reactive `data-index={item.index}` above is
+                      // applied by Solid in an effect that runs AFTER
+                      // this synchronous ref callback — so on the first
+                      // (mount-time) measure the attribute isn't there
+                      // yet, indexFromElement returns -1, and the
+                      // measurement is silently dropped (the row stays
+                      // pinned at estimateSize → overlap). Set the
+                      // attribute imperatively here, before measuring,
+                      // so the very first measure resolves. Each rendered
+                      // row maps to a fixed item index for its lifetime
+                      // (For + reconcile key:"index"), so this is stable;
+                      // the reactive attr still covers any later change.
+                      ref={(el) => {
+                        el.setAttribute("data-index", String(item.index));
+                        virtualizer.measureElement(el);
+                      }}
                       class="absolute left-0 top-0 w-full pb-2"
                       style={{ transform: `translateY(${item.start}px)` }}
                     >
