@@ -167,7 +167,12 @@ export class TelegramFrontend implements Frontend {
         return;
       }
       const lines = resp.sessions.map((s) => {
-        const icon = s.status === "idle" ? "🟢" : s.status === "working" ? "🟡" : "🔴";
+        const icon =
+          s.status === "idle"
+            ? "🟢"
+            : s.status === "thinking" || s.status === "tool_running"
+              ? "🟡"
+              : "🔴";
         return `${icon} *${esc(s.name)}* — ${s.status}\n   \`${s.workdir}\``;
       });
       await ctx.reply(lines.join("\n\n"), { parse_mode: "MarkdownV2" });

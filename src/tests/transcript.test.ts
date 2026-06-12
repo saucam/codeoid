@@ -70,7 +70,7 @@ describe("TranscriptStore", () => {
     await store.append("sess-1", {
       type: "session.status_change",
       sessionId: "sess-1",
-      status: "working",
+      status: "thinking",
       timestamp: new Date().toISOString(),
     }, 0);
 
@@ -114,7 +114,7 @@ describe("TranscriptStore", () => {
     });
     await store.saveMeta({
       sessionId: "s2", sessionName: "shield", workdir: "/tmp/2",
-      createdBy: "u1", createdAt: "t2", lastStatus: "working", lastActivityAt: "t2",
+      createdBy: "u1", createdAt: "t2", lastStatus: "thinking", lastActivityAt: "t2",
       accountId: "a", projectId: "p",
     });
 

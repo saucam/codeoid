@@ -19,7 +19,8 @@ interface Props {
 
 const STATUS_COLOR: Record<string, string> = {
   idle: "green",
-  working: "yellow",
+  thinking: "yellow",
+  tool_running: "yellow",
   waiting_approval: "red",
   error: "red",
 };

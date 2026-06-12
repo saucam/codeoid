@@ -240,7 +240,7 @@ export class TuiWsClient {
         break;
       }
       case "session.status_change": {
-        const s = msg as { sessionId: string; status: "idle" | "working" | "waiting_approval" | "error" };
+        const s = msg as { sessionId: string; status: "idle" | "thinking" | "tool_running" | "waiting_approval" | "error" };
         this.#dispatch({ type: "session.status", sessionId: s.sessionId, status: s.status });
         break;
       }

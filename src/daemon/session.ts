@@ -232,6 +232,11 @@ export class Session {
 
   // Track whether we've run a query before (for resume vs new session)
   #hasQueried = false;
+  // Last content pushed into the input queue this turn — replayed if a
+  // resume fails because the backing Claude Code conversation is missing.
+  #lastPushedContent: string | null = null;
+  // One-shot guard so backing-session recovery can't loop indefinitely.
+  #backingRecoveryAttempted = false;
 
   // ── Per-turn usage accumulator (primary vs subagent split) ─────────────
   // SDK's `result.usage` sums ALL API calls in a turn — including any
@@ -578,7 +583,8 @@ export class Session {
     // the new message to land mid-turn — auto-promote priority to `now`
     // so the SDK's agent loop observes it immediately rather than FIFO
     // queueing it behind the current turn's output.
-    const wasWorking = this.#status === "working";
+    const wasWorking =
+      this.#status === "thinking" || this.#status === "tool_running";
 
     // Pre-send rotation check. Auto-rotate if enabled AND we're above the
     // configured threshold AND past the min-turns safety window. Hard-
@@ -662,7 +668,7 @@ export class Session {
     // picks it up — immediately if `priority: "now"`, after current turn
     // if `"next"`, FIFO otherwise. Fire-and-forget from our side.
     this.#pushUserMessage(effectivePrompt, effectivePriority);
-    this.#setStatus("working");
+    this.#setStatus("thinking");
     // Broadcast info_update so StatusBar reflects the new queue depth.
     this.#broadcastInfoUpdate();
   }
@@ -933,6 +939,7 @@ export class Session {
             this.#persistAndBuffer(autoMsg);
             this.#broadcastRaw(autoMsg);
             this.#store.audit(sender.sub, "session.auto_approve", this.id, `tool=${toolName} mode=${this.#mode}`);
+            this.#setStatus("tool_running");
             return { behavior: "allow" as const, updatedInput: inputObj };
           }
 
@@ -959,7 +966,9 @@ export class Session {
           this.#setStatus("waiting_approval");
 
           const { approved, updatedInput } = await this.#waitForApproval(approvalId);
-          this.#setStatus("working");
+          // Approved → the tool now executes; denied → control returns to the
+          // model, which resumes reasoning.
+          this.#setStatus(approved ? "tool_running" : "thinking");
 
           // Emit tool state transition
           const delta: SessionMessageDelta = {
@@ -1009,6 +1018,9 @@ export class Session {
     // emits events at its own pace.
     const query$ = this.#query;
     const ac = this.#abortController;
+    // Set when a resume fails because the backing Claude Code conversation
+    // doesn't exist — drives the post-teardown replay below.
+    let recoverContent: string | null = null;
     this.#consumerTask = (async () => {
       try {
         for await (const msg of query$) {
@@ -1016,27 +1028,45 @@ export class Session {
         }
       } catch (err) {
         if (!ac.signal.aborted) {
-          console.error(
-            `[codeoid/session ${this.id}] SDK query failed:`,
-            err instanceof Error ? err.stack ?? err.message : err,
-          );
-          if (err && typeof err === "object") {
-            for (const key of Object.keys(err as object)) {
-              const v = (err as Record<string, unknown>)[key];
-              if (v !== undefined) console.error(`  ${key}:`, v);
+          const emsg = err instanceof Error ? err.message : String(err);
+          // A resume against a backing conversation that was never actually
+          // created (e.g. a session whose first query failed before the SDK
+          // subprocess spawned) surfaces as "No conversation found with
+          // session ID". Don't dead-end the session — flag a one-shot replay
+          // into a fresh backing session so the user's turn isn't lost.
+          if (
+            this.#hasQueried &&
+            !this.#backingRecoveryAttempted &&
+            this.#lastPushedContent !== null &&
+            /No conversation found with session ID/i.test(emsg)
+          ) {
+            console.error(
+              `[codeoid/session ${this.id}] backing session ${this.#claudeCodeSessionId} missing — recreating and replaying turn`,
+            );
+            recoverContent = this.#lastPushedContent;
+          } else {
+            console.error(
+              `[codeoid/session ${this.id}] SDK query failed:`,
+              err instanceof Error ? err.stack ?? err.message : err,
+            );
+            if (err && typeof err === "object") {
+              for (const key of Object.keys(err as object)) {
+                const v = (err as Record<string, unknown>)[key];
+                if (v !== undefined) console.error(`  ${key}:`, v);
+              }
             }
+            this.#setStatus("error");
+            const errorMsg = this.#makeMessage(
+              "system",
+              `Error: ${emsg}`,
+              SYSTEM_IDENTITY,
+              undefined,
+              undefined,
+              { event: "agent_error", errorCode: "agent_error" },
+            );
+            this.#persistAndBuffer(errorMsg);
+            this.#broadcastRaw(errorMsg);
           }
-          this.#setStatus("error");
-          const errorMsg = this.#makeMessage(
-            "system",
-            `Error: ${err instanceof Error ? err.message : String(err)}`,
-            SYSTEM_IDENTITY,
-            undefined,
-            undefined,
-            { event: "agent_error", errorCode: "agent_error" },
-          );
-          this.#persistAndBuffer(errorMsg);
-          this.#broadcastRaw(errorMsg);
         }
       } finally {
         // Cleanup per-loop state. Next send() will start a fresh loop.
@@ -1073,6 +1103,34 @@ export class Session {
         }
         if (this.#status !== "error") this.#setStatus("idle");
       }
+
+      // Post-teardown recovery: the backing conversation was missing. Mint a
+      // fresh backing id (forces create, not resume) and replay the pending
+      // turn so the user's message still gets a response. One-shot via
+      // #backingRecoveryAttempted so a persistent failure can't loop.
+      if (recoverContent !== null) {
+        this.#backingRecoveryAttempted = true;
+        const newBackingId = randomUUID();
+        this.#claudeCodeSessionId = newBackingId;
+        this.#hasQueried = false;
+        try {
+          this.#store.setClaudeCodeSessionId(this.id, newBackingId);
+        } catch (e) {
+          console.error(
+            `[codeoid/session ${this.id}] failed to persist recovered backing id: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+        try {
+          await this.#ensureQueryLoop(sender);
+          this.#pushUserMessage(recoverContent, "now");
+          this.#setStatus("thinking");
+        } catch (e) {
+          console.error(
+            `[codeoid/session ${this.id}] backing-session recovery failed: ${e instanceof Error ? e.message : String(e)}`,
+          );
+          this.#setStatus("error");
+        }
+      }
     })();
   }
 
@@ -1097,6 +1155,7 @@ export class Session {
       session_id: this.#claudeCodeSessionId,
       priority,
     };
+    this.#lastPushedContent = content;
     try {
       this.#inputQueue.push(msg);
     } catch (err) {
@@ -1899,7 +1958,9 @@ export class Session {
           }
         }
 
-        const content = msg.message.content as Array<Record<string, unknown>>;
+        // SDK 0.3 types content as BetaContentBlock[]; we walk it as generic
+        // records (block["type"]/["text"]/…), so route through `unknown`.
+        const content = msg.message.content as unknown as Array<Record<string, unknown>>;
         const textParts: string[] = [];
         const parts: ContentPart[] = [];
 
@@ -1987,6 +2048,8 @@ export class Session {
 
         if (event.type === "content_block_start") {
           if (event.content_block?.type === "thinking") {
+            // Model is reasoning again — leave any tool_running state.
+            if (this.#status === "tool_running") this.#setStatus("thinking");
             // Multi-call turns (primary agent + subagents + retries) can
             // interleave their own thinking streams. Our slot is
             // singular — finalize the previous in-flight block BEFORE
@@ -2011,6 +2074,9 @@ export class Session {
           // Text delta — streaming assistant response.
           if (event.delta.type === "text_delta" && event.delta.text) {
             if (!this.#activeAssistantMsg) {
+              // The model is generating again — if we were showing a tool as
+              // running, flip back to thinking so the indicator is accurate.
+              if (this.#status === "tool_running") this.#setStatus("thinking");
               this.#activeAssistantMsg = this.#makeMessage(
                 "assistant", "", this.#agentIdentity,
               );
@@ -2085,7 +2151,11 @@ export class Session {
         // the queue, Claude picks it up next and status stays working.
         const moreQueued = (this.#inputQueue?.size ?? 0) > 0;
         const awaitingApproval = this.#pendingApprovals.size > 0;
-        if (!moreQueued && !awaitingApproval && this.#status === "working") {
+        if (
+          !moreQueued &&
+          !awaitingApproval &&
+          (this.#status === "thinking" || this.#status === "tool_running")
+        ) {
           this.#setStatus("idle");
         }
         // Broadcast regardless of status change — queue depth may have

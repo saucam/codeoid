@@ -615,7 +615,10 @@ export class SessionManager {
     const interrupted = new Set<string>();
     while (Date.now() < deadline) {
       const working = [...this.#sessions.values()].filter(
-        (s) => s.status === "working" || s.status === "waiting_approval",
+        (s) =>
+          s.status === "thinking" ||
+          s.status === "tool_running" ||
+          s.status === "waiting_approval",
       );
       if (working.length === 0) return;
       for (const session of working) {

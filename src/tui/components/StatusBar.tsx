@@ -98,7 +98,8 @@ export function StatusBar({
           <Text dimColor>{" · "}</Text>
           <Text
             color={
-              focused.info.status === "working"
+              focused.info.status === "thinking" ||
+              focused.info.status === "tool_running"
                 ? "yellow"
                 : focused.info.status === "waiting_approval"
                   ? "red"

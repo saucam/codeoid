@@ -31,7 +31,20 @@ export const PROTOCOL_VERSION = 1;
 // Session metadata
 // =============================================================================
 
-export type SessionStatus = "idle" | "working" | "waiting_approval" | "error";
+// Active-turn status is split into two sub-states so clients can show what
+// the agent is actually doing: `thinking` (reasoning / generating text) vs
+// `tool_running` (a tool is executing — clients surface the tool name).
+export type SessionStatus =
+  | "idle"
+  | "thinking"
+  | "tool_running"
+  | "waiting_approval"
+  | "error";
+
+/** True when the session is mid-turn (either reasoning or running a tool). */
+export function isActiveStatus(s: SessionStatus): boolean {
+  return s === "thinking" || s === "tool_running";
+}
 
 /**
  * Execution mode — controls tool approval and autonomous budgeting.

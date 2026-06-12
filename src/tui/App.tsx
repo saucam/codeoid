@@ -202,7 +202,7 @@ export function App({ config }: Props) {
     const sessionId = fs.info.id;
     const status = fs.info.status;
     const current = workingSinceRef.current.get(sessionId) ?? null;
-    if (status === "working") {
+    if (status === "thinking" || status === "tool_running") {
       if (current === null) {
         workingSinceRef.current.set(sessionId, Date.now());
         setWorkingSinceTick((t) => t + 1);
@@ -215,7 +215,9 @@ export function App({ config }: Props) {
     }
   }, [focusedSession?.info.id, focusedSession?.info.status]);
   const workingSince =
-    focusedSession && focusedSession.info.status === "working"
+    focusedSession &&
+    (focusedSession.info.status === "thinking" ||
+      focusedSession.info.status === "tool_running")
       ? (workingSinceRef.current.get(focusedSession.info.id) ?? Date.now())
       : null;
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -402,7 +404,10 @@ export function App({ config }: Props) {
           dispatch({ type: "input.clear" });
           return;
         }
-        if (focusedSession.info.status === "working") {
+        if (
+          focusedSession.info.status === "thinking" ||
+          focusedSession.info.status === "tool_running"
+        ) {
           void wsRef.current?.interrupt(focusedSession.info.id).catch(() => {});
           return;
         }
@@ -909,7 +914,8 @@ export function App({ config }: Props) {
   //   - idle             → normal send copy
   const promptHint = focusedSession?.pendingApproval
     ? `⎆ ${focusedSession.pendingApproval.toolName}: ${focusedSession.pendingApproval.description} — press y/n`
-    : focusedSession?.info.status === "working"
+    : focusedSession?.info.status === "thinking" ||
+        focusedSession?.info.status === "tool_running"
       ? "⋯ session is working — Enter queues a mid-turn message · Ctrl-F search · Esc / Ctrl-X interrupt"
       : "Enter to send · Ctrl-N new · Ctrl-G switch · Ctrl-F search · Esc clear · Ctrl-X interrupt · ? help · Ctrl-C quit";
 
