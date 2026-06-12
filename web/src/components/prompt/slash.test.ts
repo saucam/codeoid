@@ -76,6 +76,10 @@ describe("parseSlash", () => {
     });
   });
 
+  it("bare /model opens the picker instead of erroring", () => {
+    expect(parseSlash("/model")).toEqual({ kind: "model-picker" });
+  });
+
   it("rejects unknown verbs", () => {
     expect(() => parseSlash("/banana")).toThrow(/unknown slash command/);
   });

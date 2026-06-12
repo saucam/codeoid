@@ -152,11 +152,20 @@ const ModePicker: Component<{
   );
 };
 
+// Module-level so `/model` (bare) can open the picker programmatically.
+const [modelPickerOpen, setModelPickerOpen] = createSignal(false);
+/** Open the focused session's model picker (wired to the bare `/model` slash). */
+export function openModelPicker(): void {
+  setModelPickerOpen(true);
+  void fetchModels();
+}
+
 const ModelPicker: Component<{
   sessionId: string;
   current?: string;
 }> = (props) => {
-  const [open, setOpen] = createSignal(false);
+  const open = modelPickerOpen;
+  const setOpen = setModelPickerOpen;
   const [custom, setCustom] = createSignal("");
   return (
     <div class="relative">

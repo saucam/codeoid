@@ -30,6 +30,7 @@ import {
 } from "../../state/sessions";
 import { openCapabilitiesDrawer } from "../CapabilitiesDrawer";
 import { openHelpModal } from "../HelpModal";
+import { openModelPicker } from "../SessionControls";
 import { openIdentityDrawer } from "../IdentityDrawer";
 import { openExportModal } from "../SessionExportModal";
 import { openImportModal } from "../SessionImportModal";
@@ -212,6 +213,7 @@ const PromptBox: Component = () => {
           showExport: openExportModal,
           showImport: openImportModal,
           showHelp: openHelpModal,
+          showModelPicker: openModelPicker,
         });
         clearDraft(draftKey());
         setText("");

@@ -27,6 +27,7 @@ export type SlashCommand =
   | { kind: "rotate" }
   | { kind: "mode"; mode: SessionMode; maxTurns?: number }
   | { kind: "model"; model: string; fallback?: string | null }
+  | { kind: "model-picker" }
   | { kind: "help" }
   | { kind: "clear" }
   | { kind: "who" }
@@ -84,7 +85,9 @@ export function parseSlash(raw: string): SlashCommand | null {
       };
     }
     case "model": {
-      if (rest.length === 0) throw new Error("/model <id|alias>");
+      // Bare `/model` opens the model picker (list + current). With an
+      // argument it switches directly.
+      if (rest.length === 0) return { kind: "model-picker" };
       const [model, fallback] = rest;
       return {
         kind: "model",
@@ -138,6 +141,7 @@ export interface SlashContext {
   report?: (message: string) => void;
   /** Optional UI hooks — caller provides as needed. */
   showHelp?: () => void;
+  showModelPicker?: () => void;
   showIdentity?: () => void;
   showCapabilities?: (tab: "agents" | "skills" | "mcp" | "hooks") => void;
   showExport?: () => void;
@@ -215,6 +219,9 @@ export function dispatchSlash(cmd: SlashCommand, ctx: SlashContext): void {
         model: cmd.model,
         ...(cmd.fallback !== undefined ? { fallbackModel: cmd.fallback } : {}),
       });
+      return;
+    case "model-picker":
+      ctx.showModelPicker?.();
       return;
     case "help":
       ctx.showHelp?.();
