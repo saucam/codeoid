@@ -136,22 +136,36 @@ const Transcript: Component = () => {
   // Push the row COUNT into the virtualizer when messages are appended.
   // `count` is read from the options object at creation, so a plain
   // `createVirtualizer({ count: messages().length })` never updates — we
-  // re-apply it here on length change only.
+  // re-apply it here on length change.
   //
-  // Deliberately does NOT call `virtualizer.measure()`: that method wipes
-  // the entire itemSizeCache (`this.itemSizeCache = new Map()`), and this
-  // effect previously also tracked the per-session epoch, so it ran on
-  // every streaming delta — nuking every measured height and forcing all
-  // rows back to the 96px estimate (universal overlap). The ResizeObserver
-  // wired via `measureElement` already keeps sizes current; appended rows
-  // use estimateSize only until their observer fires once. So: depend on
-  // length alone, never on epoch, never measure().
+  // measure() (which wipes the entire itemSizeCache) is called ONLY on a
+  // wholesale content swap — i.e. when the focused session changes and the
+  // new session's rows first arrive (scrollback replay). Without this, the
+  // virtualizer keeps the previous session's layout / a stale count=0 and
+  // the new history doesn't render until an unrelated event (typing in the
+  // prompt) forces a relayout. It must NOT run on every streaming delta —
+  // that's the old "universal overlap" regression — so we key the remeasure
+  // on a session change (sid), never on epoch/length alone.
+  let lastMeasuredSid: string | null | undefined;
+  let needsRemeasure = false;
   createEffect(() => {
+    const sid = focusedSessionId();
     const len = messages().length;
     virtualizer.setOptions({
       ...virtualizer.options,
       count: len,
     });
+    if (sid !== lastMeasuredSid) {
+      lastMeasuredSid = sid;
+      needsRemeasure = true;
+    }
+    // Remeasure once the swapped-in session actually has rows (scrollback
+    // may land a tick after the focus change). Deferred a frame so the new
+    // rows are in the DOM before we measure them.
+    if (needsRemeasure && len > 0) {
+      needsRemeasure = false;
+      queueMicrotask(() => virtualizer.measure());
+    }
   });
 
   // Auto-scroll on new content, but only if the user was already at
