@@ -59,7 +59,10 @@ const InterruptButton: Component<{
   sessionId: string;
   status: string;
 }> = (props) => {
-  const armed = () => props.status === "thinking" || props.status === "tool_running";
+  const armed = () =>
+    props.status === "working" ||
+    props.status === "thinking" ||
+    props.status === "tool_running";
   return (
     <button
       type="button"

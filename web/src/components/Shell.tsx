@@ -20,6 +20,7 @@ import { Component, Show, createMemo } from "solid-js";
 import CapabilitiesDrawer from "./CapabilitiesDrawer";
 import CenterPane from "./CenterPane";
 import FileViewer from "./files/FileViewer";
+import HelpModal from "./HelpModal";
 import IdentityDrawer from "./IdentityDrawer";
 import NewSessionModal from "./NewSessionModal";
 import ResizeHandle from "./ResizeHandle";
@@ -89,6 +90,7 @@ const Shell: Component = () => {
       <CapabilitiesDrawer />
       <SessionExportModal />
       <SessionImportModal />
+      <HelpModal />
     </div>
   );
 };

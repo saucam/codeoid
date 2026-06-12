@@ -65,7 +65,12 @@ const Transcript: Component = () => {
   // that hasn't transitioned to a terminal role yet.
   const streamingMessageId = createMemo<string | null>(() => {
     const status = focusedSession()?.status;
-    if (status !== "thinking" && status !== "tool_running") return null;
+    if (
+      status !== "working" &&
+      status !== "thinking" &&
+      status !== "tool_running"
+    )
+      return null;
     const arr = messages();
     for (let i = arr.length - 1; i >= 0; i--) {
       const m = arr[i];

@@ -26,7 +26,9 @@ const WorkerIndicator: Component = () => {
 
   const status = () => focusedSession()?.status;
   const visible = () =>
-    status() === "thinking" || status() === "tool_running";
+    status() === "working" ||
+    status() === "thinking" ||
+    status() === "tool_running";
 
   // Latest in-flight tool call (executing / streaming).
   const liveTool = createMemo(() => {

@@ -29,6 +29,7 @@ import {
   removeSession,
 } from "../../state/sessions";
 import { openCapabilitiesDrawer } from "../CapabilitiesDrawer";
+import { openHelpModal } from "../HelpModal";
 import { openIdentityDrawer } from "../IdentityDrawer";
 import { openExportModal } from "../SessionExportModal";
 import { openImportModal } from "../SessionImportModal";
@@ -208,8 +209,7 @@ const PromptBox: Component = () => {
           showCapabilities: openCapabilitiesDrawer,
           showExport: openExportModal,
           showImport: openImportModal,
-          // showHelp left undefined for now — wired in P7C alongside
-          // the help modal.
+          showHelp: openHelpModal,
         });
         clearDraft(draftKey());
         setText("");

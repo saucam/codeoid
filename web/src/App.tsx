@@ -104,7 +104,12 @@ const App: Component = () => {
       if (!(ev.ctrlKey || ev.metaKey)) return;
       const s = focusedSession();
       if (!s) return;
-      if (s.status !== "thinking" && s.status !== "tool_running") return;
+      if (
+        s.status !== "working" &&
+        s.status !== "thinking" &&
+        s.status !== "tool_running"
+      )
+        return;
 
       // Don't hijack a real "cut" the user intended. If the active element
       // is a text field with a non-empty selection, defer to the browser.

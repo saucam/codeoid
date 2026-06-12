@@ -24,7 +24,16 @@ export interface MessageIdentity {
 // Sessions
 // -----------------------------------------------------------------------------
 
-export type SessionStatus = "idle" | "thinking" | "tool_running" | "error";
+// `working` + `waiting_approval` are what the daemon actually emits; the
+// finer `thinking` / `tool_running` are kept for forward-compat in case the
+// daemon ever splits the active state. Treat `working` as "active" in the UI.
+export type SessionStatus =
+  | "idle"
+  | "working"
+  | "waiting_approval"
+  | "thinking"
+  | "tool_running"
+  | "error";
 export type SessionMode = "interactive" | "auto-allow" | "autonomous";
 
 export interface SessionUsage {
