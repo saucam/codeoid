@@ -12,7 +12,13 @@
  *     version bump. Decoupled from Anthropic's id changes.
  *   - A passthrough escape hatch (`resolveModel` accepts any string that
  *     looks like a full id) means users aren't locked to our opinions.
+ *
+ * NOTE: this catalog is a *fallback* only. The daemon prefers the live list
+ * the Claude Code backend reports via the SDK's `supportedModels()` (cached
+ * on the SessionManager) — see `fallbackModelInfos` / `resolveAgainstList`.
  */
+
+import type { ModelInfo } from "../protocol/types.js";
 
 export type ModelTier = "premium" | "balanced" | "fast";
 
@@ -92,8 +98,49 @@ export function resolveModelId(identifier: string): string | null {
   // errors at SDK time, which is better than us refusing unknown-but-valid
   // point releases.
   if (/^claude-/.test(trimmed)) return trimmed;
-  return null;
+  // Otherwise pass it through unchanged. The live backend (and ultimately the
+  // SDK) is the real validator — refusing an unknown-but-valid value here is
+  // worse than letting the SDK reject a genuine typo. Empty input already
+  // returned null above.
+  return trimmed;
 }
 
 /** Default model when nothing else is specified. */
 export const DEFAULT_MODEL_ALIAS = "opus";
+
+// ── Dynamic (live-backend) model resolution ──────────────────────────────
+
+/**
+ * The built-in catalog rendered as `ModelInfo`, used as a fallback before
+ * any session has initialized and we've cached the live backend list.
+ */
+export function fallbackModelInfos(): ModelInfo[] {
+  return MODEL_CATALOG.map((m) => ({
+    value: m.alias,
+    displayName: m.label,
+    description: m.description,
+    isDefault: m.alias === DEFAULT_MODEL_ALIAS,
+  }));
+}
+
+/**
+ * Resolve user input → a canonical model value against a (live or fallback)
+ * `ModelInfo[]`. Matches by exact `value` or case-insensitive `displayName`
+ * (so `opus` matches the backend's "Opus"), with a `claude-*` passthrough.
+ * Returns null when the input matches nothing — the caller surfaces the set
+ * of valid values.
+ */
+export function resolveAgainstList(
+  input: string,
+  models: readonly ModelInfo[],
+): string | null {
+  const t = input?.trim();
+  if (!t) return null;
+  const lower = t.toLowerCase();
+  for (const m of models) {
+    if (m.value.toLowerCase() === lower) return m.value;
+    if (m.displayName.toLowerCase() === lower) return m.value;
+  }
+  if (/^claude-/i.test(t)) return t;
+  return null;
+}

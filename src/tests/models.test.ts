@@ -13,8 +13,42 @@ import {
   findModel,
   resolveModelId,
   DEFAULT_MODEL_ALIAS,
+  fallbackModelInfos,
+  resolveAgainstList,
 } from "../daemon/models.js";
 import { Store } from "../daemon/store.js";
+
+describe("resolveAgainstList (live-backend resolution)", () => {
+  const live = [
+    { value: "default", displayName: "Default (recommended)", isDefault: true },
+    { value: "opus[1m]", displayName: "Opus" },
+    { value: "sonnet", displayName: "Sonnet" },
+  ];
+
+  it("matches an exact value", () => {
+    expect(resolveAgainstList("opus[1m]", live)).toBe("opus[1m]");
+  });
+  it("matches a display name case-insensitively (alias-like)", () => {
+    expect(resolveAgainstList("opus", live)).toBe("opus[1m]");
+    expect(resolveAgainstList("OPUS", live)).toBe("opus[1m]");
+  });
+  it("passes through a full claude-* id", () => {
+    expect(resolveAgainstList("claude-fable-5[1m]", live)).toBe("claude-fable-5[1m]");
+  });
+  it("returns null for an unknown value", () => {
+    expect(resolveAgainstList("o", live)).toBeNull();
+    expect(resolveAgainstList("", live)).toBeNull();
+  });
+});
+
+describe("fallbackModelInfos", () => {
+  it("renders the built-in catalog as ModelInfo with a default", () => {
+    const infos = fallbackModelInfos();
+    expect(infos.length).toBe(MODEL_CATALOG.length);
+    expect(infos.some((m) => m.isDefault)).toBe(true);
+    expect(infos.every((m) => m.value && m.displayName)).toBe(true);
+  });
+});
 
 describe("MODEL_CATALOG shape", () => {
   it("covers the three canonical tiers", () => {
@@ -50,9 +84,14 @@ describe("findModel + resolveModelId", () => {
     expect(resolveModelId(known.id)).toBe(known.id);
   });
 
-  it("returns null on unknown aliases", () => {
-    expect(findModel("gpt-5")).toBeNull();
-    expect(resolveModelId("gpt-5")).toBeNull();
+  it("returns null only for empty input; otherwise passes through", () => {
+    // resolveModelId no longer gatekeeps unknown values — the daemon validates
+    // against the live backend catalog (resolveAgainstList) instead. Unknown
+    // non-empty input passes through; the SDK is the final validator.
+    expect(findModel("gpt-5")).toBeNull(); // still not in the built-in catalog
+    expect(resolveModelId("gpt-5")).toBe("gpt-5");
+    expect(resolveModelId("")).toBeNull();
+    expect(resolveModelId("   ")).toBeNull();
   });
 
   it("passthrough accepts any claude-* id not in our catalog", () => {

@@ -91,6 +91,12 @@ export interface SessionCreateOptions {
   transcriptStore: TranscriptStore;
   identityManager?: AgentIdentityManager;
   existingId?: string;
+  /**
+   * Called once per session with the live model catalog the backend
+   * supports (from the SDK's `supportedModels()`). The manager caches it
+   * daemon-wide so `/model` validation + the picker use the real list.
+   */
+  onModels?: (models: ReadonlyArray<{ value: string; displayName: string; description?: string }>) => void;
   /** Optional memory engine — when provided, episodes are chunked and stored for recall. */
   memory?: MemoryEngine;
   /**
@@ -232,6 +238,7 @@ export class Session {
 
   // Track whether we've run a query before (for resume vs new session)
   #hasQueried = false;
+  #onModels?: (models: ReadonlyArray<{ value: string; displayName: string; description?: string }>) => void;
   // Last content pushed into the input queue this turn — replayed if a
   // resume fails because the backing Claude Code conversation is missing.
   #lastPushedContent: string | null = null;
@@ -323,6 +330,7 @@ export class Session {
     this.#store = opts.store;
     this.#transcriptStore = opts.transcriptStore;
     this.#identityManager = opts.identityManager;
+    this.#onModels = opts.onModels;
     this.#memory = opts.memory;
     this.#config = opts.config;
     this.#compressionRegistry = opts.compressionRegistry;
@@ -1012,6 +1020,16 @@ export class Session {
     });
 
     this.#hasQueried = true;
+
+    // Fetch the live model catalog the backend supports and hand it to the
+    // manager to cache daemon-wide. Best-effort, never blocks the turn —
+    // supportedModels() resolves once the SDK finishes initializing.
+    if (this.#onModels) {
+      void this.#query
+        .supportedModels()
+        .then((m) => this.#onModels?.(m))
+        .catch(() => {});
+    }
 
     // Drive the SDK stream in the background. The consumer never blocks
     // send() — user messages keep flowing through the queue while Claude

@@ -20,6 +20,7 @@ import {
   handleFsRead,
 } from "./fs.js";
 import { readClaudeConfig } from "./claude-config.js";
+import { fallbackModelInfos, resolveAgainstList } from "./models.js";
 import {
   packSession,
   unpackBundle,
@@ -35,6 +36,7 @@ import type {
   AuthContext,
   ClientMessage,
   DaemonMessage,
+  ModelInfo,
   SessionInfo,
 } from "../protocol/types.js";
 
@@ -45,6 +47,9 @@ export class SessionManager {
   #identityManager?: AgentIdentityManager;
   #rateLimiter: RateLimiter;
   #memory?: MemoryEngine;
+  /** Live model catalog from the backend (via SDK supportedModels), cached
+   *  daemon-wide once any session initializes. Null until then. */
+  #modelsCache: ModelInfo[] | null = null;
   #config?: CodeoidConfig;
   #compressionRegistry?: CompressionRegistry;
 
@@ -92,6 +97,7 @@ export class SessionManager {
           memory: this.#memory,
           config: this.#config,
           compressionRegistry: this.#compressionRegistry,
+          onModels: (m) => this.#cacheModels(m),
         });
 
         // Restore scrollback from transcript
@@ -190,6 +196,8 @@ export class SessionManager {
         return this.#fsBrowseDir(msg, auth);
       case "claude.config":
         return this.#claudeConfig(msg, auth);
+      case "models.list":
+        return this.#modelsList(msg);
       case "session.export":
         return this.#sessionExport(msg, auth);
       case "session.import":
@@ -393,6 +401,7 @@ export class SessionManager {
               ...(this.#memory ? { memory: this.#memory } : {}),
               config: this.#config,
               compressionRegistry: this.#compressionRegistry,
+              onModels: (m) => this.#cacheModels(m),
             });
             this.#sessions.set(session.id, session);
             this.#rateLimiter.recordCreation(auth.sub);
@@ -480,6 +489,37 @@ export class SessionManager {
         code: "internal",
       };
     }
+  }
+
+  /**
+   * Cache the live model catalog reported by a session's SDK query. The list
+   * is version-static across sessions, so the first one to report wins and we
+   * stop overwriting (cheap idempotence; avoids churn from every new session).
+   */
+  #cacheModels(
+    raw: ReadonlyArray<{ value: string; displayName: string; description?: string }>,
+  ): void {
+    if (this.#modelsCache || raw.length === 0) return;
+    this.#modelsCache = raw.map((m) => ({
+      value: m.value,
+      displayName: m.displayName,
+      ...(m.description ? { description: m.description } : {}),
+      isDefault: m.value === "default",
+    }));
+  }
+
+  /** The live model catalog if cached, else the built-in fallback. */
+  #currentModels(): { models: ModelInfo[]; live: boolean } {
+    return this.#modelsCache
+      ? { models: this.#modelsCache, live: true }
+      : { models: fallbackModelInfos(), live: false };
+  }
+
+  #modelsList(
+    msg: Extract<ClientMessage, { type: "models.list" }>,
+  ): DaemonMessage {
+    const { models, live } = this.#currentModels();
+    return { type: "models.list.result", requestId: msg.id, models, live };
   }
 
   async #fsBrowseDir(
@@ -656,6 +696,7 @@ export class SessionManager {
       memory: this.#memory,
       config: this.#config,
       compressionRegistry: this.#compressionRegistry,
+      onModels: (m) => this.#cacheModels(m),
     });
 
     this.#sessions.set(session.id, session);
@@ -930,8 +971,37 @@ export class SessionManager {
         code: "not_found",
       };
     }
+    // Validate against the live backend catalog (or the fallback). Accepts a
+    // canonical value, a case-insensitive display name (`opus` → "Opus"), or
+    // a full claude-* id. An unknown value is rejected here with the set of
+    // valid choices, so `/model o` gets actionable feedback.
+    const { models } = this.#currentModels();
+    const resolvedModel = resolveAgainstList(msg.model, models);
+    if (!resolvedModel) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: `Unknown model "${msg.model}". Available: ${models
+          .map((m) => m.value)
+          .join(", ")}`,
+        code: "invalid_request",
+      };
+    }
+    let resolvedFallback = msg.fallbackModel;
+    if (typeof msg.fallbackModel === "string") {
+      const rf = resolveAgainstList(msg.fallbackModel, models);
+      if (!rf) {
+        return {
+          type: "response.error",
+          requestId: msg.id,
+          error: `Unknown fallback model "${msg.fallbackModel}".`,
+          code: "invalid_request",
+        };
+      }
+      resolvedFallback = rf;
+    }
     try {
-      const result = await session.setModel(msg.model, msg.fallbackModel, auth);
+      const result = await session.setModel(resolvedModel, resolvedFallback, auth);
       return {
         type: "response.ok",
         requestId: msg.id,

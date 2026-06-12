@@ -554,6 +554,7 @@ export type ClientMessage =
   | FsReadMsg
   | FsBrowseDirMsg
   | ClaudeConfigMsg
+  | ModelsListMsg
   | SessionExportMsg
   | SessionImportMsg;
 
@@ -818,6 +819,28 @@ export interface ClaudeConfigMsg extends BaseClientMsg {
 }
 
 /**
+ * Ask the daemon for the model catalog the Claude Code backend actually
+ * supports (via the SDK's `supportedModels()`), rather than a hardcoded
+ * list that goes stale. Daemon-wide — no sessionId. Returns the cached
+ * live list, or a built-in fallback if no session has initialized yet.
+ */
+export interface ModelsListMsg extends BaseClientMsg {
+  type: "models.list";
+}
+
+/** One selectable model as reported by the Claude Code backend. */
+export interface ModelInfo {
+  /** Value passed to `/model` and forwarded to the SDK (e.g. "opus[1m]"). */
+  value: string;
+  /** Human label (e.g. "Opus"). */
+  displayName: string;
+  /** Optional one-line description from the backend. */
+  description?: string;
+  /** True for the backend's recommended default. */
+  isDefault?: boolean;
+}
+
+/**
  * Export a session as a `ShareBundle` JSON. Daemon resolves a workdir
  * alias (from git remote when available), rewrites every absolute path
  * to `${alias}/${relative}`, and returns either the full bundle inline
@@ -998,6 +1021,14 @@ export interface ClaudeConfigResultMsg {
   hooks: ClaudeConfigHook[];
 }
 
+export interface ModelsListResultMsg {
+  type: "models.list.result";
+  requestId: string;
+  models: ModelInfo[];
+  /** True when these came from the live backend; false = built-in fallback. */
+  live: boolean;
+}
+
 export interface SessionExportResultMsg {
   type: "session.export.result";
   requestId: string;
@@ -1059,6 +1090,7 @@ export type DaemonMessage =
   | FsReadResultMsg
   | FsBrowseDirResultMsg
   | ClaudeConfigResultMsg
+  | ModelsListResultMsg
   | SessionExportResultMsg
   | SessionImportResultMsg;
 
