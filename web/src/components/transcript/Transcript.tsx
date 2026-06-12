@@ -93,6 +93,54 @@ const Transcript: Component = () => {
     setStuckBottom(isAtBottom(containerRef));
   }
 
+  // Snap the scroll viewport to the very bottom (instant).
+  function snapToBottom(): void {
+    if (containerRef) containerRef.scrollTop = containerRef.scrollHeight;
+  }
+
+  // Scroll to the bottom for a discrete event (send / session switch). The
+  // continuous re-pinning as content grows or the viewport shrinks is
+  // handled by `pinObserver` below — this just kicks the initial scroll,
+  // optionally animated.
+  function pinToBottom(smooth = false): void {
+    if (!containerRef) return;
+    queueMicrotask(() => {
+      if (!containerRef) return;
+      if (smooth) {
+        containerRef.scrollTo({
+          top: containerRef.scrollHeight,
+          behavior: "smooth",
+        });
+      } else {
+        snapToBottom();
+      }
+    });
+  }
+
+  // The robust pin: a single ResizeObserver watching BOTH the scroll
+  // viewport AND the content sizer. While the user is stuck to the bottom,
+  // re-pin on every size change. This covers two edge cases a one-shot
+  // scroll misses:
+  //   1. Large / streaming output whose sizer keeps growing for many frames
+  //      as rows measure (a fixed-count re-pin falls behind → "stops
+  //      scrolling").
+  //   2. The WorkerIndicator ("thinking…") appearing below the transcript,
+  //      which shrinks the viewport and would otherwise hide the last
+  //      message behind it.
+  // Pinning sets scrollTop only (never changes element sizes), so it can't
+  // feed back into the observer. The `stuckBottom` guard means a user who
+  // scrolls up mid-stream is left alone.
+  let sizerRef: HTMLDivElement | undefined;
+  let pinObserver: ResizeObserver | undefined;
+  onMount(() => {
+    pinObserver = new ResizeObserver(() => {
+      if (stuckBottom()) snapToBottom();
+    });
+    if (containerRef) pinObserver.observe(containerRef);
+    if (sizerRef) pinObserver.observe(sizerRef);
+    onCleanup(() => pinObserver?.disconnect());
+  });
+
   // Drive the virtualizer off the messages array.
   //
   // `getItemKey` is a STABLE per-message id. tanstack-virtual stores each
@@ -183,18 +231,7 @@ const Transcript: Component = () => {
       if (stuckBottom()) {
         const smooth = smoothNext;
         smoothNext = false;
-        // Defer one frame so the new DOM has measured.
-        queueMicrotask(() => {
-          if (!containerRef) return;
-          if (smooth) {
-            containerRef.scrollTo({
-              top: containerRef.scrollHeight,
-              behavior: "smooth",
-            });
-          } else {
-            containerRef.scrollTop = containerRef.scrollHeight;
-          }
-        });
+        pinToBottom(smooth);
       }
     }),
   );
@@ -210,9 +247,7 @@ const Transcript: Component = () => {
       if (jump && jump.sessionId === sid) return;
       setStuckBottom(true);
       smoothNext = false;
-      queueMicrotask(() => {
-        if (containerRef) containerRef.scrollTop = containerRef.scrollHeight;
-      });
+      pinToBottom(false);
     }),
   );
 
@@ -283,6 +318,10 @@ const Transcript: Component = () => {
         }
       >
         <div
+          ref={(el) => {
+            sizerRef = el;
+            pinObserver?.observe(el);
+          }}
           class="relative mx-auto w-full max-w-3xl"
           style={{ height: `${virtualizer.getTotalSize()}px` }}
         >
