@@ -17,7 +17,7 @@ import {
   onMount,
 } from "solid-js";
 
-import { newRequestId, send } from "../../state/connection";
+import { newRequestId, request, send } from "../../state/connection";
 import {
   clearDraft,
   getDraft,
@@ -203,6 +203,8 @@ const PromptBox: Component = () => {
         dispatchSlash(slash, {
           sessionId: session.id,
           send,
+          request,
+          report: setError,
           newRequestId,
           removeSession,
           showIdentity: openIdentityDrawer,

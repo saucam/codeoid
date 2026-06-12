@@ -127,6 +127,15 @@ export interface SlashContext {
   send: (msg: ClientMessage) => void;
   newRequestId: () => string;
   removeSession: (id: string) => void;
+  /**
+   * Send a command and await the daemon's response, rejecting on
+   * `response.error`. When provided, fallible commands route through this so
+   * the daemon's error (e.g. "Unknown model") surfaces via `report`. Falls
+   * back to fire-and-forget `send` when absent (e.g. in tests).
+   */
+  request?: (msg: ClientMessage) => Promise<unknown>;
+  /** Surface a command error to the user (wired to the prompt's error line). */
+  report?: (message: string) => void;
   /** Optional UI hooks — caller provides as needed. */
   showHelp?: () => void;
   showIdentity?: () => void;
@@ -136,9 +145,22 @@ export interface SlashContext {
 }
 
 export function dispatchSlash(cmd: SlashCommand, ctx: SlashContext): void {
+  // Send a daemon command, surfacing any `response.error` via `report` so
+  // the user gets feedback (e.g. `/model o` → "Unknown model"). Falls back
+  // to fire-and-forget when no request channel is wired.
+  const fire = (msg: ClientMessage): void => {
+    if (ctx.request) {
+      ctx.request(msg).catch((e) =>
+        ctx.report?.(e instanceof Error ? e.message : String(e)),
+      );
+    } else {
+      ctx.send(msg);
+    }
+  };
+
   switch (cmd.kind) {
     case "new":
-      ctx.send({
+      fire({
         type: "session.create",
         id: ctx.newRequestId(),
         name: cmd.name,
@@ -146,7 +168,7 @@ export function dispatchSlash(cmd: SlashCommand, ctx: SlashContext): void {
       });
       return;
     case "rename":
-      ctx.send({
+      fire({
         type: "session.rename",
         id: ctx.newRequestId(),
         sessionId: ctx.sessionId,
@@ -154,7 +176,7 @@ export function dispatchSlash(cmd: SlashCommand, ctx: SlashContext): void {
       });
       return;
     case "destroy":
-      ctx.send({
+      fire({
         type: "session.destroy",
         id: ctx.newRequestId(),
         sessionId: ctx.sessionId,
@@ -163,21 +185,21 @@ export function dispatchSlash(cmd: SlashCommand, ctx: SlashContext): void {
       ctx.removeSession(ctx.sessionId);
       return;
     case "interrupt":
-      ctx.send({
+      fire({
         type: "session.interrupt",
         id: ctx.newRequestId(),
         sessionId: ctx.sessionId,
       });
       return;
     case "rotate":
-      ctx.send({
+      fire({
         type: "session.rotate",
         id: ctx.newRequestId(),
         sessionId: ctx.sessionId,
       });
       return;
     case "mode":
-      ctx.send({
+      fire({
         type: "session.set_mode",
         id: ctx.newRequestId(),
         sessionId: ctx.sessionId,
@@ -186,7 +208,7 @@ export function dispatchSlash(cmd: SlashCommand, ctx: SlashContext): void {
       });
       return;
     case "model":
-      ctx.send({
+      fire({
         type: "session.set_model",
         id: ctx.newRequestId(),
         sessionId: ctx.sessionId,
