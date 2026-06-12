@@ -17,6 +17,7 @@ import {
   send,
 } from "../state/connection";
 import { focusedSession, removeSession } from "../state/sessions";
+import { fetchModels, modelCatalog } from "../state/models";
 import type { SessionMode } from "../protocol/types";
 import { openExportModal } from "./SessionExportModal";
 
@@ -24,17 +25,6 @@ const MODE_OPTIONS: { value: SessionMode; label: string; hint: string }[] = [
   { value: "interactive", label: "interactive", hint: "every tool asks first" },
   { value: "auto-allow", label: "auto-allow", hint: "Read/Grep/Glob auto; Write/Bash ask" },
   { value: "autonomous", label: "autonomous", hint: "every tool auto-approved" },
-];
-
-// Common Anthropic models we surface as quick picks. ZeroID-side
-// configuration can extend this; for v1 keep the list short and obvious.
-const MODEL_OPTIONS: { id: string; label: string }[] = [
-  { id: "opus", label: "Opus (alias)" },
-  { id: "sonnet", label: "Sonnet (alias)" },
-  { id: "haiku", label: "Haiku (alias)" },
-  { id: "claude-opus-4-7", label: "claude-opus-4-7" },
-  { id: "claude-sonnet-4-6", label: "claude-sonnet-4-6" },
-  { id: "claude-haiku-4-5", label: "claude-haiku-4-5" },
 ];
 
 const SessionControls: Component = () => {
@@ -172,7 +162,11 @@ const ModelPicker: Component<{
     <div class="relative">
       <button
         type="button"
-        onClick={() => setOpen(!open())}
+        onClick={() => {
+          const next = !open();
+          setOpen(next);
+          if (next) void fetchModels();
+        }}
         class="flex items-center gap-1 rounded border border-border bg-bg px-2 py-1 font-mono uppercase tracking-wider text-fg-muted hover:border-accent/40 hover:text-fg"
         title="Switch model (next turn applies)"
       >
@@ -183,30 +177,41 @@ const ModelPicker: Component<{
           class="absolute right-0 top-full z-30 mt-1 w-56 rounded border border-border bg-bg-elev shadow-xl"
           onMouseLeave={() => setOpen(false)}
         >
-          <For each={MODEL_OPTIONS}>
-            {(opt) => (
-              <button
-                type="button"
-                onClick={() => {
-                  send({
-                    type: "session.set_model",
-                    id: newRequestId(),
-                    sessionId: props.sessionId,
-                    model: opt.id,
-                  });
-                  setOpen(false);
-                }}
-                class={`flex w-full items-center justify-between px-3 py-1.5 text-left text-[12px] transition hover:bg-bg-hover ${
-                  opt.id === props.current ? "bg-bg-active text-fg" : "text-fg-muted"
-                }`}
-              >
-                <span class="font-mono">{opt.label}</span>
-                <Show when={opt.id === props.current}>
-                  <span class="text-accent">●</span>
-                </Show>
-              </button>
-            )}
-          </For>
+          <Show
+            when={modelCatalog().length > 0}
+            fallback={
+              <div class="px-3 py-2 text-[11px] text-fg-faint">Loading models…</div>
+            }
+          >
+            <For each={modelCatalog()}>
+              {(opt) => (
+                <button
+                  type="button"
+                  onClick={() => {
+                    send({
+                      type: "session.set_model",
+                      id: newRequestId(),
+                      sessionId: props.sessionId,
+                      model: opt.value,
+                    });
+                    setOpen(false);
+                  }}
+                  class={`flex w-full items-center justify-between px-3 py-1.5 text-left text-[12px] transition hover:bg-bg-hover ${
+                    opt.value === props.current ? "bg-bg-active text-fg" : "text-fg-muted"
+                  }`}
+                  title={opt.description ?? opt.value}
+                >
+                  <span class="flex flex-col">
+                    <span class="text-fg">{opt.displayName}{opt.isDefault ? " ·default" : ""}</span>
+                    <span class="font-mono text-[10px] text-fg-faint">{opt.value}</span>
+                  </span>
+                  <Show when={opt.value === props.current}>
+                    <span class="text-accent">●</span>
+                  </Show>
+                </button>
+              )}
+            </For>
+          </Show>
           <div class="border-t border-border p-2">
             <input
               type="text"

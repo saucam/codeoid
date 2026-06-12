@@ -9,6 +9,8 @@
 
 import { Component, For, Show, createSignal, onCleanup, onMount } from "solid-js";
 
+import { modelCatalog } from "../state/models";
+
 const [openSignal, setOpenSignal] = createSignal(false);
 
 /** Open the help modal programmatically (wired to the `/help` slash command). */
@@ -92,11 +94,26 @@ const HelpModal: Component = () => {
             <div class="mb-1 text-[11px] font-semibold uppercase tracking-wider text-fg-faint">
               Models (for /model)
             </div>
-            <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-fg-muted">
-              <span><code class="font-mono text-accent">opus</code> — Opus 4.7 (deepest reasoning)</span>
-              <span><code class="font-mono text-accent">sonnet</code> — Sonnet 4.6 (fast default)</span>
-              <span><code class="font-mono text-accent">haiku</code> — Haiku 4.5 (cheapest)</span>
-            </div>
+            <Show
+              when={modelCatalog().length > 0}
+              fallback={
+                <div class="text-xs text-fg-faint">Loading models…</div>
+              }
+            >
+              <div class="flex flex-col gap-y-1 text-xs text-fg-muted">
+                <For each={modelCatalog()}>
+                  {(m) => (
+                    <span>
+                      <code class="font-mono text-accent">{m.value}</code>
+                      {" — "}
+                      {m.displayName}
+                      {m.description ? ` · ${m.description}` : ""}
+                      {m.isDefault ? " (default)" : ""}
+                    </span>
+                  )}
+                </For>
+              </div>
+            </Show>
             <div class="mt-1 text-[11px] text-fg-faint">
               …or any full <code class="font-mono">claude-*</code> id. Enter sends · Shift+Enter newline · Esc closes
             </div>

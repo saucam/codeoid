@@ -345,6 +345,26 @@ export interface ClaudeConfigMsg extends BaseClientMsg {
   sessionId: string;
 }
 
+/** Ask the daemon for the live model catalog the backend supports. */
+export interface ModelsListMsg extends BaseClientMsg {
+  type: "models.list";
+}
+
+/** One selectable model as reported by the Claude Code backend. */
+export interface ModelInfo {
+  value: string;
+  displayName: string;
+  description?: string;
+  isDefault?: boolean;
+}
+
+export interface ModelsListResultMsg {
+  type: "models.list.result";
+  requestId: string;
+  models: ModelInfo[];
+  live: boolean;
+}
+
 export interface SessionExportMsg extends BaseClientMsg {
   type: "session.export";
   sessionId: string;
@@ -380,6 +400,7 @@ export type ClientMessage =
   | FsReadMsg
   | FsBrowseDirMsg
   | ClaudeConfigMsg
+  | ModelsListMsg
   | SessionExportMsg
   | SessionImportMsg;
 
@@ -616,5 +637,6 @@ export type DaemonMessage =
   | FsReadResultMsg
   | FsBrowseDirResultMsg
   | ClaudeConfigResultMsg
+  | ModelsListResultMsg
   | SessionExportResultMsg
   | SessionImportResultMsg;

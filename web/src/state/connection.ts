@@ -134,6 +134,9 @@ export async function bootstrap(opts: { apiKey?: string; token?: string } = {}):
     await refreshSessions().catch((err) => {
       console.error("[codeoid:bootstrap] session.list failed:", err);
     });
+    // Fetch the live model catalog (best-effort, non-blocking). Dynamic
+    // import avoids a static connection<->models import cycle.
+    void import("./models").then((m) => m.fetchModels()).catch(() => {});
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     setBootError(msg);
