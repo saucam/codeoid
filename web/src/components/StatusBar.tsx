@@ -20,6 +20,7 @@ import {
 } from "../lib/format";
 import { identityLabel, identityColorClass } from "../lib/identity";
 import { authIdentity, connectionStatus, disconnect } from "../state/connection";
+import { isMobile, toggleNav } from "../state/layout";
 import { focusedSession } from "../state/sessions";
 import { forgetApiKey } from "../lib/auth";
 import { openIdentityDrawer } from "./IdentityDrawer";
@@ -28,6 +29,17 @@ import { notifyPermission, requestEnable } from "../state/desktop-notifications"
 const StatusBar: Component = () => {
   return (
     <header class="col-span-full flex items-center gap-3 border-b border-border bg-bg-elev px-4 text-sm text-fg-muted">
+      <Show when={isMobile()}>
+        <button
+          type="button"
+          class="-ml-1 rounded px-1.5 py-1 text-lg leading-none text-fg-muted hover:text-fg"
+          onClick={toggleNav}
+          aria-label="Open sessions"
+          title="Sessions"
+        >
+          ☰
+        </button>
+      </Show>
       <span class="select-none font-mono font-semibold text-fg">codeoid</span>
       <Sep />
       <ConnectionPill />

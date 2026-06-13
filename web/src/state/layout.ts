@@ -83,6 +83,30 @@ export const isLeftCollapsed = leftSidebarCollapsed;
 export const rightWidth = rightPanePx;
 export const isHeaderCollapsed = headerCollapsed;
 
+// ── Mobile / narrow-viewport (Telegram Mini App) ──────────────────────────
+
+// Reactive viewport-width breakpoint. Below 768px the 3-pane grid is too
+// cramped, so Shell switches to a single-column layout with the session list
+// and file viewer as overlays.
+const mobileMq =
+  typeof window !== "undefined" && typeof window.matchMedia === "function"
+    ? window.matchMedia("(max-width: 768px)")
+    : null;
+const [mobile, setMobile] = createSignal(mobileMq?.matches ?? false);
+mobileMq?.addEventListener("change", (e) => setMobile(e.matches));
+/** True when the viewport is narrow (phone / Mini App). */
+export const isMobile = mobile;
+
+// Off-canvas session-list drawer (mobile only).
+const [navOpen, setNavOpen] = createSignal(false);
+export const isNavOpen = navOpen;
+export function toggleNav(): void {
+  setNavOpen((v) => !v);
+}
+export function closeNav(): void {
+  setNavOpen(false);
+}
+
 export function toggleHeaderCollapsed(): void {
   setHeaderCollapsedSig((v) => !v);
 }

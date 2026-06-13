@@ -29,10 +29,13 @@ import SessionExportModal from "./SessionExportModal";
 import SessionImportModal from "./SessionImportModal";
 import SessionListPane from "./SessionListPane";
 import StatusBar from "./StatusBar";
-import { openedFile } from "../state/files";
+import { openedFile, closeFile } from "../state/files";
 import {
   LIMITS_RO,
+  closeNav,
   isLeftCollapsed,
+  isMobile,
+  isNavOpen,
   leftSidebarEffectivePx,
   rightWidth,
   setLeftWidth,
@@ -46,44 +49,10 @@ const Shell: Component = () => {
     const right = openedFile() ? `${rightWidth()}px` : "0px";
     return `${left} 4px minmax(0, 1fr) 4px ${right}`;
   });
-  return (
-    <div
-      class="grid h-full grid-rows-[40px_1fr] transition-[grid-template-columns] duration-150 ease-out"
-      style={{ "grid-template-columns": cols() }}
-    >
-      <StatusBar />
-      <SessionListPane />
-      <div class="row-start-2 col-start-2 flex h-full">
-        <Show when={!isLeftCollapsed()}>
-          <ResizeHandle
-            side="right"
-            current={sidebarWidth}
-            onResize={setLeftWidth}
-            onReset={() => setLeftWidth(280)}
-            ariaLabel="Resize sidebar"
-          />
-        </Show>
-      </div>
-      <CenterPane />
-      <div class="row-start-2 col-start-4 flex h-full">
-        <Show when={openedFile()}>
-          <ResizeHandle
-            side="left"
-            current={rightWidth}
-            onResize={setRightWidth}
-            onReset={() => setRightWidth(576)}
-            ariaLabel="Resize file viewer"
-          />
-        </Show>
-      </div>
-      <aside
-        class="row-start-2 col-start-5 overflow-hidden border-l border-border bg-bg-elev"
-        style={{
-          "min-width": openedFile() ? `${LIMITS_RO.rightMinPx}px` : undefined,
-        }}
-      >
-        <FileViewer />
-      </aside>
+
+  // Shared overlays (fixed-position) — render in both layouts.
+  const overlays = (
+    <>
       <SearchModal />
       <NewSessionModal />
       <IdentityDrawer />
@@ -91,7 +60,91 @@ const Shell: Component = () => {
       <SessionExportModal />
       <SessionImportModal />
       <HelpModal />
-    </div>
+    </>
+  );
+
+  return (
+    <Show
+      when={!isMobile()}
+      fallback={
+        // ── Mobile / Mini App: single column, sidebars become overlays ──
+        <div class="flex h-full flex-col">
+          <StatusBar />
+          <div class="relative flex min-h-0 flex-1 flex-col">
+            <CenterPane />
+
+            {/* Session list — off-canvas drawer */}
+            <Show when={isNavOpen()}>
+              <div
+                class="absolute inset-0 z-40 bg-black/50"
+                onClick={closeNav}
+              />
+              <div class="absolute inset-y-0 left-0 z-50 flex w-[85%] max-w-xs flex-col shadow-2xl">
+                <SessionListPane />
+              </div>
+            </Show>
+
+            {/* File viewer — full-screen overlay when a file is open */}
+            <Show when={openedFile()}>
+              <div class="absolute inset-0 z-30 flex flex-col bg-bg-elev">
+                <button
+                  type="button"
+                  class="flex items-center gap-2 border-b border-border px-4 py-2 text-left text-sm text-fg-muted hover:text-fg"
+                  onClick={closeFile}
+                >
+                  ← back to session
+                </button>
+                <div class="min-h-0 flex-1 overflow-hidden">
+                  <FileViewer />
+                </div>
+              </div>
+            </Show>
+          </div>
+          {overlays}
+        </div>
+      }
+    >
+      {/* ── Desktop: 3-pane grid ── */}
+      <div
+        class="grid h-full grid-rows-[40px_1fr] transition-[grid-template-columns] duration-150 ease-out"
+        style={{ "grid-template-columns": cols() }}
+      >
+        <StatusBar />
+        <SessionListPane />
+        <div class="row-start-2 col-start-2 flex h-full">
+          <Show when={!isLeftCollapsed()}>
+            <ResizeHandle
+              side="right"
+              current={sidebarWidth}
+              onResize={setLeftWidth}
+              onReset={() => setLeftWidth(280)}
+              ariaLabel="Resize sidebar"
+            />
+          </Show>
+        </div>
+        <CenterPane />
+        <div class="row-start-2 col-start-4 flex h-full">
+          <Show when={openedFile()}>
+            <ResizeHandle
+              side="left"
+              current={rightWidth}
+              onResize={setRightWidth}
+              onReset={() => setRightWidth(576)}
+              ariaLabel="Resize file viewer"
+            />
+          </Show>
+        </div>
+        <aside
+          class="row-start-2 col-start-5 overflow-hidden border-l border-border bg-bg-elev"
+          style={{
+            "min-width": openedFile() ? `${LIMITS_RO.rightMinPx}px` : undefined,
+          }}
+        >
+          <FileViewer />
+        </aside>
+        {overlays}
+      </div>
+    </Show>
   );
 };
 

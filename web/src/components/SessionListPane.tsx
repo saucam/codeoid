@@ -15,13 +15,21 @@ import {
   sessionList,
 } from "../state/sessions";
 import {
+  closeNav,
   isLeftCollapsed,
+  isMobile,
   toggleLeftCollapsed,
 } from "../state/layout";
 import type { SessionInfo, SessionStatus } from "../protocol/types";
 
 import FileTree from "./files/FileTree";
 import { openNewSessionModal } from "./NewSessionModal";
+
+/** Focus a session and, on mobile, close the off-canvas drawer. */
+function pickSession(id: string): void {
+  focusSession(id);
+  if (isMobile()) closeNav();
+}
 
 const SessionListPane: Component = () => {
   return (
@@ -86,7 +94,7 @@ const CollapsedRail: Component = () => (
       {(s) => (
         <button
           type="button"
-          onClick={() => focusSession(s.id)}
+          onClick={() => pickSession(s.id)}
           class={`flex h-7 w-7 items-center justify-center rounded text-[11px] font-mono transition ${
             focusedSessionId() === s.id
               ? "bg-accent/20 text-accent"
@@ -135,7 +143,7 @@ const SessionRow: Component<{ session: SessionInfo }> = (props) => {
     <li>
       <button
         type="button"
-        onClick={() => focusSession(props.session.id)}
+        onClick={() => pickSession(props.session.id)}
         class={`flex w-full flex-col gap-1 border-l-2 px-3 py-2 text-left transition hover:bg-bg-hover ${
           isActive()
             ? "border-l-accent bg-bg-active"
