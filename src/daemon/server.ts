@@ -229,9 +229,14 @@ export class DaemonServer {
         ) {
           try {
             const body = await req.text();
+            // Forward the caller's actual Content-Type — the web UI posts
+            // application/x-www-form-urlencoded; hardcoding JSON made ZeroID
+            // JSON-parse a form body ("invalid character 'g'").
+            const contentType =
+              req.headers.get("Content-Type") ?? "application/json";
             const zeroidResp = await fetch(`${authConfig.baseUrl}/oauth2/token`, {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers: { "Content-Type": contentType },
               body,
             });
             const data = await zeroidResp.text();
