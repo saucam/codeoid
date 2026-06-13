@@ -91,6 +91,30 @@ export class TelegramFrontend implements Frontend {
     this.#manager = ctx.manager;
     this.#authConfig = ctx.auth;
     this.#setupHandlers();
+    // Register the command menu so Telegram shows a tappable "/" list with
+    // descriptions (autocomplete) instead of making the user remember+type.
+    this.#bot.api
+      .setMyCommands([
+        { command: "ls", description: "List sessions" },
+        { command: "new", description: "Create a session: /new <name> <dir>" },
+        { command: "attach", description: "Attach to a session: /attach <name>" },
+        { command: "detach", description: "Detach from the current session" },
+        { command: "interrupt", description: "Stop the current turn" },
+        { command: "mode", description: "Set mode: interactive | auto | autonomous" },
+        { command: "model", description: "Show or switch the model" },
+        { command: "rotate", description: "Fresh context (memory kept)" },
+        { command: "rename", description: "Rename the attached session" },
+        { command: "search", description: "Search across sessions" },
+        { command: "agents", description: "Subagents available" },
+        { command: "skills", description: "Skills available" },
+        { command: "mcp", description: "MCP servers" },
+        { command: "hooks", description: "Configured hooks" },
+        { command: "who", description: "Show your identity" },
+        { command: "destroy", description: "Destroy a session: /destroy <name>" },
+        { command: "auth", description: "Authenticate: /auth <api_key>" },
+        { command: "help", description: "Show help" },
+      ])
+      .catch(() => {});
     // Don't await — long-polling runs forever
     this.#bot.start().catch((err) => {
       console.error("[codeoid:telegram] bot crashed:", err);

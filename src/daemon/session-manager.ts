@@ -8,6 +8,9 @@
  *   - Graceful drain on shutdown
  */
 
+import { existsSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 import { Session, type AttachedClient } from "./session.js";
 import { Store } from "./store.js";
 import { hasScope, SCOPES } from "../protocol/scopes.js";
@@ -39,6 +42,25 @@ import type {
   ModelInfo,
   SessionInfo,
 } from "../protocol/types.js";
+
+/**
+ * Resolve a user-supplied workdir to an absolute, existing directory.
+ * Expands a leading `~`, resolves relative paths against the daemon cwd, and
+ * returns null if the path doesn't exist or isn't a directory.
+ */
+function normalizeWorkdir(input: string): string | null {
+  const raw = (input ?? "").trim();
+  if (!raw) return null;
+  let p: string;
+  if (raw === "~") p = homedir();
+  else if (raw.startsWith("~/")) p = resolve(homedir(), raw.slice(2));
+  else p = resolve(raw);
+  try {
+    return existsSync(p) && statSync(p).isDirectory() ? p : null;
+  } catch {
+    return null;
+  }
+}
 
 export class SessionManager {
   #sessions = new Map<string, Session>();
@@ -686,9 +708,23 @@ export class SessionManager {
       return { type: "response.error", requestId: msg.id, error: rateCheck.reason, code: "rate_limited" };
     }
 
+    // Normalize + validate the workdir. A leading `~` must be expanded and a
+    // missing directory rejected up front — otherwise the SDK fails opaquely
+    // ("native binary … exists but failed to launch") when it can't spawn the
+    // agent subprocess in a non-existent cwd. Protects every frontend.
+    const workdir = normalizeWorkdir(msg.workdir);
+    if (!workdir) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: `Working directory not found: ${msg.workdir}`,
+        code: "invalid_request",
+      };
+    }
+
     const session = new Session({
       name: msg.name,
-      workdir: msg.workdir,
+      workdir,
       auth,
       store: this.#store,
       transcriptStore: this.#transcriptStore,
