@@ -14,7 +14,7 @@ codeoid start
   │       ├── TranscriptStore — JSONL persistence, survives daemon restart
   │       ├── RetryManager — exponential backoff, fallback model
   │       └── AgentIdentityManager — ZeroID identities for agents + sub-agents
-  ├── Web UI frontend (served at /app, also Telegram Mini App)
+  ├── Web UI frontend (SolidJS, served at /ui, also Telegram Mini App)
   └── Telegram frontend (embedded, direct SessionManager access)
 ```
 
@@ -68,7 +68,7 @@ src/
 │   ├── types.ts                  # Frontend plugin interface
 │   ├── index.ts
 │   ├── telegram/index.ts         # Grammy bot, embedded in daemon process
-│   └── web/index.ts              # Mobile-first SPA, Telegram Mini App compatible
+│   └── web-ui/index.ts           # Serves the built SolidJS app (web/dist) at /ui, also Telegram Mini App
 └── terminal/
     └── client.ts                 # WebSocket client, connects to daemon
 ```
@@ -180,4 +180,4 @@ Data stored at:
 - `~/.codeoid/codeoid.db` — SQLite (sessions, audit log)
 - `~/.codeoid/transcripts/` — JSONL transcripts per session
 
-Web UI available at `http://localhost:7400/app` when daemon is running.
+Web UI available at `http://localhost:7400/ui/` when daemon is running.

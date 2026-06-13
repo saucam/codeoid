@@ -107,7 +107,7 @@ Then open the TUI in another terminal:
 bun src/cli.ts tui
 ```
 
-Or browse to http://localhost:7400/app for the web UI.
+Or browse to http://localhost:7400/ui/ for the web UI.
 
 ## Architecture
 
@@ -136,7 +136,7 @@ Or browse to http://localhost:7400/app for the web UI.
 │   │ ZeroID Client    │       ┌────────────────────────────────┐     │
 │   │ - register       │       │ Frontends                      │     │
 │   │ - attenuated     │──────▶│  - TUI (Ink)                   │     │
-│   │   sub-agent      │       │  - Web UI (SPA at /app)        │     │
+│   │   sub-agent      │       │  - Web UI (SolidJS at /ui)     │     │
 │   │   tokens         │       │  - Telegram (grammy)           │     │
 │   └──────────────────┘       └────────────────────────────────┘     │
 │          │                                                           │
@@ -451,7 +451,7 @@ Status bar shows live budget: `autonomous (37 actions left)`. You can interrupt 
 
 ### Web UI
 
-Mobile-first SPA at `http://localhost:7400/app`. Also works as a Telegram Mini App:
+Mobile-first SolidJS SPA at `http://localhost:7400/ui/`. Also works as a Telegram Mini App:
 
 - Session switcher
 - Approval buttons

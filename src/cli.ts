@@ -63,12 +63,9 @@ program
 
     // ── Register frontends ────────────────────────────────────────
 
-    // Web UI (always enabled unless --no-web)
+    // Web UI (always enabled unless --no-web) — the SolidJS app at /ui,
+    // single-origin so one HTTPS tunnel also serves as a Telegram Mini App.
     if (opts.web !== false) {
-      const { WebFrontend } = await import("./frontends/web/index.js");
-      const web = new WebFrontend();
-      daemon.use(web);
-      // The built SolidJS app at /ui (single-origin → Telegram Mini App).
       const { WebUiFrontend } = await import("./frontends/web-ui/index.js");
       daemon.use(new WebUiFrontend());
     }
@@ -92,7 +89,7 @@ program
     await daemon.start();
 
     if (opts.web !== false) {
-      const url = `http://${opts.host === "0.0.0.0" ? "localhost" : opts.host}:${opts.port}/app`;
+      const url = `http://${opts.host === "0.0.0.0" ? "localhost" : opts.host}:${opts.port}/ui/`;
       console.log(`[codeoid] web UI: ${url}`);
     }
   });

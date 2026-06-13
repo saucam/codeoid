@@ -462,7 +462,7 @@ body {
     document.getElementById('status').className = 'status success';
     document.getElementById('detail').textContent = 'Redirecting to Codeoid...';
 
-    setTimeout(function() { window.location.href = '/app'; }, 500);
+    setTimeout(function() { window.location.href = '/ui/'; }, 500);
   } catch (err) {
     document.getElementById('status').textContent = 'Error';
     document.getElementById('status').className = 'status error';
@@ -478,7 +478,7 @@ function errorPage(error: string): string {
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Error</title>
 <style>body{font-family:system-ui;background:#0a0a0f;color:#ef4444;display:flex;align-items:center;justify-content:center;height:100vh;}</style>
-</head><body><div><h2>Authorization Failed</h2><p>${escapeHtml(error)}</p><p><a href="/app" style="color:#6366f1">Back to Codeoid</a></p></div></body></html>`;
+</head><body><div><h2>Authorization Failed</h2><p>${escapeHtml(error)}</p><p><a href="/ui/" style="color:#6366f1">Back to Codeoid</a></p></div></body></html>`;
 }
 
 /**
