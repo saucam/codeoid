@@ -31,6 +31,16 @@ function pickSession(id: string): void {
   if (isMobile()) closeNav();
 }
 
+/**
+ * Open the new-session modal and, on mobile, dismiss the drawer first — a nav
+ * drawer is transient, so an action that opens a modal should close it (else
+ * the drawer covers the dialog).
+ */
+function newSession(): void {
+  if (isMobile()) closeNav();
+  openNewSessionModal();
+}
+
 const SessionListPane: Component = () => {
   return (
     <Show
@@ -41,7 +51,7 @@ const SessionListPane: Component = () => {
         <SectionHeader title="Sessions" count={sessionList().length} />
         <button
           type="button"
-          onClick={openNewSessionModal}
+          onClick={newSession}
           class="mx-3 mt-1 flex items-center gap-2 rounded border border-dashed border-border px-2 py-1.5 text-left text-xs text-fg-muted transition hover:border-accent/40 hover:bg-accent/5 hover:text-fg"
           title="New session (Ctrl+N)"
         >
@@ -83,7 +93,7 @@ const CollapsedRail: Component = () => (
     </button>
     <button
       type="button"
-      onClick={openNewSessionModal}
+      onClick={newSession}
       class="rounded p-1.5 text-fg-muted hover:bg-bg-hover hover:text-fg"
       title="New session (Ctrl+N)"
     >
