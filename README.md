@@ -58,8 +58,8 @@ Legend: ✅ first-class · ~ partial · ❌ not supported · — not a meaningfu
 ### Prerequisites
 
 - [Bun](https://bun.sh) v1.0+
-- [ZeroID](https://github.com/highflame-ai/zeroid) running locally
 - Claude Code CLI logged in (`claude login`) or `ANTHROPIC_API_KEY` set
+- A ZeroID identity — either the hosted Highflame SaaS (no infra) or a [self-hosted ZeroID](https://github.com/highflame-ai/zeroid)
 
 ### Install
 
@@ -69,29 +69,34 @@ cd codeoid
 bun install
 ```
 
-### Setup ZeroID
+### Authenticate
 
-Register a Codeoid agent in ZeroID and save the returned `api_key`:
+Codeoid needs one thing to start: a ZeroID key. Two ways to get one.
+
+**Option A — Highflame SaaS (recommended, no infra)**
+
+1. Sign up at [highflame.ai](https://highflame.ai) and open Studio → **Code Agents**.
+2. Create a key (you'll get a `zid_sk_...`).
+3. Log in — Codeoid ships pointing at the Highflame SaaS issuer, so there's nothing else to configure:
+
+   ```bash
+   bun src/cli.ts login          # prompts for the key (hidden), verifies it, saves to ~/.codeoid/config.json
+   ```
+
+**Option B — Self-hosted ZeroID**
+
+Run your own [ZeroID](https://github.com/highflame-ai/zeroid), register an agent to get a key, then point Codeoid at it. `--zeroid` accepts a preset (`highflame`, `highflame-dev`, `local`) or any URL:
 
 ```bash
-curl -X POST http://localhost:8899/api/v1/agents/register \
-  -H "Content-Type: application/json" \
-  -H "X-Account-ID: personal" \
-  -H "X-Project-ID: dev" \
-  -H "X-User-ID: $USER" \
-  -d '{
-    "name": "my-codeoid",
-    "external_id": "codeoid-1",
-    "sub_type": "autonomous"
-  }'
+bun src/cli.ts login --zeroid local                       # local ZeroID on :8899
+bun src/cli.ts login --zeroid https://zeroid.mycorp.com   # your deployment
 ```
+
+The issuer is pinned to whatever you log in against — a token minted by any other issuer is rejected. `login` exchanges the key on the spot and prints the subject + granted scopes so you know it works before the daemon ever starts.
 
 ### Run
 
 ```bash
-export CODEOID_API_KEY="zid_sk_..."
-export ZEROID_URL="http://localhost:8899"
-
 # Start the daemon — serves TUI/web/Telegram + mounts memory
 bun src/cli.ts start
 ```
@@ -513,8 +518,10 @@ curl -X POST http://localhost:8899/oauth2/token -d '{
 
 ```bash
 # Auth
-CODEOID_API_KEY=zid_sk_...              # ZeroID API key (required)
-ZEROID_URL=http://localhost:8899        # ZeroID server URL
+CODEOID_API_KEY=zid_sk_...              # ZeroID API key (or use `codeoid login`)
+ZEROID_URL=highflame                    # issuer: preset (highflame | highflame-dev | local) or URL
+                                        #   default: highflame (the Highflame SaaS)
+ZEROID_ISSUER=                          # expected `iss` claim; defaults to the resolved ZEROID_URL
 ZEROID_ACCOUNT_ID=personal              # Enable agent identities
 ZEROID_PROJECT_ID=dev
 
@@ -568,7 +575,7 @@ Optional `~/.codeoid/config.json` (env vars take precedence):
 ```json
 {
   "daemonUrl": "ws://127.0.0.1:7400",
-  "zeroidUrl": "http://localhost:8899",
+  "zeroidUrl": "highflame",
   "apiKey": "zid_sk_...",
   "agentIdentity": {
     "accountId": "personal",

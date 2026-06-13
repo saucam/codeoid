@@ -156,8 +156,10 @@ codeoid destroy <n>
 ## Config
 
 ```bash
-CODEOID_API_KEY=zid_sk_...           # ZeroID API key
-ZEROID_URL=http://localhost:8899     # ZeroID server
+CODEOID_API_KEY=zid_sk_...           # ZeroID API key (or run `codeoid login`)
+ZEROID_URL=highflame                 # issuer: preset (highflame | highflame-dev | local) or URL
+                                     #   default: highflame (Highflame SaaS); iss is pinned to it
+ZEROID_ISSUER=                       # override the expected `iss` claim (default: resolved ZEROID_URL)
 TELEGRAM_BOT_TOKEN=...              # Optional: enables Telegram frontend
 TELEGRAM_ALLOWED_USER_IDS=123,456   # Required with bot token
 
@@ -165,6 +167,12 @@ TELEGRAM_ALLOWED_USER_IDS=123,456   # Required with bot token
 # No ANTHROPIC_API_KEY needed if you're logged in via Claude Code CLI.
 # Falls back to ANTHROPIC_API_KEY env var if not logged in.
 ```
+
+Onboarding: `codeoid login [key] [--zeroid <preset|url>]` verifies the key via a
+token exchange and writes `apiKey` (+ `zeroidUrl` if `--zeroid` given) to the
+config file. The shipped default issuer is the Highflame SaaS, so a hosted user
+just needs a key from Studio's Code Agents screen. `ZEROID_PRESETS` +
+`resolveZeroidUrl()` live in `src/config.ts`.
 
 Config file at `~/.codeoid/config.json` (optional). Env vars take precedence.
 

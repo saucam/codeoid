@@ -39,6 +39,40 @@ function expandHome(p: string): string {
   return p;
 }
 
+// ── ZeroID issuer presets ──────────────────────────────────────────────────
+
+/**
+ * Friendly aliases for the ZeroID issuer so the common cases are a single
+ * word instead of a URL. The shipped default is the Highflame SaaS issuer
+ * (`highflame`) — sign up at highflame.ai, mint a key in Studio's Code Agents
+ * screen, and `codeoid login` works with zero further config. Self-hosters set
+ * `ZEROID_URL` to their own deployment's URL (anything with a scheme is used
+ * verbatim). `highflame-dev` targets our internal dev environment.
+ *
+ * For every ZeroID deployment the JWT `iss` claim equals the base URL, so we
+ * can pin the expected issuer from this value (see `loadConfig`).
+ */
+export const ZEROID_PRESETS: Readonly<Record<string, string>> = {
+  highflame: "https://auth.highflame.ai",
+  "highflame-dev": "https://auth-dev.highflame.dev",
+  local: "http://localhost:8899",
+};
+
+/**
+ * Resolve a `zeroidUrl` config value to a concrete base URL:
+ *   - a known preset name → its URL
+ *   - anything containing a scheme → used verbatim (trailing slash trimmed)
+ *   - a bare host (`zeroid.mycorp.com`) → assumed https://
+ */
+export function resolveZeroidUrl(value: string): string {
+  const v = value.trim();
+  const preset = ZEROID_PRESETS[v];
+  if (preset) return preset;
+  const stripped = v.replace(/\/+$/, "");
+  if (stripped.includes("://")) return stripped;
+  return `https://${stripped}`;
+}
+
 
 // ── Schema ───────────────────────────────────────────────────────────────
 
@@ -194,7 +228,10 @@ const RootSchema = z.object({
   daemonUrl: z.string().default("ws://127.0.0.1:7400"),
   dbPath: z.string().default("codeoid.db"),
   transcriptDir: z.string().default("transcripts"),
-  zeroidUrl: z.string().default("http://localhost:8899"),
+  // Default to the Highflame SaaS issuer so a fresh install + a Studio key
+  // works with zero config. Accepts a preset name (highflame / highflame-dev /
+  // local) or any URL; resolved via resolveZeroidUrl() in loadConfig.
+  zeroidUrl: z.string().default("highflame"),
   apiKey: z.string().optional(),
   auth: AuthSchemaFields,
   oauth: OAuthSchemaFields,
@@ -394,6 +431,15 @@ export function loadConfig(opts: LoadOptions = {}): CodeoidConfig {
     setByPath(parsed, ov.path, parseOverride(raw, ov.kind));
   }
 
+  // 3b. Resolve the ZeroID issuer (preset name or URL → concrete base URL) and
+  //     pin the expected issuer claim. Every ZeroID deployment sets `iss` to
+  //     its base URL, so defaulting auth.issuer to the resolved URL rejects
+  //     tokens minted by any OTHER issuer — essential once codeoid points at a
+  //     public multi-tenant SaaS. An explicit auth.issuer / ZEROID_ISSUER
+  //     overrides this for deployments whose iss differs from the base URL.
+  const resolvedZeroidUrl = resolveZeroidUrl(parsed.zeroidUrl);
+  const resolvedIssuer = parsed.auth.issuer ?? resolvedZeroidUrl;
+
   // 4. Path normalization.
   const configRelResolve = (p: string): string =>
     isAbsolute(expandHome(p)) ? expandHome(p) : resolve(configDir, p);
@@ -407,8 +453,8 @@ export function loadConfig(opts: LoadOptions = {}): CodeoidConfig {
   const oauth: OAuthConfig | undefined = parsed.oauth.hmacSecret
     ? {
         hmacSecret: parsed.oauth.hmacSecret,
-        issuer: parsed.oauth.issuer ?? "https://auth.zeroid.dev",
-        tokenEndpoint: `${parsed.zeroidUrl}/oauth2/token`,
+        issuer: parsed.oauth.issuer ?? resolvedZeroidUrl,
+        tokenEndpoint: `${resolvedZeroidUrl}/oauth2/token`,
         clientId: parsed.oauth.clientId ?? "codeoid",
         accountId: parsed.agentIdentity.accountId,
         projectId: parsed.agentIdentity.projectId,
@@ -447,13 +493,13 @@ export function loadConfig(opts: LoadOptions = {}): CodeoidConfig {
     dbPath,
     transcriptDir,
     auth: {
-      baseUrl: parsed.zeroidUrl,
-      issuer: parsed.auth.issuer,
+      baseUrl: resolvedZeroidUrl,
+      issuer: resolvedIssuer,
       audience: parsed.auth.audience,
     },
     oauth,
     apiKey: parsed.apiKey,
-    zeroidUrl: parsed.zeroidUrl,
+    zeroidUrl: resolvedZeroidUrl,
     agentIdentity: hasExplicitTenant
       ? {
           accountId: parsed.agentIdentity.accountId,

@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig } from "../config.js";
+import { loadConfig, resolveZeroidUrl } from "../config.js";
 
 let tmp: string;
 let configPath: string;
@@ -30,7 +30,10 @@ describe("loadConfig — defaults", () => {
   it("returns sane defaults with no file + no env", () => {
     const c = loadConfig({ configPath, env: {} });
     expect(c.daemonUrl).toBe("ws://127.0.0.1:7400");
-    expect(c.zeroidUrl).toBe("http://localhost:8899");
+    // Ships pointing at the Highflame SaaS issuer (preset "highflame").
+    expect(c.zeroidUrl).toBe("https://auth.highflame.ai");
+    // Issuer claim is pinned to the resolved base URL by default.
+    expect(c.auth.issuer).toBe("https://auth.highflame.ai");
     expect(c.compress.enabled).toBe(false);
     expect(c.compress.minBytes).toBe(1024);
     expect(c.workspaceIndex.enabled).toBe(true);
@@ -174,6 +177,54 @@ describe("loadConfig — failure modes", () => {
   it("no file present — succeeds with defaults", () => {
     const c = loadConfig({ configPath: join(tmp, "missing.json"), env: {} });
     expect(c.compress.enabled).toBe(false);
+  });
+});
+
+describe("resolveZeroidUrl", () => {
+  it("maps known preset names to their URLs", () => {
+    expect(resolveZeroidUrl("highflame")).toBe("https://auth.highflame.ai");
+    expect(resolveZeroidUrl("highflame-dev")).toBe("https://auth-dev.highflame.dev");
+    expect(resolveZeroidUrl("local")).toBe("http://localhost:8899");
+  });
+
+  it("passes through a full URL verbatim (trimming trailing slashes)", () => {
+    expect(resolveZeroidUrl("https://zeroid.acme.com")).toBe("https://zeroid.acme.com");
+    expect(resolveZeroidUrl("https://zeroid.acme.com/")).toBe("https://zeroid.acme.com");
+    expect(resolveZeroidUrl("  http://10.0.0.1:8899  ")).toBe("http://10.0.0.1:8899");
+  });
+
+  it("assumes https:// for a bare host", () => {
+    expect(resolveZeroidUrl("zeroid.acme.com")).toBe("https://zeroid.acme.com");
+  });
+});
+
+describe("loadConfig — issuer presets + iss pinning", () => {
+  it("resolves a preset name in the file to its URL and pins the issuer", () => {
+    writeConfig({ zeroidUrl: "highflame-dev" });
+    const c = loadConfig({ configPath, env: {} });
+    expect(c.zeroidUrl).toBe("https://auth-dev.highflame.dev");
+    expect(c.auth.baseUrl).toBe("https://auth-dev.highflame.dev");
+    expect(c.auth.issuer).toBe("https://auth-dev.highflame.dev");
+  });
+
+  it("ZEROID_URL env (preset or URL) overrides the file", () => {
+    writeConfig({ zeroidUrl: "highflame" });
+    const c = loadConfig({ configPath, env: { ZEROID_URL: "local" } });
+    expect(c.zeroidUrl).toBe("http://localhost:8899");
+    expect(c.auth.issuer).toBe("http://localhost:8899");
+  });
+
+  it("an explicit issuer is NOT overwritten by the base-URL pin", () => {
+    writeConfig({ zeroidUrl: "https://zeroid.acme.com", auth: { issuer: "https://id.acme.com" } });
+    const c = loadConfig({ configPath, env: {} });
+    expect(c.auth.baseUrl).toBe("https://zeroid.acme.com");
+    expect(c.auth.issuer).toBe("https://id.acme.com");
+  });
+
+  it("ZEROID_ISSUER env overrides the pin", () => {
+    writeConfig({ zeroidUrl: "highflame" });
+    const c = loadConfig({ configPath, env: { ZEROID_ISSUER: "https://custom.issuer" } });
+    expect(c.auth.issuer).toBe("https://custom.issuer");
   });
 });
 

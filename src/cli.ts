@@ -13,10 +13,17 @@
  *   codeoid destroy <name|id>             Destroy a session
  */
 
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { program } from "commander";
 import { DaemonServer } from "./daemon/server.js";
 import { TerminalClient } from "./terminal/client.js";
-import { loadConfig } from "./config.js";
+import {
+  getConfigDir,
+  loadConfig,
+  resolveZeroidUrl,
+  ZEROID_PRESETS,
+} from "./config.js";
 
 program
   .name("codeoid")
@@ -89,6 +96,159 @@ program
       console.log(`[codeoid] web UI: ${url}`);
     }
   });
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+
+/** The full scope set codeoid asks ZeroID to mint for a session-driving key. */
+const CODEOID_LOGIN_SCOPES = [
+  "session:create",
+  "session:list",
+  "session:attach",
+  "session:watch",
+  "session:send",
+  "session:interrupt",
+  "session:approve",
+  "session:destroy",
+  "fs:read",
+  "tools:read",
+  "tools:write",
+  "tools:execute",
+  "tools:agent",
+].join(" ");
+
+/** Read a secret from the TTY without echoing it (handles paste + backspace). */
+function readSecret(promptText: string): Promise<string> {
+  process.stdout.write(promptText);
+  const stdin = process.stdin;
+  // Non-TTY (piped) input: read a single line plainly.
+  if (!stdin.isTTY) {
+    return new Promise((resolve) => {
+      let buf = "";
+      stdin.setEncoding("utf8");
+      stdin.on("data", (c: string) => {
+        buf += c;
+      });
+      stdin.on("end", () => resolve(buf.trim()));
+    });
+  }
+  return new Promise((resolve) => {
+    stdin.setRawMode(true);
+    stdin.resume();
+    let buf = "";
+    const onData = (chunk: Buffer): void => {
+      for (const ch of chunk.toString("utf8")) {
+        if (ch === "\r" || ch === "\n") {
+          stdin.setRawMode(false);
+          stdin.pause();
+          stdin.off("data", onData);
+          process.stdout.write("\n");
+          resolve(buf.trim());
+          return;
+        }
+        if (ch === "\u0003") process.exit(130); // Ctrl-C
+        else if (ch === "\u007f" || ch === "\b") buf = buf.slice(0, -1);
+        else buf += ch;
+      }
+    };
+    stdin.on("data", onData);
+  });
+}
+
+/** Merge-write the raw config.json (preserves existing keys, no defaults baked in). */
+function writeConfigKeys(updates: Record<string, unknown>): string {
+  const dir = getConfigDir();
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, "config.json");
+  let current: Record<string, unknown> = {};
+  if (existsSync(path)) {
+    try {
+      current = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    } catch {
+      // Corrupt file — refuse to clobber silently.
+      throw new Error(`Existing ${path} is not valid JSON; fix or remove it first.`);
+    }
+  }
+  const merged = { ...current, ...updates };
+  writeFileSync(path, `${JSON.stringify(merged, null, 2)}\n`, { mode: 0o600 });
+  return path;
+}
+
+program
+  .command("login [apiKey]")
+  .description(
+    "Authenticate with a ZeroID key (mint one in Studio's Code Agents screen). Stores it in ~/.codeoid/config.json.",
+  )
+  .option(
+    "--zeroid <preset-or-url>",
+    `ZeroID issuer: ${Object.keys(ZEROID_PRESETS).join(" | ")} | <url> (default: highflame SaaS)`,
+  )
+  .option("--no-verify", "Skip the token-exchange check and just save the key")
+  .action(
+    async (
+      apiKeyArg: string | undefined,
+      opts: { zeroid?: string; verify?: boolean },
+    ) => {
+      // Resolve the issuer: explicit --zeroid wins, else whatever config resolves to.
+      const issuerInput = opts.zeroid;
+      const baseUrl = issuerInput
+        ? resolveZeroidUrl(issuerInput)
+        : loadConfig().zeroidUrl;
+
+      const apiKey =
+        apiKeyArg ??
+        process.env["CODEOID_API_KEY"] ??
+        (await readSecret("Paste your ZeroID key (zid_sk_...): "));
+      if (!apiKey) {
+        console.error("No key provided.");
+        process.exit(1);
+      }
+
+      // Verify by exchanging the key for a token (unless --no-verify).
+      if (opts.verify !== false) {
+        process.stdout.write(`Verifying against ${baseUrl} ... `);
+        try {
+          const res = await fetch(`${baseUrl}/oauth2/token`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              grant_type: "api_key",
+              api_key: apiKey,
+              scope: CODEOID_LOGIN_SCOPES,
+            }),
+          });
+          if (!res.ok) {
+            console.error(`failed (HTTP ${res.status}).`);
+            console.error(`  ${(await res.text()).slice(0, 300)}`);
+            process.exit(1);
+          }
+          const body = (await res.json()) as { access_token?: string };
+          if (!body.access_token) {
+            console.error("failed: no access_token in response.");
+            process.exit(1);
+          }
+          const claims = JSON.parse(
+            Buffer.from(body.access_token.split(".")[1] ?? "", "base64").toString("utf8"),
+          ) as { sub?: string; scope?: string[]; scopes?: string[] };
+          console.log("ok.");
+          console.log(`  subject: ${claims.sub ?? "(unknown)"}`);
+          const scopes = claims.scope ?? claims.scopes ?? [];
+          console.log(`  scopes:  ${scopes.length ? scopes.join(", ") : "(none)"}`);
+        } catch (err) {
+          console.error(`failed: ${err instanceof Error ? err.message : String(err)}`);
+          console.error(`  (Is ${baseUrl} reachable? Override with --zeroid.)`);
+          process.exit(1);
+        }
+      }
+
+      // Persist. Store the issuer symbolically (preset name or URL as given) so
+      // the file stays readable; only touch zeroidUrl when --zeroid was passed.
+      const updates: Record<string, unknown> = { apiKey };
+      if (issuerInput) updates["zeroidUrl"] = issuerInput;
+      const path = writeConfigKeys(updates);
+      console.log(`Saved to ${path} (mode 600).`);
+      console.log("Run `codeoid start` to launch the daemon.");
+    },
+  );
 
 // ── Session commands ──────────────────────────────────────────────────────────
 
