@@ -27,9 +27,23 @@ import {
   replaceScrollback,
 } from "./messages";
 
-const DAEMON_URL =
-  (import.meta.env.VITE_CODEOID_URL as string | undefined) ??
-  "ws://127.0.0.1:7400";
+// Resolve the daemon WebSocket URL:
+//   1. explicit VITE_CODEOID_URL build override, else
+//   2. Vite dev server (:5173) → the daemon runs separately on :7400, else
+//   3. served from the daemon itself (incl. a Telegram Mini App through an
+//      HTTPS tunnel) → same origin, so wss:// works end-to-end.
+function resolveDaemonUrl(): string {
+  const override = import.meta.env.VITE_CODEOID_URL as string | undefined;
+  if (override) return override;
+  if (typeof window !== "undefined" && window.location) {
+    const { protocol, host, port } = window.location;
+    if (port === "5173") return "ws://127.0.0.1:7400";
+    return `${protocol === "https:" ? "wss:" : "ws:"}//${host}`;
+  }
+  return "ws://127.0.0.1:7400";
+}
+
+const DAEMON_URL = resolveDaemonUrl();
 // Empty default → auth.ts uses a same-origin /oauth2/token URL that
 // Vite's dev proxy (or a prod ingress) forwards to ZeroID. Set
 // VITE_ZEROID_URL only if you intentionally want a cross-origin

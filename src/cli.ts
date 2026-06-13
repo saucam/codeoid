@@ -61,6 +61,9 @@ program
       const { WebFrontend } = await import("./frontends/web/index.js");
       const web = new WebFrontend();
       daemon.use(web);
+      // The built SolidJS app at /ui (single-origin → Telegram Mini App).
+      const { WebUiFrontend } = await import("./frontends/web-ui/index.js");
+      daemon.use(new WebUiFrontend());
     }
 
     // Telegram (enabled when TELEGRAM_BOT_TOKEN is set)

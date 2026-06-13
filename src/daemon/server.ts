@@ -219,8 +219,14 @@ export class DaemonServer {
           return Response.json({ zeroid_url: authConfig.baseUrl });
         }
 
-        // Token exchange proxy (avoids CORS)
-        if (url.pathname === "/auth/token" && req.method === "POST") {
+        // Token exchange proxy (avoids CORS). `/oauth2/token` is the path the
+        // web UI posts to same-origin — Vite proxies it in dev; the daemon
+        // proxies it when it serves the UI itself (the Telegram Mini App
+        // through a tunnel). `/auth/token` is the legacy alias.
+        if (
+          (url.pathname === "/auth/token" || url.pathname === "/oauth2/token") &&
+          req.method === "POST"
+        ) {
           try {
             const body = await req.text();
             const zeroidResp = await fetch(`${authConfig.baseUrl}/oauth2/token`, {
