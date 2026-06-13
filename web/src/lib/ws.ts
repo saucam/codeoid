@@ -71,6 +71,7 @@ export class CodeoidClient {
   /** True while a connect loop is running (prevents concurrent loops). */
   #connecting = false;
   #resumeWired = false;
+  #onResume: (() => void) | null = null;
 
   constructor(opts: ConnectOptions) {
     this.#opts = opts;
@@ -162,6 +163,7 @@ export class CodeoidClient {
   shutdown(): void {
     this.#shutdown = true;
     this.#stopHeartbeat();
+    this.#unwireResumeListeners();
     this.#wake?.();
     if (this.#ws) {
       try {
@@ -324,11 +326,23 @@ export class CodeoidClient {
         this.reconnectNow();
       }
     };
+    this.#onResume = onResume;
     window.addEventListener("online", onResume);
     window.addEventListener("focus", onResume);
     if (typeof document !== "undefined") {
       document.addEventListener("visibilitychange", onResume);
     }
+  }
+
+  #unwireResumeListeners(): void {
+    if (!this.#onResume || typeof window === "undefined") return;
+    window.removeEventListener("online", this.#onResume);
+    window.removeEventListener("focus", this.#onResume);
+    if (typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", this.#onResume);
+    }
+    this.#onResume = null;
+    this.#resumeWired = false;
   }
 
   #connectOnce(): Promise<AuthOkMsg> {

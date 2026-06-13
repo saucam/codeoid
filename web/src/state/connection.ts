@@ -98,15 +98,21 @@ export function send(msg: ClientMessage): void {
 function flushPendingSends(): void {
   if (!client || pendingSends.length === 0) return;
   const batch = pendingSends.splice(0, pendingSends.length);
-  for (const msg of batch) {
+  for (let i = 0; i < batch.length; i++) {
     try {
-      client.send(msg);
+      client.send(batch[i] as ClientMessage);
     } catch {
-      // Still not ready — requeue the rest and bail.
-      pendingSends.unshift(msg);
+      // Still not ready — requeue this message AND the unsent remainder
+      // (preserving order) and bail.
+      pendingSends.unshift(...batch.slice(i));
       break;
     }
   }
+}
+
+/** Test-only: inspect the outbound queue depth. */
+export function _pendingSendCount(): number {
+  return pendingSends.length;
 }
 
 /** Send a message and await `response.ok`. Throws on `response.error`. */
@@ -171,8 +177,15 @@ export async function bootstrap(opts: { apiKey?: string; token?: string } = {}):
 
     client.onStatus((s) => {
       setStatus(s);
-      // On (re)connect, drain anything queued while the socket was down.
-      if (s.kind === "connected") flushPendingSends();
+      if (s.kind === "connected") {
+        // Drain anything queued while the socket was down.
+        flushPendingSends();
+        // Refresh session list so statuses are current after a reconnect —
+        // otherwise a session that finished its turn while we were away stays
+        // stuck showing "thinking". (The attach effect re-attaches in parallel
+        // and replays scrollback.)
+        void refreshSessions().catch(() => {});
+      }
     });
     client.onMessage(routeBroadcast);
 

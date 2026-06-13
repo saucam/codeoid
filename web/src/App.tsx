@@ -67,14 +67,17 @@ const App: Component = () => {
     }),
   );
   createEffect(
-    on([authIdentity, focusedSessionId], () => {
+    // MUST track connectionStatus too: on reconnect, neither auth nor the
+    // focused id changes, so without this dep the effect wouldn't re-fire and
+    // the re-attach would never happen — the client would reconnect but stay
+    // unsubscribed (no scrollback, no deltas, stale "thinking" forever). The
+    // status effect above clears `attached` on drop; this re-attaches on the
+    // following `connected`.
+    on([authIdentity, focusedSessionId, connectionStatus], () => {
       const auth = authIdentity();
       const id = focusedSessionId();
       if (!auth || !id || attached.has(id)) return;
-      // Don't try to attach while the socket is reconnecting — the
-      // request would queue against a dead client. The connection
-      // effect above clears `attached` on transition out of
-      // connected, so a follow-up reconnect re-fires this effect.
+      // Don't attach until the socket is actually connected.
       if (connectionStatus().kind !== "connected") return;
       try {
         send({ type: "session.attach", id: newRequestId(), sessionId: id });
