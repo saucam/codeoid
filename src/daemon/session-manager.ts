@@ -104,7 +104,11 @@ export class SessionManager {
       try {
         const session = new Session({
           name: meta.sessionName,
-          workdir: meta.workdir,
+          // Heal a workdir persisted with a literal `~` or one that has since
+          // moved — expand/validate it so the SDK can launch. Falls back to
+          // the raw value if it can't be resolved (surfaces a clear error on
+          // first send rather than crashing resume).
+          workdir: normalizeWorkdir(meta.workdir) ?? meta.workdir,
           auth: {
             sub: meta.createdBy,
             scopes: [],
