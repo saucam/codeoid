@@ -6,7 +6,7 @@
       "name": "codeoid",
       "dependencies": {
         "@anthropic-ai/claude-agent-sdk": "^0.3.175",
-        "@highflame/sdk": "^0.3.15",
+        "@highflame/sdk": "^0.3.17",
         "@xenova/transformers": "^2.17.2",
         "commander": "^13.0.0",
         "grammy": "^1.35.0",
@@ -69,7 +69,7 @@
 
     "@grammyjs/types": ["@grammyjs/types@3.25.0", "", {}, "sha512-iN9i5p+8ZOu9OMxWNcguojQfz4K/PDyMPOnL7PPCON+SoA/F8OKMH3uR7CVUkYfdNe0GCz8QOzAWrnqusQYFOg=="],
 
-    "@highflame/sdk": ["@highflame/sdk@0.3.15", "", { "peerDependencies": { "@aws/bedrock-ai-agents-strands": ">=1.0.0", "@azure/ai-projects": ">=2.0.0", "@langchain/core": ">=0.3.0", "@langchain/langgraph": ">=1.0.0", "@opentelemetry/api": "^1.4.0", "@strands-agents/sdk": ">=1.0.0" }, "optionalPeers": ["@aws/bedrock-ai-agents-strands", "@azure/ai-projects", "@langchain/core", "@langchain/langgraph", "@opentelemetry/api", "@strands-agents/sdk"] }, "sha512-dwZSA8C7mFbLha0kZDnRetBxGMkI0HMXmqimnlU9QeFMa7F9mSXKqhNQv4T6w4EoOPkHpSBoq5wLTKPUs8V7iQ=="],
+    "@highflame/sdk": ["@highflame/sdk@0.3.17", "", { "peerDependencies": { "@aws/bedrock-ai-agents-strands": ">=1.0.0", "@azure/ai-projects": ">=2.0.0", "@langchain/core": ">=0.3.0", "@langchain/langgraph": ">=1.0.0", "@opentelemetry/api": "^1.4.0", "@strands-agents/sdk": ">=1.0.0" }, "optionalPeers": ["@aws/bedrock-ai-agents-strands", "@azure/ai-projects", "@langchain/core", "@langchain/langgraph", "@opentelemetry/api", "@strands-agents/sdk"] }, "sha512-yeoTCHMWm4qR4JlScSlHnsQYOjIDlQNR5ZosDq70Qj4hz0DuGwVNbjRA/k0IUgHnYnf/EWH11Qlsz9vCn91LPg=="],
 
     "@hono/node-server": ["@hono/node-server@1.19.14", "", { "peerDependencies": { "hono": "^4" } }, "sha512-GwtvgtXxnWsucXvbQXkRgqksiH2Qed37H9xHZocE5sA3N8O8O8/8FA3uclQXxXVzc9XBZuEOMK7+r02FmSpHtw=="],
 
