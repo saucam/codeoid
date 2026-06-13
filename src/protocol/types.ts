@@ -534,7 +534,13 @@ export interface SessionMessageDelta {
 // Client → Daemon messages
 // =============================================================================
 
+/** Liveness heartbeat — daemon replies with `response.ok`. */
+export interface PingMsg extends BaseClientMsg {
+  type: "ping";
+}
+
 export type ClientMessage =
+  | PingMsg
   | SessionCreateMsg
   | SessionListMsg
   | SessionAttachMsg

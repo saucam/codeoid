@@ -184,6 +184,11 @@ export class SessionManager {
     client: AttachedClient,
   ): Promise<DaemonMessage> {
     switch (msg.type) {
+      case "ping":
+        // Liveness heartbeat — lets a client detect a half-open/zombie
+        // socket (suspended webview, slept laptop) that never fired a close
+        // event, by noticing the pong never arrives.
+        return { type: "response.ok", requestId: msg.id, data: { pong: true } };
       case "session.create":
         return this.#create(msg, auth);
       case "session.list":

@@ -73,9 +73,40 @@ export function newRequestId(): string {
   return getClient().nextId();
 }
 
-/** Send a fire-and-forget message. */
+// Outbound queue: messages sent while the socket is down/reconnecting are
+// buffered and flushed on reconnect, so a message typed during a blip (or a
+// suspended mobile webview) is never silently lost. Bounded so a long outage
+// can't grow it without limit.
+const MAX_QUEUED = 200;
+const pendingSends: ClientMessage[] = [];
+
+/** Send a fire-and-forget message; queues if the socket isn't ready. */
 export function send(msg: ClientMessage): void {
-  getClient().send(msg);
+  if (!client) {
+    if (pendingSends.length < MAX_QUEUED) pendingSends.push(msg);
+    return;
+  }
+  try {
+    client.send(msg);
+  } catch {
+    // Not connected (or socket dead) — queue and flush on reconnect.
+    if (pendingSends.length < MAX_QUEUED) pendingSends.push(msg);
+  }
+}
+
+/** Flush queued sends once the socket is back. Called on `connected`. */
+function flushPendingSends(): void {
+  if (!client || pendingSends.length === 0) return;
+  const batch = pendingSends.splice(0, pendingSends.length);
+  for (const msg of batch) {
+    try {
+      client.send(msg);
+    } catch {
+      // Still not ready — requeue the rest and bail.
+      pendingSends.unshift(msg);
+      break;
+    }
+  }
 }
 
 /** Send a message and await `response.ok`. Throws on `response.error`. */
@@ -138,7 +169,11 @@ export async function bootstrap(opts: { apiKey?: string; token?: string } = {}):
       },
     });
 
-    client.onStatus(setStatus);
+    client.onStatus((s) => {
+      setStatus(s);
+      // On (re)connect, drain anything queued while the socket was down.
+      if (s.kind === "connected") flushPendingSends();
+    });
     client.onMessage(routeBroadcast);
 
     const ok = await client.connect();

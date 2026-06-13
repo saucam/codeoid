@@ -52,6 +52,9 @@ const MIN_BACKOFF_MS = 500;
 const MAX_BACKOFF_MS = 30_000;
 /** Decorrelated jitter envelope: pick uniformly in [min, computed * factor]. */
 const JITTER_FACTOR = 1.5;
+/** Liveness heartbeat — detects a half-open socket the browser never closed. */
+const HEARTBEAT_MS = 20_000;
+const HEARTBEAT_TIMEOUT_MS = 8_000;
 
 export class CodeoidClient {
   #opts: ConnectOptions;
@@ -62,6 +65,12 @@ export class CodeoidClient {
   #status: ClientStatus = { kind: "idle" };
   #reqCounter = 0;
   #shutdown = false;
+  #heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  /** Resolver that interrupts the current backoff sleep (reconnect-now). */
+  #wake: (() => void) | null = null;
+  /** True while a connect loop is running (prevents concurrent loops). */
+  #connecting = false;
+  #resumeWired = false;
 
   constructor(opts: ConnectOptions) {
     this.#opts = opts;
@@ -82,8 +91,26 @@ export class CodeoidClient {
 
   /** Connect and complete the auth handshake. Resolves on `auth.ok`. */
   async connect(): Promise<AuthOkMsg> {
+    this.#wireResumeListeners();
     if (this.#status.kind === "connected") return this.#status.auth;
     return this.#connectWithBackoff(1);
+  }
+
+  /**
+   * Reconnect immediately — used on resume (tab focus / network online /
+   * webview unsuspend). If a backoff sleep is in progress, wake it so we
+   * retry now instead of waiting out the timer; if no loop is running and
+   * we're not connected, start one.
+   */
+  reconnectNow(): void {
+    if (this.#shutdown || this.#status.kind === "connected") return;
+    if (this.#wake) {
+      this.#wake();
+    } else if (!this.#connecting) {
+      void this.#connectWithBackoff(1).catch((e) =>
+        this.#log("error", "reconnect failed", { e }),
+      );
+    }
   }
 
   /** Send a fire-and-forget client message. */
@@ -134,6 +161,8 @@ export class CodeoidClient {
   /** Close the connection. No further reconnects after this. */
   shutdown(): void {
     this.#shutdown = true;
+    this.#stopHeartbeat();
+    this.#wake?.();
     if (this.#ws) {
       try {
         this.#ws.close(1000, "client shutdown");
@@ -171,32 +200,135 @@ export class CodeoidClient {
     // `maxAttempts` to a positive number.
     const max = this.#opts.maxAttempts ?? 0;
     const isBounded = max > 0;
-    while (!this.#shutdown && (!isBounded || attempt <= max)) {
-      try {
-        this.#setStatus({ kind: "connecting", attempt });
-        const auth = await this.#connectOnce();
-        this.#setStatus({ kind: "connected", auth });
-        return auth;
-      } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
-        if (isBounded && attempt >= max) {
-          this.#setStatus({ kind: "failed", reason });
-          throw err;
+    if (this.#connecting) {
+      // A loop is already running — don't start a second.
+      throw new Error("connect already in progress");
+    }
+    this.#connecting = true;
+    try {
+      while (!this.#shutdown && (!isBounded || attempt <= max)) {
+        try {
+          this.#setStatus({ kind: "connecting", attempt });
+          const auth = await this.#connectOnce();
+          this.#setStatus({ kind: "connected", auth });
+          this.#startHeartbeat();
+          return auth;
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          if (isBounded && attempt >= max) {
+            this.#setStatus({ kind: "failed", reason });
+            throw err;
+          }
+          // Exponential backoff with full jitter — picks uniformly in
+          // [MIN_BACKOFF_MS, computed * JITTER_FACTOR] to break thundering
+          // herds when many clients reconnect at once (post-restart) and
+          // to avoid the "wakes up exactly on the second" pattern.
+          const ceiling = Math.min(MAX_BACKOFF_MS, MIN_BACKOFF_MS * 2 ** (attempt - 1));
+          const upper = Math.min(MAX_BACKOFF_MS, Math.floor(ceiling * JITTER_FACTOR));
+          const backoff = MIN_BACKOFF_MS + Math.floor(Math.random() * (upper - MIN_BACKOFF_MS));
+          this.#log("warn", `connect attempt ${attempt} failed: ${reason}; retry in ${backoff}ms`);
+          this.#setStatus({ kind: "reconnecting", attempt, nextInMs: backoff, reason });
+          await this.#sleep(backoff);
+          attempt += 1;
         }
-        // Exponential backoff with full jitter — picks uniformly in
-        // [MIN_BACKOFF_MS, computed * JITTER_FACTOR] to break thundering
-        // herds when many clients reconnect at once (post-restart) and
-        // to avoid the "wakes up exactly on the second" pattern.
-        const ceiling = Math.min(MAX_BACKOFF_MS, MIN_BACKOFF_MS * 2 ** (attempt - 1));
-        const upper = Math.min(MAX_BACKOFF_MS, Math.floor(ceiling * JITTER_FACTOR));
-        const backoff = MIN_BACKOFF_MS + Math.floor(Math.random() * (upper - MIN_BACKOFF_MS));
-        this.#log("warn", `connect attempt ${attempt} failed: ${reason}; retry in ${backoff}ms`);
-        this.#setStatus({ kind: "reconnecting", attempt, nextInMs: backoff, reason });
-        await delay(backoff);
-        attempt += 1;
       }
+    } finally {
+      this.#connecting = false;
     }
     throw new Error("shutdown during reconnect");
+  }
+
+  /** Backoff sleep that `reconnectNow()` can interrupt via `#wake`. */
+  #sleep(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const t = setTimeout(() => {
+        this.#wake = null;
+        resolve();
+      }, ms);
+      this.#wake = () => {
+        clearTimeout(t);
+        this.#wake = null;
+        resolve();
+      };
+    });
+  }
+
+  #startHeartbeat(): void {
+    this.#stopHeartbeat();
+    this.#heartbeatTimer = setInterval(() => {
+      void this.#heartbeat();
+    }, HEARTBEAT_MS);
+  }
+
+  #stopHeartbeat(): void {
+    if (this.#heartbeatTimer) {
+      clearInterval(this.#heartbeatTimer);
+      this.#heartbeatTimer = null;
+    }
+  }
+
+  /** Ping the daemon; a missed pong means the socket is dead → reconnect. */
+  async #heartbeat(): Promise<void> {
+    if (this.#status.kind !== "connected") return;
+    try {
+      await this.request(
+        { type: "ping", id: this.nextId() },
+        { timeoutMs: HEARTBEAT_TIMEOUT_MS },
+      );
+    } catch {
+      this.#log("warn", "heartbeat failed — socket is dead, forcing reconnect");
+      this.#forceReconnect();
+    }
+  }
+
+  /** Tear down a presumed-dead socket and reconnect from attempt 1. */
+  #forceReconnect(): void {
+    if (this.#shutdown) return;
+    this.#stopHeartbeat();
+    const ws = this.#ws;
+    this.#ws = null; // so onClose for this socket short-circuits (no double kick)
+    try {
+      ws?.close();
+    } catch {
+      /* ignore */
+    }
+    for (const [, p] of this.#pending) {
+      if (p.timer) clearTimeout(p.timer);
+      p.reject(new Error("connection reset"));
+    }
+    this.#pending.clear();
+    if (!this.#connecting) {
+      void this.#connectWithBackoff(1).catch((e) =>
+        this.#log("error", "reconnect failed", { e }),
+      );
+    }
+  }
+
+  /**
+   * Reconnect/revalidate on resume — tab focus, network online, or a
+   * suspended webview waking. Mobile webviews (Telegram Mini App) freeze the
+   * socket without a close event, so on resume we either reconnect (if down)
+   * or fire an immediate heartbeat to detect a zombie socket.
+   */
+  #wireResumeListeners(): void {
+    if (this.#resumeWired || typeof window === "undefined") return;
+    this.#resumeWired = true;
+    const onResume = () => {
+      if (this.#shutdown) return;
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        return;
+      }
+      if (this.#status.kind === "connected") {
+        void this.#heartbeat();
+      } else {
+        this.reconnectNow();
+      }
+    };
+    window.addEventListener("online", onResume);
+    window.addEventListener("focus", onResume);
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onResume);
+    }
   }
 
   #connectOnce(): Promise<AuthOkMsg> {
@@ -240,6 +372,10 @@ export class CodeoidClient {
           return;
         }
         if (this.#shutdown) return;
+        // If this isn't the current socket, a forceReconnect/newer connect
+        // already took over — don't kick a second reconnect loop.
+        if (this.#ws !== ws) return;
+        this.#stopHeartbeat();
         // Reject any in-flight requests so the UI doesn't hang on a
         // dead socket waiting for the 30s default timeout — drawers
         // and modals freeze otherwise. Reconnect kicks off below; the
@@ -251,9 +387,11 @@ export class CodeoidClient {
         this.#pending.clear();
         this.#log("warn", "connection dropped, attempting reconnect", { code: ev.code });
         // Asynchronously kick off reconnect — caller already moved on.
-        void this.#connectWithBackoff(1).catch((e) => {
-          this.#log("error", "reconnect exhausted", { e });
-        });
+        if (!this.#connecting) {
+          void this.#connectWithBackoff(1).catch((e) => {
+            this.#log("error", "reconnect exhausted", { e });
+          });
+        }
       };
       const onError = (ev: Event) => {
         if (!authResolved) reject(new Error("websocket error during connect"));
@@ -300,8 +438,4 @@ export class CodeoidClient {
     }
     for (const h of this.#messageHandlers) h(msg);
   }
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
 }
