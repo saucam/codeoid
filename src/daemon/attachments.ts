@@ -238,9 +238,6 @@ function resolveOne(
   // the contents flow into the prompt + scrollback + transcript +
   // memory. Resolves both lexically and via realpath so symlinked
   // shortcuts under workdir can't pivot out.
-  const lexicallyResolved = isAbsolute(a.path)
-    ? resolvePath(a.path)
-    : resolvePath(workdir, a.path);
   let canonicalWorkdir: string;
   try {
     canonicalWorkdir = realpathSync(workdir);
@@ -251,6 +248,13 @@ function resolveOne(
       bytes: 0,
     };
   }
+  // Resolve relative paths against the CANONICAL workdir so the prefix checks
+  // below compare like-for-like. Resolving against the raw workdir broke on
+  // any symlinked workdir (notably macOS tmpdir: /var/folders → /private/var/
+  // folders), making every in-workdir path look like it escaped.
+  const lexicallyResolved = isAbsolute(a.path)
+    ? resolvePath(a.path)
+    : resolvePath(canonicalWorkdir, a.path);
   const workdirPrefix = canonicalWorkdir.replace(/\/+$/, "") + sep;
   if (
     lexicallyResolved !== canonicalWorkdir &&

@@ -234,10 +234,13 @@ describe("MemoryEngine.recall", () => {
 });
 
 describe("workspaceIdFromPath", () => {
-  it("returns the same ID for different worktrees of the same repo", () => {
-    // codeoid repo itself is a git repo — use it for the test.
-    const mainRepo = "/Workspace/codeoid";
-    const srcSubdir = "/Workspace/codeoid/src";
+  it("returns the same ID for different subdirs of the same repo", () => {
+    // Use the actual repo this test runs in (process.cwd() is the repo root,
+    // which is a git repo) rather than a hardcoded path that may not exist on
+    // every machine — the prior literal `/Workspace/codeoid` made git
+    // rev-parse fail and fall back to path-hashing, so the IDs diverged.
+    const mainRepo = process.cwd();
+    const srcSubdir = join(process.cwd(), "src");
     const mainId = workspaceIdFromPath(mainRepo);
     const subdirId = workspaceIdFromPath(srcSubdir);
     // Same git repo, different subdirectory → same workspace (anchored on git-common-dir).
