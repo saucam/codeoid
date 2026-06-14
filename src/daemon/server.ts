@@ -320,6 +320,23 @@ export class DaemonServer {
             return;
           }
 
+          // Enforce token expiry on every message. Without this a
+          // continuously-open socket would honor an expired token forever
+          // (revocation/expiry only took effect on reconnect). On expiry we
+          // close 4003; the client reconnects and re-exchanges its key for a
+          // fresh JWT. (Instant revocation of a still-valid token would need
+          // a periodic re-verify / revocation check — tracked separately.)
+          if (
+            typeof data.auth?.exp === "number" &&
+            data.auth.exp > 0 &&
+            data.auth.exp <= Math.floor(Date.now() / 1000)
+          ) {
+            self.#sockets.delete(data.clientId);
+            self.#manager.disconnectClient(data.clientId);
+            ws.close(4003, "Token expired");
+            return;
+          }
+
           // Authenticated — route through session manager
           const msg = parsed as unknown as ClientMessage;
           const client: AttachedClient = {

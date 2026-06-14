@@ -1202,6 +1202,10 @@ export interface AuthContext {
   accountId: string;
   /** Project ID */
   projectId: string;
+  /** Token expiry (Unix seconds). Carried so the daemon can reject an
+   * expired token on a long-lived connection instead of trusting the
+   * handshake forever. 0/undefined means the token carried no exp. */
+  exp?: number;
 }
 
 /**

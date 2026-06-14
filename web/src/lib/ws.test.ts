@@ -168,6 +168,42 @@ describe("CodeoidClient", () => {
     expect(MockWS.instances.length).toBeGreaterThan(afterFirstRetry);
   });
 
+  it("re-exchanges the token via getToken on each (re)connect", async () => {
+    // Regression: a reconnect after the initial JWT expired used to replay
+    // the dead token forever. With a getToken supplier each connect mints a
+    // fresh token.
+    let n = 0;
+    const c = new CodeoidClient({
+      url: "ws://x",
+      token: "static-fallback",
+      getToken: async () => `fresh-${++n}`,
+    });
+    const ws1 = await connectClient(c);
+    expect(ws1.parsed[0]).toMatchObject({ token: "fresh-1" });
+
+    ws1.drop();
+    await flush();
+    const ws2 = MockWS.last();
+    expect(ws2).not.toBe(ws1);
+    ws2.open();
+    await flush();
+    // The reconnect carried a freshly-minted token, not the stale one.
+    expect(ws2.parsed[0]).toMatchObject({ token: "fresh-2" });
+    ws2.recv(AUTH_OK);
+  });
+
+  it("falls back to the static token when getToken throws", async () => {
+    const c = new CodeoidClient({
+      url: "ws://x",
+      token: "static-fallback",
+      getToken: async () => {
+        throw new Error("no stored key");
+      },
+    });
+    const ws = await connectClient(c);
+    expect(ws.parsed[0]).toMatchObject({ token: "static-fallback" });
+  });
+
   it("does not spawn duplicate reconnect loops on force-reconnect", async () => {
     const c = new CodeoidClient({ url: "ws://x", token: "t" });
     const ws1 = await connectClient(c);

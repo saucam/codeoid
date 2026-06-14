@@ -62,6 +62,21 @@ function normalizeWorkdir(input: string): string | null {
   }
 }
 
+/** Eager-resume bounds. Resume runs before the daemon listens, and each
+ * session's full transcript is read into memory — so an unbounded resume can
+ * block startup or OOM. Cap to the newest-N sessions and stop past a deadline;
+ * the rest stay on disk (loadable on a future restart with a higher cap). */
+const RESUME_MAX_SESSIONS = 50;
+const RESUME_DEADLINE_MS = 20_000;
+
+/** Sort key for resume ordering: most-recently-active first. Falls back to
+ * createdAt, then 0, so a malformed timestamp never throws. */
+function resumeSortKey(m: { lastActivityAt?: string; createdAt?: string }): number {
+  const t = m.lastActivityAt ?? m.createdAt ?? "";
+  const n = Date.parse(t);
+  return Number.isFinite(n) ? n : 0;
+}
+
 export class SessionManager {
   #sessions = new Map<string, Session>();
   #store: Store;
@@ -97,10 +112,25 @@ export class SessionManager {
    * Rebuilds in-memory session objects and scrollback buffers.
    */
   async resumeSessions(): Promise<number> {
-    const metas = await this.#transcriptStore.loadAllMeta();
+    const allMetas = await this.#transcriptStore.loadAllMeta();
+    // Newest-first by last activity so the cap keeps the most relevant
+    // sessions when there are more than RESUME_MAX_SESSIONS on disk.
+    const sorted = [...allMetas].sort(
+      (a, b) => resumeSortKey(b) - resumeSortKey(a),
+    );
+    const capped = sorted.slice(0, RESUME_MAX_SESSIONS);
+    const deadline = Date.now() + RESUME_DEADLINE_MS;
     let resumed = 0;
+    let skippedDeadline = 0;
 
-    for (const meta of metas) {
+    for (let i = 0; i < capped.length; i++) {
+      // Time-box: a few huge transcripts shouldn't wedge startup. Stop and
+      // leave the remainder on disk rather than blocking the daemon listen.
+      if (Date.now() > deadline) {
+        skippedDeadline = capped.length - i;
+        break;
+      }
+      const meta = capped[i]!;
       try {
         const session = new Session({
           name: meta.sessionName,
@@ -142,6 +172,16 @@ export class SessionManager {
       } catch {
         // Skip sessions that fail to resume
       }
+    }
+
+    const droppedCap = sorted.length - capped.length;
+    if (droppedCap > 0 || skippedDeadline > 0) {
+      console.warn(
+        `[codeoid] resume: restored ${resumed} of ${sorted.length} session(s); ` +
+          `${droppedCap} left over the ${RESUME_MAX_SESSIONS}-session cap, ` +
+          `${skippedDeadline} skipped past the ${RESUME_DEADLINE_MS}ms deadline ` +
+          `(still on disk; loadable on a future restart).`,
+      );
     }
 
     return resumed;

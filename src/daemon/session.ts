@@ -1036,10 +1036,18 @@ export class Session {
     // emits events at its own pace.
     const query$ = this.#query;
     const ac = this.#abortController;
+    // Loop-local snapshot of the input queue. The teardown `finally` below
+    // must only clear the queue/task slots if a *newer* loop hasn't already
+    // replaced them: an un-awaited interrupt() followed by a fast send() can
+    // build a fresh loop before this finally runs, and without these identity
+    // guards we'd null the new loop's queue/task and silently drop the next
+    // message (the next #pushUserMessage would throw into a swallowed catch).
+    const queue$ = this.#inputQueue;
     // Set when a resume fails because the backing Claude Code conversation
     // doesn't exist — drives the post-teardown replay below.
     let recoverContent: string | null = null;
-    this.#consumerTask = (async () => {
+    let selfTask: Promise<void> | null = null;
+    selfTask = this.#consumerTask = (async () => {
       try {
         for await (const msg of query$) {
           this.#handleAgentMessage(msg);
@@ -1094,9 +1102,12 @@ export class Session {
         this.#chunker?.onTurnEnd();
         if (this.#query === query$) this.#query = null;
         if (this.#abortController === ac) this.#abortController = null;
-        this.#inputQueue?.close();
-        this.#inputQueue = null;
-        this.#consumerTask = null;
+        // Always close OUR queue (idempotent if interrupt already did), but
+        // only clear the slot/task if a newer loop hasn't taken over — see
+        // the queue$ snapshot comment above.
+        queue$?.close();
+        if (this.#inputQueue === queue$) this.#inputQueue = null;
+        if (this.#consumerTask === selfTask) this.#consumerTask = null;
         // Resolve any pending tool approvals — they're awaiting
         // canUseTool callbacks that will never fire on a torn-down
         // SDK loop. Without this, the client-side `await

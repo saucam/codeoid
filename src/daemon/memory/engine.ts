@@ -67,6 +67,11 @@ export class MemoryEngine {
   /** FIFO queue of episode IDs awaiting embedding. */
   #embedQueue: string[] = [];
   #embedRunning = false;
+  /** False until the embedder model loads. When the model fails to init
+   * (offline, download hiccup) the engine stays alive in FTS-only mode —
+   * keyword recall, episode persistence and usage tracking all keep working;
+   * only the vector signal is disabled. */
+  #embedderReady = false;
 
   constructor(opts: MemoryEngineOptions) {
     this.#store = opts.store;
@@ -77,7 +82,20 @@ export class MemoryEngine {
   }
 
   async init(): Promise<void> {
-    await this.#embedder.init();
+    // Degrade, don't die: an embedder init failure must NOT take down the
+    // whole engine (which would also disable FTS recall + usage persistence).
+    // Run FTS-only and let recall's vector branch no-op on a null queryVector.
+    try {
+      await this.#embedder.init();
+      this.#embedderReady = true;
+    } catch (err) {
+      this.#embedderReady = false;
+      console.error(
+        `[codeoid/memory] embedder init failed — running in FTS-only mode (no semantic recall): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   /** Expose the underlying store so callers that need raw aggregate queries
@@ -111,10 +129,13 @@ export class MemoryEngine {
     const limit = q.limit ?? 8;
     const now = Date.now();
 
-    // Embed the query (blocking — the user's waiting).
-    const queryVector = q.query.trim()
-      ? normalize((await this.#embedder.embed([q.query]))[0]!)
-      : null;
+    // Embed the query (blocking — the user's waiting). Skipped in FTS-only
+    // mode; the vector branch below then no-ops and recall falls back to
+    // keyword + recency + path signals.
+    const queryVector =
+      this.#embedderReady && q.query.trim()
+        ? normalize((await this.#embedder.embed([q.query]))[0]!)
+        : null;
 
     // FTS candidates.
     const ftsRows = this.#store.ftsSearch(q.workspaceId, q.query, this.#ftsK);
@@ -282,6 +303,9 @@ export class MemoryEngine {
   // ── Background embedding worker ───────────────────────────────────────
 
   async #pumpEmbedQueue(): Promise<void> {
+    // In FTS-only mode there's no embedder — leave episodes unembedded
+    // (still persisted + FTS-indexed) rather than throwing per batch.
+    if (!this.#embedderReady) return;
     if (this.#embedRunning) return;
     this.#embedRunning = true;
     try {

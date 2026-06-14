@@ -70,6 +70,10 @@ export function workspaceIdFromPath(workdir: string): string {
 
 export class SqliteEpisodeStore {
   #db: Database;
+  /** Decoded embedding matrix per workspace, memoized so recall() doesn't
+   * re-read + re-decode every embedding BLOB on each query. Invalidated when
+   * embeddings change (insert-with-embedding / setEmbedding). */
+  #vectorCache = new Map<string, { ids: string[]; vectors: Float32Array[] }>();
 
   constructor(dbPath: string) {
     this.#db = new Database(dbPath, { create: true });
@@ -215,6 +219,10 @@ export class SqliteEpisodeStore {
         episode.createdBy,
       );
 
+    // An insert that already carries an embedding changes the matrix for
+    // its workspace; drop the cached copy so the next recall rebuilds.
+    if (embeddingBuf) this.#vectorCache.delete(episode.workspaceId);
+
     return { ...episode, id };
   }
 
@@ -223,6 +231,10 @@ export class SqliteEpisodeStore {
     this.#db
       .prepare("UPDATE episodes SET embedding = ?, embedding_model = ? WHERE id = ?")
       .run(buf, model, episodeId);
+    // We don't have the workspaceId here; clearing all is correct and cheap
+    // (rebuild happens lazily on the next recall, not here). setEmbedding runs
+    // in background batches, so this doesn't touch the recall hot path.
+    this.#vectorCache.clear();
   }
 
   // ── Turn usage (persistent token/cost tracking) ─────────────────────────
@@ -601,8 +613,13 @@ export class SqliteEpisodeStore {
     return rows;
   }
 
-  /** Build or return the cached (rowid → embedding) matrix for a workspace. */
+  /** Build or return the cached (rowid → embedding) matrix for a workspace.
+   * Memoized: rebuilt only when embeddings change (see #vectorCache
+   * invalidation in insert/setEmbedding), not on every recall. */
   loadVectorMatrix(workspaceId: string): { ids: string[]; vectors: Float32Array[] } {
+    const cached = this.#vectorCache.get(workspaceId);
+    if (cached) return cached;
+
     const rows = this.#db
       .prepare(
         `SELECT id, embedding FROM episodes
@@ -616,7 +633,9 @@ export class SqliteEpisodeStore {
       ids.push(row.id);
       vectors.push(uint8ToFloat32(row.embedding));
     }
-    return { ids, vectors };
+    const matrix = { ids, vectors };
+    this.#vectorCache.set(workspaceId, matrix);
+    return matrix;
   }
 
   /** Look up a recent file read by path + content hash (dedup hit). */
