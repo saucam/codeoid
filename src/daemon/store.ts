@@ -278,11 +278,33 @@ export class Store {
   // ── Audit ─────────────────────────────────────────────────────────────
 
   audit(subject: string, action: string, sessionId?: string, detail?: string): void {
-    this.#db
-      .prepare(
-        "INSERT INTO audit_log (subject, session_id, action, detail) VALUES (?, ?, ?, ?)",
-      )
-      .run(subject, sessionId ?? null, action, detail ?? null);
+    // An audit write must NEVER crash the daemon. The session_id FK can fail
+    // when the referenced session is no longer in the sessions table — e.g. a
+    // client disconnect audited after the session was destroyed, or a resumed
+    // session whose row isn't present. That used to throw out of a sync WS
+    // close handler → uncaughtException → full daemon shutdown.
+    try {
+      this.#db
+        .prepare(
+          "INSERT INTO audit_log (subject, session_id, action, detail) VALUES (?, ?, ?, ?)",
+        )
+        .run(subject, sessionId ?? null, action, detail ?? null);
+    } catch {
+      // Retry unlinked (FK can't fail) so the entry is still recorded; fold
+      // the orphaned session id into the detail. Swallow anything further.
+      try {
+        const d = sessionId ? `${detail ?? ""} [session=${sessionId}]`.trim() : detail ?? null;
+        this.#db
+          .prepare(
+            "INSERT INTO audit_log (subject, session_id, action, detail) VALUES (?, NULL, ?, ?)",
+          )
+          .run(subject, action, d);
+      } catch (err) {
+        console.error(
+          `[codeoid/store] audit write failed (swallowed): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
   }
 
   close(): void {
