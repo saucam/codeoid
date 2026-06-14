@@ -273,6 +273,19 @@ export class SessionManager {
         return this.#sessionExport(msg, auth);
       case "session.import":
         return this.#sessionImport(msg, auth);
+      default: {
+        // Inbound messages are cast from raw JSON at the transport, so an
+        // unknown/malformed `type` reaches here. Without this the function
+        // returned undefined → the daemon sent nothing → the client's request
+        // never resolved until its 30s timeout. Resolve it explicitly.
+        const m = msg as { id?: unknown; type?: unknown };
+        return {
+          type: "response.error",
+          requestId: typeof m.id === "string" ? m.id : "",
+          error: `Unknown message type: ${typeof m.type === "string" ? m.type : "(none)"}`,
+          code: "invalid_request",
+        };
+      }
     }
   }
 

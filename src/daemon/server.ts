@@ -313,6 +313,17 @@ export class DaemonServer {
       },
 
       websocket: {
+        // Bound inbound frame size so a client can't send a huge payload
+        // (16MB is generous for prompts/attachments + inline import bundles,
+        // far under Bun's ~128MB default). Bound the per-client OUTBOUND
+        // buffer and auto-close a client that can't keep up — a suspended
+        // mobile webview otherwise accrues unbounded server-side buffer during
+        // a chatty streaming turn and is never pruned (Bun's send() returns a
+        // backpressure code rather than throwing, so the broadcast catch never
+        // fires). closeOnBackpressureLimit handles that natively.
+        maxPayloadLength: 16 * 1024 * 1024,
+        backpressureLimit: 16 * 1024 * 1024,
+        closeOnBackpressureLimit: true,
         open(ws) {
           // Auth timeout — client must authenticate within 10 seconds
           const data = ws.data as { clientId: string; authenticated: boolean; auth: AuthContext | null; authTimer?: ReturnType<typeof setTimeout> };
