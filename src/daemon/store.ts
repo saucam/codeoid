@@ -13,6 +13,12 @@ export class Store {
   constructor(dbPath: string) {
     this.#db = new Database(dbPath, { create: true });
     this.#db.exec("PRAGMA journal_mode = WAL");
+    // Under WAL the default is synchronous=FULL, which fsyncs the WAL on every
+    // commit. audit() is a synchronous write on the hot path (fires per tool
+    // call / attach / send), so FULL stalls the event loop. NORMAL only syncs
+    // at checkpoints — safe under WAL (worst case loses the last few committed
+    // txns on OS crash, never corruption). Matches the memory store.
+    this.#db.exec("PRAGMA synchronous = NORMAL");
     this.#db.exec("PRAGMA foreign_keys = ON");
     this.#migrate();
   }

@@ -141,12 +141,16 @@ export class DaemonServer {
       { config: config.fullConfig, compressionRegistry },
     );
 
-    // Register cleanup functions (LIFO order)
-    this.#shutdown.register("sessions", () => this.#manager.drain(10_000));
+    // Register cleanup functions. ShutdownManager runs them LIFO, so the
+    // LAST registered runs FIRST. Order matters: sessions must DRAIN (their
+    // final audit/usage writes land in store + memory) BEFORE store/memory
+    // close — hence store/memory are registered first (they close last) and
+    // sessions is registered after them (drains first).
     this.#shutdown.register("memory", async () => {
       if (this.#memory) await this.#memory.close();
     });
     this.#shutdown.register("store", () => this.#store.close());
+    this.#shutdown.register("sessions", () => this.#manager.drain(10_000));
     this.#shutdown.register("websockets", () => {
       for (const { ws } of this.#sockets.values()) {
         ws.close(1001, "Server shutting down");

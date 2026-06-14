@@ -96,6 +96,19 @@ export class MemoryEngine {
         }`,
       );
     }
+
+    // Bound the file-read dedup cache (pure cache — safe to prune, no
+    // semantic loss). episodes/audit_log retention is a policy decision,
+    // tracked in #14.
+    try {
+      const FILE_READ_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+      const pruned = this.#store.pruneFileReads(FILE_READ_TTL_MS);
+      if (pruned > 0) {
+        console.log(`[codeoid/memory] pruned ${pruned} stale file-read cache row(s)`);
+      }
+    } catch {
+      /* best-effort; never block startup on a prune */
+    }
   }
 
   /** Expose the underlying store so callers that need raw aggregate queries
@@ -320,13 +333,17 @@ export class MemoryEngine {
         const texts = episodes.map((e) => embedText(e));
         try {
           const vectors = await this.#embedder.embed(texts);
-          for (let i = 0; i < episodes.length; i++) {
-            const v = vectors[i];
-            if (v) {
-              normalize(v);
-              this.#store.setEmbedding(episodes[i]!.id, v, this.#embedder.modelName);
+          // Commit the whole batch in one transaction: one WAL fsync + one
+          // FTS-trigger pass instead of up to 8.
+          this.#store.transaction(() => {
+            for (let i = 0; i < episodes.length; i++) {
+              const v = vectors[i];
+              if (v) {
+                normalize(v);
+                this.#store.setEmbedding(episodes[i]!.id, v, this.#embedder.modelName);
+              }
             }
-          }
+          });
         } catch (err) {
           // Put them back at the front; caller can retry later.
           console.error(

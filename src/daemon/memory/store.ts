@@ -237,6 +237,21 @@ export class SqliteEpisodeStore {
     this.#vectorCache.clear();
   }
 
+  /** Run `fn` inside a single transaction so a batch of writes commits once
+   * (one WAL fsync + one FTS-trigger pass) instead of N. */
+  transaction<T>(fn: () => T): T {
+    return this.#db.transaction(fn)();
+  }
+
+  /** Prune file-read dedup-cache rows older than `maxAgeMs`. This is a pure
+   * cache (re-populated on next read), so pruning loses no semantic data —
+   * unlike episodes/audit_log, whose retention is a policy decision (#14). */
+  pruneFileReads(maxAgeMs: number): number {
+    const cutoff = Date.now() - maxAgeMs;
+    const res = this.#db.prepare("DELETE FROM file_reads WHERE read_at < ?").run(cutoff);
+    return Number(res.changes ?? 0);
+  }
+
   // ── Turn usage (persistent token/cost tracking) ─────────────────────────
 
   /**
