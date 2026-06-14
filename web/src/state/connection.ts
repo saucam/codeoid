@@ -165,6 +165,12 @@ export async function bootstrap(opts: { apiKey?: string; token?: string } = {}):
     client = new CodeoidClient({
       url: DAEMON_URL,
       token: resolved.token,
+      // Fresh-token supplier for reconnects: re-exchange the stored zid_sk_
+      // key for a new JWT (resolveToken with no `token` reads the persisted
+      // key from localStorage). Falls back to the last token if the user
+      // signed in with a raw token (no stored key to re-exchange).
+      getToken: () =>
+        resolveToken({ zeroidUrl: ZEROID_URL }).then((r) => r.token),
       log: (level, msg, ctx) => {
         // Vite passes through to the browser console; keep the prefix
         // consistent so devtools filters work.

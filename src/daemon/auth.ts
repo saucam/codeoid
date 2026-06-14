@@ -52,6 +52,17 @@ export async function verifyToken(
     throw new Error(`Token audience mismatch: expected "${config.audience}"`);
   }
 
+  // Defend locally: the SDK only rejects expiry when `exp` is present, so a
+  // signed token that omits `exp` would never expire. Require a numeric,
+  // not-yet-expired exp. (A 60s skew allowance covers minor clock drift.)
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (typeof identity.exp !== "number" || identity.exp <= 0) {
+    throw new Error("Token missing exp claim");
+  }
+  if (identity.exp <= nowSec - 60) {
+    throw new Error("Token expired");
+  }
+
   return identityToAuthContext(identity);
 }
 
@@ -67,6 +78,7 @@ function identityToAuthContext(identity: VerifiedIdentity): AuthContext {
     delegatedBy: identity.act?.sub,
     accountId: identity.account_id,
     projectId: identity.project_id,
+    exp: identity.exp,
   };
 }
 

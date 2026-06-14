@@ -28,7 +28,13 @@ export type ClientStatus =
 
 export interface ConnectOptions {
   url: string; // ws://host:port — daemon's WS endpoint
+  /** Initial access token used for the first handshake (and the fallback
+   * if `getToken` is absent or fails). */
   token: string;
+  /** Optional fresh-token supplier, called on every (re)connect's open so a
+   * reconnect after the initial JWT expired re-exchanges the stored key for
+   * a new JWT instead of replaying the dead token forever. */
+  getToken?: () => Promise<string>;
   /** Bounded reconnect attempts; once exhausted we land in `failed`. */
   maxAttempts?: number;
   /** Logger for transport-level diagnostics. */
@@ -58,6 +64,8 @@ const HEARTBEAT_TIMEOUT_MS = 8_000;
 
 export class CodeoidClient {
   #opts: ConnectOptions;
+  /** Current access token; refreshed via opts.getToken on each connect. */
+  #token: string;
   #ws: WebSocket | null = null;
   #pending = new Map<string, PendingRequest>();
   #statusHandlers = new Set<StatusHandler>();
@@ -75,6 +83,7 @@ export class CodeoidClient {
 
   constructor(opts: ConnectOptions) {
     this.#opts = opts;
+    this.#token = opts.token;
   }
 
   /** Subscribe to status changes. Returns an unsubscribe fn. */
@@ -351,11 +360,28 @@ export class CodeoidClient {
       this.#ws = ws;
 
       let authResolved = false;
-      const onOpen = () => {
+      const onOpen = async () => {
+        // Refresh the token before the handshake so a reconnect after the
+        // prior JWT expired mints a fresh one (the daemon now closes 4003 on
+        // an expired token; without this we'd replay the dead token forever).
+        if (this.#opts.getToken) {
+          try {
+            this.#token = await this.#opts.getToken();
+          } catch (err) {
+            this.#log("warn", "getToken failed; using last token", { err });
+          }
+        }
+        // We may have awaited above — bail if a newer connect superseded
+        // this socket meanwhile.
+        if (this.#ws !== ws) return;
         // Daemon requires the first frame to carry an auth token. Shape
         // matches the existing Rust client: `{ type: "auth", token }`.
         // (Daemon only checks the `token` field; `type` is ignored.)
-        ws.send(JSON.stringify({ type: "auth", token: this.#opts.token }));
+        try {
+          ws.send(JSON.stringify({ type: "auth", token: this.#token }));
+        } catch (err) {
+          this.#log("warn", "auth send failed (socket closed during refresh)", { err });
+        }
       };
       const onMessage = (ev: MessageEvent<string>) => {
         let msg: DaemonMessage;
