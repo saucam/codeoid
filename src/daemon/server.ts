@@ -30,6 +30,26 @@ import type { Frontend, FrontendContext } from "../frontends/types.js";
 import type { Server } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
+// ── Token-proxy guards ──────────────────────────────────────────────────────
+// The /oauth2/token proxy is unauthenticated (pre-auth exchange), so cap body
+// size, restrict content types, and rate-limit per source IP so it can't be
+// abused as an anonymizing amplifier against the ZeroID issuer.
+const PROXY_RATE_MAX = 30;
+const PROXY_RATE_WINDOW_MS = 60_000;
+const PROXY_BODY_MAX_BYTES = 8 * 1024;
+const proxyHits = new Map<string, number[]>();
+function proxyRateOk(ip: string): boolean {
+  const now = Date.now();
+  const arr = (proxyHits.get(ip) ?? []).filter((t) => now - t < PROXY_RATE_WINDOW_MS);
+  if (arr.length >= PROXY_RATE_MAX) {
+    proxyHits.set(ip, arr);
+    return false;
+  }
+  arr.push(now);
+  proxyHits.set(ip, arr);
+  return true;
+}
+
 export interface DaemonConfig {
   port: number;
   host: string;
@@ -227,16 +247,38 @@ export class DaemonServer {
           (url.pathname === "/auth/token" || url.pathname === "/oauth2/token") &&
           req.method === "POST"
         ) {
+          const ip = server.requestIP(req)?.address ?? "unknown";
+          if (!proxyRateOk(ip)) {
+            return Response.json({ error: "rate limited" }, { status: 429 });
+          }
+          // Only the content types the exchange legitimately uses.
+          const contentType =
+            req.headers.get("Content-Type") ?? "application/json";
+          const ctBase = contentType.split(";")[0]!.trim().toLowerCase();
+          if (
+            ctBase !== "application/json" &&
+            ctBase !== "application/x-www-form-urlencoded"
+          ) {
+            return Response.json({ error: "unsupported content-type" }, { status: 415 });
+          }
+          const clen = Number(req.headers.get("Content-Length") ?? "0");
+          if (Number.isFinite(clen) && clen > PROXY_BODY_MAX_BYTES) {
+            return Response.json({ error: "request too large" }, { status: 413 });
+          }
           try {
             const body = await req.text();
+            if (body.length > PROXY_BODY_MAX_BYTES) {
+              return Response.json({ error: "request too large" }, { status: 413 });
+            }
             // Forward the caller's actual Content-Type — the web UI posts
             // application/x-www-form-urlencoded; hardcoding JSON made ZeroID
-            // JSON-parse a form body ("invalid character 'g'").
-            const contentType =
-              req.headers.get("Content-Type") ?? "application/json";
+            // JSON-parse a form body ("invalid character 'g'"). Forward the
+            // source IP so ZeroID's own abuse controls see the real client.
+            const fwdHeaders: Record<string, string> = { "Content-Type": contentType };
+            if (ip !== "unknown") fwdHeaders["X-Forwarded-For"] = ip;
             const zeroidResp = await fetch(`${authConfig.baseUrl}/oauth2/token`, {
               method: "POST",
-              headers: { "Content-Type": contentType },
+              headers: fwdHeaders,
               body,
             });
             const data = await zeroidResp.text();

@@ -42,7 +42,9 @@ export async function verifyToken(
   config: AuthConfig,
 ): Promise<AuthContext> {
   const client = getClient(config);
-  const identity = await client.tokens.verify(token);
+  // Pass the configured audience so the SDK enforces `aud` too (no-op when
+  // unset). We keep the explicit check below as defense-in-depth.
+  const identity = await client.tokens.verify(token, config.audience);
 
   if (config.issuer && identity.iss !== config.issuer) {
     throw new Error(`Token issuer mismatch: expected "${config.issuer}", got "${identity.iss}"`);
@@ -61,6 +63,14 @@ export async function verifyToken(
   }
   if (identity.exp <= nowSec - 60) {
     throw new Error("Token expired");
+  }
+
+  // Reject empty-tenancy tokens. The SDK coerces a missing account_id/
+  // project_id claim to "", which would otherwise become a usable principal
+  // sharing a ""/"" bucket with any other claimless token. Every session is
+  // scoped to (account, project), so both are required.
+  if (!identity.account_id || !identity.project_id) {
+    throw new Error("Token missing account_id/project_id claim");
   }
 
   return identityToAuthContext(identity);

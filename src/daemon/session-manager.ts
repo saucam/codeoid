@@ -995,14 +995,32 @@ export class SessionManager {
     // resolve to a session belonging to a different tenant render as
     // "(unknown)" — same shape we already use for sessions that aren't
     // live in memory.
-    const enriched = hits.map((h) => {
-      const liveSession = this.#getOwnedSession(h.sessionId, auth);
-      return {
-        ...h,
-        sessionName: liveSession?.name ?? "(unknown)",
-        workdir: liveSession?.workdir ?? "",
-      };
-    });
+    const enriched = hits
+      .map((h) => {
+        const live = this.#sessions.get(h.sessionId);
+        // Drop hits whose session is live under a DIFFERENT tenant — masking
+        // only the name (as before) still leaked the snippet body/excerpt
+        // when two tenants share a path-hash workspace on one host. Hits with
+        // no live session (the caller's own destroyed/not-resumed history)
+        // are kept and masked as before. (A fully tenant-scoped episode store
+        // would also catch cross-tenant *non-live* hits — tracked in #13.)
+        if (
+          live &&
+          (live.accountId !== auth.accountId || live.projectId !== auth.projectId)
+        ) {
+          return null;
+        }
+        const owned =
+          live && live.accountId === auth.accountId && live.projectId === auth.projectId
+            ? live
+            : null;
+        return {
+          ...h,
+          sessionName: owned?.name ?? "(unknown)",
+          workdir: owned?.workdir ?? "",
+        };
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null);
 
     return {
       type: "session.search.result",
