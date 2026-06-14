@@ -37,11 +37,13 @@ export class ScrollbackBuffer {
    * Push a message into the buffer. Evicts oldest entries if limits are exceeded.
    */
   push(msg: DaemonMessage): void {
-    const size = JSON.stringify(msg).length;
     this.#entries.push(msg);
-    this.#bytes += size;
+    this.#bytes += JSON.stringify(msg).length;
+    this.#evict();
+  }
 
-    // Evict from front until within limits
+  /** Evict oldest entries until within both limits. */
+  #evict(): void {
     while (
       this.#entries.length > this.#config.maxEntries ||
       this.#bytes > this.#config.maxBytes
@@ -77,7 +79,15 @@ export class ScrollbackBuffer {
   updateMessage(messageId: string, updater: (msg: DaemonMessage) => void): void {
     for (const entry of this.#entries) {
       if (entry.type === "session.message" && (entry as { messageId?: string }).messageId === messageId) {
+        // Re-account bytes around the in-place mutation. Tool entries are
+        // pushed small (no output) then mutated to carry large output; without
+        // adjusting #bytes here, eviction later subtracts the grown size that
+        // was never added, drifting #bytes negative and defeating the byte cap.
+        const before = JSON.stringify(entry).length;
         updater(entry);
+        const after = JSON.stringify(entry).length;
+        this.#bytes += after - before;
+        this.#evict();
         return;
       }
     }

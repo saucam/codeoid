@@ -6,7 +6,6 @@ export { TranscriptStore } from "./transcript.js";
 export { ScrollbackBuffer } from "./scrollback.js";
 export { ShutdownManager } from "./shutdown.js";
 export { RateLimiter } from "./rate-limit.js";
-export { withRetry, categorizeError, type RetryConfig, type RetryEvent } from "./retry.js";
 export { verifyToken, extractBearerToken, type AuthConfig } from "./auth.js";
 export { AgentIdentityManager, type AgentIdentityConfig } from "./agent-identity.js";
 export { OAuthHandler, type OAuthConfig } from "./oauth.js";

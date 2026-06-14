@@ -1139,26 +1139,41 @@ export class Session {
       // #backingRecoveryAttempted so a persistent failure can't loop.
       if (recoverContent !== null) {
         this.#backingRecoveryAttempted = true;
-        const newBackingId = randomUUID();
-        this.#claudeCodeSessionId = newBackingId;
-        this.#hasQueried = false;
-        try {
-          this.#store.setClaudeCodeSessionId(this.id, newBackingId);
-        } catch (e) {
-          console.error(
-            `[codeoid/session ${this.id}] failed to persist recovered backing id: ${e instanceof Error ? e.message : String(e)}`,
-          );
-        }
-        try {
-          await this.#ensureQueryLoop(sender);
-          this.#pushUserMessage(recoverContent, "now");
-          this.#setStatus("thinking");
-        } catch (e) {
-          console.error(
-            `[codeoid/session ${this.id}] backing-session recovery failed: ${e instanceof Error ? e.message : String(e)}`,
-          );
-          this.#setStatus("error");
-        }
+        const content = recoverContent;
+        // Run recovery THROUGH the send chain. This block executes inside the
+        // consumer task, outside the serialization that send() uses — so if a
+        // user send() arrives during the recovery window, both could call
+        // #ensureQueryLoop and build a second SDK query / push to the wrong
+        // queue. Enqueueing on #sendChain serializes recovery with sends so
+        // exactly one rebuilds the backing loop.
+        const next = this.#sendChain
+          .catch(() => undefined)
+          .then(async () => {
+            const newBackingId = randomUUID();
+            this.#claudeCodeSessionId = newBackingId;
+            this.#hasQueried = false;
+            try {
+              this.#store.setClaudeCodeSessionId(this.id, newBackingId);
+            } catch (e) {
+              console.error(
+                `[codeoid/session ${this.id}] failed to persist recovered backing id: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+            try {
+              await this.#ensureQueryLoop(sender);
+              this.#pushUserMessage(content, "now");
+              this.#setStatus("thinking");
+            } catch (e) {
+              console.error(
+                `[codeoid/session ${this.id}] backing-session recovery failed: ${e instanceof Error ? e.message : String(e)}`,
+              );
+              this.#setStatus("error");
+            }
+          });
+        this.#sendChain = next.then(
+          () => undefined,
+          () => undefined,
+        );
       }
     })();
   }
@@ -2404,11 +2419,15 @@ export class Session {
     for (const msgId of this.#activeToolMsgIds) {
       if (this.#toolCallsClosedByResult.has(msgId)) continue;
 
+      // A tool reaching this fallback never produced a real tool_result
+      // (successful ones are recorded via #closeToolCallWithOutput and skipped
+      // above), so it was interrupted/abandoned — mark it failed, not success.
+      // Otherwise an interrupted tool resumes showing as successfully completed.
       let updated: SessionMessage | null = null;
       this.#scrollback.updateMessage(msgId, (msg) => {
         const sm = msg as SessionMessage;
         if (sm.tool) {
-          sm.tool.state = { phase: "completed", success: true };
+          sm.tool.state = { phase: "completed", success: false };
           updated = sm;
         }
       });
@@ -2424,7 +2443,7 @@ export class Session {
         type: "session.message.delta",
         sessionId: this.id,
         messageId: msgId,
-        toolStateUpdate: { phase: "completed", success: true },
+        toolStateUpdate: { phase: "completed", success: false },
         timestamp: new Date().toISOString(),
       });
     }
@@ -2457,7 +2476,15 @@ export class Session {
   /** Persist to transcript + scrollback buffer + memory chunker */
   #persistAndBuffer(msg: SessionMessage): void {
     this.#scrollback.push(msg);
-    this.#transcriptStore.append(this.id, msg, this.#seq++).catch(() => {});
+    // Log instead of swallowing — a silently-dropped transcript write means a
+    // turn that's missing on resume with no trace. (Scrollback above is the
+    // in-memory handoff source and is synchronous, so device-handoff replay
+    // is unaffected; this is the durable-persistence path.)
+    this.#transcriptStore.append(this.id, msg, this.#seq++).catch((e) => {
+      console.error(
+        `[codeoid/session ${this.id}] transcript append failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    });
     this.#chunker?.onMessage(msg);
   }
 

@@ -112,12 +112,26 @@ describe("ScrollbackBuffer", () => {
     expect((buf.read()[0] as SessionMessage).content).toBe("msg-500");
   });
 
-  test("default config: 500 entries, 1MB", () => {
+  test("default config keeps up to 5000 entries", () => {
     const buf = new ScrollbackBuffer();
-    // Push 600 messages
-    for (let i = 0; i < 600; i++) {
+    for (let i = 0; i < 5050; i++) {
       buf.push(makeMsg(`m${i}`));
     }
-    expect(buf.length).toBe(500);
+    expect(buf.length).toBe(5000);
+  });
+
+  test("updateMessage re-accounts bytes when an entry grows in place", () => {
+    const buf = new ScrollbackBuffer();
+    const msg = makeMsg("x");
+    buf.push(msg);
+    const before = buf.bytes;
+    buf.updateMessage(msg.messageId, (m) => {
+      (m as SessionMessage).content = "y".repeat(10_000);
+    });
+    // bytes grew by ~the added content (not left stale), and exactly matches
+    // the entry's serialized size — so later eviction subtracts the right
+    // amount instead of drifting #bytes negative.
+    expect(buf.bytes).toBeGreaterThan(before + 9_000);
+    expect(buf.bytes).toBe(JSON.stringify(buf.read()[0]).length);
   });
 });
