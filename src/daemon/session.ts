@@ -1231,22 +1231,30 @@ export class Session {
     this.#abortController = null;
   }
 
-  interrupt(sender: AuthContext): void {
+  /**
+   * Interrupt the current turn — the Claude-Code "Esc" semantics.
+   *
+   * KEEP-WARM: we use the SDK's `Query.interrupt()`, which stops the
+   * in-flight turn (LLM call + running tool, including reaping the tool's
+   * child process) WITHOUT ending the streaming query. The `for await`
+   * consumer loop and the backing Claude Code session stay alive, so the
+   * next `send()` just pushes into the existing queue — no re-`query()`,
+   * no `resume`, no chance of the resume-handshake wedge that strands a
+   * session after an interrupt.
+   *
+   * Fallback: if there's no live query, or `interrupt()` rejects, we hard
+   * `abort()` the controller (the old behavior) so the turn still stops —
+   * correctness over warmth. Idempotent: a second interrupt on an
+   * already-idle session is a harmless no-op.
+   */
+  async interrupt(sender: AuthContext): Promise<void> {
     this.#store.audit(sender.sub, "session.interrupt", this.id);
-    // Finalize any in-flight streaming messages RIGHT NOW so the TUI's
-    // live region doesn't keep spinning on content the model won't finish
-    // emitting. The consumer task's finally block also calls these, but
-    // there's a window between abort and finally where the user sees
-    // stuck spinners — doing it here flushes immediately.
+    // Finalize any in-flight streaming messages RIGHT NOW so the UI's live
+    // region stops spinning on content the model won't finish emitting,
+    // before we even await the SDK — instant feedback.
     this.#flushActiveAssistant();
     this.#finalizeActiveThinking();
-    // Abort aborts the whole SDK stream. The consumer task picks that up
-    // via its try/catch and cleans itself up. Next send() will start a
-    // fresh loop. Approvals are always unblocked to avoid orphan waiters.
-    this.#abortController?.abort();
-    // Best-effort close — consumer cleanup also nulls this, but closing
-    // early prevents any pending push from sneaking in between.
-    this.#inputQueue?.close();
+    // Unblock any pending tool approvals so canUseTool awaiters don't leak.
     for (const resolve of this.#pendingApprovals.values()) {
       resolve({ approved: false });
     }
@@ -1254,7 +1262,7 @@ export class Session {
 
     const infoMsg = this.#makeMessage(
       "info",
-      `⏹ Session interrupted by ${sender.sub}. The current turn was aborted; send a new message to continue.`,
+      `⏹ Interrupted by ${sender.sub}. Send a new message to continue.`,
       SYSTEM_IDENTITY,
       undefined,
       undefined,
@@ -1262,6 +1270,27 @@ export class Session {
     );
     this.#persistAndBuffer(infoMsg);
     this.#broadcastRaw(infoMsg);
+
+    const q = this.#query;
+    if (q) {
+      try {
+        // Turn-level stop; keeps the query + backing session alive.
+        await q.interrupt();
+        // The SDK emits a result for the interrupted turn through the
+        // still-open stream; the consumer loop's handler will flip us to
+        // idle. Set it now too so callers/UI see idle immediately.
+        if (this.#status !== "error") this.#setStatus("idle");
+        return;
+      } catch {
+        // interrupt() unsupported / mid-init / already-ended — fall through
+        // to the hard-abort path below so the turn definitely stops.
+      }
+    }
+    // Hard fallback: end the whole stream. Consumer `finally` tears down;
+    // next send() rebuilds a fresh loop.
+    this.#abortController?.abort();
+    this.#inputQueue?.close();
+    if (this.#status !== "error") this.#setStatus("idle");
   }
 
   approve(

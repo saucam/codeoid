@@ -747,7 +747,7 @@ export class SessionManager {
       if (working.length === 0) return;
       for (const session of working) {
         if (interrupted.has(session.id)) continue;
-        session.interrupt(systemAuth);
+        void session.interrupt(systemAuth);
         interrupted.add(session.id);
       }
       await Bun.sleep(500);
@@ -1182,7 +1182,11 @@ export class SessionManager {
       return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
     }
 
-    session.interrupt(auth);
+    // interrupt() does its UI-visible work (flush, deny approvals, info row)
+    // synchronously before its first await, so the ack is accurate; the
+    // SDK turn-stop resolves shortly after. Fire-and-forget — errors are
+    // handled inside interrupt() (hard-abort fallback).
+    void session.interrupt(auth);
     return { type: "response.ok", requestId: msg.id };
   }
 
