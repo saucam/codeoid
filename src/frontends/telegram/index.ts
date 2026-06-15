@@ -69,6 +69,12 @@ interface UserState {
    * whenever Claude moves to a new message OR the session goes idle.
    */
   streaming: Map<string, { role: string; content: string }>;
+  /**
+   * message_id of the live "⏹ Stop" control shown while a turn runs, so we
+   * show exactly one per turn and remove it when the turn ends. Null when no
+   * turn is active.
+   */
+  stopMessageId: number | null;
 }
 
 export class TelegramFrontend implements Frontend {
@@ -727,17 +733,41 @@ export class TelegramFrontend implements Frontend {
       }
 
       case "session.status_change": {
-        if (msg.status === "idle") {
-          // Session done — flush any remaining buffered streams.
-          if (state) {
-            for (const [, buf] of state.streaming) {
-              this.#flushBuffer(chatId, buf);
-            }
-            state.streaming.clear();
+        const active =
+          msg.status === "thinking" || msg.status === "tool_running";
+        if (active) {
+          // Turn started — show a one-tap ⏹ Stop control (once per turn).
+          // Mobile parity with Esc on desktop: no need to type /interrupt.
+          if (state && state.attachedSessionId && state.stopMessageId === null) {
+            const sid = state.attachedSessionId;
+            const kb = new InlineKeyboard().text("⏹ Stop", `stop:${sid}`);
+            this.#bot.api
+              .sendMessage(chatId, "⏳ Working…", { reply_markup: kb })
+              .then((m) => {
+                // Guard against a race where the turn already ended.
+                if (state.stopMessageId === null) state.stopMessageId = m.message_id;
+                else this.#bot.api.deleteMessage(chatId, m.message_id).catch(() => {});
+              })
+              .catch(() => {});
           }
-          send("✅ Done.");
-        } else if (msg.status === "error") {
-          send("❌ Error.");
+        } else if (msg.status === "idle" || msg.status === "error") {
+          // Turn ended — remove the Stop control.
+          if (state && state.stopMessageId !== null) {
+            this.#bot.api.deleteMessage(chatId, state.stopMessageId).catch(() => {});
+            state.stopMessageId = null;
+          }
+          if (msg.status === "idle") {
+            // Flush any remaining buffered streams.
+            if (state) {
+              for (const [, buf] of state.streaming) {
+                this.#flushBuffer(chatId, buf);
+              }
+              state.streaming.clear();
+            }
+            send("✅ Done.");
+          } else {
+            send("❌ Error.");
+          }
         }
         break;
       }
@@ -821,6 +851,34 @@ export class TelegramFrontend implements Frontend {
   async #handleCallback(ctx: Context): Promise<void> {
     const data = ctx.callbackQuery?.data ?? "";
     const [kind, short, ...rest] = data.split(":");
+
+    // ⏹ Stop — interrupt the current turn. Handled before the approval
+    // lookup since it carries a sessionId, not an approvalId.
+    if (kind === "stop") {
+      const userId = ctx.from?.id;
+      const state = userId !== undefined ? this.#users.get(userId) : undefined;
+      const sessionId = short || state?.attachedSessionId || null;
+      if (!state?.auth || !sessionId) {
+        await ctx.answerCallbackQuery({ text: "Nothing to stop." }).catch(() => {});
+        return;
+      }
+      const client: AttachedClient = {
+        id: state.clientId,
+        auth: state.auth,
+        send: (m: DaemonMessage) => this.#forwardToChat(ctx.chat!.id, userId!, m),
+      };
+      await this.#manager.handle(
+        { type: "session.interrupt", id: randomUUID(), sessionId },
+        state.auth,
+        client,
+      );
+      await ctx.answerCallbackQuery({ text: "⏹ Interrupted" }).catch(() => {});
+      // Remove the Stop control; the idle status_change also clears it.
+      await ctx.editMessageText("⏹ Interrupted").catch(() => {});
+      if (state.stopMessageId !== null) state.stopMessageId = null;
+      return;
+    }
+
     const pending = short ? this.#approvals.get(short) : undefined;
     if (!pending) {
       await ctx.answerCallbackQuery({ text: "This prompt expired." }).catch(() => {});
@@ -933,6 +991,7 @@ export class TelegramFrontend implements Frontend {
         attachedSessionName: null,
         clientId: `telegram:${userId}`,
         streaming: new Map(),
+        stopMessageId: null,
       };
       this.#users.set(userId, state);
     }

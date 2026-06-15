@@ -96,40 +96,59 @@ const App: Component = () => {
     }),
   );
 
-  // Global Ctrl+X (or Cmd+X on macOS) — interrupt the focused session if
-  // it's mid-turn. We swallow the event before it bubbles into the prompt
-  // textarea, which would otherwise eat the shortcut as a clipboard cut.
-  // No-op when no session is busy or focus is in an editable field that
-  // would conflict with a real cut intent (input/textarea with selection).
+  // Global interrupt — Esc (Claude Code parity) and Ctrl/Cmd+X (alias).
+  // Esc interrupts the focused session when it's mid-turn; when idle, or
+  // when an overlay is open, Esc keeps its existing job (the modal's own
+  // listener closes it). Ctrl/Cmd+X is the always-available alias and
+  // guards against hijacking a genuine clipboard "cut".
   onMount(() => {
-    function onKey(ev: KeyboardEvent): void {
-      if (ev.key.toLowerCase() !== "x") return;
-      if (!(ev.ctrlKey || ev.metaKey)) return;
-      const s = focusedSession();
-      if (!s) return;
-      if (
-        s.status !== "working" &&
-        s.status !== "thinking" &&
-        s.status !== "tool_running"
-      )
-        return;
+    const isBusy = (status: string): boolean =>
+      status === "working" ||
+      status === "thinking" ||
+      status === "tool_running" ||
+      status === "waiting_approval";
 
-      // Don't hijack a real "cut" the user intended. If the active element
-      // is a text field with a non-empty selection, defer to the browser.
-      const el = document.activeElement;
-      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA")) {
-        const ta = el as HTMLInputElement | HTMLTextAreaElement;
-        if (
-          typeof ta.selectionStart === "number" &&
-          typeof ta.selectionEnd === "number" &&
-          ta.selectionEnd > ta.selectionStart
-        ) {
-          return;
-        }
+    function interruptFocused(): void {
+      const s = focusedSession();
+      if (!s || !isBusy(s.status)) return;
+      send({ type: "session.interrupt", id: newRequestId(), sessionId: s.id });
+    }
+
+    function onKey(ev: KeyboardEvent): void {
+      // Esc — interrupt when busy. Defer to any open modal/drawer (they
+      // share a `backdrop-blur` root and own their Esc-to-close handler),
+      // so the first Esc closes the overlay and a later Esc interrupts.
+      if (ev.key === "Escape") {
+        if (document.querySelector('[class*="backdrop-blur"]')) return;
+        const s = focusedSession();
+        if (!s || !isBusy(s.status)) return;
+        ev.preventDefault();
+        interruptFocused();
+        return;
       }
 
-      ev.preventDefault();
-      send({ type: "session.interrupt", id: newRequestId(), sessionId: s.id });
+      // Ctrl/Cmd+X alias — interrupt mid-turn.
+      if (ev.key.toLowerCase() === "x" && (ev.ctrlKey || ev.metaKey)) {
+        const s = focusedSession();
+        if (!s || !isBusy(s.status)) return;
+
+        // Don't hijack a real "cut": if focus is a text field with a
+        // non-empty selection, defer to the browser.
+        const el = document.activeElement;
+        if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA")) {
+          const ta = el as HTMLInputElement | HTMLTextAreaElement;
+          if (
+            typeof ta.selectionStart === "number" &&
+            typeof ta.selectionEnd === "number" &&
+            ta.selectionEnd > ta.selectionStart
+          ) {
+            return;
+          }
+        }
+
+        ev.preventDefault();
+        interruptFocused();
+      }
     }
     window.addEventListener("keydown", onKey);
     onCleanup(() => window.removeEventListener("keydown", onKey));
