@@ -878,11 +878,15 @@ export class SessionManager {
       return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
     }
 
-    // Fire and forget — output streams to attached clients.
+    // Fire and forget — output streams to attached clients. The user message
+    // is persisted synchronously at the top of session.send() before any
+    // fallible work, so a later throw can't lose it. Surface that throw as a
+    // visible system message instead of swallowing it (the old `.catch(() => {})`
+    // returned a false "ok" and dropped the error — silent data loss).
     // priority controls mid-turn insertion semantics (default "later" = FIFO).
     session
       .send(msg.text, auth, msg.attachments, msg.priority)
-      .catch(() => {});
+      .catch((err) => session.reportSendFailure(err));
 
     return { type: "response.ok", requestId: msg.id };
   }

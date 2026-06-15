@@ -648,11 +648,18 @@ export class TelegramFrontend implements Frontend {
     // Tool approvals go through the inline Approve/Deny buttons (precise
     // approvalId, concurrent-safe), so plain text is always a message to the
     // session — no "yes"/"no" interception.
-    await this.#manager.handle(
+    const resp = await this.#manager.handle(
       { type: "session.send", id: randomUUID(), sessionId: state.attachedSessionId, text },
       state.auth!,
       this.#makeClient(state, ctx),
     );
+    // Never drop a rejected send silently — surface the reason so the user
+    // knows their message didn't go through (e.g. missing scope, session gone).
+    if (resp?.type === "response.error") {
+      await ctx
+        .reply(`⚠️ Message not delivered: ${resp.error}`)
+        .catch(() => {});
+    }
   }
 
   async #handleVoice(ctx: Context): Promise<void> {

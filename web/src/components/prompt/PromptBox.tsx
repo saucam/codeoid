@@ -235,14 +235,25 @@ const PromptBox: Component = () => {
       ...(a.content !== undefined ? { content: a.content } : {}),
       ...(a.data !== undefined ? { data: a.data } : {}),
     }));
-    send({
+    const key = draftKey();
+    // Use request() (not fire-and-forget send) so a rejected send — missing
+    // scope, session gone — surfaces instead of vanishing silently. The daemon
+    // acks immediately; a *post-ack* failure arrives separately as a visible
+    // system message. On rejection we also restore the draft so the user's
+    // text is never lost.
+    request({
       type: "session.send",
       id: newRequestId(),
       sessionId: session.id,
       text: raw,
       ...(payload.length > 0 ? { attachments: payload } : {}),
+    }).catch((e) => {
+      setError(`Message not delivered: ${e instanceof Error ? e.message : String(e)}`);
+      setText(raw);
+      setDraft(key, raw);
+      autosize();
     });
-    clearDraft(draftKey());
+    clearDraft(key);
     setText("");
     setTransientPlaceholder(null);
     clearAttachments();

@@ -578,6 +578,33 @@ export class Session {
     return next;
   }
 
+  /**
+   * Surface a send-path failure as a visible system message instead of
+   * swallowing it. Called by SessionManager#send when the async send()
+   * rejects. By the time send() can throw, the user's message is already
+   * persisted (see #sendInner), so this tells the user it failed and that
+   * their text was kept — never a silent drop with a false "ok".
+   */
+  reportSendFailure(err: unknown): void {
+    const emsg = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[codeoid/session ${this.id}] send failed after ack: ${
+        err instanceof Error ? (err.stack ?? emsg) : emsg
+      }`,
+    );
+    const msg = this.#makeMessage(
+      "system",
+      `⚠️ Your message couldn't be processed (${emsg}). It was saved — send again to retry.`,
+      SYSTEM_IDENTITY,
+      undefined,
+      undefined,
+      { event: "send_failed", errorCode: "send_failed" },
+    );
+    this.#persistAndBuffer(msg);
+    this.#broadcastRaw(msg);
+    if (this.#status !== "error") this.#setStatus("idle");
+  }
+
   async #sendInner(
     text: string,
     sender: AuthContext,
@@ -594,29 +621,30 @@ export class Session {
     const wasWorking =
       this.#status === "thinking" || this.#status === "tool_running";
 
-    // Pre-send rotation check. Auto-rotate if enabled AND we're above the
-    // configured threshold AND past the min-turns safety window. Hard-
-    // rotation fires even when disabled. Runs before queueing so the
-    // seed prompt gets fed to the NEW query, not the stale one.
-    if (this.#shouldRotate()) {
-      await this.#rotate(sender, "auto");
+    // PERSIST THE USER MESSAGE FIRST — before any fallible work (attachment
+    // resolution, rotation, ensureQueryLoop). Whatever fails downstream, what
+    // the user typed is already on disk (transcript) and in scrollback, so it
+    // can never be silently lost. Resolve attachments up front for the
+    // breadcrumb, but guard it: a resolver failure must not drop the message.
+    let resolved: ReturnType<typeof resolveAttachments>["resolved"] = [];
+    let promptPrefix = "";
+    try {
+      // Merge pinned + per-turn attachments (dedup by path, per-turn wins).
+      const allAttachments = this.#buildEffectiveAttachments(attachments);
+      ({ resolved, promptPrefix } = resolveAttachments(allAttachments, {
+        workdir: this.workdir,
+      }));
+    } catch (err) {
+      console.error(
+        `[codeoid/session ${this.id}] attachment resolution failed (continuing without): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
     }
 
-    // Merge pinned + per-turn attachments (dedup by path, per-turn wins).
-    const allAttachments = this.#buildEffectiveAttachments(attachments);
-    const { resolved, promptPrefix } = resolveAttachments(allAttachments, {
-      workdir: this.workdir,
-    });
-    // Rotation seed: on the first send after a rotation, prepend a
-    // task-anchor block so the fresh Claude Code session knows what the
-    // user was working on and how to fetch prior detail via memory.recall.
-    const rotationSeed = this.#justRotated ? this.#buildRotationSeed(text) : "";
-    if (this.#justRotated) this.#justRotated = false;
-    const effectivePrompt = `${rotationSeed}${promptPrefix}${text}`;
-
     // The user-visible message carries the bare text plus a metadata
-    // breadcrumb. Emitted immediately so the TUI sees the user's message
-    // before Claude starts responding (even when queued mid-turn).
+    // breadcrumb. Emitted immediately so every frontend sees the user's
+    // message before Claude starts responding (even when queued mid-turn).
     const userIdentity = authToIdentity(sender);
     const attachmentSummary = resolved.map((r) => ({
       path: r.path,
@@ -636,6 +664,25 @@ export class Session {
     );
     this.#persistAndBuffer(userMsg);
     this.#broadcastRaw(userMsg);
+
+    // ── From here on, the message is safe. Any throw surfaces as a visible
+    //    error (see SessionManager#send -> reportSendFailure), never a silent
+    //    drop. ────────────────────────────────────────────────────────────
+    //
+    // Pre-send rotation check. Auto-rotate if enabled AND above the configured
+    // threshold AND past the min-turns safety window. Hard-rotation fires even
+    // when disabled. Runs before queueing so the seed prompt feeds the NEW
+    // query, not the stale one.
+    if (this.#shouldRotate()) {
+      await this.#rotate(sender, "auto");
+    }
+
+    // Rotation seed: on the first send after a rotation, prepend a
+    // task-anchor block so the fresh Claude Code session knows what the
+    // user was working on and how to fetch prior detail via memory.recall.
+    const rotationSeed = this.#justRotated ? this.#buildRotationSeed(text) : "";
+    if (this.#justRotated) this.#justRotated = false;
+    const effectivePrompt = `${rotationSeed}${promptPrefix}${text}`;
 
     // Ensure a long-running query is bound to this session's backing
     // Claude Code session. First send + post-rotation sends start the
