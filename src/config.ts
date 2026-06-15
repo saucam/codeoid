@@ -32,6 +32,56 @@ export function getConfigDir(): string {
   return DEFAULT_CONFIG_DIR;
 }
 
+/**
+ * Load `~/.codeoid/.env` (or `$XDG_CONFIG_HOME/codeoid/.env`) into process.env.
+ *
+ * This is the durable home for env-only secrets the daemon needs at launch —
+ * notably TELEGRAM_BOT_TOKEN / TELEGRAM_ALLOWED_USER_IDS, which aren't in
+ * config.json. Co-located with config.json + the db, it's cwd-independent (a
+ * restart from any directory picks it up) and never lives in the git tree.
+ *
+ * Precedence is preserved: a variable already set in the real environment
+ * WINS over the file, so an explicit `TELEGRAM_BOT_TOKEN=… codeoid start`
+ * still overrides. Returns the names of the keys it populated (for logging;
+ * values are never logged).
+ *
+ * Format: `KEY=value` per line; `#` comments and blank lines ignored;
+ * optional surrounding single/double quotes are stripped. Intentionally
+ * minimal — not a full dotenv dialect (no interpolation, no multiline).
+ */
+export function loadDotEnv(): string[] {
+  const envPath = join(getConfigDir(), ".env");
+  if (!existsSync(envPath)) return [];
+  const loaded: string[] = [];
+  let text: string;
+  try {
+    text = readFileSync(envPath, "utf8");
+  } catch {
+    return [];
+  }
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trim();
+    if (line.length === 0 || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    // Real environment wins — file is the fallback, not an override.
+    if (process.env[key] !== undefined) continue;
+    let value = line.slice(eq + 1).trim();
+    if (
+      value.length >= 2 &&
+      ((value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'")))
+    ) {
+      value = value.slice(1, -1);
+    }
+    process.env[key] = value;
+    loaded.push(key);
+  }
+  return loaded;
+}
+
 /** Expand a leading `~` to $HOME; leaves absolute paths untouched. */
 function expandHome(p: string): string {
   if (p.startsWith("~/")) return join(homedir(), p.slice(2));

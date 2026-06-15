@@ -21,6 +21,7 @@ import { TerminalClient } from "./terminal/client.js";
 import {
   getConfigDir,
   loadConfig,
+  loadDotEnv,
   resolveZeroidUrl,
   ZEROID_PRESETS,
 } from "./config.js";
@@ -40,6 +41,15 @@ program
   .option("--no-telegram", "Disable Telegram bot")
   .option("--no-web", "Disable Web UI")
   .action(async (opts) => {
+    // Load ~/.codeoid/.env before anything reads process.env — this is where
+    // env-only secrets (TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USER_IDS) live so
+    // they survive daemon restarts regardless of which shell launched it.
+    const dotenvKeys = loadDotEnv();
+    if (dotenvKeys.length > 0) {
+      console.log(
+        `[codeoid] loaded ${dotenvKeys.length} var(s) from ~/.codeoid/.env: ${dotenvKeys.join(", ")}`,
+      );
+    }
     const config = loadConfig();
     const daemon = new DaemonServer({
       port: parseInt(opts.port, 10),
