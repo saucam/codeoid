@@ -1,8 +1,14 @@
 # Codeoid
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Runtime: Bun](https://img.shields.io/badge/runtime-Bun-000000.svg?logo=bun)](https://bun.sh)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+
 **Identity-first control plane for AI coding agents — multi-session, multi-frontend, with cross-session memory.**
 
 Run N parallel Claude Code sessions across repos. Switch between them from a terminal cockpit, a web UI, or Telegram. Every action auditable; every agent (and sub-agent) has a cryptographic identity via [ZeroID](https://github.com/highflame-ai/zeroid). Memory persists across sessions so Claude inherits what it learned last time.
+
+> **Terminal client lives in its own repo.** The recommended cockpit is [**codeoid-tui**](https://github.com/saucam/codeoid-ui) — a native Rust/[Ratatui](https://ratatui.rs) client that speaks the daemon's WebSocket protocol. A built-in `codeoid tui` (Ink/React) ships in this repo as a zero-install fallback. See [Terminal client](#terminal-client).
 
 ```
   Terminal TUI  ──┐
@@ -64,7 +70,7 @@ Legend: ✅ first-class · ~ partial · ❌ not supported · — not a meaningfu
 ### Install
 
 ```bash
-git clone https://github.com/highflame-ai/codeoid.git
+git clone https://github.com/saucam/codeoid.git
 cd codeoid
 bun install
 ```
@@ -101,9 +107,14 @@ The issuer is pinned to whatever you log in against — a token minted by any ot
 bun src/cli.ts start
 ```
 
-Then open the TUI in another terminal:
+Then connect a client:
 
 ```bash
+# Recommended: the native Rust cockpit (separate repo).
+#   git clone https://github.com/saucam/codeoid-ui && cd codeoid-ui
+#   cargo run -p codeoid-tui --release
+#
+# Or the built-in fallback TUI (Ink/React, no extra install):
 bun src/cli.ts tui
 ```
 
@@ -149,9 +160,18 @@ Sessions are daemon-owned. Clients are stateless; they attach, receive scrollbac
 
 ## Features
 
-### Terminal cockpit (TUI)
+### Terminal client
 
-`bun src/cli.ts tui` launches an Ink-based cockpit with everything in one view:
+Codeoid has two terminal cockpits, both speaking the daemon's WebSocket protocol:
+
+- **[codeoid-tui](https://github.com/saucam/codeoid-ui) (recommended)** — a native
+  Rust/[Ratatui](https://ratatui.rs) client in its own repo. A true cell-matrix
+  framebuffer, so it stays jitter-free under high-frequency streaming deltas.
+  Build once (`cargo run -p codeoid-tui --release`) and point it at the daemon.
+- **Built-in `codeoid tui` (Ink/React)** — ships in this repo as a zero-install
+  fallback. Documented below. Same protocol, same daemon; codeoid-tui supersedes it.
+
+`bun src/cli.ts tui` launches the built-in Ink cockpit with everything in one view:
 
 ```
 [▾ studio2  @  /Workspace/codeoid]
@@ -461,7 +481,9 @@ Mobile-first SolidJS SPA at `http://localhost:7400/ui/`. Also works as a Telegra
 
 ### Telegram
 
-Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_USER_IDS`, then `bun src/cli.ts start`. Commands:
+Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_USER_IDS` (put them in
+[`~/.codeoid/.env`](#codeoidenv--env-only-secrets) so they survive restarts),
+then `bun src/cli.ts start`. Commands:
 
 | Command | Action |
 |---|---|
@@ -475,6 +497,9 @@ Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_USER_IDS`, then `bun src/cli.ts s
 | `yes` / `no` | Approve / deny tool calls |
 | _(any text)_ | Send to attached session |
 
+While a turn is running, a one-tap **⏹ Stop** button appears on the chat —
+the mobile equivalent of `Esc` / `/interrupt`.
+
 Thinking content and sub-agent tool calls surface as separate italic messages. Streamed assistant text is buffered per message and flushed when Claude finishes (Telegram's rate limits make per-token streaming infeasible).
 
 ### Production resilience
@@ -487,6 +512,8 @@ Thinking content and sub-agent tool calls surface as separate italic messages. S
 | **Rate limiting** | Per-user sliding window: max 10 concurrent sessions, 30 creations/hour. |
 | **Tool approval correlation** | Each approval request has a unique `approvalId`; first response wins; multiple concurrent approvals supported. |
 | **Subprocess stderr capture** | Claude Code subprocess stderr is piped into the daemon log so SDK-level failures are debuggable. |
+| **Keep-warm interrupt** | Interrupt (Esc / `⏹` / `Ctrl-X`) stops the in-flight turn via the SDK's `Query.interrupt()` — it reaps the running tool but keeps the backing session alive, so your next message continues on the same context. No re-`query()`, no resume handshake. Claude Code parity. |
+| **Never-lose user messages** | A sent message is persisted to the transcript the instant it's accepted — before attachment resolution, rotation, or the SDK call. A failure afterward surfaces a visible `⚠️` row (never a silent drop), and frontends render send rejections instead of swallowing them. |
 
 ## Permission scopes
 
@@ -589,6 +616,22 @@ Optional `~/.codeoid/config.json` (env vars take precedence):
 }
 ```
 
+### `~/.codeoid/.env` — env-only secrets
+
+Some daemon settings are env-only (notably the Telegram frontend). Rather than
+exporting them in whatever shell happens to launch the daemon — where a restart
+from a different terminal silently drops them — put them in `~/.codeoid/.env`.
+`codeoid start` loads this file before anything reads `process.env`, it's
+co-located with `config.json` (cwd-independent), mode `600`, and never in git.
+A variable already set in the real environment still wins.
+
+```bash
+# ~/.codeoid/.env
+TELEGRAM_BOT_TOKEN=123456:AA...
+TELEGRAM_ALLOWED_USER_IDS=6714605885
+# ANTHROPIC_API_KEY=          # only if not logged in via `claude login`
+```
+
 ## CLI reference
 
 ```bash
@@ -628,15 +671,22 @@ bun test                 # run unit tests (memory, attachments, etc.)
 | Memory engine | [src/daemon/memory/](src/daemon/memory/) |
 | Attachments + limits | [src/daemon/attachments.ts](src/daemon/attachments.ts) |
 | Git worktree helper | [src/worktree.ts](src/worktree.ts) |
-| TUI (Ink) | [src/tui/](src/tui/) |
-| Web UI | [src/frontends/web/index.ts](src/frontends/web/index.ts) |
+| Web UI server (serves `web/dist` at `/ui`) | [src/frontends/web-ui/index.ts](src/frontends/web-ui/index.ts) |
+| Web UI app (SolidJS) | [web/](web/) |
 | Telegram bot | [src/frontends/telegram/index.ts](src/frontends/telegram/index.ts) |
+| Built-in TUI (Ink, legacy fallback) | [src/tui/](src/tui/) |
+| Native TUI (Rust, recommended) | [saucam/codeoid-ui](https://github.com/saucam/codeoid-ui) |
 | Protocol types | [src/protocol/types.ts](src/protocol/types.ts) |
+
+## Contributing & security
+
+PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). For vulnerabilities, see
+[SECURITY.md](SECURITY.md) (please don't open public issues for security).
 
 ## License
 
-MIT
+[MIT](LICENSE) © Codeoid
 
 ---
 
-Built by [Highflame](https://highflame.ai). Powered by [ZeroID](https://github.com/highflame-ai/zeroid) + [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-typescript) + [Ink](https://github.com/vadimdemedes/ink).
+Powered by [ZeroID](https://github.com/highflame-ai/zeroid) + [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-typescript). Terminal cockpit: [codeoid-tui](https://github.com/saucam/codeoid-ui).
