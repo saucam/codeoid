@@ -23,6 +23,7 @@ import { ALL_SCOPES_STRING } from "../../protocol/scopes.js";
 import type { Frontend, FrontendContext } from "../types.js";
 import type { SessionManager } from "../../daemon/session-manager.js";
 import type { AuthConfig } from "../../daemon/auth.js";
+import type { Store } from "../../daemon/store.js";
 import type {
   AuthContext,
   ClaudeConfigResultMsg,
@@ -84,6 +85,7 @@ export class TelegramFrontend implements Frontend {
   #allowedUserIds: Set<number>;
   #manager!: SessionManager;
   #authConfig!: AuthConfig;
+  #store!: Store;
   #users = new Map<number, UserState>();
   /** Short-token → pending approval, for inline-keyboard tool approvals. */
   #approvals = new Map<string, PendingApproval>();
@@ -96,6 +98,7 @@ export class TelegramFrontend implements Frontend {
   async start(ctx: FrontendContext): Promise<void> {
     this.#manager = ctx.manager;
     this.#authConfig = ctx.auth;
+    this.#store = ctx.store;
     this.#setupHandlers();
     // Register the command menu so Telegram shows a tappable "/" list with
     // descriptions (autocomplete) instead of making the user remember+type.
@@ -226,6 +229,17 @@ export class TelegramFrontend implements Frontend {
       const auth = await verifyToken(token, this.#authConfig);
       const state = this.#getOrCreate(userId);
       state.auth = auth;
+
+      // Persist the Telegram-id ↔ ZeroID-subject mapping. The allowlist is
+      // env-only and in-memory, so without this there's no durable record of
+      // which Telegram user authenticated as which subject — making it
+      // unrecoverable after a restart. Audited so it's queryable later.
+      this.#store.audit(
+        auth.sub,
+        "telegram.auth",
+        undefined,
+        `telegram_user_id=${userId}${auth.name ? ` name=${auth.name}` : ""}`,
+      );
 
       await ctx.reply(`Authenticated as ${auth.name ?? auth.sub}. Use /ls to see sessions.`);
     } catch (err) {
