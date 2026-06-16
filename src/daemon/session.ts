@@ -1025,17 +1025,38 @@ export class Session {
           // model, which resumes reasoning.
           this.#setStatus(approved ? "tool_running" : "thinking");
 
-          // Emit tool state transition
-          const delta: SessionMessageDelta = {
+          // Finalize the approval message in the CANONICAL store, not just a
+          // live broadcast. The decision is terminal — the prompt is answered.
+          //
+          // BUGFIX: previously this only `#broadcastRaw`'d a delta, leaving the
+          // persisted/scrollback copy stuck at `waiting_confirmation`. Any
+          // scrollback replay (client re-attach / reconnect) then re-surfaced
+          // the answered prompt — the AskUserQuestion (and any approval) window
+          // popping up again after it was already answered. Updating the stored
+          // message + appending to the transcript (the same mechanism normal
+          // tool completion uses) makes replay reflect the resolved state.
+          const resolvedState = (
+            approved
+              ? { phase: "completed", success: true, output: "" }
+              : { phase: "cancelled", reason: "denied" }
+          ) as unknown as ToolState;
+          this.#scrollback.updateMessage(toolMsg.messageId, (m) => {
+            const sm = m as SessionMessage;
+            if (sm.tool) sm.tool.state = resolvedState;
+          });
+          const resolvedMsg: SessionMessage = {
+            ...toolMsg,
+            tool: { ...toolMsg.tool!, state: resolvedState },
+            timestamp: new Date().toISOString(),
+          };
+          this.#transcriptStore.append(this.id, resolvedMsg, this.#seq++).catch(() => {});
+          this.#broadcastRaw({
             type: "session.message.delta",
             sessionId: this.id,
             messageId: toolMsg.messageId,
-            toolStateUpdate: approved
-              ? { phase: "executing" }
-              : { phase: "cancelled", reason: "denied" },
-            timestamp: new Date().toISOString(),
-          };
-          this.#broadcastRaw(delta);
+            toolStateUpdate: resolvedState,
+            timestamp: resolvedMsg.timestamp,
+          });
 
           if (approved) {
             this.#store.audit(sender.sub, "session.approve", this.id, `tool=${toolName} approvalId=${approvalId}`);
