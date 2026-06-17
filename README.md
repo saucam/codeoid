@@ -301,13 +301,15 @@ Because `workspaceId` anchors on the shared `.git/common-dir`, both sessions liv
 
 ### Execution modes
 
-Each session has a mode:
+Each session has a mode. Only codeoid's internal memory-recall tools are ever
+pre-approved at the SDK layer — every real tool (`Read`/`Grep`/`Glob`/`Write`/
+`Edit`/`Bash`/`Agent`) is gated by the mode below:
 
 | Mode | Behavior |
 |---|---|
-| `interactive` (default) | Every tool call prompts for approval |
-| `auto-allow` | `Read` / `Grep` / `Glob` / memory tools auto-approve; `Write` / `Edit` / `Bash` still prompt |
-| `autonomous` | Everything auto-approves until the write/exec budget is spent, then reverts to `interactive` |
+| `auto-allow` (default) | `Read` / `Grep` / `Glob` / memory auto-approve; `Write` / `Edit` / `Bash` / `Agent` prompt. Claude-Code-equivalent default. |
+| `interactive` | Every tool call prompts for approval — including reads. |
+| `autonomous` | Everything auto-approves until the write/exec budget is spent, then reverts to `auto-allow`. |
 
 Cycle with `Shift-Tab` (or `Ctrl-M` on terminals that swallow shift-tab). Set explicitly with `/mode autonomous 100` for a 100-action budget. `/mode autonomous 0` for unbounded (use with caution).
 

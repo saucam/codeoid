@@ -192,7 +192,11 @@ export class Session {
   static readonly CONTEXT_WINDOW = 1_000_000;
 
   // Execution mode + turn budget (autonomous mode only).
-  #mode: SessionMode = "interactive";
+  // Default `auto-allow` (Claude Code parity): read-only tools (Read/Grep/Glob
+  // + memory) auto-approve, while Write/Edit/Bash and other actions prompt.
+  // `interactive` (prompt for everything, incl. reads) and `autonomous` (auto
+  // until budget) are opt-in via /mode.
+  #mode: SessionMode = "auto-allow";
   #turnsRemaining: number | undefined = undefined;
 
   // Cumulative token + cost totals, aggregated from SDK `result` messages
@@ -804,22 +808,23 @@ export class Session {
       options: {
         cwd: this.workdir,
         abortController: this.#abortController,
-        allowedTools: [
-          "Read",
-          "Grep",
-          "Glob",
-          "Write",
-          "Edit",
-          "Bash",
-          "Agent",
-          ...(this.#memory
-            ? [
-                "mcp__codeoid_memory__recall",
-                "mcp__codeoid_memory__recall_file",
-                "mcp__codeoid_memory__timeline",
-              ]
-            : []),
-        ],
+        // ONLY codeoid's own read-only memory MCP tools are pre-approved at
+        // the SDK layer — they're internal recall, never a user-facing action,
+        // so they should never prompt. Every real tool (Read/Grep/Glob/Write/
+        // Edit/Bash/Agent) is deliberately ABSENT here so it flows through
+        // canUseTool and the session's execution MODE actually governs it:
+        //   - interactive   → every tool prompts
+        //   - auto-allow    → reads (isSafeTool) auto-approve, writes/exec prompt
+        //   - autonomous    → everything auto until the write/exec budget runs out
+        // Previously Write/Edit/Bash were listed here, which silently bypassed
+        // the mode system — the dangerous tools never prompted regardless of mode.
+        allowedTools: this.#memory
+          ? [
+              "mcp__codeoid_memory__recall",
+              "mcp__codeoid_memory__recall_file",
+              "mcp__codeoid_memory__timeline",
+            ]
+          : [],
         permissionMode: "default",
         includePartialMessages: true,
         persistSession: true,
@@ -2041,8 +2046,9 @@ export class Session {
     if (this.#mode === "autonomous") {
       if (this.#turnsRemaining === undefined) return true;
       if (this.#turnsRemaining <= 0) {
-        // Budget exhausted — revert to interactive and fall through to ask.
-        this.setMode("interactive");
+        // Budget exhausted — revert to auto-allow (reads stay frictionless,
+        // writes/exec start prompting again) and fall through to ask.
+        this.setMode("auto-allow");
         return false;
       }
       this.#turnsRemaining -= 1;
