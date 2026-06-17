@@ -280,17 +280,42 @@ export class DaemonServer {
             // source IP so ZeroID's own abuse controls see the real client.
             const fwdHeaders: Record<string, string> = { "Content-Type": contentType };
             if (ip !== "unknown") fwdHeaders["X-Forwarded-For"] = ip;
-            const zeroidResp = await fetch(`${authConfig.baseUrl}/oauth2/token`, {
-              method: "POST",
-              headers: fwdHeaders,
-              body,
-            });
-            const data = await zeroidResp.text();
+
+            // Retry transient upstream 5xx (ZeroID has intermittently returned
+            // "500 Internal Server Error" on token exchange). A 4xx is a real
+            // rejection (bad/expired key) — never retried. Up to 3 attempts
+            // with short backoff so a flaky upstream doesn't fail a login on
+            // the first try. Every attempt's status is logged so a recurring
+            // 500 is visible in the daemon log (secrets are never logged).
+            const ZEROID_URL = `${authConfig.baseUrl}/oauth2/token`;
+            let zeroidResp: Response | null = null;
+            let data = "";
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              zeroidResp = await fetch(ZEROID_URL, {
+                method: "POST",
+                headers: fwdHeaders,
+                body,
+              });
+              data = await zeroidResp.text();
+              if (zeroidResp.status < 500) break;
+              console.warn(
+                `[codeoid] /oauth2/token upstream ${zeroidResp.status} (attempt ${attempt}/3) from ${ZEROID_URL} — body: ${data.slice(0, 200)}`,
+              );
+              if (attempt < 3) await Bun.sleep(250 * attempt);
+            }
+            if (zeroidResp && zeroidResp.status >= 400) {
+              console.warn(
+                `[codeoid] /oauth2/token returning ${zeroidResp.status} to client (ct=${ctBase})`,
+              );
+            }
             return new Response(data, {
-              status: zeroidResp.status,
+              status: zeroidResp?.status ?? 502,
               headers: { "Content-Type": "application/json" },
             });
-          } catch {
+          } catch (err) {
+            console.error(
+              `[codeoid] /oauth2/token proxy error: ${err instanceof Error ? err.message : String(err)}`,
+            );
             return Response.json({ error: "ZeroID unreachable" }, { status: 502 });
           }
         }
