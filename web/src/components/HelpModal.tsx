@@ -33,7 +33,7 @@ const COMMANDS: readonly CommandDoc[] = [
   { usage: "/destroy", desc: "Destroy the focused session" },
   { usage: "/interrupt", desc: "Interrupt the current turn" },
   { usage: "/rotate", desc: "Rotate context — fresh backing session, memory preserved" },
-  { usage: "/mode <i|a|x>", desc: "Switch mode: interactive · auto-allow · autonomous" },
+  { usage: "/mode <g|i|x>", desc: "Switch mode: guarded · interactive · autonomous" },
   { usage: "/model <id|alias> [fallback]", desc: "Switch model: opus / sonnet / haiku, or a full claude-* id" },
   { usage: "/agents", desc: "Show subagents available to this session" },
   { usage: "/skills", desc: "Show skills available to this session" },

@@ -22,9 +22,9 @@ import type { SessionMode } from "../protocol/types";
 import { openExportModal } from "./SessionExportModal";
 
 const MODE_OPTIONS: { value: SessionMode; label: string; hint: string }[] = [
+  { value: "guarded", label: "guarded", hint: "Read/Grep/Glob auto; Write/Edit/Bash ask (default)" },
   { value: "interactive", label: "interactive", hint: "every tool asks first" },
-  { value: "auto-allow", label: "auto-allow", hint: "Read/Grep/Glob auto; Write/Bash ask" },
-  { value: "autonomous", label: "autonomous", hint: "every tool auto-approved" },
+  { value: "autonomous", label: "autonomous", hint: "every tool auto-approved — no prompts" },
 ];
 
 const SessionControls: Component = () => {

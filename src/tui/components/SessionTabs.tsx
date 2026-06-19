@@ -66,7 +66,7 @@ function SessionTab({
   const color = STATUS_COLOR[session.info.status] ?? "white";
   const mode = session.info.mode ?? "interactive";
   const modeBadge =
-    mode === "auto-allow" ? " ᴀ" : mode === "autonomous" ? " ᴀ⚡" : "";
+    mode === "guarded" ? " ᴀ" : mode === "autonomous" ? " ᴀ⚡" : "";
   const pinCount = session.info.pinnedFiles?.length ?? 0;
 
   // Focused tab: cyan block on both sides + inverse text. Guaranteed to

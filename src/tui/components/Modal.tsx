@@ -541,7 +541,7 @@ function HelpModal({ onCancel }: { onCancel: () => void }) {
           <Text bold>y / n</Text> approve/deny pending tool
         </Text>
         <Text>
-          <Text bold>Shift-Tab / Ctrl-M</Text> cycle mode (interactive → auto-allow → autonomous)
+          <Text bold>Shift-Tab / Ctrl-M</Text> cycle mode (interactive → guarded → autonomous)
         </Text>
         <Text>
           <Text bold>?</Text> show this help

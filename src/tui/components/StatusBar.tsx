@@ -127,7 +127,7 @@ export function StatusBar({
             color={
               (focused.info.mode ?? "interactive") === "interactive"
                 ? "white"
-                : (focused.info.mode ?? "") === "auto-allow"
+                : (focused.info.mode ?? "") === "guarded"
                   ? "blue"
                   : "magenta"
             }

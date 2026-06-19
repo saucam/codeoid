@@ -192,11 +192,11 @@ export class Session {
   static readonly CONTEXT_WINDOW = 1_000_000;
 
   // Execution mode + turn budget (autonomous mode only).
-  // Default `auto-allow` (Claude Code parity): read-only tools (Read/Grep/Glob
-  // + memory) auto-approve, while Write/Edit/Bash and other actions prompt.
+  // Default `guarded` (≈ Claude Code's default): read-only tools (Read/Grep/Glob
+  // + memory) auto-approve, while Write/Edit/Bash and other mutations prompt.
   // `interactive` (prompt for everything, incl. reads) and `autonomous` (auto
   // until budget) are opt-in via /mode.
-  #mode: SessionMode = "auto-allow";
+  #mode: SessionMode = "guarded";
   #turnsRemaining: number | undefined = undefined;
 
   // Cumulative token + cost totals, aggregated from SDK `result` messages
@@ -814,7 +814,7 @@ export class Session {
         // Edit/Bash/Agent) is deliberately ABSENT here so it flows through
         // canUseTool and the session's execution MODE actually governs it:
         //   - interactive   → every tool prompts
-        //   - auto-allow    → reads (isSafeTool) auto-approve, writes/exec prompt
+        //   - guarded       → reads (isSafeTool) auto-approve, writes/exec prompt
         //   - autonomous    → everything auto until the write/exec budget runs out
         // Previously Write/Edit/Bash were listed here, which silently bypassed
         // the mode system — the dangerous tools never prompted regardless of mode.
@@ -2039,16 +2039,16 @@ export class Session {
   #shouldAutoApprove(toolName: string): boolean {
     if (this.#mode === "interactive") return false;
 
-    // Read-only / retrieval tools — safe in both auto-allow and autonomous.
+    // Read-only / retrieval tools — safe in both guarded and autonomous.
     if (isSafeTool(toolName)) return true;
 
     // Write / exec tools — only auto-approved in autonomous mode.
     if (this.#mode === "autonomous") {
       if (this.#turnsRemaining === undefined) return true;
       if (this.#turnsRemaining <= 0) {
-        // Budget exhausted — revert to auto-allow (reads stay frictionless,
+        // Budget exhausted — revert to guarded (reads stay frictionless,
         // writes/exec start prompting again) and fall through to ask.
-        this.setMode("auto-allow");
+        this.setMode("guarded");
         return false;
       }
       this.#turnsRemaining -= 1;
@@ -2640,7 +2640,7 @@ function formatTokenCount(n: number): string {
   return (n / 1_000_000).toFixed(1) + "M";
 }
 
-/** Tools that only read state — safe to auto-approve in auto-allow mode. */
+/** Tools that only read state — safe to auto-approve in guarded mode. */
 function isSafeTool(name: string): boolean {
   if (SAFE_TOOLS.has(name)) return true;
   // All memory recall tools are read-only.

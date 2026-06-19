@@ -34,7 +34,7 @@ export type SessionStatus =
   | "thinking"
   | "tool_running"
   | "error";
-export type SessionMode = "interactive" | "auto-allow" | "autonomous";
+export type SessionMode = "interactive" | "guarded" | "autonomous";
 
 export interface SessionUsage {
   inputTokens: number;

@@ -432,8 +432,8 @@ export function App({ config }: Props) {
     const current = focusedSession.info.mode ?? "interactive";
     const next: import("../protocol/types.js").SessionMode =
       current === "interactive"
-        ? "auto-allow"
-        : current === "auto-allow"
+        ? "guarded"
+        : current === "guarded"
           ? "autonomous"
           : "interactive";
     // Autonomous budget: explicit override, otherwise default 50 write/exec actions.
@@ -457,13 +457,13 @@ export function App({ config }: Props) {
     if (!client || !focusedSession) return;
     const modes: ReadonlyArray<import("../protocol/types.js").SessionMode> = [
       "interactive",
-      "auto-allow",
+      "guarded",
       "autonomous",
     ];
     if (!modes.includes(target as import("../protocol/types.js").SessionMode)) {
       dispatch({
         type: "error",
-        message: `unknown mode: ${target} (expected interactive | auto-allow | autonomous)`,
+        message: `unknown mode: ${target} (expected interactive | guarded | autonomous)`,
       });
       return;
     }

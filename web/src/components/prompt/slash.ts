@@ -5,7 +5,7 @@
  *   /destroy                 — destroy focused session
  *   /interrupt               — interrupt current turn
  *   /rotate                  — rotate context (refresh skills/settings)
- *   /mode <i|a|x>            — interactive | auto-allow | autonomous
+ *   /mode <i|g|x>            — interactive | guarded | autonomous
  *   /model <id|alias>        — switch model (opus / sonnet / haiku / full id)
  *   /help                    — surface help modal (TODO P6)
  *   /clear                   — clear prompt (handled by caller before dispatch)
@@ -64,12 +64,13 @@ export function parseSlash(raw: string): SlashCommand | null {
       return { kind: "rotate" };
     case "mode": {
       const m = rest[0]?.toLowerCase();
-      if (!m) throw new Error("/mode <interactive|auto-allow|autonomous>");
+      if (!m) throw new Error("/mode <guarded|interactive|autonomous>");
       const mode: SessionMode | undefined =
         m === "i" || m === "interactive"
           ? "interactive"
-          : m === "a" || m === "auto-allow" || m === "auto"
-            ? "auto-allow"
+          : // `a`/`auto`/`auto-allow` kept as backward-compat aliases for `guarded`.
+            m === "g" || m === "guarded" || m === "a" || m === "auto-allow" || m === "auto"
+            ? "guarded"
             : m === "x" || m === "autonomous"
               ? "autonomous"
               : undefined;

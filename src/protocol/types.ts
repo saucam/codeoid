@@ -49,12 +49,14 @@ export function isActiveStatus(s: SessionStatus): boolean {
 /**
  * Execution mode — controls tool approval and autonomous budgeting.
  *
- * - `interactive` (default): every tool call asks for approval
- * - `auto-allow`: Read/Grep/Glob/memory/recall are auto-approved; Write/Edit/Bash still ask
+ * - `guarded` (default): Read/Grep/Glob/memory are auto-approved; Write/Edit/Bash/Agent
+ *   still ask. The name says it plainly — it AUTO-runs the safe reads but GUARDS the
+ *   mutations. (≈ Claude Code's default mode.) Formerly named `auto-allow`.
+ * - `interactive`: every tool call asks for approval, including reads.
  * - `autonomous`: every tool auto-approved until the turn budget (`maxTurns`) is exhausted;
- *   session then reverts to `interactive` and interrupts
+ *   session then reverts to `guarded`. (≈ Claude Code's bypass-permissions mode.)
  */
-export type SessionMode = "interactive" | "auto-allow" | "autonomous";
+export type SessionMode = "interactive" | "guarded" | "autonomous";
 
 export interface SessionInfo {
   id: string;

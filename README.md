@@ -307,9 +307,9 @@ pre-approved at the SDK layer — every real tool (`Read`/`Grep`/`Glob`/`Write`/
 
 | Mode | Behavior |
 |---|---|
-| `auto-allow` (default) | `Read` / `Grep` / `Glob` / memory auto-approve; `Write` / `Edit` / `Bash` / `Agent` prompt. Claude-Code-equivalent default. |
+| `guarded` (default) | `Read` / `Grep` / `Glob` / memory auto-approve; `Write` / `Edit` / `Bash` / `Agent` prompt. ≈ Claude Code's default mode. |
 | `interactive` | Every tool call prompts for approval — including reads. |
-| `autonomous` | Everything auto-approves until the write/exec budget is spent, then reverts to `auto-allow`. |
+| `autonomous` | Everything auto-approves (no prompts) until the write/exec budget is spent, then reverts to `guarded`. ≈ Claude Code's bypass mode. |
 
 Cycle with `Shift-Tab` (or `Ctrl-M` on terminals that swallow shift-tab). Set explicitly with `/mode autonomous 100` for a 100-action budget. `/mode autonomous 0` for unbounded (use with caution).
 

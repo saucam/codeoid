@@ -526,17 +526,18 @@ export class TelegramFrontend implements Frontend {
     const mode: SessionMode | undefined =
       arg === "i" || arg === "interactive"
         ? "interactive"
-        : arg === "a" || arg === "auto" || arg === "auto-allow"
-          ? "auto-allow"
+        : // `auto-allow` kept as a backward-compat alias for the renamed `guarded`.
+          arg === "g" || arg === "guarded" || arg === "auto-allow"
+          ? "guarded"
           : arg === "x" || arg === "autonomous"
             ? "autonomous"
             : undefined;
     if (!mode) {
       await ctx.reply(
-        "Usage: /mode <interactive|auto|autonomous>\n" +
+        "Usage: /mode <guarded|interactive|autonomous>\n" +
+          "  guarded (default) — Read/Grep/Glob auto; Write/Edit/Bash ask\n" +
           "  interactive — every tool asks first\n" +
-          "  auto — Read/Grep/Glob auto; Write/Bash ask\n" +
-          "  autonomous — every tool auto-approved",
+          "  autonomous — every tool auto-approved (no prompts)",
       );
       return;
     }

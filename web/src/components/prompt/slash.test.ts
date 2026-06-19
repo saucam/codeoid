@@ -55,7 +55,7 @@ describe("parseSlash", () => {
 
   it("parses /mode with single-letter aliases", () => {
     expect(parseSlash("/mode i")).toEqual({ kind: "mode", mode: "interactive" });
-    expect(parseSlash("/mode auto")).toEqual({ kind: "mode", mode: "auto-allow" });
+    expect(parseSlash("/mode auto")).toEqual({ kind: "mode", mode: "guarded" });
     expect(parseSlash("/mode x 50")).toEqual({
       kind: "mode",
       mode: "autonomous",
