@@ -17,9 +17,13 @@ import {
   type PreToolUseHookInput,
   type SubagentStartHookInput,
   type SubagentStopHookInput,
+  type McpServerConfig,
 } from "@anthropic-ai/claude-agent-sdk";
 import { AsyncQueue } from "./async-queue.js";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type {
   AuthContext,
   SessionInfo,
@@ -793,15 +797,23 @@ export class Session {
       ? { resume: this.#claudeCodeSessionId }
       : { sessionId: this.#claudeCodeSessionId };
 
-    // Build MCP memory server for this session so Claude can call recall()
-    const mcpServers = this.#memory
-      ? {
-          codeoid_memory: buildMemoryMcpServer(this.#memory, {
-            workspaceId: this.#workspaceId,
-            sessionId: this.id,
-          }),
-        }
-      : undefined;
+    // MCP servers handed to the SDK: the user's externally-configured servers
+    // (from ~/.claude.json — picked up here because settingSources:["project"]
+    // doesn't load the user scope) PLUS codeoid's in-process memory server.
+    // codeoid's own server wins on a name collision. Re-read each query start,
+    // so `/rotate` (or a restart) makes a newly-added MCP server visible.
+    const merged: Record<string, McpServerConfig> = {
+      ...loadUserMcpServers(this.workdir),
+      ...(this.#memory
+        ? {
+            codeoid_memory: buildMemoryMcpServer(this.#memory, {
+              workspaceId: this.#workspaceId,
+              sessionId: this.id,
+            }),
+          }
+        : {}),
+    };
+    const mcpServers = Object.keys(merged).length > 0 ? merged : undefined;
 
     this.#query = query({
       prompt: this.#inputQueue,
@@ -2641,6 +2653,39 @@ function formatTokenCount(n: number): string {
 }
 
 /** Tools that only read state — safe to auto-approve in guarded mode. */
+/**
+ * Load the user's externally-configured MCP servers from `~/.claude.json` so a
+ * codeoid session can use them.
+ *
+ * codeoid runs the SDK with `settingSources: ["project"]`, which loads a
+ * project `.mcp.json` but NOT the user/global scope. Servers added via
+ * `claude mcp add` (the common case) live in `~/.claude.json` — top-level
+ * `mcpServers` (user scope) and `projects[workdir].mcpServers` (local scope) —
+ * and would otherwise be invisible. Reading them here injects them via the
+ * SDK's explicit `mcpServers` option WITHOUT widening settingSources, so we
+ * pick up the servers without also inheriting user-level permissions/hooks/env.
+ *
+ * Best-effort: any missing file / parse error yields no extra servers. Read at
+ * each query start, so `/rotate` (or a daemon restart) surfaces newly-added
+ * servers in a live session. The entries are already in the SDK's
+ * McpServerConfig shape (Claude Code writes stdio/sse/http in that format).
+ */
+function loadUserMcpServers(workdir: string): Record<string, McpServerConfig> {
+  try {
+    const raw = readFileSync(join(homedir(), ".claude.json"), "utf8");
+    const cfg = JSON.parse(raw) as {
+      mcpServers?: Record<string, McpServerConfig>;
+      projects?: Record<string, { mcpServers?: Record<string, McpServerConfig> }>;
+    };
+    return {
+      ...(cfg.mcpServers ?? {}),
+      ...(cfg.projects?.[workdir]?.mcpServers ?? {}),
+    };
+  } catch {
+    return {};
+  }
+}
+
 function isSafeTool(name: string): boolean {
   if (SAFE_TOOLS.has(name)) return true;
   // All memory recall tools are read-only.
