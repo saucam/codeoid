@@ -36,28 +36,31 @@ You're orchestrating AI coding agents. Codeoid solves the things Claude Code's s
 
 Codeoid is not a general-purpose IDE assistant — it's aimed at **long-horizon multi-session agent work** where context continuity and token economics matter more than inline code actions. Here's where it differs from the tools you're probably already using:
 
-| Capability | Claude Code CLI (interactive) | VSCode Extension | Cursor | Aider | **Codeoid** |
-|---|:-:|:-:|:-:|:-:|:-:|
-| **Cross-session verbatim memory** | ❌ `/compact` is lossy | ❌ session-scoped | ❌ | ❌ | ✅ SQLite + FTS5 + vectors, workspace-scoped |
-| **Parallel sessions, one control plane** | ❌ one terminal | ❌ one window per repo | ~ tabs | ❌ | ✅ N sessions, switch with Ctrl-G |
-| **Git-worktree-aware memory sharing** | ❌ | ❌ | ❌ | ❌ | ✅ anchored on `git-common-dir` |
-| **Workspace memory index** injected into system prompt | ❌ | ❌ | ❌ | ~ repo map | ✅ hot files + topic clusters + recent sessions, auto-regenerated |
-| **Pre-entry CLI output compression** (git diff, test runners, etc.) with recall recovery | ❌ | ❌ | ❌ | ❌ | ✅ declarative rules, 60-90% reduction with tee-cache |
-| **Auto-rotation of backing context** near compaction ceiling | ❌ | ❌ | ❌ | ❌ | ✅ lossless via memory recall seed |
-| **Mid-turn user input (stream)** | ❌ interactive CLI is turn-based | ✅ | ~ | ❌ | ✅ with `now`/`next`/`later` priority |
-| **Per-turn token / cost / cache telemetry** | ~ `/cost` total only | ❌ | ❌ | ~ | ✅ persistent SQLite, StatusBar, Δ per turn |
-| **Current context occupancy visible** | ❌ | ❌ | ❌ | ❌ | ✅ `ctx 65k/1.0M (7%)` live in StatusBar |
-| **Cryptographic identity per agent + sub-agent** (SPIFFE) | ❌ | ❌ | ❌ | ❌ | ✅ ZeroID WIMSE URIs |
-| **Autonomous mode with write-action budget** | ❌ | ~ | ~ | ❌ | ✅ budget tracked per session |
-| **Multi-frontend (TUI + Web + Telegram)** | ❌ CLI only | ❌ IDE only | ❌ IDE only | ❌ | ✅ same session on all three |
-| **Device handoff** (start laptop, continue phone) | ❌ | ❌ | ❌ | ❌ | ✅ WS re-attach with scrollback replay |
-| **Inline IDE code actions** | ❌ | ✅ | ✅ | ~ | ❌ not our niche |
-| **SWE-bench / automated coding benchmark score** | — | — | ✅ | ✅ | ❌ not yet benchmarked |
-| **Multi-model routing** (Opus for plan, Haiku for cheap subtasks) | ~ recent | ~ | ✅ | ✅ | ❌ roadmap |
+| Capability | Claude Code CLI | VSCode Extension | Cursor | Aider | **Omnigent** | **Codeoid** |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|
+| **Cross-session verbatim memory** | ❌ `/compact` is lossy | ❌ session-scoped | ❌ | ❌ | ❌ state syncs, no episodic recall | ✅ SQLite + FTS5 + vectors, workspace-scoped |
+| **Parallel sessions, one control plane** | ❌ one terminal | ❌ one window per repo | ~ tabs | ❌ | ✅ Polly delegates to parallel agents | ✅ N sessions, switch with Ctrl-G |
+| **Git-worktree-aware memory sharing** | ❌ | ❌ | ❌ | ❌ | ~ worktrees for isolation, not shared memory | ✅ anchored on `git-common-dir` |
+| **Workspace memory index** injected into system prompt | ❌ | ❌ | ❌ | ~ repo map | ❌ | ✅ hot files + topic clusters + recent sessions, auto-regenerated |
+| **Pre-entry CLI output compression** (git diff, test runners, etc.) with recall recovery | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ declarative rules, 60-90% reduction with tee-cache |
+| **Auto-rotation of backing context** near compaction ceiling | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ lossless via memory recall seed |
+| **Mid-turn user input (stream)** | ❌ interactive CLI is turn-based | ✅ | ~ | ❌ | ~ real-time collab | ✅ with `now`/`next`/`later` priority |
+| **Per-turn token / cost / cache telemetry** | ~ `/cost` total only | ❌ | ❌ | ~ | ~ spend caps + routing | ✅ persistent SQLite, StatusBar, Δ per turn |
+| **Current context occupancy visible** | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ `ctx 65k/1.0M (7%)` live in StatusBar |
+| **Cryptographic identity per agent + sub-agent** (SPIFFE) | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ ZeroID WIMSE URIs |
+| **Autonomous mode with write-action budget** | ❌ | ~ | ~ | ❌ | ✅ stateful spend caps + risk escalation | ✅ budget tracked per session |
+| **Multi-frontend** (terminal + web + mobile) | ❌ CLI only | ❌ IDE only | ❌ IDE only | ❌ | ✅ terminal → browser → phone | ✅ TUI + Web + Telegram, same session |
+| **Device handoff** (start laptop, continue phone) | ❌ | ❌ | ❌ | ❌ | ✅ sessions follow you | ✅ WS re-attach with scrollback replay |
+| **Multi-harness** (Claude + Codex + Cursor + Pi + custom) | ❌ Claude only | ❌ | ❌ | ❌ | ✅ swap/combine harnesses in one session | ❌ Claude Agent SDK only |
+| **OS-level sandbox** (filesystem + network isolation) | ~ permission modes | ❌ | ❌ | ❌ | ✅ secure OS sandbox | ~ approval + autonomous budget, not OS-level |
+| **Credential brokering** (hide secrets from the agent) | ❌ | ❌ | ❌ | ❌ | ✅ broker access, hide creds | ~ scoped ZeroID identity tokens |
+| **Inline IDE code actions** | ❌ | ✅ | ✅ | ~ | ❌ orchestrates, not inline | ❌ not our niche |
+| **SWE-bench / automated coding benchmark score** | — | — | ✅ | ✅ | — meta-harness | ❌ not yet benchmarked |
+| **Multi-model routing** (Opus for plan, Haiku for cheap subtasks) | ~ recent | ~ | ✅ | ✅ | ✅ model routing across harnesses | ❌ roadmap |
 
 Legend: ✅ first-class · ~ partial · ❌ not supported · — not a meaningful comparison
 
-**Translation**: if you're working on a big codebase over weeks, occasionally switching devices, and you care that Claude *remembers* rather than re-summarizes — Codeoid is the frontier. If you want "fix this function I'm looking at right now" — Cursor is still sharper.
+**Where each tool fits:** **[Omnigent](https://github.com/omnigent-ai/omnigent)** (open-sourced by Databricks) is Codeoid's closest peer — a *meta-harness* that puts Claude Code, Codex, Cursor, and Pi behind one governance layer with an OS sandbox and credential brokering. Codeoid trades that multi-harness breadth for depth on a single harness: verbatim cross-session memory, a cryptographic identity per agent and sub-agent (ZeroID), pre-entry output compression, and per-turn token economics. So: if you need to orchestrate *many different* agents with OS-level isolation, reach for Omnigent; if you live in Claude Code across weeks and devices and care that it *remembers* rather than re-summarizes, Codeoid is the frontier; and if you just want "fix this function I'm looking at right now," Cursor is still sharper.
 
 ## Quick start
 
@@ -377,7 +380,7 @@ The TUI surfaces this:
 
 ### Device handoff
 
-Detach on laptop, attach from phone. The scrollback buffer (500 entries / 1MB) replays what happened while you were away. Same session state, same memory, same pending approvals.
+Detach on laptop, attach from phone. The scrollback buffer (5000 entries / 20MB) replays what happened while you were away. Same session state, same memory, same pending approvals.
 
 ```
 laptop$ codeoid attach oracle
