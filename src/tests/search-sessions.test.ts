@@ -182,9 +182,7 @@ describe("searchSessions — ranking", () => {
 describe("searchSessions — snippets", () => {
   it("returns query-centered excerpt when a literal term is found", async () => {
     const long =
-      "lorem ipsum ".repeat(40) +
-      "the real answer is in authentication flow " +
-      "dolor sit amet ".repeat(40);
+      `${"lorem ipsum ".repeat(40)}the real answer is in authentication flow ${"dolor sit amet ".repeat(40)}`;
     insert("sess-1", "assistant_turn", "big reply", long);
     await engine.drain();
 

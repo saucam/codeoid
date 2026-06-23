@@ -20,7 +20,7 @@ let sessionId: string;
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), "codeoid-rotate-"));
   store = new Store(join(tmp, "codeoid.db"));
-  sessionId = "sess_" + Math.random().toString(36).slice(2, 10);
+  sessionId = `sess_${Math.random().toString(36).slice(2, 10)}`;
   store.createSession({
     id: sessionId,
     name: "test",
@@ -199,7 +199,7 @@ function buildRotationSeed(opts: {
     lines.push("---");
     lines.push(
       opts.lastUserTurn.length > 2000
-        ? opts.lastUserTurn.slice(0, 2000) + "\n…"
+        ? `${opts.lastUserTurn.slice(0, 2000)}\n…`
         : opts.lastUserTurn,
     );
     lines.push("---");

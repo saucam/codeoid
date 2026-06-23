@@ -67,7 +67,7 @@ function parseArgv(argv: readonly string[]): { command: string; workdir: string 
 async function main(): Promise<void> {
   const { command, workdir } = parseArgv(process.argv.slice(2));
 
-  let config;
+  let config: ReturnType<typeof loadConfig>;
   try {
     config = loadConfig();
   } catch (err) {

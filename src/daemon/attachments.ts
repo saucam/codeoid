@@ -92,8 +92,7 @@ export function resolveAttachments(
         entry.content = undefined;
         entry.error = `total attachment budget exceeded (${maxTotal} bytes)`;
       } else {
-        entry.content = entry.content.slice(0, remaining) +
-          `\n… truncated: total attachment budget exceeded (${maxTotal} bytes) …`;
+        entry.content = `${entry.content.slice(0, remaining)}\n… truncated: total attachment budget exceeded (${maxTotal} bytes) …`;
       }
     }
     totalBytes += Math.min(entry.bytes, maxPer);
@@ -223,8 +222,7 @@ function resolveOne(
     if (bytes > maxBytes) {
       return {
         path: a.path,
-        content: a.content.slice(0, maxBytes) +
-          `\n… truncated: inline content exceeded ${maxBytes} bytes …`,
+        content: `${a.content.slice(0, maxBytes)}\n… truncated: inline content exceeded ${maxBytes} bytes …`,
         bytes,
       };
     }
@@ -244,7 +242,7 @@ function resolveOne(
   } catch {
     return {
       path: a.path,
-      error: `workdir unresolvable; refusing attachment read`,
+      error: "workdir unresolvable; refusing attachment read",
       bytes: 0,
     };
   }
@@ -351,7 +349,7 @@ function resolveOne(
   const truncated = buf.subarray(0, maxBytes).toString("utf8");
   return {
     path: a.path,
-    content: truncated + `\n… truncated: file exceeded ${maxBytes} bytes …`,
+    content: `${truncated}\n… truncated: file exceeded ${maxBytes} bytes …`,
     bytes: rawBytes,
   };
 }
@@ -377,11 +375,11 @@ export function formatAsPrompt(resolved: readonly ResolvedAttachment[]): string 
       blocks.push(
         `The user attached a ${mime} file. Use the Read tool on the path above to view its contents before responding.`,
       );
-      blocks.push(`</file>`);
+      blocks.push("</file>");
     } else {
       blocks.push(`<file path="${escapeAttr(r.path)}">`);
       blocks.push(r.content ?? "");
-      blocks.push(`</file>`);
+      blocks.push("</file>");
     }
     blocks.push("");
   }

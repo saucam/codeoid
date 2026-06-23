@@ -128,7 +128,7 @@ export class TerminalClient {
       return;
     }
 
-    console.log(`\nAttached to session. Type messages below. Ctrl+C to detach.\n`);
+    console.log("\nAttached to session. Type messages below. Ctrl+C to detach.\n");
 
     let latestApprovalId: string | null = null;
 
@@ -148,7 +148,7 @@ export class TerminalClient {
               }
             }
           }
-          console.log(`\n--- end scrollback ---\n`);
+          console.log("\n--- end scrollback ---\n");
           break;
 
         case "session.message": {
@@ -388,7 +388,7 @@ export class TerminalClient {
         });
       } catch (err) {
         console.error(`Cannot reach ZeroID at ${this.#config.zeroidUrl}`);
-        console.error("  Is ZeroID running? Try: curl " + this.#config.zeroidUrl + "/health\n");
+        console.error(`  Is ZeroID running? Try: curl ${this.#config.zeroidUrl}/health\n`);
         process.exit(1);
       }
 

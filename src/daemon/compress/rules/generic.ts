@@ -18,8 +18,7 @@ const MIN_BYTES = 4 * 1024;
 export const genericTruncateRule: CompressionRule = {
   name: "generic-head-tail",
   description:
-    "Last-resort truncator for any command whose output is >=4 KB; keeps the first " +
-    `${HEAD_LINES} + last ${TAIL_LINES} lines with the middle replaced by a count.`,
+    `Last-resort truncator for any command whose output is >=4 KB; keeps the first ${HEAD_LINES} + last ${TAIL_LINES} lines with the middle replaced by a count.`,
   match: () => true, // always matches; lives at the tail of the registry
   compress: (stdout, ctx) => {
     const bytes = Buffer.byteLength(stdout, "utf8");

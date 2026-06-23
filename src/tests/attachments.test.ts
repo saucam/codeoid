@@ -60,7 +60,7 @@ describe("resolveAttachments — error cases", () => {
     expect(resolved[0]!.error).toContain("unreadable");
     expect(resolved[0]!.content).toBeUndefined();
     expect(promptPrefix).toContain(`<file path="nope.md" error=`);
-    expect(promptPrefix).not.toContain(`</file>`); // self-closing for errors
+    expect(promptPrefix).not.toContain("</file>"); // self-closing for errors
   });
 
   it("rejects binary files (null byte in first 1024 bytes)", () => {

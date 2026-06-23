@@ -350,8 +350,8 @@ function applyDelta(
   let streaming = s.streaming;
 
   // Locate the target message in either list.
-  let liveIdx = live.findIndex((m) => m.messageId === messageId);
-  let commIdx =
+  const liveIdx = live.findIndex((m) => m.messageId === messageId);
+  const commIdx =
     liveIdx >= 0 ? -1 : committed.findIndex((m) => m.messageId === messageId);
 
   // Content delta — only meaningful for live streams.
@@ -360,7 +360,6 @@ function applyDelta(
       const orig = live[liveIdx]!;
       live = [...live];
       live[liveIdx] = { ...orig, content: orig.content + contentAppend };
-      liveIdx = liveIdx; // unchanged
     }
     streaming =
       streaming && streaming.messageId === messageId

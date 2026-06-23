@@ -391,7 +391,7 @@ function excerpt(content: string, query: string, maxLen: number): string {
 
   if (best === -1) {
     // No literal match — head excerpt.
-    return content.slice(0, maxLen - 1).trimEnd() + "…";
+    return `${content.slice(0, maxLen - 1).trimEnd()}…`;
   }
 
   const halfWindow = Math.floor(maxLen / 2);

@@ -52,7 +52,7 @@ program
     }
     const config = loadConfig();
     const daemon = new DaemonServer({
-      port: parseInt(opts.port, 10),
+      port: Number.parseInt(opts.port, 10),
       host: opts.host,
       dbPath: config.dbPath,
       transcriptDir: config.transcriptDir,
@@ -82,8 +82,8 @@ program
 
     // Telegram (enabled when TELEGRAM_BOT_TOKEN is set)
     if (opts.telegram !== false) {
-      const botToken = process.env["TELEGRAM_BOT_TOKEN"];
-      const allowedIds = (process.env["TELEGRAM_ALLOWED_USER_IDS"] ?? "")
+      const botToken = process.env.TELEGRAM_BOT_TOKEN;
+      const allowedIds = (process.env.TELEGRAM_ALLOWED_USER_IDS ?? "")
         .split(",")
         .map(Number)
         .filter(Boolean);
@@ -203,7 +203,7 @@ program
 
       const apiKey =
         apiKeyArg ??
-        process.env["CODEOID_API_KEY"] ??
+        process.env.CODEOID_API_KEY ??
         (await readSecret("Paste your ZeroID key (zid_sk_...): "));
       if (!apiKey) {
         console.error("No key provided.");
@@ -250,7 +250,7 @@ program
       // Persist. Store the issuer symbolically (preset name or URL as given) so
       // the file stays readable; only touch zeroidUrl when --zeroid was passed.
       const updates: Record<string, unknown> = { apiKey };
-      if (issuerInput) updates["zeroidUrl"] = issuerInput;
+      if (issuerInput) updates.zeroidUrl = issuerInput;
       const path = writeConfigKeys(updates);
       console.log(`Saved to ${path} (mode 600).`);
       console.log("Run `codeoid start` to launch the daemon.");

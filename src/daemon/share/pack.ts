@@ -251,7 +251,7 @@ async function capturePinnedFile(
   absolute: string,
   cap: number,
 ): Promise<ShareFileSnapshot | null> {
-  let stat;
+  let stat: Awaited<ReturnType<typeof fs.stat>>;
   try {
     stat = await fs.stat(absolute);
   } catch {

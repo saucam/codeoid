@@ -101,14 +101,14 @@ export class Store {
 
   unpinFile(sessionId: string, filePath: string): void {
     this.#db
-      .prepare(`DELETE FROM session_pins WHERE session_id = ? AND file_path = ?`)
+      .prepare("DELETE FROM session_pins WHERE session_id = ? AND file_path = ?")
       .run(sessionId, filePath);
   }
 
   listPins(sessionId: string): string[] {
     const rows = this.#db
       .prepare(
-        `SELECT file_path FROM session_pins WHERE session_id = ? ORDER BY pinned_at ASC`,
+        "SELECT file_path FROM session_pins WHERE session_id = ? ORDER BY pinned_at ASC",
       )
       .all(sessionId) as Array<{ file_path: string }>;
     return rows.map((r) => r.file_path);

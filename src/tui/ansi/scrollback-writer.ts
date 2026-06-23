@@ -230,7 +230,7 @@ export class ScrollbackWriter {
 		this.#streamBuffers.set(key, remainder);
 		// Indent streamed body to match renderMessage's BODY_INDENT
 		// convention ("  " prefix under the role header).
-		this.#writeAtomic(indentStreamedBody(toFlush) + "\n");
+		this.#writeAtomic(`${indentStreamedBody(toFlush)}\n`);
 	}
 
 	/**
@@ -245,7 +245,7 @@ export class ScrollbackWriter {
 		if (!state) return;
 		const buf = this.#streamBuffers.get(key) ?? "";
 		if (buf.length > 0) {
-			this.#writeAtomic(indentStreamedBody(buf) + "\n");
+			this.#writeAtomic(`${indentStreamedBody(buf)}\n`);
 		}
 		this.#streams.delete(key);
 		this.#streamBuffers.delete(key);
@@ -333,7 +333,7 @@ export class ScrollbackWriter {
 function indentStreamedBody(text: string): string {
 	return text
 		.split("\n")
-		.map((ln) => (ln.length ? "  " + ln : ln))
+		.map((ln) => (ln.length ? `  ${ln}` : ln))
 		.join("\n");
 }
 

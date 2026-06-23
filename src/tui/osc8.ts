@@ -49,11 +49,11 @@ export function fileUri(path: string, baseDir?: string): string {
  * user might see confused underline styling on very old terminals).
  */
 export function supportsOsc8(): boolean {
-  if (process.env["CODEOID_DISABLE_OSC8"]) return false;
-  if (process.env["CODEOID_FORCE_OSC8"]) return true;
+  if (process.env.CODEOID_DISABLE_OSC8) return false;
+  if (process.env.CODEOID_FORCE_OSC8) return true;
   if (!process.stdout.isTTY) return false;
 
-  const termProgram = process.env["TERM_PROGRAM"];
+  const termProgram = process.env.TERM_PROGRAM;
   if (termProgram) {
     const known = new Set([
       "WezTerm",
@@ -71,22 +71,22 @@ export function supportsOsc8(): boolean {
   }
 
   // Kitty advertises itself via KITTY_WINDOW_ID.
-  if (process.env["KITTY_WINDOW_ID"]) return true;
-  if (process.env["TERM"] === "xterm-kitty") return true;
+  if (process.env.KITTY_WINDOW_ID) return true;
+  if (process.env.TERM === "xterm-kitty") return true;
 
   // Alacritty exposes ALACRITTY_LOG / ALACRITTY_WINDOW_ID (support is recent
   // but on by default).
-  if (process.env["ALACRITTY_LOG"] || process.env["ALACRITTY_WINDOW_ID"]) {
+  if (process.env.ALACRITTY_LOG || process.env.ALACRITTY_WINDOW_ID) {
     return true;
   }
 
   // VTE-based terminals (GNOME Terminal, Tilix, Terminator) set VTE_VERSION.
   // OSC-8 support landed in VTE 0.50 (2017). Anything modern enough to run
   // this CLI is fine.
-  if (process.env["VTE_VERSION"]) return true;
+  if (process.env.VTE_VERSION) return true;
 
   // ConEmu / Windows Terminal.
-  if (process.env["WT_SESSION"]) return true;
+  if (process.env.WT_SESSION) return true;
 
   return false;
 }

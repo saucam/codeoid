@@ -217,8 +217,8 @@ function renderToolRow(
 			? (tool.state.input as Record<string, unknown>)
 			: undefined;
 	const filePath =
-		typeof input?.["file_path"] === "string"
-			? (input["file_path"] as string)
+		typeof input?.file_path === "string"
+			? (input.file_path as string)
 			: null;
 	const isEdit = tool.name === "Edit" && input;
 	const isWrite = tool.name === "Write" && input;
@@ -252,13 +252,13 @@ function renderToolRow(
 	}
 
 	if (isEdit) {
-		const oldStr = input!["old_string"];
-		const newStr = input!["new_string"];
+		const oldStr = input!.old_string;
+		const newStr = input!.new_string;
 		if (typeof oldStr === "string" && typeof newStr === "string") {
 			lines.push(renderDiff(oldStr, newStr, opts.cols));
 		}
 	} else if (isWrite) {
-		const content = input!["content"];
+		const content = input!.content;
 		if (typeof content === "string") {
 			lines.push(renderWriteView(content, opts.cols));
 		}
@@ -307,7 +307,7 @@ function colorForPhase(phase: ToolState["phase"]): SgrKey {
 function summarizeInput(input: Record<string, unknown>): string {
 	for (const key of ["pattern", "command", "glob", "query", "text"]) {
 		const v = input[key];
-		if (typeof v === "string") return v.length > 60 ? v.slice(0, 57) + "…" : v;
+		if (typeof v === "string") return v.length > 60 ? `${v.slice(0, 57)}…` : v;
 	}
 	return Object.keys(input).slice(0, 3).join(", ");
 }
@@ -360,8 +360,8 @@ function renderWriteView(content: string, cols: number): string {
 function renderAttachments(
 	metadata: Record<string, unknown> | undefined,
 ): string {
-	if (!metadata || !Array.isArray(metadata["attachments"])) return "";
-	const rows = metadata["attachments"] as Array<{
+	if (!metadata || !Array.isArray(metadata.attachments)) return "";
+	const rows = metadata.attachments as Array<{
 		path: string;
 		pinned?: boolean;
 		bytes?: number;
@@ -378,7 +378,7 @@ function renderAttachments(
 		const icon = r.pinned ? "📌 " : isImage ? "🖼 " : r.binary ? "📎 " : "• ";
 		const path = maybeLink(fileUri(r.path), r.path);
 		const mime = r.binary && r.mimeType ? ` (${r.mimeType})` : "";
-		const err = r.error ? `${red(" — " + r.error)}` : "";
+		const err = r.error ? `${red(` — ${r.error}`)}` : "";
 		return `${BODY_INDENT}   ${dim(icon + path + mime)}${err}`;
 	});
 	return [header, ...rowLines].join("\n");
@@ -510,5 +510,5 @@ function join(parts: Array<string | null | undefined>): string {
 	}
 	// Trim trailing empties (no dangling blank lines at EOM).
 	while (kept.length > 0 && kept[kept.length - 1] === "") kept.pop();
-	return kept.join("\n") + "\n";
+	return `${kept.join("\n")}\n`;
 }

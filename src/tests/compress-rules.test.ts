@@ -123,7 +123,7 @@ describe("gitStatusRule", () => {
       '  (use "git add <file>..." to include in what will be committed)',
     ].join("\n");
     const untracked = Array.from({ length: 300 }, (_, i) => `\tsrc/generated-${i}.ts`).join("\n");
-    const full = header + "\n" + untracked + "\n";
+    const full = `${header}\n${untracked}\n`;
     const r = gitStatusRule.compress(full, ctx(full.length, "git status"));
     expect(r).not.toBeNull();
     expect(r!.ruleName).toBe("git-status");
@@ -145,11 +145,11 @@ describe("gitLogRule", () => {
       blocks.push(
         [
           `commit ${String(i).padStart(40, "0").slice(0, 40)}`,
-          `Author: Test <test@example.com>`,
+          "Author: Test <test@example.com>",
           `Date:   Mon Jan 1 00:00:0${i % 10} 2024`,
-          ``,
+          "",
           `    Commit message ${i}`,
-          ``,
+          "",
         ].join("\n"),
       );
     }

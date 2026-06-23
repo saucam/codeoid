@@ -470,7 +470,7 @@ export function App({ config }: Props) {
     const budget = budgetStr ? Number.parseInt(budgetStr, 10) : undefined;
     const maxTurns =
       target === "autonomous"
-        ? budget === 0 || Number.isNaN(budget ?? NaN)
+        ? budget === 0 || Number.isNaN(budget ?? Number.NaN)
           ? undefined
           : budget
         : undefined;
@@ -565,10 +565,10 @@ export function App({ config }: Props) {
     // Cap displayed ratios at 100%. Raw numbers can exceed when a turn
     // aggregates multiple API calls (subagents / retries), but the
     // per-turn percentage only makes sense bounded to [0, 100].
-    const pct = (n: number) => (Math.min(n / W, 1) * 100).toFixed(1) + "%";
-    const rawPct = (n: number) => ((n / W) * 100).toFixed(1) + "%";
+    const pct = (n: number) => `${(Math.min(n / W, 1) * 100).toFixed(1)}%`;
+    const rawPct = (n: number) => `${((n / W) * 100).toFixed(1)}%`;
 
-    lines.push(`### Last turn (raw SDK usage)`);
+    lines.push("### Last turn (raw SDK usage)");
     if (mostRecent) {
       lines.push(`- new input (uncached): **${formatK(mostRecent.inputTokens)}** (${pct(mostRecent.inputTokens)})`);
       lines.push(`- cache read:           **${formatK(mostRecent.cacheReadTokens)}** (${pct(mostRecent.cacheReadTokens)}) — billed ~10%`);
@@ -587,19 +587,19 @@ export function App({ config }: Props) {
     lines.push(`- **avg cache_read per turn: ${formatK(avgCacheRead)} (${pct(avgCacheRead)}) — the honest "typical primary context size" signal**`);
     const peak = u.peakInputTokens ?? 0;
     const peakOverflow = peak > W;
-    lines.push(`- peak single-turn sum: ${formatK(peak)} (${peakOverflow ? rawPct(peak) + " — ⚠ aggregated multi-call, see note below" : pct(peak)})`);
+    lines.push(`- peak single-turn sum: ${formatK(peak)} (${peakOverflow ? `${rawPct(peak)} — ⚠ aggregated multi-call, see note below` : pct(peak)})`);
     lines.push(`- total cost: $${u.totalCostUsd.toFixed(4)}`);
     if (info.rotation && info.rotation.count > 0) {
       lines.push(`- 🔄 rotations: ${info.rotation.count}`);
     }
     lines.push("");
     lines.push(`### ⚠ Important: "sum processed this turn" ≠ "context size"`);
-    lines.push(`The SDK reports ONE \`usage\` object per turn, but a turn can include multiple internal API calls:`);
+    lines.push("The SDK reports ONE \`usage\` object per turn, but a turn can include multiple internal API calls:");
     lines.push(`- The primary agent's reply`);
-    lines.push(`- Subagent(s) spawned via the Task / Agent tool (each has its OWN context window)`);
-    lines.push(`- Retries on rate-limit / capacity errors`);
+    lines.push("- Subagent(s) spawned via the Task / Agent tool (each has its OWN context window)");
+    lines.push("- Retries on rate-limit / capacity errors");
     lines.push("");
-    lines.push(`The SDK **sums** these usages. A subagent-heavy turn can report 1M+ tokens processed even though no single API call exceeded 300k. The hard 1M context window applies PER API CALL, not per turn.`);
+    lines.push("The SDK **sums** these usages. A subagent-heavy turn can report 1M+ tokens processed even though no single API call exceeded 300k. The hard 1M context window applies PER API CALL, not per turn.");
     lines.push("");
     lines.push(`**Better signal for "how full is my primary context":** look at \`avg cache_read per turn\` above. The stable prompt prefix (system + tools + CLAUDE.md + conversation history) is what gets cached and re-read every turn. In your session that averages **${formatK(avgCacheRead)} (${pct(avgCacheRead)})** — the real typical context size.`);
     lines.push("");
@@ -629,9 +629,9 @@ export function App({ config }: Props) {
     lines.push(`## Identity chain for ${info.name}`);
     lines.push("");
     lines.push(`**You** — ${info.createdBy}`);
-    lines.push(`  ↓`);
+    lines.push("  ↓");
     lines.push(
-      `**Session agent** — \`${info.agentUri ?? "anonymous:" + info.id}\``,
+      `**Session agent** — \`${info.agentUri ?? `anonymous:${info.id}`}\``,
     );
     const active = (info.subagents ?? []).filter((s) => s.active);
     const inactive = (info.subagents ?? []).filter((s) => !s.active);
@@ -640,7 +640,7 @@ export function App({ config }: Props) {
       lines.push("*No sub-agents spawned in this session yet.*");
     } else {
       if (active.length > 0) {
-        lines.push(`  ↓`);
+        lines.push("  ↓");
         lines.push(`### Active sub-agents (${active.length})`);
         for (const s of active) {
           lines.push(
@@ -1026,8 +1026,7 @@ function extractMentionAttachments(text: string): Attachment[] {
   const out: Attachment[] = [];
   const seen = new Set<string>();
   const re = /(?:^|\s)@([A-Za-z0-9_./-]+)/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
+  for (let m = re.exec(text); m !== null; m = re.exec(text)) {
     const path = m[1]!;
     if (seen.has(path)) continue;
     seen.add(path);
@@ -1045,7 +1044,7 @@ function stripMentionPrefix(path: string): string {
 function formatK(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return "0";
   if (n < 1_000) return String(Math.round(n));
-  if (n < 10_000) return (n / 1_000).toFixed(1) + "k";
-  if (n < 1_000_000) return Math.round(n / 1_000) + "k";
-  return (n / 1_000_000).toFixed(2) + "M";
+  if (n < 10_000) return `${(n / 1_000).toFixed(1)}k`;
+  if (n < 1_000_000) return `${Math.round(n / 1_000)}k`;
+  return `${(n / 1_000_000).toFixed(2)}M`;
 }

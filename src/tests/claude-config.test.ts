@@ -17,11 +17,11 @@ describe("parseFrontmatter", () => {
       "Body content here.",
     ].join("\n");
     const fm = parseFrontmatter(md);
-    expect(fm["name"]).toBe("security-reviewer");
-    expect(fm["description"]).toBe(
+    expect(fm.name).toBe("security-reviewer");
+    expect(fm.description).toBe(
       "Audits Highflame code for auth violations.",
     );
-    expect(fm["tools"]).toBe("Read, Grep, Glob, Bash");
+    expect(fm.tools).toBe("Read, Grep, Glob, Bash");
   });
 
   test("returns empty object when no frontmatter", () => {
@@ -31,14 +31,14 @@ describe("parseFrontmatter", () => {
   test("strips quoted strings", () => {
     const md = ["---", 'name: "quoted-name"', "description: 'single-quoted'", "---"].join("\n");
     const fm = parseFrontmatter(md);
-    expect(fm["name"]).toBe("quoted-name");
-    expect(fm["description"]).toBe("single-quoted");
+    expect(fm.name).toBe("quoted-name");
+    expect(fm.description).toBe("single-quoted");
   });
 
   test("ignores yaml comment lines and unmatched", () => {
     const md = ["---", "# this is a comment", "name: ok", "no-colon-line", "---"].join("\n");
     const fm = parseFrontmatter(md);
-    expect(fm["name"]).toBe("ok");
+    expect(fm.name).toBe("ok");
     expect(Object.keys(fm)).toEqual(["name"]);
   });
 });
@@ -49,13 +49,13 @@ describe("readClaudeConfig", () => {
 
   beforeEach(async () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), "codeoid-cc-"));
-    originalHome = process.env["HOME"];
-    process.env["HOME"] = path.join(tmp, "home");
+    originalHome = process.env.HOME;
+    process.env.HOME = path.join(tmp, "home");
     await fs.mkdir(path.join(tmp, "home", ".claude"), { recursive: true });
   });
 
   afterEach(async () => {
-    process.env["HOME"] = originalHome;
+    process.env.HOME = originalHome;
     await fs.rm(tmp, { recursive: true, force: true });
   });
 

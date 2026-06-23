@@ -27,7 +27,7 @@ const DEFAULT_CONFIG_DIR = join(homedir(), ".codeoid");
 
 /** Resolve the config directory honoring XDG_CONFIG_HOME if set. */
 export function getConfigDir(): string {
-  const xdg = process.env["XDG_CONFIG_HOME"];
+  const xdg = process.env.XDG_CONFIG_HOME;
   if (xdg && xdg.length > 0) return join(xdg, "codeoid");
   return DEFAULT_CONFIG_DIR;
 }
@@ -529,7 +529,7 @@ export function loadConfig(opts: LoadOptions = {}): CodeoidConfig {
   //    semantic so existing single-tenant setups don't accidentally flip into
   //    multi-tenant mode.
   const hasExplicitTenant =
-    env["ZEROID_ACCOUNT_ID"] !== undefined ||
+    env.ZEROID_ACCOUNT_ID !== undefined ||
     (typeof fileConfig === "object" &&
       fileConfig !== null &&
       "agentIdentity" in fileConfig);

@@ -226,7 +226,7 @@ describe("cappedOccupancy", () => {
   });
 
   it("safe on invalid input", () => {
-    expect(cappedOccupancy(NaN)).toBe(0);
+    expect(cappedOccupancy(Number.NaN)).toBe(0);
     expect(cappedOccupancy(-100)).toBe(0);
   });
 });

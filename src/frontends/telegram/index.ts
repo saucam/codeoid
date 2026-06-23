@@ -462,7 +462,7 @@ export class TelegramFrontend implements Frontend {
       lines.push("");
     }
 
-    lines.push(`Use /attach \\<name\\> to jump into a session\\.`);
+    lines.push("Use /attach \\<name\\> to jump into a session\\.");
 
     // Telegram has a 4096-char limit; chunk if needed
     const text = lines.join("\n");
@@ -760,7 +760,7 @@ export class TelegramFrontend implements Frontend {
         if (active) {
           // Turn started — show a one-tap ⏹ Stop control (once per turn).
           // Mobile parity with Esc on desktop: no need to type /interrupt.
-          if (state && state.attachedSessionId && state.stopMessageId === null) {
+          if (state?.attachedSessionId && state.stopMessageId === null) {
             const sid = state.attachedSessionId;
             const kb = new InlineKeyboard().text("⏹ Stop", `stop:${sid}`);
             this.#bot.api
@@ -1042,7 +1042,7 @@ export class TelegramFrontend implements Frontend {
 
 /** Escape MarkdownV2 special characters. */
 function escMd(text: string): string {
-  return text.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, (m) => "\\" + m);
+  return text.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, (m) => `\\${m}`);
 }
 
 /** @deprecated — legacy esc used elsewhere in this file. */
@@ -1054,7 +1054,7 @@ function esc(text: string): string {
 function formatAgo(when: number): string {
   const dt = Math.max(0, Date.now() - when);
   if (dt < 60_000) return "just now";
-  if (dt < 3_600_000) return Math.round(dt / 60_000) + "m ago";
-  if (dt < 86_400_000) return Math.round(dt / 3_600_000) + "h ago";
-  return Math.round(dt / 86_400_000) + "d ago";
+  if (dt < 3_600_000) return `${Math.round(dt / 60_000)}m ago`;
+  if (dt < 86_400_000) return `${Math.round(dt / 3_600_000)}h ago`;
+  return `${Math.round(dt / 86_400_000)}d ago`;
 }

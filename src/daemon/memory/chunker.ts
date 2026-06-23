@@ -48,7 +48,7 @@ export function extractFilePaths(
 
   // Grep/Glob patterns aren't literal file paths but are still routing signals.
   if (toolName === "Grep" || toolName === "Glob") {
-    const pat = rec["pattern"] ?? rec["glob"];
+    const pat = rec.pattern ?? rec.glob;
     if (typeof pat === "string") paths.push(pat);
   }
 

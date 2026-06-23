@@ -42,7 +42,7 @@ import { authToIdentity, SYSTEM_IDENTITY } from "../protocol/types.js";
 import type { Store } from "./store.js";
 import type { AgentIdentityManager } from "./agent-identity.js";
 import { ScrollbackBuffer } from "./scrollback.js";
-import { TranscriptStore } from "./transcript.js";
+import type { TranscriptStore } from "./transcript.js";
 import { contextWindowForModel } from "./context-windows.js";
 import {
   EpisodeChunker,
@@ -55,7 +55,7 @@ import type { Attachment } from "../protocol/types.js";
 import { resolveAttachments } from "./attachments.js";
 import type { CodeoidConfig } from "../config.js";
 import {
-  CompressionRegistry,
+  type CompressionRegistry,
   rewriteBashToolInput,
 } from "./compress/index.js";
 import { findModel, resolveModelId } from "./models.js";
@@ -765,7 +765,7 @@ export class Session {
         console.log(`[codeoid] agent identity registered: ${wimseUri}`);
         const infoMsg = this.#makeMessage(
           "info",
-          `Agent identity registered`,
+          "Agent identity registered",
           SYSTEM_IDENTITY,
           undefined,
           undefined,
@@ -780,7 +780,7 @@ export class Session {
         this.#broadcastRaw(infoMsg);
       } catch (err) {
         console.error(
-          `[codeoid] agent identity registration failed:`,
+          "[codeoid] agent identity registration failed:",
           err instanceof Error ? err.message : err,
         );
       }
@@ -1987,7 +1987,7 @@ export class Session {
     if (lastTurn) {
       parts.push("Most recent user turn before the rotation:");
       parts.push("---");
-      parts.push(lastTurn.length > 2000 ? lastTurn.slice(0, 2000) + "\n…" : lastTurn);
+      parts.push(lastTurn.length > 2000 ? `${lastTurn.slice(0, 2000)}\n…` : lastTurn);
       parts.push("---");
     } else {
       parts.push("No prior user turn recorded (memory disabled). Rely on the user's next message.");
@@ -2124,14 +2124,14 @@ export class Session {
         const parts: ContentPart[] = [];
 
         for (const block of content) {
-          if (block["type"] === "text" && typeof block["text"] === "string") {
-            textParts.push(block["text"]);
-            parts.push({ kind: "text", text: block["text"], markdown: true });
+          if (block.type === "text" && typeof block.text === "string") {
+            textParts.push(block.text);
+            parts.push({ kind: "text", text: block.text, markdown: true });
           }
-          if (block["type"] === "tool_use" && typeof block["name"] === "string") {
-            const toolName = block["name"] as string;
-            const toolInput = block["input"] as Record<string, unknown>;
-            const sdkToolUseId = typeof block["id"] === "string" ? block["id"] : null;
+          if (block.type === "tool_use" && typeof block.name === "string") {
+            const toolName = block.name as string;
+            const toolInput = block.input as Record<string, unknown>;
+            const sdkToolUseId = typeof block.id === "string" ? block.id : null;
 
             // Complete any previously executing tools before starting new one
             this.#completeActiveTools();
@@ -2394,14 +2394,14 @@ export class Session {
         if (!Array.isArray(content)) break;
         let closedAny = false;
         for (const block of content as Array<Record<string, unknown>>) {
-          if (block["type"] !== "tool_result") continue;
-          const useId = typeof block["tool_use_id"] === "string" ? block["tool_use_id"] : null;
+          if (block.type !== "tool_result") continue;
+          const useId = typeof block.tool_use_id === "string" ? block.tool_use_id : null;
           if (!useId) continue;
           const messageId = this.#toolUseIdToMessageId.get(useId);
           if (!messageId) continue;
 
-          const output = extractToolResultText(block["content"]);
-          const isError = block["is_error"] === true;
+          const output = extractToolResultText(block.content);
+          const isError = block.is_error === true;
           this.#closeToolCallWithOutput(messageId, output, !isError);
           closedAny = true;
         }
@@ -2647,9 +2647,9 @@ export class Session {
 function formatTokenCount(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return "0";
   if (n < 1_000) return String(Math.round(n));
-  if (n < 10_000) return (n / 1_000).toFixed(1) + "k";
-  if (n < 1_000_000) return Math.round(n / 1_000) + "k";
-  return (n / 1_000_000).toFixed(1) + "M";
+  if (n < 10_000) return `${(n / 1_000).toFixed(1)}k`;
+  if (n < 1_000_000) return `${Math.round(n / 1_000)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
 /** Tools that only read state — safe to auto-approve in guarded mode. */
@@ -2705,12 +2705,12 @@ function extractToolResultText(content: unknown): string {
   if (!Array.isArray(content)) return "";
   const parts: string[] = [];
   for (const block of content as Array<Record<string, unknown>>) {
-    if (block["type"] === "text" && typeof block["text"] === "string") {
-      parts.push(block["text"]);
-    } else if (block["type"] === "image") {
+    if (block.type === "text" && typeof block.text === "string") {
+      parts.push(block.text);
+    } else if (block.type === "image") {
       parts.push("[image]");
-    } else if (typeof block["text"] === "string") {
-      parts.push(block["text"] as string);
+    } else if (typeof block.text === "string") {
+      parts.push(block.text as string);
     }
   }
   return parts.join("\n");

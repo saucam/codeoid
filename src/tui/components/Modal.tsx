@@ -366,7 +366,7 @@ function SearchHitRow({
         {bar}
         {hit.sessionName}
         <Text dimColor>
-          {" — " + hit.matchCount + " match" + (hit.matchCount === 1 ? "" : "es") + " · " + when}
+          {` — ${hit.matchCount} match${hit.matchCount === 1 ? "" : "es"} · ${when}`}
         </Text>
       </Text>
       {top && (
@@ -377,7 +377,7 @@ function SearchHitRow({
             : top.kind === "assistant_turn"
               ? "claude: "
               : top.kind === "tool_call"
-                ? (top.toolName ? top.toolName + ": " : "tool: ")
+                ? (top.toolName ? `${top.toolName}: ` : "tool: ")
                 : "!: "}
           {compactExcerpt(top.excerpt)}
         </Text>
@@ -389,15 +389,15 @@ function SearchHitRow({
 function formatAgo(when: number): string {
   const dt = Math.max(0, Date.now() - when);
   if (dt < 60_000) return "just now";
-  if (dt < 3_600_000) return Math.round(dt / 60_000) + "m ago";
-  if (dt < 86_400_000) return Math.round(dt / 3_600_000) + "h ago";
-  return Math.round(dt / 86_400_000) + "d ago";
+  if (dt < 3_600_000) return `${Math.round(dt / 60_000)}m ago`;
+  if (dt < 86_400_000) return `${Math.round(dt / 3_600_000)}h ago`;
+  return `${Math.round(dt / 86_400_000)}d ago`;
 }
 
 function compactExcerpt(s: string): string {
   // Collapse internal whitespace + cap length for a single inline row.
   const collapsed = s.replace(/\s+/g, " ").trim();
-  return collapsed.length > 120 ? collapsed.slice(0, 117) + "…" : collapsed;
+  return collapsed.length > 120 ? `${collapsed.slice(0, 117)}…` : collapsed;
 }
 
 // ── Model picker ────────────────────────────────────────────────────────
@@ -501,11 +501,11 @@ function ModelRow({
         {bar}
         {model.label}
         <Text dimColor>
-          {" — " + model.alias + " · " + Math.round(model.contextWindow / 1000) + "k ctx"}
+          {` — ${model.alias} · ${Math.round(model.contextWindow / 1000)}k ctx`}
         </Text>
         {active && <Text color="green">{activeBadge}</Text>}
       </Text>
-      <Text dimColor>{"    " + model.description}</Text>
+      <Text dimColor>{`    ${model.description}`}</Text>
     </Box>
   );
 }

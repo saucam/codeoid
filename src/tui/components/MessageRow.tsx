@@ -10,7 +10,8 @@
  * content shrinks mid-render.
  */
 
-import React, { useEffect, useState } from "react";
+import React from "react";
+import { useEffect, useState } from "react";
 import { Box, Text } from "ink";
 import type { SessionMessage, ToolInfo } from "../../protocol/types.js";
 import { renderMarkdown, type Segment } from "../markdown.js";
@@ -134,12 +135,12 @@ function AttachmentSummary({ metadata }: { metadata: Record<string, unknown> | u
         const icon = r.pinned ? "📌 " : isImage ? "🖼 " : r.binary ? "📎 " : "• ";
         return (
           <Text key={r.path} dimColor>
-            {"   " + icon}
+            {`   ${icon}`}
             {maybeLink(fileUri(r.path), r.path)}
             {r.binary && r.mimeType ? (
-              <Text dimColor>{" (" + r.mimeType + ")"}</Text>
+              <Text dimColor>{` (${r.mimeType})`}</Text>
             ) : null}
-            {r.error ? <Text color="red">{" — " + r.error}</Text> : null}
+            {r.error ? <Text color="red">{` — ${r.error}`}</Text> : null}
           </Text>
         );
       })}
@@ -185,7 +186,7 @@ function ToolRow({
   const input =
     "input" in tool.state ? (tool.state.input as Record<string, unknown>) : undefined;
   const filePath =
-    typeof input?.["file_path"] === "string" ? (input["file_path"] as string) : null;
+    typeof input?.file_path === "string" ? (input.file_path as string) : null;
   const isEdit = tool.name === "Edit" && input;
   const isWrite = tool.name === "Write" && input;
   const output =
@@ -196,7 +197,7 @@ function ToolRow({
       <Box>
         {isSubagent && identity && (
           <Text color="green" bold>
-            {"[" + (identity.name ?? "subagent") + "] "}
+            {`[${identity.name ?? "subagent"}] `}
           </Text>
         )}
         <Text color={phaseColor}>
@@ -211,7 +212,7 @@ function ToolRow({
           </>
         )}
         {!filePath && input && (
-          <Text dimColor>{" " + summarizeInput(input)}</Text>
+          <Text dimColor>{` ${summarizeInput(input)}`}</Text>
         )}
         {live && phase === "executing" && (
           <Text dimColor>
@@ -226,15 +227,15 @@ function ToolRow({
         </Text>
       )}
       {isEdit &&
-        typeof input!["old_string"] === "string" &&
-        typeof input!["new_string"] === "string" && (
+        typeof input!.old_string === "string" &&
+        typeof input!.new_string === "string" && (
           <DiffView
-            oldStr={input!["old_string"] as string}
-            newStr={input!["new_string"] as string}
+            oldStr={input!.old_string as string}
+            newStr={input!.new_string as string}
           />
         )}
-      {isWrite && typeof input!["content"] === "string" && (
-        <WriteView content={input!["content"] as string} />
+      {isWrite && typeof input!.content === "string" && (
+        <WriteView content={input!.content as string} />
       )}
       {phase === "completed" && output && !isEdit && !isWrite && (
         <Box paddingLeft={2}>
@@ -248,7 +249,7 @@ function ToolRow({
 function summarizeInput(input: Record<string, unknown>): string {
   for (const key of ["pattern", "command", "glob", "query", "text"]) {
     const v = input[key];
-    if (typeof v === "string") return v.length > 60 ? v.slice(0, 57) + "…" : v;
+    if (typeof v === "string") return v.length > 60 ? `${v.slice(0, 57)}…` : v;
   }
   return Object.keys(input).slice(0, 3).join(", ");
 }

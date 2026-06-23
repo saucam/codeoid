@@ -46,12 +46,12 @@ describe("renderMessage — with color", () => {
     // Clear every signal that would suppress color — otherwise env leakage
     // from a prior test in the suite (e.g. NO_COLOR=1) would cause plain
     // text output and hide the color assertions below.
-    delete process.env["NO_COLOR"];
-    delete process.env["CODEOID_NO_COLOR"];
-    process.env["FORCE_COLOR"] = "1";
+    delete process.env.NO_COLOR;
+    delete process.env.CODEOID_NO_COLOR;
+    process.env.FORCE_COLOR = "1";
   });
   afterAll(() => {
-    delete process.env["FORCE_COLOR"];
+    delete process.env.FORCE_COLOR;
   });
 
   it("renders a user message with header + body + trailing newline", () => {
@@ -198,11 +198,11 @@ describe("renderMessage — with color", () => {
 
 describe("renderMessage — without color", () => {
   beforeAll(() => {
-    process.env["NO_COLOR"] = "1";
-    delete process.env["FORCE_COLOR"];
+    process.env.NO_COLOR = "1";
+    delete process.env.FORCE_COLOR;
   });
   afterAll(() => {
-    delete process.env["NO_COLOR"];
+    delete process.env.NO_COLOR;
   });
 
   it("emits no ANSI escapes when color is disabled", () => {
@@ -218,12 +218,12 @@ describe("renderMessage — without color", () => {
 
 describe("renderSessionBanner", () => {
   beforeAll(() => {
-    delete process.env["NO_COLOR"];
-    delete process.env["CODEOID_NO_COLOR"];
-    process.env["FORCE_COLOR"] = "1";
+    delete process.env.NO_COLOR;
+    delete process.env.CODEOID_NO_COLOR;
+    process.env.FORCE_COLOR = "1";
   });
   afterAll(() => {
-    delete process.env["FORCE_COLOR"];
+    delete process.env.FORCE_COLOR;
   });
 
   it("includes the session name and workdir", () => {

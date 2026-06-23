@@ -66,8 +66,8 @@ export class IndexScheduler {
   #debounceMs: number;
   #now: () => number;
 
-  #cached: string = "";
-  #cachedAt: number = 0;
+  #cached = "";
+  #cachedAt = 0;
   #pendingEpisodes = 0;
 
   // ── Clustering state (opt-in) ────────────────────────────────────────
@@ -85,7 +85,7 @@ export class IndexScheduler {
     this.#debounceMs = opts.debounceMs ?? DEBOUNCE_MS;
     this.#now = opts.now ?? Date.now;
     this.#clustersEnabled =
-      opts.clustersEnabled ?? process.env["CODEOID_MEMORY_CLUSTERS"] === "1";
+      opts.clustersEnabled ?? process.env.CODEOID_MEMORY_CLUSTERS === "1";
     this.#labeler = opts.labeler ?? createLabeler();
   }
 

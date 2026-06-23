@@ -38,7 +38,7 @@ export class WebUiFrontend implements Frontend {
       path === "/ui" || path === "/ui/" ? "index.html" : path.slice("/ui/".length);
     const target = normalize(join(DIST, rel));
     // Path-traversal guard — never serve outside the dist root.
-    if (target !== DIST && !target.startsWith(DIST + "/")) {
+    if (target !== DIST && !target.startsWith(`${DIST}/`)) {
       return new Response("Forbidden", { status: 403 });
     }
 

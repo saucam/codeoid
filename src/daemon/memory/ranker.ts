@@ -69,7 +69,7 @@ export function rank(
       rawBm25 !== undefined ? (-rawBm25 - bm25Min) / bm25Range : 0;
 
     const ageHours = Math.max(0, (now - ep.createdAt) / (1000 * 60 * 60));
-    const recencyScore = Math.pow(0.5, ageHours / weights.recencyHalfLifeHours);
+    const recencyScore = 0.5 ** (ageHours / weights.recencyHalfLifeHours);
 
     const pathScore = computePathOverlap(queryFilePaths, ep.filePaths);
 

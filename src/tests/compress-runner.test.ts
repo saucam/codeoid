@@ -45,7 +45,7 @@ describe("runCompressed — end to end", () => {
 
   it("passes through small outputs (below minBytes)", async () => {
     const out = await runCompressed({
-      command: `echo small`,
+      command: "echo small",
       workdir: "/tmp",
       env: process.env as Record<string, string>,
       registry: makeRegistry(),
@@ -97,7 +97,7 @@ describe("runCompressed — end to end", () => {
       rules: BUILTIN_RULES,
       excludeCommands: ["seq"],
     });
-    const cmd = `seq 1 2000`;
+    const cmd = "seq 1 2000";
     const out = await runCompressed({
       command: cmd,
       workdir: "/tmp",

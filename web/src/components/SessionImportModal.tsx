@@ -3,7 +3,7 @@
  * map to a target workdir, fork off a new session.
  */
 
-import { Component, Show, createSignal, onCleanup, onMount } from "solid-js";
+import { Component, For, Show, createSignal, onCleanup, onMount } from "solid-js";
 
 import { getClient, newRequestId } from "../state/connection";
 import { focusSession, sessionList } from "../state/sessions";
@@ -202,9 +202,7 @@ const SessionImportModal: Component = () => {
                 </div>
                 <Show when={r().warnings.length > 0}>
                   <ul class="space-y-1 rounded border border-warn/40 bg-warn/5 px-3 py-2 text-[12px] text-warn">
-                    {r().warnings.map((w) => (
-                      <li>⚠ {w}</li>
-                    ))}
+                    <For each={r().warnings}>{(w) => <li>⚠ {w}</li>}</For>
                   </ul>
                 </Show>
                 <div class="flex justify-end">

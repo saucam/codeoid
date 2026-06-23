@@ -47,7 +47,7 @@ export const gitDiffRule: CompressionRule = {
       if (line.startsWith("diff --git") && i + 3 < lines.length) {
         const peek = lines[i + 3] ?? "";
         if (peek.startsWith("Binary files") || peek.includes("GIT binary patch")) {
-          out.push(line + "  [binary diff elided]");
+          out.push(`${line}  [binary diff elided]`);
           droppedBinary += 1;
           // Skip forward until next `diff --git` or end.
           i += 1;

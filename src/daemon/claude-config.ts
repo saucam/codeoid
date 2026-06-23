@@ -28,7 +28,7 @@ import path from "node:path";
  * env overrides — annoying for testing.
  */
 function homedir(): string {
-  return process.env["HOME"] ?? process.env["USERPROFILE"] ?? os.homedir();
+  return process.env.HOME ?? process.env.USERPROFILE ?? os.homedir();
 }
 
 import type {
@@ -119,7 +119,7 @@ async function readClaudeJson(
   const out: ClaudeConfigMcpServer[] = [];
 
   // Top-level mcpServers — global scope.
-  const topMcp = obj["mcpServers"];
+  const topMcp = obj.mcpServers;
   if (topMcp && typeof topMcp === "object" && !Array.isArray(topMcp)) {
     for (const [name, def] of Object.entries(topMcp as Record<string, unknown>)) {
       if (name.startsWith("_")) continue;
@@ -129,11 +129,11 @@ async function readClaudeJson(
   }
 
   // Per-workdir mcpServers under projects[<workdir>].mcpServers.
-  const projects = obj["projects"];
+  const projects = obj.projects;
   if (projects && typeof projects === "object" && !Array.isArray(projects)) {
     const proj = (projects as Record<string, unknown>)[workdir];
     if (proj && typeof proj === "object" && !Array.isArray(proj)) {
-      const projMcp = (proj as Record<string, unknown>)["mcpServers"];
+      const projMcp = (proj as Record<string, unknown>).mcpServers;
       if (projMcp && typeof projMcp === "object" && !Array.isArray(projMcp)) {
         for (const [name, def] of Object.entries(projMcp as Record<string, unknown>)) {
           if (name.startsWith("_")) continue;
@@ -159,21 +159,21 @@ function parseMcpServer(
     name,
     scope,
     path: sourcePath,
-    command: typeof d["command"] === "string" ? (d["command"] as string) : null,
-    args: Array.isArray(d["args"])
-      ? (d["args"] as unknown[]).filter((x): x is string => typeof x === "string")
+    command: typeof d.command === "string" ? (d.command as string) : null,
+    args: Array.isArray(d.args)
+      ? (d.args as unknown[]).filter((x): x is string => typeof x === "string")
       : [],
     envKeys:
-      d["env"] && typeof d["env"] === "object" && !Array.isArray(d["env"])
-        ? Object.keys(d["env"] as Record<string, unknown>)
+      d.env && typeof d.env === "object" && !Array.isArray(d.env)
+        ? Object.keys(d.env as Record<string, unknown>)
         : [],
-    url: typeof d["url"] === "string" ? (d["url"] as string) : null,
-    type: typeof d["type"] === "string" ? (d["type"] as string) : null,
-    ...(d["headers"] &&
-    typeof d["headers"] === "object" &&
-    !Array.isArray(d["headers"])
+    url: typeof d.url === "string" ? (d.url as string) : null,
+    type: typeof d.type === "string" ? (d.type as string) : null,
+    ...(d.headers &&
+    typeof d.headers === "object" &&
+    !Array.isArray(d.headers)
       ? {
-          headerKeys: Object.keys(d["headers"] as Record<string, unknown>),
+          headerKeys: Object.keys(d.headers as Record<string, unknown>),
         }
       : {}),
   };
@@ -199,7 +199,7 @@ async function readAgentsDir(
     const stem = ent.name.replace(/\.md$/i, "");
     const name = strField(fm, "name") ?? stem;
     const description = strField(fm, "description") ?? null;
-    const tools = parseTools(fm["tools"]);
+    const tools = parseTools(fm.tools);
     out.push({
       name,
       description,
@@ -294,7 +294,7 @@ async function readSettings(
   const obj = parsed as Record<string, unknown>;
 
   const mcpServers: ClaudeConfigMcpServer[] = [];
-  const mcpRaw = obj["mcpServers"];
+  const mcpRaw = obj.mcpServers;
   if (mcpRaw && typeof mcpRaw === "object" && !Array.isArray(mcpRaw)) {
     for (const [name, def] of Object.entries(mcpRaw as Record<string, unknown>)) {
       if (name.startsWith("_")) continue;
@@ -304,7 +304,7 @@ async function readSettings(
   }
 
   const hooks: ClaudeConfigHook[] = [];
-  const hooksRaw = obj["hooks"];
+  const hooksRaw = obj.hooks;
   if (hooksRaw && typeof hooksRaw === "object" && !Array.isArray(hooksRaw)) {
     for (const [event, defs] of Object.entries(hooksRaw as Record<string, unknown>)) {
       if (event.startsWith("_")) continue;
@@ -312,19 +312,19 @@ async function readSettings(
       for (const def of defs as unknown[]) {
         if (!def || typeof def !== "object") continue;
         const d = def as Record<string, unknown>;
-        const matcher = typeof d["matcher"] === "string" ? (d["matcher"] as string) : null;
-        const inner = Array.isArray(d["hooks"]) ? (d["hooks"] as unknown[]) : [];
+        const matcher = typeof d.matcher === "string" ? (d.matcher as string) : null;
+        const inner = Array.isArray(d.hooks) ? (d.hooks as unknown[]) : [];
         for (const h of inner) {
           if (!h || typeof h !== "object") continue;
           const hh = h as Record<string, unknown>;
-          if (typeof hh["command"] !== "string") continue;
+          if (typeof hh.command !== "string") continue;
           hooks.push({
             event,
             scope,
             path: filePath,
             matcher,
-            kind: typeof hh["type"] === "string" ? (hh["type"] as string) : "command",
-            command: hh["command"] as string,
+            kind: typeof hh.type === "string" ? (hh.type as string) : "command",
+            command: hh.command as string,
           });
         }
       }

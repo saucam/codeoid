@@ -128,13 +128,13 @@ export function isShareBundle(x: unknown): x is ShareBundle {
   if (!x || typeof x !== "object") return false;
   const obj = x as Record<string, unknown>;
   return (
-    obj["kind"] === "codeoid.session" &&
-    typeof obj["version"] === "number" &&
-    !!obj["manifest"] &&
-    typeof obj["manifest"] === "object" &&
-    Array.isArray(obj["transcript"]) &&
-    Array.isArray(obj["episodes"]) &&
-    Array.isArray(obj["turns"])
+    obj.kind === "codeoid.session" &&
+    typeof obj.version === "number" &&
+    !!obj.manifest &&
+    typeof obj.manifest === "object" &&
+    Array.isArray(obj.transcript) &&
+    Array.isArray(obj.episodes) &&
+    Array.isArray(obj.turns)
   );
 }
 
