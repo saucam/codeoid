@@ -1,0 +1,32 @@
+# Codecov configuration — https://docs.codecov.com/docs/codecovyml-reference
+# Test results (flaky/failed-test detection) are ingested from the junit.xml
+# uploaded by the `daemon` CI job via codecov/test-results-action.
+
+coverage:
+  status:
+    # Whole-project coverage: reported on the PR comment but NOT blocking — the
+    # repo has a large pre-existing uncovered surface, so a hard project gate
+    # would block every PR. Flip `informational: false` once a baseline lands.
+    project:
+      default:
+        target: auto
+        threshold: 1%
+        informational: true
+    # Patch = coverage of the lines this PR changed. THIS is the gate: new or
+    # modified code must be >=80% covered. Tune the target as you like.
+    patch:
+      default:
+        target: 80%
+        threshold: 0%
+
+comment:
+  layout: "condensed_header, diff, flags, components, files"
+  behavior: default
+  require_changes: false
+
+# Don't count build artifacts / vendored output toward coverage.
+ignore:
+  - "dist"
+  - "web/dist"
+  - "**/*.test.ts"
+  - "src/tests"
