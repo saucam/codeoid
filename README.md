@@ -83,11 +83,23 @@ Legend: ✅ first-class · ~ partial · ❌ not supported · — not a meaningfu
 
 ### Install
 
+**From npm (recommended)** — Codeoid runs on Bun, so install it with Bun (`npm` also works as long as Bun is on your `PATH`, since it's the runtime):
+
+```bash
+bun install -g codeoid        # or: npm install -g codeoid
+```
+
+This puts a `codeoid` command on your `PATH`. Everywhere below you can run `codeoid <cmd>` directly — e.g. `codeoid login`, `codeoid start`, `codeoid tui`.
+
+**From source** — to hack on it:
+
 ```bash
 git clone https://github.com/saucam/codeoid.git
 cd codeoid
 bun install
 ```
+
+From a source checkout, run `bun src/cli.ts <cmd>` in place of `codeoid <cmd>` below.
 
 ### Authenticate
 
