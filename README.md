@@ -1,5 +1,6 @@
 # Codeoid
 
+[![CI](https://github.com/saucam/codeoid/actions/workflows/ci.yml/badge.svg)](https://github.com/saucam/codeoid/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Runtime: Bun](https://img.shields.io/badge/runtime-Bun-000000.svg?logo=bun)](https://bun.sh)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
@@ -10,13 +11,23 @@ Run N parallel Claude Code sessions across repos. Switch between them from a ter
 
 > **Terminal client lives in its own repo.** The recommended cockpit is [**codeoid-tui**](https://github.com/saucam/codeoid-ui) — a native Rust/[Ratatui](https://ratatui.rs) client that speaks the daemon's WebSocket protocol. A built-in `codeoid tui` (Ink/React) ships in this repo as a zero-install fallback. See [Terminal client](#terminal-client).
 
-```
-  Terminal TUI  ──┐
-  Web UI         ──┼──▶  Codeoid Daemon (Bun)  ──▶  Claude Agent SDK
-  Telegram       ──┘         │         │
-                             │         └──▶  ZeroID (identity + audit)
-                             └──▶  Memory (SQLite + embeddings)
-```
+<p align="center">
+  <img src="docs/architecture.png" width="840"
+       alt="Codeoid architecture: stateless clients (Terminal TUI, Web UI, Telegram) attach to one Bun daemon that owns every session — Session Manager, Memory Engine, MCP server and ZeroID client — driving a Claude Agent SDK query per session over SQLite memory, with a ZeroID identity stamped on every action.">
+</p>
+
+## Contents
+
+- [Why Codeoid](#why-codeoid)
+- [How Codeoid compares](#how-codeoid-compares)
+- [Quick start](#quick-start)
+- [Architecture](#architecture)
+- [Features](#features)
+- [Permission scopes](#permission-scopes)
+- [Configuration](#configuration)
+- [CLI reference](#cli-reference)
+- [Development](#development)
+- [Contributing & security](#contributing--security)
 
 ## Why Codeoid
 
@@ -125,39 +136,13 @@ Or browse to http://localhost:7400/ui/ for the web UI.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                       Codeoid Daemon (Bun)                          │
-│                                                                     │
-│   ┌──────────────────┐       ┌────────────────────────────────┐     │
-│   │ Session Manager  │──────▶│ Memory Engine                   │     │
-│   │                  │       │ ┌─────────────┐ ┌────────────┐ │     │
-│   │ - mode + budget  │       │ │  Chunker    │ │  Ranker    │ │     │
-│   │ - pinned files   │       │ │ (episodes)  │ │ (hybrid)   │ │     │
-│   │ - subagent tree  │       │ └─────────────┘ └────────────┘ │     │
-│   │ - scrollback     │       │ ┌─────────────────────────────┐ │     │
-│   │ - transcript     │       │ │  SQLite + FTS5 + vectors    │ │     │
-│   └──────────────────┘       │ │  (embeddings, episodes,     │ │     │
-│          │                    │ │   file-read cache)          │ │     │
-│          ▼                    │ └─────────────────────────────┘ │     │
-│   ┌──────────────────┐       │         ▲                       │     │
-│   │ Claude Agent SDK │───────┤         │ recall(), timeline(), │     │
-│   │ (per session)    │       │         │ recall_file()         │     │
-│   └──────────────────┘       │ ┌──────────────────────────────┐│     │
-│          │                    │ │  MCP Server (in-process)     ││     │
-│          ▼                    │ └──────────────────────────────┘│     │
-│   ┌──────────────────┐       └────────────────────────────────┘     │
-│   │ ZeroID Client    │       ┌────────────────────────────────┐     │
-│   │ - register       │       │ Frontends                      │     │
-│   │ - attenuated     │──────▶│  - TUI (Ink)                   │     │
-│   │   sub-agent      │       │  - Web UI (SolidJS at /ui)     │     │
-│   │   tokens         │       │  - Telegram (grammy)           │     │
-│   └──────────────────┘       └────────────────────────────────┘     │
-│          │                                                           │
-│          ▼                                                           │
-│       ZeroID                                                         │
-└─────────────────────────────────────────────────────────────────────┘
-```
+In one Bun process the daemon brokers everything between your clients and Claude, and owns three subsystems:
+
+- **Session Manager** — per-session mode + write/exec budget, pinned files, the sub-agent tree, scrollback, and a JSONL transcript for crash-safe resume.
+- **Memory Engine** — a chunker turns every tool call into a verbatim *episode*; a hybrid ranker (vectors + FTS5 BM25 + recency + path overlap) serves it back. Backed by SQLite (FTS5 + embeddings + file-read cache) and exposed to Claude as an **in-process MCP server** — `recall()`, `recall_file()`, `timeline()`.
+- **ZeroID client** — registers the session's SPIFFE identity and mints attenuated tokens for each sub-agent.
+
+Each session drives its own **Claude Agent SDK** query. The [diagram at the top](#codeoid) shows how the pieces fit.
 
 Sessions are daemon-owned. Clients are stateless; they attach, receive scrollback replay, and stream live deltas. Detach and re-attach from anywhere.
 

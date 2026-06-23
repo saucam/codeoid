@@ -1,0 +1,49 @@
+# Source of truth for docs/architecture.png.
+# Rendered with the posts asset generator (matplotlib house style):
+#   cd ~/Workspace/posts && . assets/.venv/bin/activate
+#   python assets/render.py ~/Workspace/codeoid/docs/architecture.yaml
+template: layered_map
+basename: architecture
+outputs: [png, svg]
+animate: none
+
+title: "Codeoid architecture"
+subtitle: "one daemon owns every session — clients are stateless renderers"
+
+tiers:
+  - num: "3"
+    label: "Clients  ·  stateless — attach, replay scrollback, stream deltas"
+    kind: row
+    fill: grey
+    cells:
+      - {name: "Terminal TUI", sub: "Rust · Ratatui"}
+      - {name: "Web UI", sub: "SolidJS · /ui"}
+      - {name: "Telegram", sub: "grammy bot"}
+    note: "detach on laptop,\nreattach on phone"
+  - num: "2"
+    label: "Codeoid Daemon (Bun)  ·  owns session state, memory & identity"
+    kind: hero
+    fill: tealL
+    hero_title: "Codeoid Daemon"
+    hero_sub: "one Bun process · WebSocket protocol · a Claude Agent SDK query per session"
+    cells: ["Session\nManager", "Memory\nEngine", "MCP\nserver", "ZeroID\nclient"]
+    note: "the source of truth;\nclients just render it"
+  - num: "1"
+    label: "Backbones  ·  model, memory store, identity"
+    kind: row
+    fill: grey
+    cells:
+      - {name: "Claude Agent SDK", sub: "per session"}
+      - {name: "SQLite memory", sub: "FTS5 + vectors"}
+      - {name: "ZeroID", sub: "identity + audit"}
+    note: "verbatim episodes;\na SPIFFE id per agent"
+
+rail:
+  enabled: true
+  label: "every action is daemon-brokered & ZeroID-stamped"
+  branches_into: ["2", "1"]
+
+footer:
+  insight: "Sessions live in the daemon — not the client, and not the model's context window"
+  line2: "clients attach and stream · memory persists verbatim across sessions · every tool call is stamped with a ZeroID identity"
+  cite: "github.com/saucam/codeoid"
