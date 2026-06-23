@@ -54,7 +54,7 @@ export function rewriteBashToolInput(
   if (input.toolName !== "Bash") return null;
   if (!input.config.compress.enabled) return null;
 
-  const original = input.toolInput["command"];
+  const original = input.toolInput.command;
   if (typeof original !== "string" || original.length === 0) return null;
 
   // Idempotency: if we already rewrote, don't wrap again.
@@ -77,5 +77,5 @@ export function rewriteBashToolInput(
  */
 function shellQuote(s: string): string {
   if (/^[A-Za-z0-9_./@:+=-]+$/.test(s)) return s; // safe already
-  return "'" + s.replace(/'/g, `'\\''`) + "'";
+  return `'${s.replace(/'/g, `'\\''`)}'`;
 }

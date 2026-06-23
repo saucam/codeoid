@@ -156,7 +156,7 @@ export function buildWorkspaceIndex(
   if (body.length <= cap) return body;
 
   // Trim from the hot-files section (most compressible) when we overflow.
-  return body.slice(0, cap - 24) + "\n… (index truncated) …";
+  return `${body.slice(0, cap - 24)}\n… (index truncated) …`;
 }
 
 // ── Formatting helpers ──────────────────────────────────────────────────
@@ -173,7 +173,7 @@ function formatAgo(when: number | null, now: number): string {
 
 function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
-  return s.slice(0, max - 1).trimEnd() + "…";
+  return `${s.slice(0, max - 1).trimEnd()}…`;
 }
 
 /** Compact a path for inline rendering — keep last two segments when deep. */

@@ -148,7 +148,7 @@ describe("TranscriptStore", () => {
     const msg2 = makeMsg("also valid");
     const line1 = JSON.stringify({ seq: 0, timestamp: "t", message: msg1 });
     const line2 = JSON.stringify({ seq: 1, timestamp: "t", message: msg2 });
-    await Bun.write(path, line1 + "\nnot json\n" + line2 + "\n");
+    await Bun.write(path, `${line1}\nnot json\n${line2}\n`);
 
     const entries = await store.loadTranscript("sess-1");
     expect(entries).toHaveLength(2); // Skips the corrupted line

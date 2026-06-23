@@ -12,10 +12,10 @@ import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { Session, type AttachedClient } from "./session.js";
-import { Store } from "./store.js";
+import type { Store } from "./store.js";
 import { hasScope, SCOPES } from "../protocol/scopes.js";
 import { RateLimiter } from "./rate-limit.js";
-import { TranscriptStore } from "./transcript.js";
+import type { TranscriptStore } from "./transcript.js";
 import {
   FsAccessError,
   handleFsBrowseDir,
@@ -177,10 +177,7 @@ export class SessionManager {
     const droppedCap = sorted.length - capped.length;
     if (droppedCap > 0 || skippedDeadline > 0) {
       console.warn(
-        `[codeoid] resume: restored ${resumed} of ${sorted.length} session(s); ` +
-          `${droppedCap} left over the ${RESUME_MAX_SESSIONS}-session cap, ` +
-          `${skippedDeadline} skipped past the ${RESUME_DEADLINE_MS}ms deadline ` +
-          `(still on disk; loadable on a future restart).`,
+        `[codeoid] resume: restored ${resumed} of ${sorted.length} session(s); ${droppedCap} left over the ${RESUME_MAX_SESSIONS}-session cap, ${skippedDeadline} skipped past the ${RESUME_DEADLINE_MS}ms deadline (still on disk; loadable on a future restart).`,
       );
     }
 
@@ -727,7 +724,7 @@ export class SessionManager {
    * a per-session "already interrupted" set, then poll status until
    * idle or deadline.
    */
-  async drain(timeoutMs: number = 10_000): Promise<void> {
+  async drain(timeoutMs = 10_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     const systemAuth: AuthContext = {
       sub: "system:shutdown",

@@ -94,7 +94,7 @@ export class TranscriptStore {
     };
 
     const path = this.transcriptPath(sessionId);
-    const line = JSON.stringify(entry) + "\n";
+    const line = `${JSON.stringify(entry)}\n`;
 
     // True append. The previous implementation read the entire file
     // and rewrote it with the new line concatenated — O(n) per append,
@@ -249,8 +249,8 @@ export class TranscriptStore {
           if (v !== undefined) existingMsg[k] = v;
         }
         // Deep merge tool state specifically
-        if (newMsg["tool"] && existingMsg["tool"]) {
-          Object.assign(existingMsg["tool"] as Record<string, unknown>, newMsg["tool"] as Record<string, unknown>);
+        if (newMsg.tool && existingMsg.tool) {
+          Object.assign(existingMsg.tool as Record<string, unknown>, newMsg.tool as Record<string, unknown>);
         }
         existing.seq = entry.seq; // update seq to latest
       } else {

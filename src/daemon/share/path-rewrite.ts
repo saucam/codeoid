@@ -33,7 +33,7 @@ export function encodePath(
   const norm = canonicalPosix(absolute);
   const wd = canonicalPosix(workdir).replace(/\/$/, "");
   if (norm === wd) return alias;
-  if (wd.length > 0 && norm.startsWith(wd + "/")) {
+  if (wd.length > 0 && norm.startsWith(`${wd}/`)) {
     return `${alias}/${norm.slice(wd.length + 1)}`;
   }
   // Absolute path outside workdir — preserve verbatim with the
@@ -61,7 +61,7 @@ export function decodePath(
     return `/${encoded.slice(EXTERNAL_PREFIX.length).replace(/^\/+/, "")}`;
   }
   if (encoded === alias) return canonicalPosix(targetWorkdir).replace(/\/$/, "");
-  if (encoded.startsWith(alias + "/")) {
+  if (encoded.startsWith(`${alias}/`)) {
     const rel = encoded.slice(alias.length + 1);
     const wd = canonicalPosix(targetWorkdir).replace(/\/$/, "");
     return `${wd}/${rel}`;

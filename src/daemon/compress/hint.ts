@@ -35,5 +35,5 @@ export function formatHint(
 function shortenCommand(cmd: string): string {
   const trimmed = cmd.trim();
   if (trimmed.length <= 80) return trimmed;
-  return trimmed.slice(0, 77) + "…";
+  return `${trimmed.slice(0, 77)}…`;
 }

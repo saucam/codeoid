@@ -152,7 +152,7 @@ describe("SessionMessage", () => {
 
   test("metadata is optional and freeform", () => {
     const msg = baseMessage({ metadata: { event: "identity.registered", agentUri: "spiffe://test" } });
-    expect(msg.metadata!["event"]).toBe("identity.registered");
+    expect(msg.metadata!.event).toBe("identity.registered");
   });
 
   test("message is JSON serializable", () => {
@@ -461,7 +461,7 @@ describe("ClientMessage", () => {
     expect(msg.type).toBe("session.approve");
     expect((msg as { approvalId: string }).approvalId).toBe("approval-abc");
     // Should NOT have requestId for the approval correlation
-    expect((msg as unknown as Record<string, unknown>)["requestId"]).toBeUndefined();
+    expect((msg as unknown as Record<string, unknown>).requestId).toBeUndefined();
   });
 
   test("all client message types have id field", () => {

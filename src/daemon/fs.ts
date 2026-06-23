@@ -20,7 +20,7 @@
  * router; this module assumes scope was already enforced.
  */
 
-import { promises as fs } from "node:fs";
+import { promises as fs, type Dirent } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -126,7 +126,7 @@ export async function handleFsList(
 ): Promise<FsListResultMsg> {
   const { absolute, relative } = await resolveSafe(workdir, msg.path);
 
-  let stat;
+  let stat: Awaited<ReturnType<typeof fs.stat>>;
   try {
     stat = await fs.stat(absolute);
   } catch (err) {
@@ -139,7 +139,7 @@ export async function handleFsList(
     throw new FsAccessError(`not a directory: ${relative}`, "invalid_request");
   }
 
-  let dirents;
+  let dirents: Dirent[];
   try {
     dirents = await fs.readdir(absolute, { withFileTypes: true });
   } catch (err) {
@@ -159,7 +159,7 @@ export async function handleFsList(
       childAbs,
     );
     let kind: "file" | "directory" = dirent.isDirectory() ? "directory" : "file";
-    let isSymlink = dirent.isSymbolicLink();
+    const isSymlink = dirent.isSymbolicLink();
     let size: number | undefined;
     let mtimeMs: number | undefined;
     try {
@@ -200,7 +200,7 @@ export async function handleFsRead(
 ): Promise<FsReadResultMsg> {
   const { absolute, relative } = await resolveSafe(workdir, msg.path);
 
-  let stat;
+  let stat: Awaited<ReturnType<typeof fs.stat>>;
   try {
     stat = await fs.stat(absolute);
   } catch (err) {
@@ -265,7 +265,7 @@ export async function handleFsRead(
  * containerised setup).
  */
 function browseRoot(): string {
-  const override = process.env["CODEOID_FS_BROWSE_ROOT"];
+  const override = process.env.CODEOID_FS_BROWSE_ROOT;
   if (override && override.trim().length > 0) return override;
   return os.homedir();
 }
@@ -313,7 +313,7 @@ export async function handleFsBrowseDir(
     );
   }
 
-  let stat;
+  let stat: Awaited<ReturnType<typeof fs.stat>>;
   try {
     stat = await fs.stat(resolved);
   } catch (err) {
@@ -326,7 +326,7 @@ export async function handleFsBrowseDir(
     throw new FsAccessError(`not a directory: ${requested}`, "invalid_request");
   }
 
-  let dirents;
+  let dirents: Dirent[];
   try {
     dirents = await fs.readdir(resolved, { withFileTypes: true });
   } catch (err) {
@@ -342,7 +342,7 @@ export async function handleFsBrowseDir(
     if (DEFAULT_HIDDEN.has(dirent.name)) continue;
     if (dirent.name.startsWith(".")) continue; // hide all dotfiles in browse mode
     const childAbs = path.join(resolved, dirent.name);
-    let isSymlink = dirent.isSymbolicLink();
+    const isSymlink = dirent.isSymbolicLink();
     let isDirectory = dirent.isDirectory();
     let mtimeMs: number | undefined;
     try {

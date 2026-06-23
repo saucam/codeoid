@@ -69,7 +69,7 @@ function seedWorkspace(groups: Array<{
 }>): Episode[] {
   const dim = 32;
   const eps: Episode[] = [];
-  let t = 1_700_000_000_000;
+  const t = 1_700_000_000_000;
   let idx = 0;
   for (const g of groups) {
     for (let i = 0; i < g.count; i++) {

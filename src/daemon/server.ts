@@ -20,7 +20,7 @@ import { OAuthHandler, type OAuthConfig } from "./oauth.js";
 import { GoogleOAuthProvider, LocalProvider } from "./identity-provider.js";
 import { createMemory, type MemoryEngine } from "./memory/index.js";
 import {
-  CompressionRegistry,
+  type CompressionRegistry,
   createRegistry,
 } from "./compress/index.js";
 import type { CodeoidConfig } from "../config.js";
@@ -104,8 +104,8 @@ export class DaemonServer {
 
     if (config.oauth) {
       // Choose IdP based on env config
-      const googleClientId = process.env["GOOGLE_CLIENT_ID"];
-      const googleClientSecret = process.env["GOOGLE_CLIENT_SECRET"];
+      const googleClientId = process.env.GOOGLE_CLIENT_ID;
+      const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET;
 
       const idp = (googleClientId && googleClientSecret)
         ? new GoogleOAuthProvider({ clientId: googleClientId, clientSecret: googleClientSecret })
@@ -373,7 +373,7 @@ export class DaemonServer {
           // First message must be auth
           if (!data.authenticated) {
             if (data.authTimer) clearTimeout(data.authTimer);
-            const token = typeof parsed["token"] === "string" ? parsed["token"] : undefined;
+            const token = typeof parsed.token === "string" ? parsed.token : undefined;
             if (!token) {
               ws.close(4001, "Missing auth token");
               return;

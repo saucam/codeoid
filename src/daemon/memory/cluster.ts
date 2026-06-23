@@ -88,7 +88,7 @@ export function clusterEpisodes(
     // Assign each episode to the nearest centroid (by dot product — unit vectors).
     for (let i = 0; i < vectors.length; i++) {
       let bestK = 0;
-      let bestScore = -Infinity;
+      let bestScore = Number.NEGATIVE_INFINITY;
       const v = vectors[i]!;
       for (let c = 0; c < k; c++) {
         const cn = centroids[c]!;
@@ -117,7 +117,7 @@ export function clusterEpisodes(
       counts[c]! += 1;
       const v = vectors[i]!;
       const s = sums[c]!;
-      for (let d = 0; d < dim; d++) s[d]! += v[d]!;
+      for (let d = 0; d < dim; d++) s[d]! += v[d];
     }
     for (let c = 0; c < k; c++) {
       if (counts[c]! === 0) continue;
@@ -164,7 +164,9 @@ export function clusterEpisodes(
   // Sort clusters by size descending — largest topics first in the index.
   clusters.sort((a, b) => b.members.length - a.members.length);
   // Stable re-id so "c0" is always the biggest cluster.
-  clusters.forEach((c, i) => (c.id = `c${i}`));
+  clusters.forEach((c, i) => {
+    c.id = `c${i}`;
+  });
   return clusters;
 }
 
@@ -188,7 +190,7 @@ function kmeansPlusPlusInit(
   for (let c = 1; c < k; c++) {
     let total = 0;
     for (let i = 0; i < vectors.length; i++) {
-      let nearest = -Infinity;
+      let nearest = Number.NEGATIVE_INFINITY;
       const v = vectors[i]!;
       for (const cn of centroids) {
         let dot = 0;
@@ -239,8 +241,9 @@ function signatureOf(members: ClusterMember[]): string {
 }
 
 /** Tiny deterministic PRNG. */
-function mulberry32(a: number): () => number {
-  return function () {
+function mulberry32(seed: number): () => number {
+  let a = seed;
+  return () => {
     a = (a + 0x6d2b79f5) | 0;
     let t = a;
     t = Math.imul(t ^ (t >>> 15), t | 1);

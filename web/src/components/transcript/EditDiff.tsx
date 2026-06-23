@@ -301,6 +301,7 @@ const DiffRow: Component<{
       <span class={`w-4 select-none px-1 py-0.5 ${sigilColor}`}>{sigil}</span>
       <span class="flex-1 overflow-x-auto whitespace-pre py-0.5 pr-3">
         {highlightedRow ? (
+          // eslint-disable-next-line solid/no-innerhtml -- shiki-highlighted HTML (code is escaped by shiki)
           <span innerHTML={highlightedRow} />
         ) : (
           <span class="text-fg">{line.text || " "}</span>
@@ -367,6 +368,7 @@ const WriteFile: Component<{ input: WriteInput }> = (props) => {
               <span class="w-4 select-none px-1 py-0.5 text-success">+</span>
               <span class="flex-1 overflow-x-auto whitespace-pre py-0.5 pr-3">
                 {rendered() && rendered()![i()] ? (
+                  // eslint-disable-next-line solid/no-innerhtml -- shiki-highlighted HTML (code is escaped by shiki)
                   <span innerHTML={rendered()![i()]} />
                 ) : (
                   <span class="text-fg">{text || " "}</span>

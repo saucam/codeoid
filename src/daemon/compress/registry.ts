@@ -51,7 +51,7 @@ export class CompressionRegistry {
   isExcluded(command: string): boolean {
     const head = extractLeadingTokens(command, 2).join(" ");
     for (const ex of this.#excludeCommands) {
-      if (head === ex || head.startsWith(ex + " ")) return true;
+      if (head === ex || head.startsWith(`${ex} `)) return true;
     }
     for (const re of this.#excludePatterns) {
       if (re.test(command)) return true;

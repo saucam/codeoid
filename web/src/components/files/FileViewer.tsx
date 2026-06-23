@@ -104,11 +104,8 @@ const Body: Component = () => {
             </pre>
           }
         >
-          {/* eslint-disable-next-line solid/no-innerhtml */}
-          <div
-            class="shiki-out p-3 font-mono text-[12px] [&_pre]:!bg-transparent [&_pre]:!m-0"
-            innerHTML={highlighted() ?? ""}
-          />
+          {/* eslint-disable-next-line solid/no-innerhtml -- shiki-highlighted HTML (code is escaped by shiki) */}
+          <div class="shiki-out p-3 font-mono text-[12px] [&_pre]:!bg-transparent [&_pre]:!m-0" innerHTML={highlighted() ?? ""} />
         </Show>
       </Show>
     </div>

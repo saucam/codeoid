@@ -12,15 +12,15 @@ function formatAgo(when: number | undefined): string {
   if (!when) return "";
   const dt = Math.max(0, Date.now() - when);
   if (dt < 60_000) return "just now";
-  if (dt < 3_600_000) return Math.round(dt / 60_000) + "m ago";
-  if (dt < 86_400_000) return Math.round(dt / 3_600_000) + "h ago";
-  return Math.round(dt / 86_400_000) + "d ago";
+  if (dt < 3_600_000) return `${Math.round(dt / 60_000)}m ago`;
+  if (dt < 86_400_000) return `${Math.round(dt / 3_600_000)}h ago`;
+  return `${Math.round(dt / 86_400_000)}d ago`;
 }
 
 function compactExcerpt(s: string | undefined): string {
   if (!s) return "";
   const collapsed = s.replace(/\s+/g, " ").trim();
-  return collapsed.length > 140 ? collapsed.slice(0, 137) + "..." : collapsed;
+  return collapsed.length > 140 ? `${collapsed.slice(0, 137)}...` : collapsed;
 }
 
 /** Simulates esc() in the web frontend (DOM-based in browser, here simplified). */
@@ -48,7 +48,7 @@ function renderSearchHitHtml(
   const sel = idx === selectedIdx ? " selected" : "";
   const when = formatAgo(hit.lastMatchAt);
   const matchLabel =
-    hit.matchCount + " match" + (hit.matchCount === 1 ? "" : "es");
+    `${hit.matchCount} match${hit.matchCount === 1 ? "" : "es"}`;
   const snippetHtml = (hit.snippets || [])
     .slice(0, 3)
     .map((s) => {
@@ -62,38 +62,12 @@ function renderSearchHitHtml(
               : "tool";
       const excerpt = compactExcerpt(s.excerpt);
       return (
-        '<div class="search-snippet">' +
-        '<span class="search-snippet-prefix">' +
-        esc(prefix) +
-        ":</span> " +
-        esc(excerpt) +
-        "</div>"
+        `<div class="search-snippet"><span class="search-snippet-prefix">${esc(prefix)}:</span> ${esc(excerpt)}</div>`
       );
     })
     .join("");
   return (
-    '<div class="search-hit' +
-    sel +
-    '" data-sid="' +
-    hit.sessionId +
-    '" data-idx="' +
-    idx +
-    '">' +
-    '<div class="search-hit-header">' +
-    '<span class="search-hit-name">' +
-    esc(hit.sessionName) +
-    "</span>" +
-    '<span class="search-meta">' +
-    esc(matchLabel) +
-    " \u00b7 " +
-    esc(when) +
-    "</span>" +
-    "</div>" +
-    snippetHtml +
-    '<div class="search-workdir">' +
-    esc(hit.workdir || "") +
-    "</div>" +
-    "</div>"
+    `<div class="search-hit${sel}" data-sid="${hit.sessionId}" data-idx="${idx}"><div class="search-hit-header"><span class="search-hit-name">${esc(hit.sessionName)}</span><span class="search-meta">${esc(matchLabel)} \u00b7 ${esc(when)}</span></div>${snippetHtml}<div class="search-workdir">${esc(hit.workdir || "")}</div></div>`
   );
 }
 

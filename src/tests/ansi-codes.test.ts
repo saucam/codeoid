@@ -26,10 +26,10 @@ describe("supportsColor env handling", () => {
   beforeEach(() => {
     snapshot = { ...process.env };
     // Clean out every signal that could force a decision.
-    delete process.env["NO_COLOR"];
-    delete process.env["CODEOID_NO_COLOR"];
-    delete process.env["FORCE_COLOR"];
-    delete process.env["TERM"];
+    delete process.env.NO_COLOR;
+    delete process.env.CODEOID_NO_COLOR;
+    delete process.env.FORCE_COLOR;
+    delete process.env.TERM;
   });
   afterEach(() => {
     for (const k of Object.keys(process.env)) {
@@ -39,33 +39,33 @@ describe("supportsColor env handling", () => {
   });
 
   it("respects NO_COLOR=1", () => {
-    process.env["NO_COLOR"] = "1";
+    process.env.NO_COLOR = "1";
     expect(supportsColor()).toBe(false);
   });
 
   it("respects TERM=dumb", () => {
-    process.env["TERM"] = "dumb";
+    process.env.TERM = "dumb";
     expect(supportsColor()).toBe(false);
   });
 
   it("respects CODEOID_NO_COLOR", () => {
-    process.env["CODEOID_NO_COLOR"] = "1";
+    process.env.CODEOID_NO_COLOR = "1";
     expect(supportsColor()).toBe(false);
   });
 
   it("FORCE_COLOR wins over TTY=false", () => {
-    process.env["FORCE_COLOR"] = "1";
+    process.env.FORCE_COLOR = "1";
     expect(supportsColor()).toBe(true);
   });
 });
 
 describe("sgr wrapping", () => {
   beforeEach(() => {
-    process.env["FORCE_COLOR"] = "1";
-    delete process.env["NO_COLOR"];
+    process.env.FORCE_COLOR = "1";
+    delete process.env.NO_COLOR;
   });
   afterEach(() => {
-    delete process.env["FORCE_COLOR"];
+    delete process.env.FORCE_COLOR;
   });
 
   it("wraps text with the requested SGR codes + closing reset", () => {
@@ -83,14 +83,14 @@ describe("sgr wrapping", () => {
   });
 
   it("emits bare text when color is disabled", () => {
-    process.env["NO_COLOR"] = "1";
-    delete process.env["FORCE_COLOR"];
+    process.env.NO_COLOR = "1";
+    delete process.env.FORCE_COLOR;
     expect(red("hello")).toBe("hello");
   });
 
   it("resetAll is empty when color is disabled", () => {
-    process.env["NO_COLOR"] = "1";
-    delete process.env["FORCE_COLOR"];
+    process.env.NO_COLOR = "1";
+    delete process.env.FORCE_COLOR;
     expect(resetAll()).toBe("");
   });
 });

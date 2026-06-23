@@ -9,7 +9,7 @@
  * SPIFFE/WIMSE URI to copy it.
  */
 
-import { Component, For, Show, createSignal, onCleanup, onMount } from "solid-js";
+import { Component, For, Show, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 
 import { authIdentity } from "../state/connection";
 import { focusedSession } from "../state/sessions";
@@ -72,7 +72,7 @@ const IdentityDrawer: Component = () => {
   );
 };
 
-const Section: Component<{ title: string; children: any }> = (props) => (
+const Section: Component<{ title: string; children: JSX.Element }> = (props) => (
   <section class="mb-5">
     <h3 class="mb-1.5 text-[10px] font-medium uppercase tracking-wider text-fg-faint">
       {props.title}

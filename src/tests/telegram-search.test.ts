@@ -9,15 +9,15 @@ import { describe, it, expect } from "bun:test";
 // ── Re-implement the pure helpers under test (module-private in source) ──
 
 function escMd(text: string): string {
-  return text.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, (m) => "\\" + m);
+  return text.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, (m) => `\\${m}`);
 }
 
 function formatAgo(when: number): string {
   const dt = Math.max(0, Date.now() - when);
   if (dt < 60_000) return "just now";
-  if (dt < 3_600_000) return Math.round(dt / 60_000) + "m ago";
-  if (dt < 86_400_000) return Math.round(dt / 3_600_000) + "h ago";
-  return Math.round(dt / 86_400_000) + "d ago";
+  if (dt < 3_600_000) return `${Math.round(dt / 60_000)}m ago`;
+  if (dt < 86_400_000) return `${Math.round(dt / 3_600_000)}h ago`;
+  return `${Math.round(dt / 86_400_000)}d ago`;
 }
 
 /** Builds formatted search output matching the Telegram frontend logic. */
@@ -56,7 +56,7 @@ function buildSearchReply(
     lines.push("");
   }
 
-  lines.push(`Use /attach \\<name\\> to jump into a session\\.`);
+  lines.push("Use /attach \\<name\\> to jump into a session\\.");
   return lines.join("\n");
 }
 
@@ -97,7 +97,7 @@ describe("escMd — MarkdownV2 escaping", () => {
     const escaped = escMd(specials);
     // Every special char is preceded by a backslash.
     for (const ch of specials) {
-      expect(escaped).toContain("\\" + ch);
+      expect(escaped).toContain(`\\${ch}`);
     }
   });
 

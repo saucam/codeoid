@@ -17,7 +17,7 @@ import type {
   CompressionContext,
   CompressionOutcome,
 } from "./types.js";
-import { CompressionRegistry } from "./registry.js";
+import type { CompressionRegistry } from "./registry.js";
 import { formatHint } from "./hint.js";
 
 /** Hard cap on raw bytes buffered before truncation. 10 MiB. */

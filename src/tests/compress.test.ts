@@ -195,7 +195,7 @@ describe("formatHint", () => {
   });
 
   it("shortens long commands", () => {
-    const longCmd = "echo " + "x".repeat(200);
+    const longCmd = `echo ${"x".repeat(200)}`;
     const hint = formatHint(
       { compressed: "", originalBytes: 100, ruleName: "r" },
       longCmd,

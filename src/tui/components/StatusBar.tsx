@@ -113,13 +113,13 @@ export function StatusBar({
           </Text>
           {workingSec !== null && (
             <Text color="yellow" dimColor>
-              {" · " + formatDuration(workingSec)}
+              {` · ${formatDuration(workingSec)}`}
             </Text>
           )}
           {focused.info.queuedMessages !== undefined &&
             focused.info.queuedMessages > 0 && (
               <Text color="yellow" bold>
-                {" · ⎆ " + focused.info.queuedMessages + " queued"}
+                {` · ⎆ ${focused.info.queuedMessages} queued`}
               </Text>
             )}
           <Text dimColor>{" · mode: "}</Text>
@@ -138,7 +138,7 @@ export function StatusBar({
           {focused.info.mode === "autonomous" &&
             focused.info.turnsRemaining !== undefined && (
               <Text dimColor>
-                {" (" + focused.info.turnsRemaining + " actions left)"}
+                {` (${focused.info.turnsRemaining} actions left)`}
               </Text>
             )}
           {focused.info.model && (
@@ -160,8 +160,7 @@ export function StatusBar({
                 {focused.info.pinnedFiles.length}
               </Text>
               <Text dimColor>
-                {" (" + focused.info.pinnedFiles.slice(0, 3).join(", ") +
-                  (focused.info.pinnedFiles.length > 3 ? ", …" : "") + ")"}
+                {` (${focused.info.pinnedFiles.slice(0, 3).join(", ")}${focused.info.pinnedFiles.length > 3 ? ", …" : ""})`}
               </Text>
             </>
           )}
@@ -173,22 +172,21 @@ export function StatusBar({
               </Text>
               {usage.lastTurnCostUsd !== undefined && usage.lastTurnCostUsd > 0 && (
                 <Text color="cyan" dimColor>
-                  {" (Δ " + formatCost(usage.lastTurnCostUsd) + ")"}
+                  {` (Δ ${formatCost(usage.lastTurnCostUsd)})`}
                 </Text>
               )}
               <Text dimColor>
-                {" · " + formatTokens(totalInputOf(usage)) + " in / " +
-                  formatTokens(usage.outputTokens) + " out"}
+                {` · ${formatTokens(totalInputOf(usage))} in / ${formatTokens(usage.outputTokens)} out`}
               </Text>
               {usage.cacheReadTokens > 0 && (
                 <Text
                   color={pickCacheColor(usage)}
                   dimColor
                 >
-                  {" · " + formatPct(cacheRateCumulative(usage)) + " cache"}
+                  {` · ${formatPct(cacheRateCumulative(usage))} cache`}
                 </Text>
               )}
-              <Text dimColor>{" · " + usage.numTurns + " turns"}</Text>
+              <Text dimColor>{` · ${usage.numTurns} turns`}</Text>
               {usage.lastTurnInputTokens !== undefined && usage.lastTurnInputTokens > 0 && (
                 <>
                   <Text dimColor>{" · ctx "}</Text>
@@ -196,7 +194,7 @@ export function StatusBar({
                     {formatTokens(usage.lastTurnInputTokens)}
                   </Text>
                   <Text dimColor>
-                    {"/" + formatTokens(contextWindow) + " ("}
+                    {`/${formatTokens(contextWindow)} (`}
                   </Text>
                   <Text color={pickContextColor(usage.lastTurnInputTokens, contextWindow)}>
                     {formatPct(usage.lastTurnInputTokens / contextWindow)}
@@ -211,7 +209,7 @@ export function StatusBar({
                     color={pickContextColor(usage.peakInputTokens, contextWindow)}
                     dimColor
                   >
-                    {" · peak " + formatTokens(Math.min(usage.peakInputTokens, contextWindow))}
+                    {` · peak ${formatTokens(Math.min(usage.peakInputTokens, contextWindow))}`}
                     {/* When raw peak exceeds the window, that turn summed
                         multiple internal API calls (subagents/retries). The
                         sum isn't a real single-call context size — badge
@@ -224,7 +222,7 @@ export function StatusBar({
               {focused.info.rotation &&
                 focused.info.rotation.count > 0 && (
                   <Text color="magenta" dimColor>
-                    {" · 🔄 " + focused.info.rotation.count}
+                    {` · 🔄 ${focused.info.rotation.count}`}
                   </Text>
                 )}
             </>
@@ -234,13 +232,13 @@ export function StatusBar({
       {sessionCount > 1 && (
         <>
           <Text dimColor>{"   │   "}</Text>
-          <Text dimColor>{sessionCount + " sessions"}</Text>
+          <Text dimColor>{`${sessionCount} sessions`}</Text>
           {unreadCount > 0 && (
-            <Text color="yellow">{" · " + unreadCount + " unread"}</Text>
+            <Text color="yellow">{` · ${unreadCount} unread`}</Text>
           )}
           {approvalCount > 0 && (
             <Text color="red" bold>
-              {" · ⎆ " + approvalCount}
+              {` · ⎆ ${approvalCount}`}
             </Text>
           )}
         </>
@@ -271,9 +269,9 @@ function formatDuration(totalSec: number): string {
 function formatTokens(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return "0";
   if (n < 1_000) return String(Math.round(n));
-  if (n < 10_000) return (n / 1_000).toFixed(1) + "k";
-  if (n < 1_000_000) return Math.round(n / 1_000) + "k";
-  return (n / 1_000_000).toFixed(1) + "M";
+  if (n < 10_000) return `${(n / 1_000).toFixed(1)}k`;
+  if (n < 1_000_000) return `${Math.round(n / 1_000)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
 /**
@@ -283,16 +281,16 @@ function formatTokens(n: number): string {
  */
 function formatCost(usd: number): string {
   if (!Number.isFinite(usd) || usd <= 0) return "$0.00";
-  if (usd < 10) return "$" + usd.toFixed(2);
-  if (usd < 100) return "$" + usd.toFixed(1);
-  if (usd < 1_000) return "$" + Math.round(usd);
-  return "$" + (usd / 1_000).toFixed(1) + "k";
+  if (usd < 10) return `$${usd.toFixed(2)}`;
+  if (usd < 100) return `$${usd.toFixed(1)}`;
+  if (usd < 1_000) return `$${Math.round(usd)}`;
+  return `$${(usd / 1_000).toFixed(1)}k`;
 }
 
 /** Render a 0-1 ratio as a compact "NN%". */
 function formatPct(r: number): string {
   if (!Number.isFinite(r) || r <= 0) return "0%";
-  return Math.round(r * 100) + "%";
+  return `${Math.round(r * 100)}%`;
 }
 
 /** Total context tokens processed = new input + cache read + cache write. */

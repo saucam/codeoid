@@ -49,15 +49,15 @@ describe("supportsOsc8 detection", () => {
   beforeEach(() => {
     snapshot = { ...process.env };
     // Clean out anything that could false-positive detection.
-    delete process.env["CODEOID_DISABLE_OSC8"];
-    delete process.env["CODEOID_FORCE_OSC8"];
-    delete process.env["TERM_PROGRAM"];
-    delete process.env["KITTY_WINDOW_ID"];
-    delete process.env["TERM"];
-    delete process.env["ALACRITTY_LOG"];
-    delete process.env["ALACRITTY_WINDOW_ID"];
-    delete process.env["VTE_VERSION"];
-    delete process.env["WT_SESSION"];
+    delete process.env.CODEOID_DISABLE_OSC8;
+    delete process.env.CODEOID_FORCE_OSC8;
+    delete process.env.TERM_PROGRAM;
+    delete process.env.KITTY_WINDOW_ID;
+    delete process.env.TERM;
+    delete process.env.ALACRITTY_LOG;
+    delete process.env.ALACRITTY_WINDOW_ID;
+    delete process.env.VTE_VERSION;
+    delete process.env.WT_SESSION;
   });
   afterEach(() => {
     for (const k of Object.keys(process.env)) {
@@ -67,24 +67,24 @@ describe("supportsOsc8 detection", () => {
   });
 
   it("honors CODEOID_FORCE_OSC8 even without a TTY", () => {
-    process.env["CODEOID_FORCE_OSC8"] = "1";
+    process.env.CODEOID_FORCE_OSC8 = "1";
     expect(supportsOsc8()).toBe(true);
   });
 
   it("honors CODEOID_DISABLE_OSC8 over everything else", () => {
-    process.env["CODEOID_FORCE_OSC8"] = "1";
-    process.env["CODEOID_DISABLE_OSC8"] = "1";
+    process.env.CODEOID_FORCE_OSC8 = "1";
+    process.env.CODEOID_DISABLE_OSC8 = "1";
     expect(supportsOsc8()).toBe(false);
   });
 
   it("detects WezTerm via TERM_PROGRAM", () => {
-    process.env["CODEOID_FORCE_OSC8"] = "";
-    process.env["TERM_PROGRAM"] = "WezTerm";
+    process.env.CODEOID_FORCE_OSC8 = "";
+    process.env.TERM_PROGRAM = "WezTerm";
     // Forcing the TTY check is impractical here, but supportsOsc8 also
     // demands isTTY. If stdout is a pipe (test env), we get false.
     // Exercise via maybeLink semantics instead:
     const s = maybeLink("file:///x", "x");
-    expect(s === "x" || s.includes(ESC + "]8")).toBe(true);
+    expect(s === "x" || s.includes(`${ESC}]8`)).toBe(true);
   });
 
   it("maybeLink passes through the bare label when unsupported", () => {

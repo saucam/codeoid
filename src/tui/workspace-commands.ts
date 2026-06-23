@@ -43,7 +43,7 @@ export function loadWorkspaceCommands(workdir: string): WorkspaceCommand[] {
       const raw = readFileSync(abs, "utf8");
       const { frontmatter, body } = splitFrontmatter(raw);
       out.push({
-        name: "/" + entry.replace(/\.md$/, ""),
+        name: `/${entry.replace(/\.md$/, "")}`,
         description: frontmatter.description ?? `workspace command (${entry})`,
         template: body,
         sourcePath: abs,

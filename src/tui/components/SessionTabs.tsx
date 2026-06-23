@@ -78,7 +78,7 @@ function SessionTab({
         <Text color="cyan" bold>▸ </Text>
         <Text color={color}>●</Text>
         <Text color="cyan" bold inverse>
-          {" " + session.info.name + " "}
+          {` ${session.info.name} `}
         </Text>
         {session.unread > 0 && <Text color="yellow">{` (${session.unread})`}</Text>}
         {session.pendingApproval && <Text color="red" bold>{" ⎆"}</Text>}
@@ -92,7 +92,7 @@ function SessionTab({
     <Box>
       {showSeparator && <Text dimColor>{"  "}</Text>}
       <Text color={color}>●</Text>
-      <Text dimColor>{" " + session.info.name}</Text>
+      <Text dimColor>{` ${session.info.name}`}</Text>
       {session.unread > 0 && <Text color="yellow">{` (${session.unread})`}</Text>}
       {session.pendingApproval && <Text color="red" bold>{" ⎆"}</Text>}
       {modeBadge && <Text color="magenta">{modeBadge}</Text>}

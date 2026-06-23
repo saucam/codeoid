@@ -58,10 +58,10 @@ export type SgrKey = keyof typeof SGR;
  * 16-color SGR without issue — same assumption Ink itself makes.
  */
 export function supportsColor(): boolean {
-	if (process.env["NO_COLOR"]) return false;
-	if (process.env["CODEOID_NO_COLOR"]) return false;
-	if (process.env["TERM"] === "dumb") return false;
-	if (process.env["FORCE_COLOR"]) return true;
+	if (process.env.NO_COLOR) return false;
+	if (process.env.CODEOID_NO_COLOR) return false;
+	if (process.env.TERM === "dumb") return false;
+	if (process.env.FORCE_COLOR) return true;
 	// isTTY is false when piped (e.g. `codeoid | tee`). Preserve scrollback by
 	// stripping color there — users piping to files don't want escape soup.
 	return Boolean(process.stdout.isTTY);
