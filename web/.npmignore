@@ -1,0 +1,3 @@
+# Intentionally minimal. Its presence makes npm ignore web/.gitignore (which
+# excludes dist/) when packing the parent "codeoid" package, so the prebuilt
+# web/dist — referenced by the "files" allowlist in ../package.json — ships.

@@ -1,20 +1,56 @@
 {
   "name": "codeoid",
   "version": "0.1.0",
-  "description": "Identity-first remote control plane for AI coding agents",
+  "description": "Identity-first control plane for AI coding agents — multi-session, multi-frontend, with cross-session memory",
   "type": "module",
   "bin": {
-    "codeoid": "./dist/cli.js"
+    "codeoid": "./src/cli.ts"
   },
+  "files": [
+    "src",
+    "!src/tests",
+    "!src/**/*.test.ts",
+    "web/dist",
+    "!web/dist/**/*.map",
+    "README.md",
+    "LICENSE",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "docs/architecture.png"
+  ],
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/saucam/codeoid.git"
+  },
+  "homepage": "https://github.com/saucam/codeoid#readme",
+  "bugs": {
+    "url": "https://github.com/saucam/codeoid/issues"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "ai-agents",
+    "coding-agent",
+    "agent-identity",
+    "zeroid",
+    "tui",
+    "bun",
+    "mcp"
+  ],
   "scripts": {
     "build": "bun build src/cli.ts --outdir dist --target bun --sourcemap",
+    "build:web": "cd web && bun install --frozen-lockfile && bun run build",
     "dev": "bun --watch src/cli.ts",
     "lint": "biome check src/",
     "lint:fix": "biome check --write src/",
     "format": "biome format --write src/",
     "test": "bun test src/tests src/daemon",
     "test:web": "cd web && bun run test",
-    "typecheck": "bun x tsc --noEmit"
+    "typecheck": "bun x tsc --noEmit",
+    "prepublishOnly": "bun run build:web"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.175",
