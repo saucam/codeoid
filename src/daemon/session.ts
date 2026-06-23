@@ -42,6 +42,7 @@ import { authToIdentity, SYSTEM_IDENTITY } from "../protocol/types.js";
 import type { Store } from "./store.js";
 import type { AgentIdentityManager } from "./agent-identity.js";
 import { ScrollbackBuffer } from "./scrollback.js";
+import { reconcileResumedMessage } from "./resume-reconcile.js";
 import type { TranscriptStore } from "./transcript.js";
 import { contextWindowForModel } from "./context-windows.js";
 import {
@@ -1451,31 +1452,13 @@ export class Session {
   restoreScrollback(messages: DaemonMessage[]): void {
     for (const msg of messages) {
       if (msg.type !== "session.message") continue;
-      // Any tool_call still in `waiting_confirmation` after a daemon restart
-      // is orphaned — `#pendingApprovals` lives in memory only, so the SDK
-      // will never call canUseTool again for this approvalId. Rewrite to
-      // `cancelled` before persisting so the ApprovalBar doesn't resurrect a
-      // ghost prompt the user can't actually answer.
-      if (
-        msg.role === "tool_call" &&
-        msg.tool &&
-        msg.tool.state.phase === "waiting_confirmation"
-      ) {
-        const stale: SessionMessage = {
-          ...msg,
-          tool: {
-            ...msg.tool,
-            state: {
-              phase: "cancelled",
-              reason: "interrupted",
-              message: "approval lost on daemon restart",
-            },
-          },
-        };
-        this.#scrollback.push(stale);
-        continue;
-      }
-      this.#scrollback.push(msg);
+      // Reconcile tool calls frozen in a non-terminal phase (streaming /
+      // waiting_confirmation / executing) by a daemon restart. The in-memory
+      // state that would advance them — the live SDK turn and
+      // `#pendingApprovals` — is gone, so without this clients replay them as
+      // forever-"running" (and the ApprovalBar resurrects ghost prompts the
+      // user can't answer). Rewrite to `cancelled` / `interrupted`.
+      this.#scrollback.push(reconcileResumedMessage(msg));
     }
     // A session with prior scrollback already exists in Claude Code's own
     // persistent session store — next send() must use `resume`, not re-create.
