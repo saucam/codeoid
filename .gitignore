@@ -8,3 +8,7 @@ dist/
 
 # Runtime logs from `nohup bun src/cli.ts start > .run/daemon.log` etc.
 .run/
+
+# coverage / test-result artifacts
+coverage/
+junit.xml

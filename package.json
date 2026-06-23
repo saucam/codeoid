@@ -48,6 +48,7 @@
     "lint:fix": "biome check --write src/",
     "format": "biome format --write src/",
     "test": "bun test src/tests src/daemon",
+    "test:coverage": "bun test src/tests src/daemon --coverage --coverage-reporter=lcov --reporter=junit --reporter-outfile=junit.xml",
     "test:web": "cd web && bun run test",
     "typecheck": "bun x tsc --noEmit",
     "prepublishOnly": "bun run build:web"

@@ -1,0 +1,26 @@
+# CodeRabbit configuration — https://docs.coderabbit.ai/reference/configuration
+# Free for open-source. Install the GitHub App once at https://coderabbit.ai
+# (sign in with GitHub → add saucam/codeoid); this file then governs reviews.
+language: en-US
+early_access: false
+reviews:
+  profile: chill                 # concise, high-signal; "assertive" for stricter
+  request_changes_workflow: false
+  high_level_summary: true
+  review_status: true
+  poem: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - main
+  path_filters:
+    - "!dist/**"
+    - "!web/dist/**"
+    - "!**/*.lock"
+    - "!bun.lock"
+  tools:
+    biome:
+      enabled: true             # codeoid lints with biome — surface its findings inline
+chat:
+  auto_reply: true
