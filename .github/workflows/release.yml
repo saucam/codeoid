@@ -26,6 +26,11 @@ jobs:
           node-version: 22
           registry-url: "https://registry.npmjs.org"
 
+      # OIDC Trusted Publishing requires the npm CLI >= 11.5.1; node 22 ships
+      # an older 10.x. No token after this — auth is the GitHub OIDC id-token.
+      - name: Upgrade npm for Trusted Publishing
+        run: npm install -g npm@latest
+
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
@@ -44,10 +49,11 @@ jobs:
             exit 1
           fi
 
-      - name: Publish to npm
+      # No NODE_AUTH_TOKEN: auth comes from the GitHub OIDC id-token via npm's
+      # Trusted Publisher (configured on the package at npmjs.com). Provenance
+      # is generated automatically from the same OIDC identity.
+      - name: Publish to npm (OIDC Trusted Publishing)
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
