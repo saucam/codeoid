@@ -320,6 +320,25 @@ export class TelegramFrontend implements Frontend {
 
     const chatId = ctx.chat!.id;
     const userId = ctx.from!.id;
+
+    // Detach from the current session before switching to a new one.
+    // Without this, the old session stays registered as a client and
+    // continues streaming into this chat — causing interleaved output
+    // and stale streaming/stop-button state when cycling sessions.
+    if (state.attachedSessionId && state.attachedSessionId !== session.id) {
+      this.#manager.disconnectClient(state.clientId);
+      state.attachedSessionId = null;
+      state.attachedSessionName = null;
+      state.streaming.clear();
+      // Remove the ⏹ Stop button for the old session. The old session's
+      // idle status_change (which normally deletes it) won't arrive after
+      // we disconnected, so it would otherwise linger in the chat.
+      if (state.stopMessageId !== null) {
+        this.#bot.api.deleteMessage(chatId, state.stopMessageId).catch(() => {});
+        state.stopMessageId = null;
+      }
+    }
+
     const client: AttachedClient = {
       id: state.clientId,
       auth: state.auth!,
@@ -348,10 +367,16 @@ export class TelegramFrontend implements Frontend {
       return;
     }
 
+    const chatId = ctx.chat!.id;
     this.#manager.disconnectClient(state.clientId);
     const name = state.attachedSessionName;
     state.attachedSessionId = null;
     state.attachedSessionName = null;
+    state.streaming.clear();
+    if (state.stopMessageId !== null) {
+      this.#bot.api.deleteMessage(chatId, state.stopMessageId).catch(() => {});
+      state.stopMessageId = null;
+    }
     await ctx.reply(`Detached from ${name}.`);
   }
 
