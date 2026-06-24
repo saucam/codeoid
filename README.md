@@ -1,9 +1,12 @@
 # Codeoid
 
+[![npm version](https://img.shields.io/npm/v/codeoid?logo=npm&label=npm&color=cb3837)](https://www.npmjs.com/package/codeoid)
+[![npm downloads](https://img.shields.io/npm/dm/codeoid?logo=npm&label=downloads&color=cb3837)](https://www.npmjs.com/package/codeoid)
 [![CI](https://github.com/saucam/codeoid/actions/workflows/ci.yml/badge.svg)](https://github.com/saucam/codeoid/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/saucam/codeoid/branch/main/graph/badge.svg)](https://codecov.io/gh/saucam/codeoid)
+[![published with provenance](https://img.shields.io/badge/published%20with-provenance-2da44e?logo=npm)](https://www.npmjs.com/package/codeoid)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Runtime: Bun](https://img.shields.io/badge/runtime-Bun-000000.svg?logo=bun)](https://bun.sh)
-[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 **Identity-first control plane for AI coding agents — multi-session, multi-frontend, with cross-session memory.**
 
