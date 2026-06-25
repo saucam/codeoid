@@ -2512,20 +2512,20 @@ export class Session {
     this.#broadcastRaw(m);
   }
 
-  /** Mark any still-open tool calls as completed — skips ones already closed with a real tool_result. */
+  /** Mark any still-open tool calls as cancelled — skips ones already closed with a real tool_result. */
   #completeActiveTools(): void {
     for (const msgId of this.#activeToolMsgIds) {
       if (this.#toolCallsClosedByResult.has(msgId)) continue;
 
-      // A tool reaching this fallback never produced a real tool_result
-      // (successful ones are recorded via #closeToolCallWithOutput and skipped
-      // above), so it was interrupted/abandoned — mark it failed, not success.
-      // Otherwise an interrupted tool resumes showing as successfully completed.
+      // A tool reaching this fallback never produced a real tool_result — it was
+      // interrupted mid-flight. Use `cancelled/interrupted` (not `completed/false`)
+      // so clients render it as a cancellation, not a failure with no message.
+      const cancelledState = { phase: "cancelled" as const, reason: "interrupted" as const };
       let updated: SessionMessage | null = null;
       this.#scrollback.updateMessage(msgId, (msg) => {
         const sm = msg as SessionMessage;
         if (sm.tool) {
-          sm.tool.state = { phase: "completed", success: false };
+          sm.tool.state = cancelledState;
           updated = sm;
         }
       });
@@ -2541,7 +2541,7 @@ export class Session {
         type: "session.message.delta",
         sessionId: this.id,
         messageId: msgId,
-        toolStateUpdate: { phase: "completed", success: false },
+        toolStateUpdate: cancelledState,
         timestamp: new Date().toISOString(),
       });
     }
