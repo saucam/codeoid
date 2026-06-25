@@ -2516,36 +2516,48 @@ export class Session {
   #completeActiveTools(): void {
     for (const msgId of this.#activeToolMsgIds) {
       if (this.#toolCallsClosedByResult.has(msgId)) continue;
-
-      // A tool reaching this fallback never produced a real tool_result — it was
-      // interrupted mid-flight. Use `cancelled/interrupted` (not `completed/false`)
-      // so clients render it as a cancellation, not a failure with no message.
-      const cancelledState = { phase: "cancelled" as const, reason: "interrupted" as const };
-      let updated: SessionMessage | null = null;
-      this.#scrollback.updateMessage(msgId, (msg) => {
-        const sm = msg as SessionMessage;
-        if (sm.tool) {
-          sm.tool.state = cancelledState;
-          updated = sm;
-        }
-      });
-
-      if (updated) {
-        const sm = updated as SessionMessage;
-        this.#transcriptStore.append(this.id, sm, this.#seq++).catch(() => {});
-        // Feed the chunker so the episode closes even when we never saw a tool_result.
-        this.#chunker?.onMessage(sm);
-      }
-
-      this.#broadcastRaw({
-        type: "session.message.delta",
-        sessionId: this.id,
-        messageId: msgId,
-        toolStateUpdate: cancelledState,
-        timestamp: new Date().toISOString(),
-      });
+      this._applyInterruptedStateToTool(msgId);
     }
     this.#activeToolMsgIds = [];
+  }
+
+  /**
+   * Apply `cancelled/interrupted` terminal state to one orphaned tool call:
+   * update the scrollback entry in-place, persist to transcript, and broadcast
+   * the state delta to attached clients.
+   *
+   * TypeScript-private (not `#`) so unit tests can exercise this path directly
+   * without a live SDK turn — call via `(session as SessionInternal)._applyInterruptedStateToTool(msgId)`.
+   * Do NOT call from production code outside this class.
+   */
+  private _applyInterruptedStateToTool(msgId: string): void {
+    // A tool reaching this fallback never produced a real tool_result — it was
+    // interrupted mid-flight. Use `cancelled/interrupted` (not `completed/false`)
+    // so clients render it as a cancellation, not a failure with no message.
+    const cancelledState = { phase: "cancelled" as const, reason: "interrupted" as const };
+    let updated: SessionMessage | null = null;
+    this.#scrollback.updateMessage(msgId, (msg) => {
+      const sm = msg as SessionMessage;
+      if (sm.tool) {
+        sm.tool.state = cancelledState;
+        updated = sm;
+      }
+    });
+
+    if (updated) {
+      const sm = updated as SessionMessage;
+      this.#transcriptStore.append(this.id, sm, this.#seq++).catch(() => {});
+      // Feed the chunker so the episode closes even when we never saw a tool_result.
+      this.#chunker?.onMessage(sm);
+    }
+
+    this.#broadcastRaw({
+      type: "session.message.delta",
+      sessionId: this.id,
+      messageId: msgId,
+      toolStateUpdate: cancelledState,
+      timestamp: new Date().toISOString(),
+    });
   }
 
   /** Create a SessionMessage with all required fields */
