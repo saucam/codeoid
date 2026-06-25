@@ -249,7 +249,15 @@ export class TuiWsClient {
       if (this.#ws !== ws) return;
       const raw =
         typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data);
-      const msg = JSON.parse(raw) as DaemonMessage & { type: string; requestId?: string };
+      let msg: DaemonMessage & { type: string; requestId?: string };
+      try {
+        msg = JSON.parse(raw) as DaemonMessage & { type: string; requestId?: string };
+      } catch {
+        // A malformed frame from the daemon shouldn't take down the handler —
+        // drop it. (Structural validation of daemon frames is tracked
+        // separately in #15.)
+        return;
+      }
       this.#handleMessage(msg);
     };
 

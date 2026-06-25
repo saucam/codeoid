@@ -84,6 +84,11 @@ const CONFIG = {
 let savedWebSocket: unknown;
 let savedFetch: unknown;
 let tokenSeq = 0;
+/** Every client makeClient() builds, so afterEach can stop them even when an
+ * assertion throws before the test's own teardown — otherwise a surviving
+ * reconnect/heartbeat timer fires after the globals are restored and connects
+ * against the real WebSocket/fetch, leaking into the next test. */
+const clients: TuiWsClient[] = [];
 
 /** Mock the ZeroID token exchange — each call mints a distinct JWT so we can
  * prove a reconnect re-exchanges the key instead of replaying a dead token. */
@@ -99,7 +104,9 @@ function makeClient(
   actions: TuiAction[],
   opts?: ConstructorParameters<typeof TuiWsClient>[2],
 ): TuiWsClient {
-  return new TuiWsClient(CONFIG, (a) => actions.push(a), opts);
+  const client = new TuiWsClient(CONFIG, (a) => actions.push(a), opts);
+  clients.push(client);
+  return client;
 }
 
 /** start() → open the freshest socket → deliver auth.ok → connected. */
@@ -129,6 +136,11 @@ describe("TuiWsClient", () => {
     installFetchMock();
   });
   afterEach(() => {
+    // Stop every client first — halts heartbeat intervals and pending reconnect
+    // timers — THEN restore the globals, so no stray timer can reconnect against
+    // the real WebSocket/fetch.
+    for (const c of clients) c.stop();
+    clients.length = 0;
     (globalThis as { WebSocket: unknown }).WebSocket = savedWebSocket;
     (globalThis as { fetch: unknown }).fetch = savedFetch;
   });
@@ -140,7 +152,6 @@ describe("TuiWsClient", () => {
 
     expect(ws.parsed[0]).toMatchObject({ token: "fresh-1" }); // auth frame first
     expect(lastConnState(actions)).toBe("connected");
-    client.stop();
   });
 
   it("recovers from a 4003 'Token expired' close by reconnecting with a fresh token", async () => {
@@ -166,7 +177,6 @@ describe("TuiWsClient", () => {
     ws2.recv(AUTH_OK);
     await flush();
     expect(lastConnState(actions)).toBe("connected");
-    client.stop();
   });
 
   it("gives up with an error after maxAuthReconnects consecutive 4003s", async () => {
@@ -190,25 +200,25 @@ describe("TuiWsClient", () => {
 
     expect(lastConnState(actions)).toBe("error");
     expect(actions.some((a) => a.type === "error")).toBe(true);
-    client.stop();
   });
 
   it("sends a heartbeat ping and force-reconnects when no pong arrives", async () => {
     const actions: TuiAction[] = [];
+    // Wide margins so the ping/timeout ordering can't race the assertions
+    // under CI load: ping fires at ~20ms, its timeout lands at ~60ms.
     const client = makeClient(actions, {
       heartbeatMs: 20,
-      heartbeatTimeoutMs: 15,
+      heartbeatTimeoutMs: 40,
       reconnectDelayMs: 5,
     });
     const ws1 = await connect(client);
     expect(MockWS.instances.length).toBe(1);
 
-    await sleep(35); // heartbeat interval fires → ping sent
+    await sleep(40); // ping has fired (~20ms), well before its ~60ms timeout
     expect(ws1.sentTypes).toContain("ping");
 
-    await sleep(40); // no pong → ping times out → forceReconnect opens a new socket
+    await sleep(60); // ping times out (~60ms) → forceReconnect opens a new socket
     expect(MockWS.instances.length).toBeGreaterThan(1);
-    client.stop();
   });
 
   it("fails in-flight requests immediately when the socket drops (no 30s hang)", async () => {
@@ -221,7 +231,6 @@ describe("TuiWsClient", () => {
 
     ws1.close(1006, "dropped"); // network drop under the request
     await expect(pending).rejects.toThrow();
-    client.stop();
   });
 
   it("4001 (handshake failure) stays terminal — re-minting won't fix it", async () => {
@@ -235,6 +244,5 @@ describe("TuiWsClient", () => {
     expect(lastConnState(actions)).toBe("error");
     await sleep(20);
     expect(MockWS.instances.length).toBe(1); // no reconnect attempted
-    client.stop();
   });
 });
