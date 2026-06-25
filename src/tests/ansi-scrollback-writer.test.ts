@@ -250,6 +250,29 @@ describe("ScrollbackWriter streaming", () => {
     expect(lines.length).toBe(before); // writeMessage skipped
   });
 
+  it("writeBatch is a no-op for messages currently streaming (no double-print)", () => {
+    // Reproduces the duplicate-response bug: a streamed assistant message
+    // finalizes. In App.tsx the committed-emission effect (writeBatch) runs
+    // BEFORE the stream-finalize effect, so writeBatch sees the message
+    // while it's still an active stream. Without the #streams guard it
+    // re-renders the whole body, then finalizeStream flushes the buffer —
+    // printing the response twice.
+    writer.streamDelta("s1", assistantDelta("m1", "Which thread do you want to pull?"));
+    // Header emitted; body buffered (no trailing newline).
+    const afterStream = lines.length;
+
+    // Committed-emission effect fires first, while the stream is still open.
+    writer.writeBatch("s1", [
+      msg("m1", "Which thread do you want to pull?"),
+    ]);
+    expect(lines.length).toBe(afterStream); // writeBatch skipped the live stream
+
+    // Stream-finalize effect runs second and seals the body — once.
+    writer.finalizeStream("s1", "m1");
+    const body = lines.filter((l) => l.includes("Which thread do you want to pull?"));
+    expect(body.length).toBe(1);
+  });
+
   it("forget() wipes stream buffers too", () => {
     writer.streamDelta("s1", assistantDelta("m1", "buffered"));
     writer.forget("s1");

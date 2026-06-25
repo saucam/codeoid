@@ -269,6 +269,13 @@ export class ScrollbackWriter {
 		for (const msg of messages) {
 			const key = `${sessionId}:${msg.messageId}`;
 			if (this.#emitted.has(key)) continue;
+			// Currently-streaming message: its tokens are already in the
+			// terminal via streamDelta(), and finalizeStream() will seal it.
+			// Re-rendering here would print the body (and header) a second
+			// time. Mirror writeMessage()'s guard — this is the common path
+			// when a live assistant/thinking message finalizes, because the
+			// committed-emission effect runs BEFORE the stream-finalize one.
+			if (this.#streams.has(key)) continue;
 			const rendered = renderMessage(msg, { cols });
 			if (!rendered) continue;
 			chunks.push(rendered);
