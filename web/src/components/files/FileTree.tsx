@@ -24,7 +24,11 @@ const FileTree: Component = () => {
         resetFileTreeForSession(prev as string);
       }
       if (sid) {
-        void loadDirectory(sid, ".");
+        // clearFirst: true ensures entries are wiped before the fetch so the
+        // loading indicator always shows on session switch — without it, stale
+        // entries from a previous visit display silently until the response
+        // arrives, making the tree look like it didn't switch sessions.
+        void loadDirectory(sid, ".", { clearFirst: true });
       }
     }),
   );
@@ -47,6 +51,16 @@ const FileTree: Component = () => {
           </button>
         </Show>
       </div>
+      <Show when={focusedSession()}>
+        {(s) => (
+          <div
+            class="truncate px-3 pb-1 font-mono text-[10px] text-fg-faint"
+            title={s().workdir}
+          >
+            {s().workdir}
+          </div>
+        )}
+      </Show>
       <Show
         when={focusedSessionId()}
         fallback={

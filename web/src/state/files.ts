@@ -15,7 +15,7 @@
  */
 
 import { batch, createSignal } from "solid-js";
-import { createStore } from "solid-js/store";
+import { createStore, produce } from "solid-js/store";
 
 import { getClient, newRequestId } from "./connection";
 import type {
@@ -95,11 +95,18 @@ export async function toggleExpanded(sessionId: string, path: string): Promise<v
   }
 }
 
-export async function loadDirectory(sessionId: string, path: string): Promise<void> {
+export async function loadDirectory(
+  sessionId: string,
+  path: string,
+  opts?: { clearFirst?: boolean },
+): Promise<void> {
   ensureNode(sessionId, path);
   setState("bySession", sessionId, path, {
     loading: true,
     error: null,
+    // clearFirst forces entries to null so the "loading…" indicator appears
+    // even when stale entries exist (used on session switch at the root).
+    ...(opts?.clearFirst ? { entries: null, expanded: false } : {}),
   });
   try {
     const id = newRequestId();
@@ -202,7 +209,14 @@ export function resetFileTreeForSession(sessionId: string | null): void {
     if (sessionId) {
       // Drop any stale tree state — daemon is canonical, re-load on
       // next expand. Keeps memory bounded across long-running tabs.
-      setState("bySession", sessionId, {});
+      //
+      // Must use produce() to replace (not merge) the session's node map.
+      // SolidJS interprets a plain-object final argument as a MERGE, so
+      // `setState("bySession", id, {})` is a no-op that leaves all
+      // entries intact. produce() does an actual assignment on the draft.
+      setState(produce<FilesState>((draft) => {
+        draft.bySession[sessionId] = {};
+      }));
     }
   });
 }
