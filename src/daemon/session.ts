@@ -703,7 +703,8 @@ export class Session {
             `[codeoid/session ${this.id}] failed to persist recovered backing id: ${e instanceof Error ? e.message : String(e)}`,
           );
         }
-        this.#accumulator.pushUserTurn(content);
+        // Do NOT pushUserTurn(content) here — the original send() already
+        // pushed it before runTurn(). Pushing again duplicates the user turn.
         const recoveryRun = this.#provider.runTurn({
           history: [...this.#accumulator.history],
           userMessage: content,
@@ -1489,9 +1490,11 @@ export class Session {
       // Finalize the tool_call message in scrollback + transcript.
       const msgId = this.#approvalIdToMessageId.get(approvalId);
       if (msgId) {
+        // Approved → "executing" (tool hasn't run yet — tool_complete will
+        // set the final "completed" state with real output). Denied → "cancelled".
         const resolvedState = (
           approved
-            ? { phase: "completed", success: true, output: "" }
+            ? { phase: "executing", input: inputObj }
             : { phase: "cancelled", reason: "denied" }
         ) as unknown as ToolState;
         this.#scrollback.updateMessage(msgId, (m) => {
@@ -1552,9 +1555,14 @@ export class Session {
         }
         this.#pendingApprovals.clear();
       }
-      this.#activeRun = null;
-      this.#eventConsumerTask = null;
-      if (this.#status !== "error") this.#setStatus("idle");
+      // Guard: only clobber run state if this consumer owns the current run.
+      // A recovery path may have started a replacement run before our finally
+      // unwinds; clearing unconditionally would null the new run's slots.
+      if (this.#activeRun === run) {
+        this.#activeRun = null;
+        this.#eventConsumerTask = null;
+        if (this.#status !== "error") this.#setStatus("idle");
+      }
     }
   }
 
@@ -1787,7 +1795,15 @@ export class Session {
       case "turn_done": {
         this.#accumulator.handleEvent(event);
         this.#recordTurnFromResult(event.result);
-        if (this.#status !== "error") this.#setStatus("idle");
+        if (event.result.isError) {
+          const errText = event.result.errorMessage ?? "Turn ended with an error";
+          const errorMsg = this.#makeMessage("system", `Error: ${errText}`, SYSTEM_IDENTITY, undefined, undefined, { event: "agent_error" });
+          this.#persistAndBuffer(errorMsg);
+          this.#broadcastRaw(errorMsg);
+          this.#setStatus("error");
+        } else if (this.#status !== "error") {
+          this.#setStatus("idle");
+        }
         break;
       }
 

@@ -99,7 +99,7 @@ export class GeminiProvider implements AgentProvider {
 
       let streamResult: GenerateContentStreamResult;
       try {
-        streamResult = await chat.sendMessageStream(userMessage);
+        streamResult = await chat.sendMessageStream(userMessage, { signal: ac.signal });
       } catch (err) {
         if (ac.signal.aborted) return;
         queue.push({

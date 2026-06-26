@@ -81,9 +81,9 @@ export function normalizeToolName(name: string): string {
 export const TOOL_OUTPUT_LIMITS: Readonly<Record<string, number>> = {
   read_file: 32_768,
   run_shell: 8_192,
-  str_replace_file: Infinity,
-  write_file: Infinity,
-  multi_edit_file: Infinity,
+  str_replace_file: Number.POSITIVE_INFINITY,
+  write_file: Number.POSITIVE_INFINITY,
+  multi_edit_file: Number.POSITIVE_INFINITY,
   glob_files: 8_192,
   list_directory: 8_192,
   search_in_files: 8_192,
@@ -94,7 +94,7 @@ export const TOOL_OUTPUT_LIMITS: Readonly<Record<string, number>> = {
 export function limitToolOutput(canonicalName: string, output: string): string {
   const limit = canonicalName.startsWith("mcp__")
     ? TOOL_OUTPUT_LIMITS.default_mcp
-    : (TOOL_OUTPUT_LIMITS[canonicalName] ?? Infinity);
+    : (TOOL_OUTPUT_LIMITS[canonicalName] ?? Number.POSITIVE_INFINITY);
   if (!Number.isFinite(limit) || output.length <= limit) return output;
   return `${output.slice(0, limit)}\n…output truncated at ${limit} chars (full output was ${output.length} chars)`;
 }

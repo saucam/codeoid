@@ -37,7 +37,7 @@ import { rewriteBashToolInput } from "../../compress/index.js";
 import type { CodeoidConfig } from "../../../config.js";
 import type { AuthContext } from "../../../protocol/types.js";
 import type { AgentProvider, ModelInfo, NormalizedTurnResult, ProviderEvent, TurnOpts, TurnRun } from "../interface.js";
-import { type LLMCallUsage } from "../../context-math.js";
+import type { LLMCallUsage } from "../../context-math.js";
 
 // ── Initialisation options ────────────────────────────────────────────────────
 
@@ -147,12 +147,10 @@ export class ClaudeProvider implements AgentProvider {
     if (opts.userMessage) {
       this.#pushSDKMessage(opts.userMessage, "later");
     }
-
-    const self = this;
     return {
       events: turnQueue,
       interrupt: async () => {
-        const q = self.#query;
+        const q = this.#query;
         if (q) {
           try {
             await q.interrupt();
@@ -161,11 +159,11 @@ export class ClaudeProvider implements AgentProvider {
             // fall through to hard abort
           }
         }
-        self.#abortController?.abort();
-        self.#inputQueue?.close();
+        this.#abortController?.abort();
+        this.#inputQueue?.close();
       },
       pushMidTurn: (content, priority) => {
-        self.#pushSDKMessage(content, priority);
+        this.#pushSDKMessage(content, priority);
       },
     };
   }
@@ -250,8 +248,6 @@ export class ClaudeProvider implements AgentProvider {
     };
     const mcpServers = Object.keys(merged).length > 0 ? merged : undefined;
 
-    const self = this;
-
     this.#query = query({
       prompt: this.#inputQueue,
       options: {
@@ -287,7 +283,7 @@ export class ClaudeProvider implements AgentProvider {
             hooks: [async (rawInput) => {
               const input = rawInput as PreToolUseHookInput & { agent_id?: string };
               init.store.audit(
-                self.#currentSender?.sub ?? "unknown",
+                this.#currentSender?.sub ?? "unknown",
                 "session.tool_call",
                 sessionId,
                 `tool=${input.tool_name}`,
@@ -295,9 +291,9 @@ export class ClaudeProvider implements AgentProvider {
               // Capture tool_use_id + agent_id so canUseTool can correlate them.
               if (input.tool_use_id) {
                 const entry = { toolUseId: input.tool_use_id, agentId: input.agent_id };
-                const queue = self.#pendingToolUse.get(input.tool_name) ?? [];
+                const queue = this.#pendingToolUse.get(input.tool_name) ?? [];
                 queue.push(entry);
-                self.#pendingToolUse.set(input.tool_name, queue);
+                this.#pendingToolUse.set(input.tool_name, queue);
               }
               // Compression rewrite.
               if (init.config && init.compressionRegistry) {
@@ -326,7 +322,7 @@ export class ClaudeProvider implements AgentProvider {
               const input = rawInput as SubagentStartHookInput;
               const agentId = input.agent_id ?? "unknown";
               const agentType = input.agent_type ?? "unknown";
-              self.#emit({ type: "subagent_start", agentId, agentType });
+              this.#emit({ type: "subagent_start", agentId, agentType });
               return {};
             }],
           }],
@@ -334,7 +330,7 @@ export class ClaudeProvider implements AgentProvider {
           SubagentStop: [{
             hooks: [async (rawInput) => {
               const input = rawInput as SubagentStopHookInput;
-              self.#emit({ type: "subagent_stop", agentId: input.agent_id ?? "unknown" });
+              this.#emit({ type: "subagent_stop", agentId: input.agent_id ?? "unknown" });
               return {};
             }],
           }],
@@ -346,15 +342,15 @@ export class ClaudeProvider implements AgentProvider {
           const inputObj = input as Record<string, unknown>;
 
           // Pop the PreToolUse-captured data for this tool (FIFO by name).
-          const pending = self.#pendingToolUse.get(toolName);
+          const pending = this.#pendingToolUse.get(toolName);
           const captured = pending?.shift();
-          if (pending && pending.length === 0) self.#pendingToolUse.delete(toolName);
+          if (pending && pending.length === 0) this.#pendingToolUse.delete(toolName);
 
           const sdkToolUseId = captured?.toolUseId ?? randomUUID();
           const sdkAgentId = captured?.agentId;
 
           // Emit tool_start — Session creates the SessionMessage.
-          self.#emit({
+          this.#emit({
             type: "tool_start",
             toolId,
             sdkToolUseId,
@@ -365,7 +361,7 @@ export class ClaudeProvider implements AgentProvider {
           });
 
           // Call Session's approval gate (may block until user responds).
-          const canUse = self.#currentCanUseTool;
+          const canUse = this.#currentCanUseTool;
           if (!canUse) return { behavior: "deny" as const, message: "provider not ready" };
           const result = await canUse(toolId, approvalId, toolName, inputObj);
           if (result.behavior === "allow") {
@@ -395,40 +391,40 @@ export class ClaudeProvider implements AgentProvider {
     selfTask = this.#consumerTask = (async () => {
       try {
         for await (const msg of query$) {
-          self.#translateSDKMessage(msg);
+          this.#translateSDKMessage(msg);
         }
       } catch (err) {
         if (!ac.signal.aborted) {
           const emsg = err instanceof Error ? err.message : String(err);
           if (
-            self.#hasQueried &&
-            !self.#backingRecoveryAttempted &&
-            self.#lastPushedContent !== null &&
+            this.#hasQueried &&
+            !this.#backingRecoveryAttempted &&
+            this.#lastPushedContent !== null &&
             /No conversation found with session ID/i.test(emsg)
           ) {
             console.error(`[claude-provider ${sessionId.slice(0, 8)}] backing session missing — scheduling recovery`);
-            recoverContent = self.#lastPushedContent;
+            recoverContent = this.#lastPushedContent;
           } else {
             console.error(`[claude-provider ${sessionId.slice(0, 8)}] SDK query failed:`, err instanceof Error ? (err.stack ?? err.message) : err);
-            self.#emit({ type: "error", message: emsg });
+            this.#emit({ type: "error", message: emsg });
           }
         }
       } finally {
         // Close the current turn queue — session's for-await loop will finish.
-        self.#currentTurnQueue?.close();
-        self.#currentTurnQueue = null;
+        this.#currentTurnQueue?.close();
+        this.#currentTurnQueue = null;
 
-        if (self.#query === query$) self.#query = null;
-        if (self.#abortController === ac) self.#abortController = null;
+        if (this.#query === query$) this.#query = null;
+        if (this.#abortController === ac) this.#abortController = null;
         queue$?.close();
-        if (self.#inputQueue === queue$) self.#inputQueue = null;
-        if (self.#consumerTask === selfTask) self.#consumerTask = null;
+        if (this.#inputQueue === queue$) this.#inputQueue = null;
+        if (this.#consumerTask === selfTask) this.#consumerTask = null;
       }
 
       // Post-teardown recovery.
       if (recoverContent !== null) {
-        self.#backingRecoveryAttempted = true;
-        self.onRecoveryNeeded?.(recoverContent);
+        this.#backingRecoveryAttempted = true;
+        this.onRecoveryNeeded?.(recoverContent);
       }
     })();
   }
@@ -569,7 +565,8 @@ export class ClaudeProvider implements AgentProvider {
             const sep = rest.indexOf("__");
             if (sep <= 0) continue;
             const server = rest.slice(0, sep);
-            (tools[server] ??= []).push(t);
+            tools[server] ??= [];
+            tools[server].push(t);
           }
           this.#emit({ type: "mcp_init", servers, tools });
         } else if (subtype === "api_retry") {
