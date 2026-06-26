@@ -1,0 +1,5 @@
+[test]
+# Exclude web/ — those tests require Vitest (vi.advanceTimersByTimeAsync,
+# SolidJS reactive root, vite-plugin-solid transform).
+# Run them with: bun run test:web
+pathIgnorePatterns = ["web"]
