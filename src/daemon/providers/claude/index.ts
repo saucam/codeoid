@@ -187,6 +187,7 @@ export class ClaudeProvider implements AgentProvider {
   }
 
   async teardown(): Promise<void> {
+    this.#pendingToolUse.clear();  // clear before closing so stale entries don't survive a model switch
     this.#inputQueue?.close();
     this.#abortController?.abort();
     if (this.#consumerTask) {
@@ -605,17 +606,47 @@ export class ClaudeProvider implements AgentProvider {
 function loadUserMcpServers(workdir: string): Record<string, McpServerConfig> {
   try {
     const raw = readFileSync(join(homedir(), ".claude.json"), "utf8");
-    const cfg = JSON.parse(raw) as {
-      mcpServers?: Record<string, McpServerConfig>;
-      projects?: Record<string, { mcpServers?: Record<string, McpServerConfig> }>;
-    };
-    return {
-      ...(cfg.mcpServers ?? {}),
-      ...(cfg.projects?.[workdir]?.mcpServers ?? {}),
-    };
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    const cfg = parsed as Record<string, unknown>;
+    const result: Record<string, McpServerConfig> = {};
+    for (const [k, v] of Object.entries(safeServerMap(cfg.mcpServers))) result[k] = v;
+    for (const [k, v] of Object.entries(safeServerMap(safeProjectServers(cfg.projects, workdir)))) result[k] = v;
+    return result;
   } catch {
     return {};
   }
+}
+
+function safeProjectServers(projects: unknown, workdir: string): unknown {
+  if (typeof projects !== "object" || projects === null || Array.isArray(projects)) return undefined;
+  const project = (projects as Record<string, unknown>)[workdir];
+  if (typeof project !== "object" || project === null || Array.isArray(project)) return undefined;
+  return (project as Record<string, unknown>).mcpServers;
+}
+
+function safeServerMap(raw: unknown): Record<string, McpServerConfig> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+  const result: Record<string, McpServerConfig> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const server = parseMcpServerConfig(value);
+    if (server) result[key] = server;
+  }
+  return result;
+}
+
+function parseMcpServerConfig(value: unknown): McpServerConfig | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const obj = value as Record<string, unknown>;
+  if (typeof obj.command !== "string" && typeof obj.url !== "string") return null;
+  if (obj.args !== undefined) {
+    if (!Array.isArray(obj.args) || !obj.args.every((a) => typeof a === "string")) return null;
+  }
+  if (obj.env !== undefined) {
+    if (typeof obj.env !== "object" || obj.env === null || Array.isArray(obj.env)) return null;
+    if (!Object.values(obj.env as Record<string, unknown>).every((v) => typeof v === "string")) return null;
+  }
+  return obj as unknown as McpServerConfig;
 }
 
 function extractToolResultText(content: unknown): string {

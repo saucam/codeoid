@@ -135,7 +135,15 @@ export class Session {
   #activeRun: TurnRun | null = null;
   #eventConsumerTask: Promise<void> | null = null;
   #accumulator = new CanonicalHistoryAccumulator();
+  // Tracks the sender of the most recently started turn. The onRecoveryNeeded
+  // closure reads this instead of closing over the original send()'s sender,
+  // which may have been overwritten by a subsequent send() before recovery fires.
+  #currentSender: AuthContext | null = null;
   #approvalIdToMessageId = new Map<string, string>();
+  // Pending ZeroID registration promises keyed by subagent id. tool_start
+  // awaits this fence before attributing identity so the real WIMSE URI is
+  // used even for a subagent's very first tool call.
+  #subagentRegistrations = new Map<string, Promise<void>>();
   #seq = 0;
   #memory?: MemoryEngine;
   #chunker?: EpisodeChunker;
@@ -689,9 +697,13 @@ export class Session {
     }
 
     await this.#ensureAgentIdentity(sender);
+    this.#currentSender = sender;
 
-    // Wire recovery handler for this turn's sender context.
+    // Wire recovery handler. Uses #currentSender rather than closing over `sender`
+    // so that if a subsequent send() updates the active sender before recovery fires,
+    // audit events are attributed to the turn that actually triggered recovery.
     this.#provider.onRecoveryNeeded = (content: string) => {
+      const recoverySender = this.#currentSender ?? sender;
       this.#sendChain = this.#sendChain.then(async () => {
         // Reset to a fresh backing session for recovery.
         const newBackingId = randomUUID();
@@ -706,24 +718,24 @@ export class Session {
         // Do NOT pushUserTurn(content) here — the original send() already
         // pushed it before runTurn(). Pushing again duplicates the user turn.
         const recoveryRun = this.#provider.runTurn({
-          history: [...this.#accumulator.history],
+          history: this.#accumulator.history,
           userMessage: content,
           model: this.#model ?? undefined,
           fallbackModel: this.#fallbackModel ?? undefined,
           workdir: this.workdir,
           systemPromptAppend: this.#memory ? this.#buildMemoryPromptAppend() : undefined,
-          canUseTool: this.#makeCanUseToolFn(sender),
-          sender,
+          canUseTool: this.#makeCanUseToolFn(recoverySender),
+          sender: recoverySender,
         });
         this.#activeRun = recoveryRun;
-        this.#eventConsumerTask = this.#consumeEvents(recoveryRun, sender);
+        this.#eventConsumerTask = this.#consumeEvents(recoveryRun, recoverySender);
         this.#setStatus("thinking");
       });
     };
 
     this.#accumulator.pushUserTurn(effectivePrompt);
     const run = this.#provider.runTurn({
-      history: [...this.#accumulator.history],
+      history: this.#accumulator.history,
       userMessage: effectivePrompt,
       model: this.#model ?? undefined,
       fallbackModel: this.#fallbackModel ?? undefined,
@@ -740,16 +752,15 @@ export class Session {
   }
 
   async #teardownProvider(): Promise<void> {
+    // Capture before nulling: provider.teardown() may trigger onRecoveryNeeded,
+    // which installs a new #eventConsumerTask. Awaiting the snapshot drains
+    // the old consumer; we intentionally don't null the field again afterward
+    // so the recovery task is not orphaned.
+    const taskToAwait = this.#eventConsumerTask;
     this.#activeRun = null;
+    this.#eventConsumerTask = null;
     await this.#provider.teardown();
-    if (this.#eventConsumerTask) {
-      try {
-        await this.#eventConsumerTask;
-      } catch {
-        // consumer handles its own errors
-      }
-      this.#eventConsumerTask = null;
-    }
+    try { await taskToAwait; } catch { /* consumer handles its own errors */ }
   }
 
   /**
@@ -1277,6 +1288,9 @@ export class Session {
     // After a rotation the new backing session starts fresh; the
     // ctx denominator is genuinely 0 until the first turn lands a
     // real usage row, so 0 is the right value to seed.
+    // Capture BEFORE zeroing so the rotation message shows the real pre-rotation value.
+    const ctxBefore = this.#usage.lastTurnInputTokens ?? 0;
+    const pctBefore = Math.round((ctxBefore / Session.CONTEXT_WINDOW) * 100);
     this.#usage.lastTurnInputTokens = 0;
     this.#turnsSinceLastRotation = 0;
 
@@ -1294,9 +1308,6 @@ export class Session {
       this.id,
       `reason=${reason} prev=${previousBackingId} new=${newBackingId}`,
     );
-
-    const ctxBefore = this.#usage.lastTurnInputTokens ?? 0;
-    const pctBefore = Math.round((ctxBefore / Session.CONTEXT_WINDOW) * 100);
 
     const infoMsg = this.#makeMessage(
       "info",
@@ -1477,6 +1488,7 @@ export class Session {
       await Promise.resolve();
 
       if (autoApprove) {
+        this.#approvalIdToMessageId.delete(approvalId); // clean up — no manual approval will reference this
         this.#store.audit(sender.sub, "session.auto_approve", this.id, `tool=${toolName} mode=${this.#mode}`);
         this.#setStatus("tool_running");
         return { behavior: "allow" as const, updatedInput: inputObj };
@@ -1501,8 +1513,7 @@ export class Session {
           const sm = m as SessionMessage;
           if (sm.tool) sm.tool.state = resolvedState;
         });
-        const messages = this.#scrollback.read() as SessionMessage[];
-        const toolMsg = messages.find((m) => (m as SessionMessage).messageId === msgId) as SessionMessage | undefined;
+        const toolMsg = this.#toolCallMessages.get(msgId);
         if (toolMsg?.tool) {
           const resolvedMsg: SessionMessage = { ...toolMsg, tool: { ...toolMsg.tool, state: resolvedState }, timestamp: new Date().toISOString() };
           this.#transcriptStore.append(this.id, resolvedMsg, this.#seq++).catch(() => {});
@@ -1531,7 +1542,7 @@ export class Session {
   async #consumeEvents(run: TurnRun, _sender: AuthContext): Promise<void> {
     try {
       for await (const event of run.events) {
-        this.#handleProviderEvent(event);
+        await this.#handleProviderEvent(event);
         if (event.type === "turn_done" || event.type === "error") break;
       }
     } catch (err) {
@@ -1566,7 +1577,7 @@ export class Session {
     }
   }
 
-  #handleProviderEvent(event: ProviderEvent): void {
+  async #handleProviderEvent(event: ProviderEvent): Promise<void> {
     switch (event.type) {
       case "text_delta": {
         if (!this.#activeAssistantMsg) {
@@ -1636,6 +1647,12 @@ export class Session {
       case "tool_start": {
         this.#accumulator.handleEvent(event);
         this.#completeActiveTools();
+        // Await the ZeroID registration fence so sub-agent identity is resolved
+        // before we attribute this tool call. Safe to ignore rejection here —
+        // a failed registration falls back to the anonymous placeholder.
+        if (event.sdkAgentId) {
+          try { await this.#subagentRegistrations.get(event.sdkAgentId); } catch { /* use placeholder */ }
+        }
         const emittingIdentity = event.sdkAgentId
           ? (this.#subagents.get(event.sdkAgentId)?.identity ?? this.#agentIdentity)
           : this.#agentIdentity;
@@ -1710,18 +1727,18 @@ export class Session {
       case "subagent_start": {
         const agentId = event.agentId;
         const agentType = event.agentType;
-        let childIdentity: MessageIdentity = { sub: `anonymous:subagent:${agentId}`, name: agentType, type: "subagent" };
+        const childIdentity: MessageIdentity = { sub: `anonymous:subagent:${agentId}`, name: agentType, type: "subagent" };
+        this.#subagents.set(agentId, { identity: childIdentity, agentType, spawnedAt: Date.now(), active: true });
         const im = this.#identityManager;
         if (im) {
-          im.registerSubagent(this.id, agentId, agentType).then((result) => {
-            childIdentity = { sub: result.wimseUri, name: agentType, type: "subagent" };
+          const fence = im.registerSubagent(this.id, agentId, agentType).then((result) => {
             const subagentEntry = this.#subagents.get(agentId);
-            if (subagentEntry) subagentEntry.identity = childIdentity;
+            if (subagentEntry) subagentEntry.identity = { sub: result.wimseUri, name: agentType, type: "subagent" };
           }).catch((err) => {
             console.error(`[codeoid] subagent register failed: ${err instanceof Error ? err.message : String(err)}`);
           });
+          this.#subagentRegistrations.set(agentId, fence);
         }
-        this.#subagents.set(agentId, { identity: childIdentity, agentType, spawnedAt: Date.now(), active: true });
         const infoMsg = this.#makeMessage("info", `Sub-agent spawned: ${agentType}`, this.#agentIdentity, undefined, undefined, {
           event: "subagent.spawned",
           subagentUri: childIdentity.sub,
@@ -1737,6 +1754,7 @@ export class Session {
       case "subagent_stop": {
         const agentId = event.agentId;
         void this.#identityManager?.deactivateSubagent(this.id, agentId);
+        this.#subagentRegistrations.delete(agentId);
         if (this.#subagents.delete(agentId)) {
           this.#broadcastInfoUpdate();
         }

@@ -125,7 +125,7 @@ function toolCallToText(tc: CanonicalToolCall): string {
  *   follow-up user turn with { functionResponse: { name, response } } parts.
  */
 export function toGeminiContent(
-  history: CanonicalTurn[],
+  history: readonly CanonicalTurn[],
 ): Array<{ role: "user" | "model"; parts: Array<{ text: string }> }> {
   const out: Array<{ role: "user" | "model"; parts: Array<{ text: string }> }> = [];
 
@@ -161,7 +161,7 @@ export function toGeminiContent(
  *   assistant.tool_calls[] + { role: "tool" } messages.
  */
 export function toOpenAIMessages(
-  history: CanonicalTurn[],
+  history: readonly CanonicalTurn[],
 ): Array<{ role: "user" | "assistant" | "system"; content: string }> {
   const out: Array<{ role: "user" | "assistant" | "system"; content: string }> = [];
 
@@ -197,7 +197,7 @@ export function toOpenAIMessages(
  * Phase 2: replace with proper tool_use/tool_result content blocks.
  */
 export function toAnthropicMessages(
-  history: CanonicalTurn[],
+  history: readonly CanonicalTurn[],
 ): Array<{ role: "user" | "assistant"; content: string }> {
   const out: Array<{ role: "user" | "assistant"; content: string }> = [];
 

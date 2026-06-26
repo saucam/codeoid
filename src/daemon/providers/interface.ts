@@ -51,7 +51,7 @@ export interface TurnOpts {
    * Gemini/OpenAI convert it to their native message format via
    * toGeminiContent() / toOpenAIMessages() on each runTurn().
    */
-  history: CanonicalTurn[];
+  history: readonly CanonicalTurn[];
   userMessage: string;
   model?: string;
   fallbackModel?: string;

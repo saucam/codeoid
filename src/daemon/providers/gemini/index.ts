@@ -181,7 +181,7 @@ export class GeminiProvider implements AgentProvider {
  * before it is the chat context.
  */
 export function splitForStateless(opts: TurnOpts): {
-  chatHistory: import("../canonical.js").CanonicalTurn[];
+  chatHistory: readonly import("../canonical.js").CanonicalTurn[];
   userMessage: string;
 } {
   const history = opts.history;
