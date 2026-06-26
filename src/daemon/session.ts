@@ -282,6 +282,9 @@ export class Session {
   // blocks (emitted in SDKUserMessage) back to the originating tool_call message
   // so we can record the real tool output in scrollback, transcript, and memory.
   #toolUseIdToMessageId = new Map<string, string>();
+  // Reverse of #toolUseIdToMessageId — needed so _applyInterruptedStateToTool
+  // and the denial path can clean up both maps without a full scan.
+  #messageIdToToolUseId = new Map<string, string>();
   // messageIds of tool_calls already closed via a tool_result — so the
   // fallback #completeActiveTools() path doesn't clobber their output.
   #toolCallsClosedByResult = new Set<string>();
@@ -1424,7 +1427,17 @@ export class Session {
     return out;
   }
 
-  /** Tool classification — used by auto-approve logic. */
+  /**
+   * Authoritative approval gate — called from canUseTool, NOT from tool_start.
+   * Has side effects in autonomous mode: decrements the turn budget and flips
+   * mode to "guarded" when the budget is exhausted.
+   *
+   * IMPORTANT: #peekAutoApprove is used for the initial tool_call message
+   * state (UI only). If you call #shouldAutoApprove from tool_start too, the
+   * budget is decremented twice per tool call (once here, once there) because
+   * tool_start runs after canUseTool's synchronous section but before its
+   * first yield — the microtask ordering is deterministic.
+   */
   #shouldAutoApprove(toolName: string): boolean {
     if (this.#mode === "interactive") return false;
 
@@ -1445,6 +1458,23 @@ export class Session {
       return true;
     }
 
+    return false;
+  }
+
+  /**
+   * Side-effect-free read of auto-approve state. Used ONLY in the tool_start
+   * event handler to determine the initial UI phase (executing vs
+   * waiting_confirmation) without touching the turn budget or mode.
+   *
+   * The authoritative decision with side effects lives in #shouldAutoApprove,
+   * called from #makeCanUseToolFn where the actual allow/deny happens.
+   */
+  #peekAutoApprove(toolName: string): boolean {
+    if (this.#mode === "interactive") return false;
+    if (isSafeTool(toolName)) return true;
+    if (this.#mode === "autonomous") {
+      return this.#turnsRemaining === undefined || this.#turnsRemaining > 0;
+    }
     return false;
   }
 
@@ -1648,15 +1678,23 @@ export class Session {
         this.#accumulator.handleEvent(event);
         this.#completeActiveTools();
         // Await the ZeroID registration fence so sub-agent identity is resolved
-        // before we attribute this tool call. Safe to ignore rejection here —
-        // a failed registration falls back to the anonymous placeholder.
+        // before we attribute this tool call. Bounded by a 5s timeout so a
+        // hung ZeroID service can't stall the event loop indefinitely.
         if (event.sdkAgentId) {
-          try { await this.#subagentRegistrations.get(event.sdkAgentId); } catch { /* use placeholder */ }
+          const fence = this.#subagentRegistrations.get(event.sdkAgentId);
+          if (fence) {
+            const timeout = new Promise<void>((resolve) => setTimeout(resolve, 5000));
+            try { await Promise.race([fence, timeout]); } catch { /* use placeholder */ }
+          }
         }
         const emittingIdentity = event.sdkAgentId
           ? (this.#subagents.get(event.sdkAgentId)?.identity ?? this.#agentIdentity)
           : this.#agentIdentity;
-        const autoApprove = this.#shouldAutoApprove(event.name);
+        // Side-effect-free peek — budget decrement happens in canUseTool via
+        // #shouldAutoApprove. Using #shouldAutoApprove here would decrement
+        // twice per tool call (this handler runs in the same microtask batch
+        // as canUseTool's synchronous section, always after it).
+        const autoApprove = this.#peekAutoApprove(event.name);
         const toolMsg = this.#makeMessage(
           "tool_call",
           `${event.name}(${Object.keys(event.input).join(", ")})`,
@@ -1679,6 +1717,7 @@ export class Session {
         this.#activeToolMsgIds.push(toolMsg.messageId);
         this.#toolCallMessages.set(toolMsg.messageId, toolMsg);
         this.#toolUseIdToMessageId.set(event.sdkToolUseId, toolMsg.messageId);
+        this.#messageIdToToolUseId.set(toolMsg.messageId, event.sdkToolUseId);
         this.#approvalIdToMessageId.set(event.approvalId, toolMsg.messageId);
         this.#persistAndBuffer(toolMsg);
         this.#broadcastRaw(toolMsg);
@@ -1715,6 +1754,7 @@ export class Session {
               timestamp: completedMsg.timestamp,
             });
             this.#toolCallMessages.delete(msgId);
+            this.#messageIdToToolUseId.delete(msgId);
             const idx = this.#activeToolMsgIds.indexOf(msgId);
             if (idx >= 0) this.#activeToolMsgIds.splice(idx, 1);
           }
@@ -1929,6 +1969,16 @@ export class Session {
       toolStateUpdate: cancelledState,
       timestamp: new Date().toISOString(),
     });
+
+    // Clean up correlation maps. tool_complete normally does this; for
+    // denied/interrupted tools it never fires, so we do it here to prevent
+    // these maps growing without bound across many interrupts in long sessions.
+    const sdkToolUseId = this.#messageIdToToolUseId.get(msgId);
+    if (sdkToolUseId) {
+      this.#toolUseIdToMessageId.delete(sdkToolUseId);
+      this.#messageIdToToolUseId.delete(msgId);
+    }
+    this.#toolCallMessages.delete(msgId);
   }
 
   /** Create a SessionMessage with all required fields */
