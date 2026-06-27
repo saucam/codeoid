@@ -1,5 +1,6 @@
 export type {
   AgentProvider,
+  SessionProvider,
   ProviderConfig,
   ProviderAuth,
   ProviderEvent,
@@ -28,4 +29,5 @@ export type { GeminiProviderInit } from "./gemini/index.js";
 export { OpenAIProvider } from "./openai/index.js";
 export type { OpenAIProviderInit } from "./openai/index.js";
 export { MockProvider, mockResult } from "./mock/index.js";
+export { MockSessionProvider } from "./mock/session-provider.js";
 export { splitForStateless } from "./gemini/index.js";

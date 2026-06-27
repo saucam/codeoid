@@ -36,7 +36,7 @@ import type { CompressionRegistry } from "../../compress/index.js";
 import { rewriteBashToolInput } from "../../compress/index.js";
 import type { CodeoidConfig } from "../../../config.js";
 import type { AuthContext } from "../../../protocol/types.js";
-import type { AgentProvider, ModelInfo, NormalizedTurnResult, ProviderEvent, TurnOpts, TurnRun } from "../interface.js";
+import type { SessionProvider, ModelInfo, NormalizedTurnResult, ProviderEvent, TurnOpts, TurnRun } from "../interface.js";
 import type { LLMCallUsage } from "../../context-math.js";
 
 // ── Initialisation options ────────────────────────────────────────────────────
@@ -64,7 +64,7 @@ export interface ClaudeProviderInit {
 
 // ── ClaudeProvider ────────────────────────────────────────────────────────────
 
-export class ClaudeProvider implements AgentProvider {
+export class ClaudeProvider implements SessionProvider {
   readonly id = "claude";
   readonly displayName = "Claude (Anthropic)";
 

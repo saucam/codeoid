@@ -11,7 +11,7 @@
 
 import { ClaudeProvider } from "./providers/claude/index.js";
 import { CanonicalHistoryAccumulator } from "./providers/canonical.js";
-import type { ProviderEvent, NormalizedTurnResult, TurnRun, ToolApprovalFn } from "./providers/interface.js";
+import type { ProviderEvent, NormalizedTurnResult, TurnRun, ToolApprovalFn, SessionProvider } from "./providers/interface.js";
 import { randomUUID } from "node:crypto";
 import type {
   AuthContext,
@@ -99,6 +99,12 @@ export interface SessionCreateOptions {
    * rewrites Bash commands to route through the wrapper CLI when enabled.
    */
   compressionRegistry?: CompressionRegistry;
+  /**
+   * Provider override for testing. When present, replaces ClaudeProvider so
+   * integration tests run without the Claude Agent SDK subprocess.
+   * Name prefix signals this is test-only infrastructure — do not use in production.
+   */
+  _testProvider?: SessionProvider;
 }
 
 export class Session {
@@ -131,7 +137,7 @@ export class Session {
   #identityManager?: AgentIdentityManager;
   #agentIdentity: MessageIdentity;
   #scrollback = new ScrollbackBuffer();
-  #provider!: ClaudeProvider;
+  #provider!: SessionProvider;
   #activeRun: TurnRun | null = null;
   #eventConsumerTask: Promise<void> | null = null;
   #accumulator = new CanonicalHistoryAccumulator();
@@ -331,7 +337,7 @@ export class Session {
       resolveModelId(opts.config?.session.fallbackModel ?? "") ??
       null;
 
-    this.#provider = new ClaudeProvider({
+    this.#provider = opts._testProvider ?? new ClaudeProvider({
       sessionId: this.id,
       initialBackingId: this.#store.getClaudeCodeSessionId(this.id) ?? this.id,
       store: opts.store,

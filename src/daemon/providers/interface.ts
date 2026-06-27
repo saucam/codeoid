@@ -151,3 +151,27 @@ export interface AgentProvider {
   listModels(): Promise<ModelInfo[]>;
   dispose(): Promise<void>;
 }
+
+// ── SessionProvider interface ─────────────────────────────────────────────────
+
+/**
+ * Extended provider interface that Session requires in addition to AgentProvider.
+ * ClaudeProvider satisfies this. Tests inject MockSessionProvider via
+ * SessionCreateOptions._testProvider so integration tests run without the SDK.
+ */
+export interface SessionProvider extends AgentProvider {
+  /** Set by Session before each runTurn(). Handles "backing session lost" errors. */
+  onRecoveryNeeded: ((content: string) => void) | undefined;
+  /** Underlying backing session ID (for display and Store persistence). */
+  readonly backingSessionId: string;
+  /** True once runTurn() has been called at least once (guards agent registration). */
+  readonly hasQueried: boolean;
+  /** Depth of the queued input messages (for StatusBar display). */
+  readonly queuedMessages: number;
+  /** Called on rotation/recovery to mint a fresh backing session ID. */
+  resetToNewSession(newBackingId: string): void;
+  /** Mark the provider as having queried (used on session resume to skip re-registration). */
+  setHasQueried(value: boolean): void;
+  /** Tear down the running query loop. Called on model switch, rotation, or destroy. */
+  teardown(): Promise<void>;
+}
