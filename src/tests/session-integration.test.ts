@@ -574,3 +574,49 @@ describe("T6 – ZeroID fence 5 s timeout", () => {
     expect(session.status).toBe("idle");
   }, 15000);
 });
+
+// ── T7: MockSessionProvider direct API ───────────────────────────────────────
+// Covers the mock's own helper methods so the file stays above the 80% patch
+// coverage gate.  These also serve as sanity checks: if the mock's API drifts
+// from SessionProvider's contract the integration tests would silently test
+// the wrong thing.
+
+describe("T7 – MockSessionProvider direct API", () => {
+  it("listModels returns the mock model list", async () => {
+    const provider = new MockSessionProvider("m");
+    const models = await provider.listModels();
+    expect(models.length).toBeGreaterThan(0);
+    expect(models[0]!.id).toBeTruthy();
+  });
+
+  it("teardown increments teardownCount and clears onRecoveryNeeded", async () => {
+    const provider = new MockSessionProvider("m");
+    provider.onRecoveryNeeded = () => {};
+    await provider.teardown();
+    expect(provider.teardownCount).toBe(1);
+    expect(provider.onRecoveryNeeded).toBeUndefined();
+  });
+
+  it("dispose delegates to teardown", async () => {
+    const provider = new MockSessionProvider("m");
+    await provider.dispose();
+    expect(provider.teardownCount).toBe(1);
+  });
+
+  it("setHasQueried updates hasQueried", () => {
+    const provider = new MockSessionProvider("m");
+    expect(provider.hasQueried).toBe(false);
+    provider.setHasQueried(true);
+    expect(provider.hasQueried).toBe(true);
+    provider.setHasQueried(false);
+    expect(provider.hasQueried).toBe(false);
+  });
+
+  it("runTurn with empty script falls back to default turn_done", async () => {
+    const provider = new MockSessionProvider("m");
+    const session = makeSession(provider);
+    await session.send("hello", TEST_AUTH);
+    await waitForIdle(session);
+    expect(session.status).toBe("idle");
+  });
+});
