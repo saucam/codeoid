@@ -457,13 +457,25 @@ describe("ClaudeProvider – runTurn with mocked SDK", () => {
   });
 
   it("canUseTool callback emits tool_start and returns allow", async () => {
+    // The SDK fires PreToolUse *before* canUseTool — we must simulate that order
+    // so #pendingToolUse has the tool_use_id before canUseTool tries to pop it.
     sdkMessages = [{ type: "result", modelUsage: {} }];
     capturedQueryOpts = null;
     const provider = makeProvider();
     provider.runTurn({ history: [], userMessage: "hi", workdir: "/tmp", canUseTool: async () => ({ behavior: "allow" as const }) });
-    await Promise.resolve(); // let #ensureQueryLoop register opts
-    const opts = capturedQueryOpts as { options: { canUseTool: (name: string, input: unknown) => Promise<unknown> } } | null;
-    if (opts?.options?.canUseTool) {
+    await Promise.resolve();
+    const opts = capturedQueryOpts as {
+      options: {
+        hooks: { PreToolUse: Array<{ hooks: Array<(input: unknown) => Promise<unknown>> }> };
+        canUseTool: (name: string, input: unknown) => Promise<unknown>;
+      };
+    } | null;
+    if (opts?.options?.hooks?.PreToolUse?.[0]?.hooks?.[0] && opts.options.canUseTool) {
+      // 1. Fire PreToolUse so the provider registers "Read" → "tu-abc"
+      await opts.options.hooks.PreToolUse[0].hooks[0]({
+        tool_name: "Read", tool_use_id: "tu-abc", tool_input: {}, agent_id: undefined,
+      });
+      // 2. Now canUseTool can pop the pending entry and emit tool_start
       const result = await opts.options.canUseTool("Read", { file_path: "/tmp/x.ts" });
       expect((result as { behavior: string }).behavior).toBe("allow");
     }

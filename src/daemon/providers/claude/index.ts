@@ -347,8 +347,11 @@ export class ClaudeProvider implements SessionProvider {
           const captured = pending?.shift();
           if (pending && pending.length === 0) this.#pendingToolUse.delete(toolName);
 
-          const sdkToolUseId = captured?.toolUseId ?? randomUUID();
-          const sdkAgentId = captured?.agentId;
+          if (!captured?.toolUseId) {
+            return { behavior: "deny" as const, message: "Unable to correlate tool use id" };
+          }
+          const sdkToolUseId = captured.toolUseId;
+          const sdkAgentId = captured.agentId;
 
           // Emit tool_start — Session creates the SessionMessage.
           this.#emit({
@@ -406,7 +409,7 @@ export class ClaudeProvider implements SessionProvider {
             console.error(`[claude-provider ${sessionId.slice(0, 8)}] backing session missing — scheduling recovery`);
             recoverContent = this.#lastPushedContent;
           } else {
-            console.error(`[claude-provider ${sessionId.slice(0, 8)}] SDK query failed:`, err instanceof Error ? (err.stack ?? err.message) : err);
+            console.error(`[claude-provider ${sessionId.slice(0, 8)}] SDK query failed: ${emsg}`);
             this.#emit({ type: "error", message: emsg });
           }
         }
