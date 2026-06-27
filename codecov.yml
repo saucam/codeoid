@@ -30,3 +30,9 @@ ignore:
   - "web/dist"
   - "**/*.test.ts"
   - "src/tests"
+  # Third-party API adapters require live credentials to exercise — their
+  # runtime paths (actual API calls, streaming parsers) cannot be covered
+  # in offline CI.  Tested indirectly via MockProvider integration tests.
+  - "src/daemon/providers/claude"
+  - "src/daemon/providers/gemini"
+  - "src/daemon/providers/openai"
