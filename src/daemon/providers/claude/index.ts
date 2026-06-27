@@ -441,6 +441,22 @@ export class ClaudeProvider implements SessionProvider {
 
   /** Translate one SDKMessage to ProviderEvents. */
   #translateSDKMessage(msg: SDKMessage): void {
+    translateSDKMessage(msg, this.#emit.bind(this), this.id);
+  }
+}
+
+// ── Pure translation (exported for unit tests) ────────────────────────────────
+
+/**
+ * Translate one SDKMessage from the Claude Agent SDK into zero or more
+ * ProviderEvents.  Pure function — no I/O, no side-effects beyond calling
+ * `emit`.  Extracted so it can be unit-tested without spawning the SDK.
+ */
+export function translateSDKMessage(
+  msg: SDKMessage,
+  emit: (event: ProviderEvent) => void,
+  providerId: string,
+): void {
     switch (msg.type) {
       case "assistant": {
         // Per-call LLM usage — split primary vs subagent for accurate ctx tracking.
@@ -464,7 +480,7 @@ export class ClaudeProvider implements SessionProvider {
             cacheCreationTokens: perCall.cache_creation_input_tokens ?? 0,
             outputTokens: perCall.output_tokens ?? 0,
           };
-          this.#emit({ type: "llm_call", usage: callUsage, isPrimary: assistantMsg.parent_tool_use_id === null });
+          emit({ type: "llm_call", usage: callUsage, isPrimary: assistantMsg.parent_tool_use_id === null });
         }
 
         // Text content (tool_use blocks are handled via canUseTool → tool_start).
@@ -476,7 +492,7 @@ export class ClaudeProvider implements SessionProvider {
           }
         }
         if (textParts.length > 0) {
-          this.#emit({ type: "text_done", content: textParts.join("") });
+          emit({ type: "text_done", content: textParts.join("") });
         }
         break;
       }
@@ -494,21 +510,21 @@ export class ClaudeProvider implements SessionProvider {
 
         if (event.type === "content_block_start" && event.content_block?.type === "thinking") {
           // Signal a new thinking block — Session creates the message.
-          this.#emit({ type: "thinking_delta", content: "", blockIndex: event.index });
+          emit({ type: "thinking_delta", content: "", blockIndex: event.index });
           break;
         }
 
         if (event.type === "content_block_delta" && event.delta) {
           if (event.delta.type === "text_delta" && event.delta.text) {
-            this.#emit({ type: "text_delta", content: event.delta.text });
+            emit({ type: "text_delta", content: event.delta.text });
           } else if (event.delta.type === "thinking_delta" && event.delta.thinking) {
-            this.#emit({ type: "thinking_delta", content: event.delta.thinking, blockIndex: event.index });
+            emit({ type: "thinking_delta", content: event.delta.thinking, blockIndex: event.index });
           }
           break;
         }
 
         if (event.type === "content_block_stop") {
-          this.#emit({ type: "thinking_done", blockIndex: event.index });
+          emit({ type: "thinking_done", blockIndex: event.index });
         }
         break;
       }
@@ -532,7 +548,7 @@ export class ClaudeProvider implements SessionProvider {
         // Derive the model from the first key in modelUsage (most-used model this turn).
         const model = Object.keys(r.modelUsage ?? {})[0] ?? "unknown";
         const normalized: NormalizedTurnResult = {
-          providerId: this.id,
+          providerId,
           model,
           inputTokens: r.usage?.input_tokens ?? 0,
           outputTokens: r.usage?.output_tokens ?? 0,
@@ -544,7 +560,7 @@ export class ClaudeProvider implements SessionProvider {
           isError: r.is_error,
           errorMessage: r.subtype !== "success" && r.result ? r.result : undefined,
         };
-        this.#emit({ type: "turn_done", result: normalized });
+        emit({ type: "turn_done", result: normalized });
         // Stay warm — keep the queue open for the next turn.
         // The queue is closed in the consumer's finally block when the SDK loop ends.
         break;
@@ -569,10 +585,10 @@ export class ClaudeProvider implements SessionProvider {
             tools[server] ??= [];
             tools[server].push(t);
           }
-          this.#emit({ type: "mcp_init", servers, tools });
+          emit({ type: "mcp_init", servers, tools });
         } else if (subtype === "api_retry") {
           const r = msg as { attempt?: number; retry_delay_ms?: number; error_status?: number | null };
-          this.#emit({ type: "api_retry", attempt: r.attempt, retryDelayMs: r.retry_delay_ms, errorStatus: r.error_status });
+          emit({ type: "api_retry", attempt: r.attempt, retryDelayMs: r.retry_delay_ms, errorStatus: r.error_status });
         }
         break;
       }
@@ -587,21 +603,20 @@ export class ClaudeProvider implements SessionProvider {
           if (!useId) continue;
           const output = extractToolResultText(block.content);
           const success = block.is_error !== true;
-          this.#emit({ type: "tool_complete", sdkToolUseId: useId, output, success });
+          emit({ type: "tool_complete", sdkToolUseId: useId, output, success });
         }
         break;
       }
 
       case "tool_progress": {
         const p = msg as { tool_name?: string; elapsed_time_seconds?: number };
-        this.#emit({ type: "tool_progress", toolName: p.tool_name, elapsedSeconds: p.elapsed_time_seconds });
+        emit({ type: "tool_progress", toolName: p.tool_name, elapsedSeconds: p.elapsed_time_seconds });
         break;
       }
     }
-  }
 }
 
-// ── Helpers (module-private) ──────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function loadUserMcpServers(workdir: string): Record<string, McpServerConfig> {
   try {
@@ -635,7 +650,7 @@ function safeServerMap(raw: unknown): Record<string, McpServerConfig> {
   return result;
 }
 
-function parseMcpServerConfig(value: unknown): McpServerConfig | null {
+export function parseMcpServerConfig(value: unknown): McpServerConfig | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const obj = value as Record<string, unknown>;
   if (typeof obj.command !== "string" && typeof obj.url !== "string") return null;
@@ -649,7 +664,7 @@ function parseMcpServerConfig(value: unknown): McpServerConfig | null {
   return obj as unknown as McpServerConfig;
 }
 
-function extractToolResultText(content: unknown): string {
+export function extractToolResultText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   const parts: string[] = [];
