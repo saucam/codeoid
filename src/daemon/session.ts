@@ -153,6 +153,12 @@ export class Session {
   #seq = 0;
   #memory?: MemoryEngine;
   #chunker?: EpisodeChunker;
+  // Counts mid-turn messages in flight. When the SDK interrupts the current
+  // turn to process a pushMidTurn() injection, it emits a turn_done for the
+  // aborted partial turn BEFORE the continuation turn starts. This counter lets
+  // #consumeEvents absorb those intermediate turn_dones and keep looping instead
+  // of exiting the consumer and leaving the continuation turn without a reader.
+  #pendingMidTurnCount = 0;
   #indexScheduler?: IndexScheduler;
   #workspaceId: string;
 
@@ -699,6 +705,7 @@ export class Session {
       this.#persistAndBuffer(midTurnMsg);
       this.#broadcastRaw(midTurnMsg);
       this.#accumulator.pushUserTurn(effectivePrompt);
+      this.#pendingMidTurnCount++;
       this.#activeRun.pushMidTurn(effectivePrompt, effectivePriority ?? "now");
       this.#setStatus("thinking");
       this.#broadcastInfoUpdate();
@@ -790,6 +797,7 @@ export class Session {
    */
   async interrupt(sender: AuthContext): Promise<void> {
     this.#store.audit(sender.sub, "session.interrupt", this.id);
+    this.#pendingMidTurnCount = 0; // cancel pending mid-turn continuations
     // Finalize any in-flight streaming messages RIGHT NOW so the UI's live
     // region stops spinning on content the model won't finish emitting,
     // before we even await the SDK — instant feedback.
@@ -1578,6 +1586,36 @@ export class Session {
   async #consumeEvents(run: TurnRun, _sender: AuthContext): Promise<void> {
     try {
       for await (const event of run.events) {
+        // When a mid-turn message interrupts the current turn, the SDK emits a
+        // turn_done (often with isError) for the aborted partial turn BEFORE it
+        // starts the continuation turn for the injected message. Absorb that
+        // intermediate boundary: flush per-turn state, record partial cost, and
+        // continue looping — no break, no error display, no status flip to idle.
+        // The continuation turn's events follow immediately in the same queue.
+        if (event.type === "turn_done" && this.#pendingMidTurnCount > 0) {
+          this.#pendingMidTurnCount--;
+          // Record history / cost for the interrupted partial turn.
+          this.#accumulator.handleEvent(event);
+          this.#recordTurnFromResult(event.result);
+          // Flush per-turn accumulators so the continuation turn starts clean.
+          this.#completeActiveTools();
+          this.#flushActiveAssistant();
+          this.#finalizeActiveThinking();
+          this.#chunker?.onTurnEnd();
+          // Dismiss any stale approval gates from the interrupted turn.
+          if (this.#pendingApprovals.size > 0) {
+            const systemAuth: AuthContext = { sub: "system", scopes: [], delegationDepth: 0, accountId: this.accountId, projectId: this.projectId };
+            for (const [aid, resolveFn] of this.#pendingApprovals.entries()) {
+              resolveFn({ approved: false });
+              this.#dismissStaleApproval(aid, systemAuth);
+            }
+            this.#pendingApprovals.clear();
+          }
+          // Re-assert thinking status so the UI doesn't flash idle between turns.
+          if (this.#status !== "error") this.#setStatus("thinking");
+          continue;
+        }
+
         await this.#handleProviderEvent(event);
         if (event.type === "turn_done" || event.type === "error") break;
       }
@@ -1590,6 +1628,7 @@ export class Session {
       this.#persistAndBuffer(errorMsg);
       this.#broadcastRaw(errorMsg);
     } finally {
+      this.#pendingMidTurnCount = 0; // safety: reset on any exit path
       this.#completeActiveTools();
       this.#flushActiveAssistant();
       this.#finalizeActiveThinking();

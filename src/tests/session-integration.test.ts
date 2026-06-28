@@ -151,6 +151,33 @@ function waitForIdle(session: Session, timeoutMs = 8000): Promise<void> {
   });
 }
 
+/**
+ * Resolve when the session broadcasts a session.status_change with the given
+ * status. Checks the current status first. Rejects after timeoutMs.
+ */
+function waitForStatus(session: Session, targetStatus: string, timeoutMs = 4000): Promise<void> {
+  if (session.status === targetStatus) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const watcherId = randomUUID();
+    const timer = setTimeout(() => {
+      session.detach(watcherId);
+      reject(new Error(`session did not reach '${targetStatus}' within ${timeoutMs}ms — status=${session.status}`));
+    }, timeoutMs);
+    const watcher: AttachedClient = {
+      id: watcherId,
+      auth: TEST_AUTH,
+      send(msg) {
+        if (msg.type === "session.status_change" && msg.status === targetStatus) {
+          clearTimeout(timer);
+          session.detach(watcherId);
+          resolve();
+        }
+      },
+    };
+    session.attach(watcher);
+  });
+}
+
 // ── T1: Async event ordering ──────────────────────────────────────────────────
 
 describe("T1 – async event ordering", () => {
@@ -804,5 +831,128 @@ describe("T8 – regression guards: text overlap + stale status", () => {
       .at(-1) as { toolStateUpdate?: { phase?: string } } | undefined;
     const finalPhase = lastDelta?.toolStateUpdate?.phase ?? (toolMsg as { tool?: { state?: { phase?: string } } }).tool?.state?.phase;
     expect(finalPhase).toBe("completed");
+  });
+});
+
+// ── T9: Mid-turn message handling ─────────────────────────────────────────────
+
+describe("T9 – mid-turn message handling", () => {
+  /**
+   * Regression test for the bug where #consumeEvents broke on the first
+   * turn_done (the interrupted partial turn) and left the continuation turn
+   * with no consumer, causing the session to stop dead with an error instead
+   * of processing the injected message.
+   *
+   * The test drives a custom TurnRun directly:
+   *   1. Emit text_delta so the session enters "thinking" status.
+   *   2. Wait for the mid-turn send() to arrive (via pushMidTurn).
+   *   3. Emit turn_done(isError, "conversation ended mid-turn") — the aborted turn.
+   *   4. Emit the continuation turn (text_delta + text_done + turn_done(success)).
+   */
+  it("mid-turn message is consumed as a continuation turn, not an error stop", async () => {
+    const queue = new AsyncQueue<ProviderEvent>();
+    let notifyMidTurnReceived: (() => void) | null = null;
+
+    // Custom SessionProvider whose TurnRun supports pushMidTurn.
+    const provider: import("../daemon/providers/interface.js").SessionProvider = {
+      id: "claude",
+      displayName: "MidTurnTest",
+      onRecoveryNeeded: undefined,
+      backingSessionId: "mid-turn-test-backing",
+      hasQueried: false,
+      queuedMessages: 0,
+      resetToNewSession() {},
+      setHasQueried(_v: boolean) { },
+      async teardown() { queue.close(); },
+      async dispose() { queue.close(); },
+      async listModels() { return []; },
+
+      runTurn(_opts: import("../daemon/providers/interface.js").TurnOpts): TurnRun {
+        void (async () => {
+          await Promise.resolve(); // yield so #consumeEvents loop has started
+          // First turn: emit a partial text_delta so the session enters "thinking",
+          // then stall until the mid-turn message arrives via pushMidTurn.
+          queue.push({ type: "text_delta", content: "Working on original task..." });
+          await new Promise<void>((r) => { notifyMidTurnReceived = r; });
+          // Simulate SDK interrupting the turn when a now-priority message lands.
+          queue.push({
+            type: "turn_done",
+            result: mockResult({ providerId: "claude", isError: true, errorMessage: "conversation ended mid-turn" }),
+          });
+          // Continuation turn for the injected mid-turn message.
+          queue.push({ type: "text_delta", content: "Continuing with your request." });
+          queue.push({ type: "text_done", content: "Continuing with your request." });
+          queue.push({ type: "turn_done", result: mockResult({ providerId: "claude" }) });
+          queue.close();
+        })();
+
+        return {
+          events: queue,
+          interrupt: async () => { queue.close(); },
+          pushMidTurn: (_content: string, _priority: string) => {
+            notifyMidTurnReceived?.();
+          },
+        };
+      },
+    };
+
+    // makeSession() requires MockSessionProvider; construct Session directly.
+    const id = randomUUID();
+    store.createSession({
+      id,
+      name: "mid-turn-integ",
+      workdir: tmp,
+      status: "idle",
+      createdBy: TEST_AUTH.sub,
+      createdAt: new Date().toISOString(),
+      attachedClients: 0,
+      accountId: TEST_AUTH.accountId!,
+      projectId: TEST_AUTH.projectId!,
+    });
+    const { Session: SessionCtor } = await import("../daemon/session.js");
+    const session = new SessionCtor({
+      name: "mid-turn-integ",
+      workdir: tmp,
+      auth: TEST_AUTH,
+      store,
+      transcriptStore,
+      existingId: id,
+      _testProvider: provider as unknown as import("../daemon/providers/mock/session-provider.js").MockSessionProvider,
+    });
+
+    const { client, received } = makeClient();
+    session.attach(client);
+
+    // Start the first turn.
+    await session.send("original task", TEST_AUTH);
+
+    // Wait until the session is "thinking" before sending the mid-turn message.
+    await waitForStatus(session, "thinking");
+
+    // Send mid-turn message — triggers pushMidTurn on the active run.
+    await session.send("mid-turn add something", TEST_AUTH);
+
+    // Session must reach idle (not error) after both turns complete.
+    await waitForIdle(session);
+
+    expect(session.status).toBe("idle");
+
+    // No "Error: conversation ended mid-turn" should appear in the scrollback.
+    const errorMsgs = received.filter(
+      (m) =>
+        m.type === "session.message" &&
+        (m as { role?: string }).role === "system" &&
+        typeof (m as { content?: unknown }).content === "string" &&
+        ((m as { content: string }).content).startsWith("Error:"),
+    );
+    expect(errorMsgs).toHaveLength(0);
+
+    // The continuation assistant message from the mid-turn response must exist.
+    const assistantMsgs = received.filter(
+      (m) => m.type === "session.message" && (m as { role?: string }).role === "assistant",
+    );
+    expect(assistantMsgs.length).toBeGreaterThan(0);
+    const lastAssistant = assistantMsgs.at(-1) as { content?: string };
+    expect(lastAssistant?.content).toContain("Continuing");
   });
 });
