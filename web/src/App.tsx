@@ -18,9 +18,11 @@ import {
   bootstrap,
   connectionStatus,
   newRequestId,
+  request,
   send,
 } from "./state/connection";
-import { focusedSession, focusedSessionId } from "./state/sessions";
+import { focusedSession, focusedSessionId, mergeSession } from "./state/sessions";
+import type { SessionInfo } from "./protocol/types";
 import { resetClaudeConfig } from "./state/claude-config";
 import { installApprovalNotifications } from "./state/desktop-notifications";
 
@@ -79,12 +81,23 @@ const App: Component = () => {
       if (!auth || !id || attached.has(id)) return;
       // Don't attach until the socket is actually connected.
       if (connectionStatus().kind !== "connected") return;
-      try {
-        send({ type: "session.attach", id: newRequestId(), sessionId: id });
-        attached.add(id);
-      } catch (err) {
-        console.warn("[codeoid] attach failed:", err);
-      }
+      // Mark attached optimistically so concurrent effect firings don't send
+      // duplicate attaches. On failure, remove so the next focus change retries.
+      attached.add(id);
+      const reqId = newRequestId();
+      request({ type: "session.attach", id: reqId, sessionId: id })
+        .then((data) => {
+          // The attach response includes the session's current SessionInfo.
+          // Update local state immediately so the status dot reflects reality
+          // (e.g. idle) rather than whatever stale value was last seen.
+          if (data && typeof data === "object" && "id" in (data as object)) {
+            mergeSession(data as SessionInfo);
+          }
+        })
+        .catch((err) => {
+          attached.delete(id);
+          console.warn("[codeoid] attach failed:", err);
+        });
     }),
   );
 

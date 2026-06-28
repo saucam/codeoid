@@ -9,21 +9,10 @@
  *   - Scrollback stores merged SessionMessage (not deltas)
  */
 
-import {
-  query,
-  type Query,
-  type SDKMessage,
-  type SDKUserMessage,
-  type PreToolUseHookInput,
-  type SubagentStartHookInput,
-  type SubagentStopHookInput,
-  type McpServerConfig,
-} from "@anthropic-ai/claude-agent-sdk";
-import { AsyncQueue } from "./async-queue.js";
+import { ClaudeProvider } from "./providers/claude/index.js";
+import { CanonicalHistoryAccumulator } from "./providers/canonical.js";
+import type { ProviderEvent, NormalizedTurnResult, TurnRun, ToolApprovalFn, SessionProvider } from "./providers/interface.js";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import type {
   AuthContext,
   SessionInfo,
@@ -48,17 +37,13 @@ import { contextWindowForModel } from "./context-windows.js";
 import {
   EpisodeChunker,
   IndexScheduler,
-  buildMemoryMcpServer,
   workspaceIdFromPath,
   type MemoryEngine,
 } from "./memory/index.js";
 import type { Attachment } from "../protocol/types.js";
 import { resolveAttachments } from "./attachments.js";
 import type { CodeoidConfig } from "../config.js";
-import {
-  type CompressionRegistry,
-  rewriteBashToolInput,
-} from "./compress/index.js";
+import type { CompressionRegistry } from "./compress/index.js";
 import { findModel, resolveModelId } from "./models.js";
 import {
   callContextSize,
@@ -114,6 +99,12 @@ export interface SessionCreateOptions {
    * rewrites Bash commands to route through the wrapper CLI when enabled.
    */
   compressionRegistry?: CompressionRegistry;
+  /**
+   * Provider override for testing. When present, replaces ClaudeProvider so
+   * integration tests run without the Claude Agent SDK subprocess.
+   * Name prefix signals this is test-only infrastructure — do not use in production.
+   */
+  _testProvider?: SessionProvider;
 }
 
 export class Session {
@@ -145,18 +136,27 @@ export class Session {
   #transcriptStore: TranscriptStore;
   #identityManager?: AgentIdentityManager;
   #agentIdentity: MessageIdentity;
-  #query: Query | null = null;
-  #abortController: AbortController | null = null;
   #scrollback = new ScrollbackBuffer();
+  #provider!: SessionProvider;
+  #activeRun: TurnRun | null = null;
+  #eventConsumerTask: Promise<void> | null = null;
+  #accumulator = new CanonicalHistoryAccumulator();
+  // Tracks the sender of the most recently started turn. The onRecoveryNeeded
+  // closure reads this instead of closing over the original send()'s sender,
+  // which may have been overwritten by a subsequent send() before recovery fires.
+  #currentSender: AuthContext | null = null;
+  #approvalIdToMessageId = new Map<string, string>();
+  // Pending ZeroID registration promises keyed by subagent id. tool_start
+  // awaits this fence before attributing identity so the real WIMSE URI is
+  // used even for a subagent's very first tool call.
+  #subagentRegistrations = new Map<string, Promise<void>>();
   #seq = 0;
   #memory?: MemoryEngine;
   #chunker?: EpisodeChunker;
   #indexScheduler?: IndexScheduler;
   #workspaceId: string;
 
-  // Compression (Layer B) — toggled via config.compress.enabled.
   #config?: CodeoidConfig;
-  #compressionRegistry?: CompressionRegistry;
 
   // ── Model selection ───────────────────────────────────────────────────
   // Both fields resolved to full Anthropic model ids (never aliases). Null
@@ -171,7 +171,6 @@ export class Session {
   // session.id so we can rotate the underlying context while keeping the
   // user-visible identity stable. Initialized to this.id at construction;
   // mutates when rotate() fires.
-  #claudeCodeSessionId!: string;
   // When true, the next send() injects the task-anchor seed prefix so the
   // fresh context knows it's a continuation and memory recall is the path
   // to prior detail. Cleared after the first send post-rotation.
@@ -241,19 +240,6 @@ export class Session {
       active: boolean;
     }
   >();
-  // SDK tool_use_id → agent_id that invoked it. Populated in the PreToolUse
-  // hook, used when we later see the tool_use in an assistant message.
-  #toolUseAgentId = new Map<string, string>();
-
-  // Track whether we've run a query before (for resume vs new session)
-  #hasQueried = false;
-  #onModels?: (models: ReadonlyArray<{ value: string; displayName: string; description?: string }>) => void;
-  // Last content pushed into the input queue this turn — replayed if a
-  // resume fails because the backing Claude Code conversation is missing.
-  #lastPushedContent: string | null = null;
-  // One-shot guard so backing-session recovery can't loop indefinitely.
-  #backingRecoveryAttempted = false;
-
   // ── Per-turn usage accumulator (primary vs subagent split) ─────────────
   // SDK's `result.usage` sums ALL API calls in a turn — including any
   // subagents spawned via the Task tool. But subagents have their own
@@ -277,18 +263,6 @@ export class Session {
   #primaryPeakContext = 0;
   /** Running total of cache_read from primary calls only (for honest avg). */
   #primaryCacheReadCumulative = 0;
-
-  // ── Stream input mode (VSCode-style mid-turn messaging) ───────────────
-  // One long-running `query()` per (session, backing_session_id). The
-  // input queue lives for that query's lifetime and accepts new user
-  // messages at any time — mid-turn, after a turn, doesn't matter. The
-  // SDK's `priority` field on SDKUserMessage controls whether a mid-turn
-  // push interrupts immediately ("now") or waits for turn end ("next"/"later").
-  //
-  // Lifecycle: created lazily on first send, torn down on rotation /
-  // destroy / SDK error. Subsequent sends restart the loop.
-  #inputQueue: AsyncQueue<SDKUserMessage> | null = null;
-  #consumerTask: Promise<void> | null = null;
 
   // Active streaming message — accumulates deltas into a complete message for scrollback
   #activeAssistantMsg: SessionMessage | null = null;
@@ -314,6 +288,9 @@ export class Session {
   // blocks (emitted in SDKUserMessage) back to the originating tool_call message
   // so we can record the real tool output in scrollback, transcript, and memory.
   #toolUseIdToMessageId = new Map<string, string>();
+  // Reverse of #toolUseIdToMessageId — needed so _applyInterruptedStateToTool
+  // and the denial path can clean up both maps without a full scan.
+  #messageIdToToolUseId = new Map<string, string>();
   // messageIds of tool_calls already closed via a tool_result — so the
   // fallback #completeActiveTools() path doesn't clobber their output.
   #toolCallsClosedByResult = new Set<string>();
@@ -339,16 +316,9 @@ export class Session {
     this.#store = opts.store;
     this.#transcriptStore = opts.transcriptStore;
     this.#identityManager = opts.identityManager;
-    this.#onModels = opts.onModels;
     this.#memory = opts.memory;
     this.#config = opts.config;
-    this.#compressionRegistry = opts.compressionRegistry;
     this.#workspaceId = workspaceIdFromPath(opts.workdir);
-    // Initialize backing Claude Code session id. On resume, the Store
-    // may already have one — restore it. Otherwise default to this.id
-    // so existing sessions remain backwards-compatible.
-    const persistedBackingId = this.#store.getClaudeCodeSessionId(this.id);
-    this.#claudeCodeSessionId = persistedBackingId ?? this.id;
     // Rotation counters — populated from Store so they survive restart.
     const stats = this.#store.getRotationStats(this.id);
     this.#rotationCount = stats.count;
@@ -366,6 +336,17 @@ export class Session {
       persistedModel.fallbackModel ??
       resolveModelId(opts.config?.session.fallbackModel ?? "") ??
       null;
+
+    this.#provider = opts._testProvider ?? new ClaudeProvider({
+      sessionId: this.id,
+      initialBackingId: this.#store.getClaudeCodeSessionId(this.id) ?? this.id,
+      store: opts.store,
+      identityManager: opts.identityManager,
+      memory: opts.memory,
+      config: opts.config,
+      compressionRegistry: opts.compressionRegistry,
+      onModels: opts.onModels,
+    });
 
     // Restore any pinned files the user had on this session before.
     try {
@@ -693,23 +674,14 @@ export class Session {
     if (this.#justRotated) this.#justRotated = false;
     const effectivePrompt = `${rotationSeed}${promptPrefix}${text}`;
 
-    // Ensure a long-running query is bound to this session's backing
-    // Claude Code session. First send + post-rotation sends start the
-    // consumer loop; subsequent sends re-use it and push into the queue.
-    await this.#ensureQueryLoop(sender);
-
     // Resolve priority. Explicit caller value wins. Otherwise: `now` when
     // the session was already mid-turn (VSCode-style responsiveness);
-    // `later` for the idle case (identical semantics to `now` when nothing
-    // is in flight but cheaper to reason about).
+    // `later` for the idle case.
     const effectivePriority: "now" | "next" | "later" =
       priority ?? (wasWorking ? "now" : "later");
 
-    // Mid-turn pushes interrupt Claude's in-flight LLM call (the SDK aborts
-    // the HTTP stream and restarts with the new context). That costs 1-2s
-    // of time-to-first-token latency — surface an info message so the user
-    // has immediate feedback that the push was received.
-    if (wasWorking) {
+    // For keep-warm mid-turn pushes (ClaudeProvider), inject directly into the live run.
+    if (wasWorking && this.#activeRun?.pushMidTurn) {
       const hint =
         effectivePriority === "now"
           ? "⎆ Queued mid-turn — Claude is re-integrating with new context"
@@ -726,595 +698,78 @@ export class Session {
       );
       this.#persistAndBuffer(midTurnMsg);
       this.#broadcastRaw(midTurnMsg);
+      this.#accumulator.pushUserTurn(effectivePrompt);
+      this.#activeRun.pushMidTurn(effectivePrompt, effectivePriority ?? "now");
+      this.#setStatus("thinking");
+      this.#broadcastInfoUpdate();
+      return;
     }
 
-    // Push the user message into the input stream. Claude's consumer loop
-    // picks it up — immediately if `priority: "now"`, after current turn
-    // if `"next"`, FIFO otherwise. Fire-and-forget from our side.
-    this.#pushUserMessage(effectivePrompt, effectivePriority);
+    await this.#ensureAgentIdentity(sender);
+    this.#currentSender = sender;
+
+    // Wire recovery handler. Uses #currentSender rather than closing over `sender`
+    // so that if a subsequent send() updates the active sender before recovery fires,
+    // audit events are attributed to the turn that actually triggered recovery.
+    this.#provider.onRecoveryNeeded = (content: string) => {
+      const recoverySender = this.#currentSender ?? sender;
+      this.#sendChain = this.#sendChain.then(async () => {
+        // Reset to a fresh backing session for recovery.
+        const newBackingId = randomUUID();
+        this.#provider.resetToNewSession(newBackingId);
+        try {
+          this.#store.setClaudeCodeSessionId(this.id, newBackingId);
+        } catch (e) {
+          console.error(
+            `[codeoid/session ${this.id}] failed to persist recovered backing id: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+        // Do NOT pushUserTurn(content) here — the original send() already
+        // pushed it before runTurn(). Pushing again duplicates the user turn.
+        const recoveryRun = this.#provider.runTurn({
+          history: this.#accumulator.history,
+          userMessage: content,
+          model: this.#model ?? undefined,
+          fallbackModel: this.#fallbackModel ?? undefined,
+          workdir: this.workdir,
+          systemPromptAppend: this.#memory ? this.#buildMemoryPromptAppend() : undefined,
+          canUseTool: this.#makeCanUseToolFn(recoverySender),
+          sender: recoverySender,
+        });
+        this.#activeRun = recoveryRun;
+        this.#eventConsumerTask = this.#consumeEvents(recoveryRun, recoverySender);
+        this.#setStatus("thinking");
+      });
+    };
+
+    this.#accumulator.pushUserTurn(effectivePrompt);
+    const run = this.#provider.runTurn({
+      history: this.#accumulator.history,
+      userMessage: effectivePrompt,
+      model: this.#model ?? undefined,
+      fallbackModel: this.#fallbackModel ?? undefined,
+      workdir: this.workdir,
+      systemPromptAppend: this.#memory ? this.#buildMemoryPromptAppend() : undefined,
+      canUseTool: this.#makeCanUseToolFn(sender),
+      sender,
+    });
+    this.#activeRun = run;
+    this.#eventConsumerTask = this.#consumeEvents(run, sender);
     this.#setStatus("thinking");
     // Broadcast info_update so StatusBar reflects the new queue depth.
     this.#broadcastInfoUpdate();
   }
 
-  /**
-   * Lazily start the long-running Claude Code query bound to this
-   * session's backing id. Idempotent — returns immediately when a
-   * consumer task is already healthy.
-   */
-  async #ensureQueryLoop(sender: AuthContext): Promise<void> {
-    if (this.#consumerTask && this.#inputQueue && !this.#inputQueue.closed) {
-      return; // already running
-    }
-
-    const im = this.#identityManager;
-
-    // Register agent identity on very first query — the SessionStart hook
-    // doesn't fire via SDK query(), so we do it here once per session.
-    if (im && !this.#hasQueried && this.#agentIdentity.sub.startsWith("agent:")) {
-      try {
-        const { wimseUri } = await im.registerSessionAgent(
-          this.id,
-          this.name,
-          sender.sub,
-        );
-        this.#agentIdentity = {
-          sub: wimseUri,
-          name: `${this.name} agent`,
-          type: "agent",
-        };
-        console.log(`[codeoid] agent identity registered: ${wimseUri}`);
-        const infoMsg = this.#makeMessage(
-          "info",
-          "Agent identity registered",
-          SYSTEM_IDENTITY,
-          undefined,
-          undefined,
-          {
-            event: "identity.registered",
-            agentUri: wimseUri,
-            sessionName: this.name,
-            createdBy: sender.sub,
-          },
-        );
-        this.#persistAndBuffer(infoMsg);
-        this.#broadcastRaw(infoMsg);
-      } catch (err) {
-        console.error(
-          "[codeoid] agent identity registration failed:",
-          err instanceof Error ? err.message : err,
-        );
-      }
-    }
-
-    const sessionId = this.id;
-    this.#abortController = new AbortController();
-    this.#inputQueue = new AsyncQueue<SDKUserMessage>();
-
-    // First-ever query creates the backing session. Subsequent queries (after
-    // rotation or daemon restart) resume. `#hasQueried` persists across the
-    // Session's life to distinguish these cases.
-    const sessionOpts = this.#hasQueried
-      ? { resume: this.#claudeCodeSessionId }
-      : { sessionId: this.#claudeCodeSessionId };
-
-    // MCP servers handed to the SDK: the user's externally-configured servers
-    // (from ~/.claude.json — picked up here because settingSources:["project"]
-    // doesn't load the user scope) PLUS codeoid's in-process memory server.
-    // codeoid's own server wins on a name collision. Re-read each query start,
-    // so `/rotate` (or a restart) makes a newly-added MCP server visible.
-    const merged: Record<string, McpServerConfig> = {
-      ...loadUserMcpServers(this.workdir),
-      ...(this.#memory
-        ? {
-            codeoid_memory: buildMemoryMcpServer(this.#memory, {
-              workspaceId: this.#workspaceId,
-              sessionId: this.id,
-            }),
-          }
-        : {}),
-    };
-    const mcpServers = Object.keys(merged).length > 0 ? merged : undefined;
-
-    this.#query = query({
-      prompt: this.#inputQueue,
-      options: {
-        cwd: this.workdir,
-        abortController: this.#abortController,
-        // ONLY codeoid's own read-only memory MCP tools are pre-approved at
-        // the SDK layer — they're internal recall, never a user-facing action,
-        // so they should never prompt. Every real tool (Read/Grep/Glob/Write/
-        // Edit/Bash/Agent) is deliberately ABSENT here so it flows through
-        // canUseTool and the session's execution MODE actually governs it:
-        //   - interactive   → every tool prompts
-        //   - guarded       → reads (isSafeTool) auto-approve, writes/exec prompt
-        //   - autonomous    → everything auto until the write/exec budget runs out
-        // Previously Write/Edit/Bash were listed here, which silently bypassed
-        // the mode system — the dangerous tools never prompted regardless of mode.
-        allowedTools: this.#memory
-          ? [
-              "mcp__codeoid_memory__recall",
-              "mcp__codeoid_memory__recall_file",
-              "mcp__codeoid_memory__timeline",
-            ]
-          : [],
-        permissionMode: "default",
-        includePartialMessages: true,
-        persistSession: true,
-        // Adaptive thinking — lets the model decide how deeply to reason per
-        // turn. Without this, many prompts ship thinking=disabled and the
-        // TUI's gray reasoning block stays empty. Adaptive = small prompts
-        // get no overhead, hard prompts get visible reasoning.
-        thinking: { type: "adaptive" as const },
-        // Model selection — null means "leave to Claude Code's default"
-        // (don't force a specific model on users who haven't opted in).
-        // When set, propagates to the SDK subprocess via the `--model` CLI
-        // flag and the Messages API's `model` field.
-        ...(this.#model ? { model: this.#model } : {}),
-        // Fallback model: SDK retries here on 429/529 capacity errors so
-        // the user doesn't see a hard failure during rate-limited windows.
-        ...(this.#fallbackModel ? { fallbackModel: this.#fallbackModel } : {}),
-        // Capture subprocess stderr into the daemon log so spawn failures are debuggable.
-        stderr: (data: string) => {
-          process.stderr.write(`[claude-subprocess ${this.id.slice(0, 8)}] ${data}`);
-        },
-        ...(mcpServers ? { mcpServers } : {}),
-        ...(this.#memory
-          ? {
-              // Build the system-prompt append by stacking:
-              //   (1) MEMORY_SYSTEM_PROMPT_APPEND — stable across turns, cached by
-              //       prompt cache since the string never changes.
-              //   (2) IndexScheduler.get() — the workspace memory index. Cheaply
-              //       rebuilt when episodes accumulate; gated by debounce so cache
-              //       invalidation stays bounded to ~1/minute of active work.
-              // Putting the stable text first lets the prompt cache hold more
-              // often than if the dynamic index came first.
-              systemPrompt: {
-                type: "preset" as const,
-                preset: "claude_code" as const,
-                append: this.#buildMemoryPromptAppend(),
-              },
-            }
-          : {}),
-        ...sessionOpts,
-        settingSources: ["project"],
-
-        hooks: {
-          PreToolUse: [{
-            hooks: [async (rawInput) => {
-              const input = rawInput as PreToolUseHookInput & { agent_id?: string };
-              im?.auditToolCall(sessionId, input.tool_name, JSON.stringify(input.tool_input));
-              // Record which agent (parent session or sub-agent) is invoking
-              // this tool_use_id. Used later in #handleAgentMessage to tag
-              // the emitted tool_call SessionMessage with the right identity.
-              if (input.tool_use_id && input.agent_id) {
-                this.#toolUseAgentId.set(input.tool_use_id, input.agent_id);
-              }
-
-              // Compression (Layer B): rewrite Bash tool_input to route
-              // through the codeoid wrapper CLI when enabled + eligible.
-              // Returns null on any non-applicable path — then we pass
-              // through unchanged.
-              if (this.#config && this.#compressionRegistry) {
-                const rewritten = rewriteBashToolInput({
-                  toolName: input.tool_name,
-                  toolInput: (input.tool_input ?? {}) as Record<string, unknown>,
-                  config: this.#config,
-                  registry: this.#compressionRegistry,
-                  workdir: this.workdir,
-                });
-                if (rewritten) {
-                  return {
-                    hookSpecificOutput: {
-                      hookEventName: "PreToolUse" as const,
-                      updatedInput: rewritten,
-                    },
-                  };
-                }
-              }
-              return {};
-            }],
-          }],
-
-          SubagentStart: [{
-            hooks: [async (rawInput) => {
-              const input = rawInput as SubagentStartHookInput;
-              const agentId = input.agent_id ?? "unknown";
-              const agentType = input.agent_type ?? "unknown";
-              let childIdentity: MessageIdentity = {
-                sub: `anonymous:subagent:${agentId}`,
-                name: agentType,
-                type: "subagent",
-              };
-              if (im) {
-                try {
-                  const result = await im.registerSubagent(sessionId, agentId, agentType);
-                  childIdentity = {
-                    sub: result.wimseUri,
-                    name: agentType,
-                    type: "subagent",
-                  };
-                } catch (err) {
-                  console.error(
-                    `[codeoid] subagent register failed: ${err instanceof Error ? err.message : String(err)}`,
-                  );
-                }
-              }
-              this.#subagents.set(agentId, {
-                identity: childIdentity,
-                agentType,
-                spawnedAt: Date.now(),
-                active: true,
-              });
-              const infoMsg = this.#makeMessage(
-                "info",
-                `Sub-agent spawned: ${agentType}`,
-                this.#agentIdentity,
-                undefined,
-                undefined,
-                {
-                  event: "subagent.spawned",
-                  subagentUri: childIdentity.sub,
-                  agentType,
-                  parentAgent: this.#agentIdentity.sub,
-                },
-              );
-              this.#persistAndBuffer(infoMsg);
-              this.#broadcastRaw(infoMsg);
-              this.#broadcastInfoUpdate();
-              return {};
-            }],
-          }],
-
-          SubagentStop: [{
-            hooks: [async (rawInput) => {
-              const input = rawInput as SubagentStopHookInput;
-              const agentId = input.agent_id ?? "unknown";
-              await im?.deactivateSubagent(sessionId, agentId);
-              // Drop the entry entirely instead of marking inactive.
-              // The previous behaviour kept every spawned subagent in
-              // the map for the session's lifetime; long sessions with
-              // many tool-using turns leaked O(turns) entries, and
-              // `toInfo()` walked the whole map on every status flip.
-              // ZeroID identity manager already records terminal
-              // state via deactivateSubagent.
-              if (this.#subagents.delete(agentId)) {
-                this.#broadcastInfoUpdate();
-              }
-              return {};
-            }],
-          }],
-        },
-
-        canUseTool: async (toolName, input) => {
-          const approvalId = randomUUID();
-          const toolId = randomUUID();
-          const inputObj = input as Record<string, unknown>;
-
-          // Mode-based auto-approve check — runs before we even emit a
-          // waiting_confirmation message.
-          const autoApprove = this.#shouldAutoApprove(toolName);
-          if (autoApprove) {
-            const autoMsg = this.#makeMessage(
-              "tool_call",
-              `${toolName}(${Object.keys(inputObj).join(", ")})`,
-              this.#agentIdentity,
-              undefined,
-              {
-                toolId,
-                name: toolName,
-                input: inputObj,
-                state: { phase: "executing", input: inputObj } as unknown as ToolState,
-              },
-            );
-            this.#activeToolMsgIds.push(autoMsg.messageId);
-            this.#toolCallMessages.set(autoMsg.messageId, autoMsg);
-            this.#persistAndBuffer(autoMsg);
-            this.#broadcastRaw(autoMsg);
-            this.#store.audit(sender.sub, "session.auto_approve", this.id, `tool=${toolName} mode=${this.#mode}`);
-            this.#setStatus("tool_running");
-            return { behavior: "allow" as const, updatedInput: inputObj };
-          }
-
-          // Emit tool_call message with waiting_confirmation state
-          const toolMsg = this.#makeMessage(
-            "tool_call",
-            `${toolName}(${Object.keys(inputObj).join(", ")})`,
-            this.#agentIdentity,
-            undefined,
-            {
-              toolId,
-              name: toolName,
-              input: inputObj,
-              state: {
-                phase: "waiting_confirmation",
-                input: inputObj,
-                description: `${toolName}(${Object.keys(inputObj).join(", ")})`,
-                approvalId,
-              },
-            },
-          );
-          this.#persistAndBuffer(toolMsg);
-          this.#broadcastRaw(toolMsg);
-          this.#setStatus("waiting_approval");
-
-          const { approved, updatedInput } = await this.#waitForApproval(approvalId);
-          // Approved → the tool now executes; denied → control returns to the
-          // model, which resumes reasoning.
-          this.#setStatus(approved ? "tool_running" : "thinking");
-
-          // Finalize the approval message in the CANONICAL store, not just a
-          // live broadcast. The decision is terminal — the prompt is answered.
-          //
-          // BUGFIX: previously this only `#broadcastRaw`'d a delta, leaving the
-          // persisted/scrollback copy stuck at `waiting_confirmation`. Any
-          // scrollback replay (client re-attach / reconnect) then re-surfaced
-          // the answered prompt — the AskUserQuestion (and any approval) window
-          // popping up again after it was already answered. Updating the stored
-          // message + appending to the transcript (the same mechanism normal
-          // tool completion uses) makes replay reflect the resolved state.
-          const resolvedState = (
-            approved
-              ? { phase: "completed", success: true, output: "" }
-              : { phase: "cancelled", reason: "denied" }
-          ) as unknown as ToolState;
-          this.#scrollback.updateMessage(toolMsg.messageId, (m) => {
-            const sm = m as SessionMessage;
-            if (sm.tool) sm.tool.state = resolvedState;
-          });
-          const resolvedMsg: SessionMessage = {
-            ...toolMsg,
-            tool: { ...toolMsg.tool!, state: resolvedState },
-            timestamp: new Date().toISOString(),
-          };
-          this.#transcriptStore.append(this.id, resolvedMsg, this.#seq++).catch(() => {});
-          this.#broadcastRaw({
-            type: "session.message.delta",
-            sessionId: this.id,
-            messageId: toolMsg.messageId,
-            toolStateUpdate: resolvedState,
-            timestamp: resolvedMsg.timestamp,
-          });
-
-          if (approved) {
-            this.#store.audit(sender.sub, "session.approve", this.id, `tool=${toolName} approvalId=${approvalId}`);
-
-            // updatedInput must be present even when we don't change anything —
-            // SDK's runtime Zod schema rejects `{behavior:"allow"}` without
-            // it, even though the published TS types say it's optional.
-            //
-            // SECURITY: only allow `updatedInput` to inject NEW fields the
-            // tool legitimately needs from a form-style approval. Without a
-            // whitelist, a client with `session:approve` could swap a Bash
-            // tool's `command` at the moment of approval — UI shows the
-            // user `Bash(ls)` (the input recorded in the
-            // waiting_confirmation state), they approve, but the daemon
-            // hands the SDK whatever patch the client supplied. Per-tool
-            // allowlist below: AskUserQuestion answers map only;
-            // everything else falls through to the original input.
-            const sanitizedPatch = sanitizeApprovalPatch(toolName, updatedInput);
-            const merged: Record<string, unknown> = sanitizedPatch
-              ? { ...inputObj, ...sanitizedPatch }
-              : inputObj;
-            return { behavior: "allow" as const, updatedInput: merged };
-          }
-
-          this.#store.audit(sender.sub, "session.deny", this.id, `tool=${toolName} approvalId=${approvalId}`);
-          return { behavior: "deny" as const, message: "Denied by user" };
-        },
-      },
-    });
-
-    this.#hasQueried = true;
-
-    // Fetch the live model catalog the backend supports and hand it to the
-    // manager to cache daemon-wide. Best-effort, never blocks the turn —
-    // supportedModels() resolves once the SDK finishes initializing.
-    if (this.#onModels) {
-      void this.#query
-        .supportedModels()
-        .then((m) => this.#onModels?.(m))
-        .catch(() => {});
-    }
-
-    // Drive the SDK stream in the background. The consumer never blocks
-    // send() — user messages keep flowing through the queue while Claude
-    // emits events at its own pace.
-    const query$ = this.#query;
-    const ac = this.#abortController;
-    // Loop-local snapshot of the input queue. The teardown `finally` below
-    // must only clear the queue/task slots if a *newer* loop hasn't already
-    // replaced them: an un-awaited interrupt() followed by a fast send() can
-    // build a fresh loop before this finally runs, and without these identity
-    // guards we'd null the new loop's queue/task and silently drop the next
-    // message (the next #pushUserMessage would throw into a swallowed catch).
-    const queue$ = this.#inputQueue;
-    // Set when a resume fails because the backing Claude Code conversation
-    // doesn't exist — drives the post-teardown replay below.
-    let recoverContent: string | null = null;
-    let selfTask: Promise<void> | null = null;
-    selfTask = this.#consumerTask = (async () => {
-      try {
-        for await (const msg of query$) {
-          this.#handleAgentMessage(msg);
-        }
-      } catch (err) {
-        if (!ac.signal.aborted) {
-          const emsg = err instanceof Error ? err.message : String(err);
-          // A resume against a backing conversation that was never actually
-          // created (e.g. a session whose first query failed before the SDK
-          // subprocess spawned) surfaces as "No conversation found with
-          // session ID". Don't dead-end the session — flag a one-shot replay
-          // into a fresh backing session so the user's turn isn't lost.
-          if (
-            this.#hasQueried &&
-            !this.#backingRecoveryAttempted &&
-            this.#lastPushedContent !== null &&
-            /No conversation found with session ID/i.test(emsg)
-          ) {
-            console.error(
-              `[codeoid/session ${this.id}] backing session ${this.#claudeCodeSessionId} missing — recreating and replaying turn`,
-            );
-            recoverContent = this.#lastPushedContent;
-          } else {
-            console.error(
-              `[codeoid/session ${this.id}] SDK query failed:`,
-              err instanceof Error ? err.stack ?? err.message : err,
-            );
-            if (err && typeof err === "object") {
-              for (const key of Object.keys(err as object)) {
-                const v = (err as Record<string, unknown>)[key];
-                if (v !== undefined) console.error(`  ${key}:`, v);
-              }
-            }
-            this.#setStatus("error");
-            const errorMsg = this.#makeMessage(
-              "system",
-              `Error: ${emsg}`,
-              SYSTEM_IDENTITY,
-              undefined,
-              undefined,
-              { event: "agent_error", errorCode: "agent_error" },
-            );
-            this.#persistAndBuffer(errorMsg);
-            this.#broadcastRaw(errorMsg);
-          }
-        }
-      } finally {
-        // Cleanup per-loop state. Next send() will start a fresh loop.
-        this.#completeActiveTools();
-        this.#flushActiveAssistant();
-        this.#finalizeActiveThinking();
-        this.#chunker?.onTurnEnd();
-        if (this.#query === query$) this.#query = null;
-        if (this.#abortController === ac) this.#abortController = null;
-        // Always close OUR queue (idempotent if interrupt already did), but
-        // only clear the slot/task if a newer loop hasn't taken over — see
-        // the queue$ snapshot comment above.
-        queue$?.close();
-        if (this.#inputQueue === queue$) this.#inputQueue = null;
-        if (this.#consumerTask === selfTask) this.#consumerTask = null;
-        // Resolve any pending tool approvals — they're awaiting
-        // canUseTool callbacks that will never fire on a torn-down
-        // SDK loop. Without this, the client-side `await
-        // session.approve(...)` hangs and the awaiter promise leaks.
-        // Also flips the matching tool_call rows in scrollback to
-        // `cancelled/interrupted` so the ApprovalBar dismisses.
-        if (this.#pendingApprovals.size > 0) {
-          // Synthetic auth context — only used as the audit subject
-          // for the cancelled deltas we're about to broadcast.
-          const systemAuth: AuthContext = {
-            sub: "system",
-            scopes: [],
-            delegationDepth: 0,
-            accountId: this.accountId,
-            projectId: this.projectId,
-          };
-          for (const [aid, resolveFn] of this.#pendingApprovals.entries()) {
-            resolveFn({ approved: false });
-            this.#dismissStaleApproval(aid, systemAuth);
-          }
-          this.#pendingApprovals.clear();
-        }
-        if (this.#status !== "error") this.#setStatus("idle");
-      }
-
-      // Post-teardown recovery: the backing conversation was missing. Mint a
-      // fresh backing id (forces create, not resume) and replay the pending
-      // turn so the user's message still gets a response. One-shot via
-      // #backingRecoveryAttempted so a persistent failure can't loop.
-      if (recoverContent !== null) {
-        this.#backingRecoveryAttempted = true;
-        const content = recoverContent;
-        // Run recovery THROUGH the send chain. This block executes inside the
-        // consumer task, outside the serialization that send() uses — so if a
-        // user send() arrives during the recovery window, both could call
-        // #ensureQueryLoop and build a second SDK query / push to the wrong
-        // queue. Enqueueing on #sendChain serializes recovery with sends so
-        // exactly one rebuilds the backing loop.
-        const next = this.#sendChain
-          .catch(() => undefined)
-          .then(async () => {
-            const newBackingId = randomUUID();
-            this.#claudeCodeSessionId = newBackingId;
-            this.#hasQueried = false;
-            try {
-              this.#store.setClaudeCodeSessionId(this.id, newBackingId);
-            } catch (e) {
-              console.error(
-                `[codeoid/session ${this.id}] failed to persist recovered backing id: ${e instanceof Error ? e.message : String(e)}`,
-              );
-            }
-            try {
-              await this.#ensureQueryLoop(sender);
-              this.#pushUserMessage(content, "now");
-              this.#setStatus("thinking");
-            } catch (e) {
-              console.error(
-                `[codeoid/session ${this.id}] backing-session recovery failed: ${e instanceof Error ? e.message : String(e)}`,
-              );
-              this.#setStatus("error");
-            }
-          });
-        this.#sendChain = next.then(
-          () => undefined,
-          () => undefined,
-        );
-      }
-    })();
-  }
-
-  /**
-   * Push a user message into the active SDK stream. Must only be called
-   * when `#inputQueue` is non-null (i.e. after #ensureQueryLoop).
-   */
-  #pushUserMessage(
-    content: string,
-    priority: "now" | "next" | "later",
-  ): void {
-    if (!this.#inputQueue) {
-      console.error(
-        `[codeoid/session ${this.id}] push without active query — dropping message`,
-      );
-      return;
-    }
-    const msg: SDKUserMessage = {
-      type: "user",
-      message: { role: "user", content },
-      parent_tool_use_id: null,
-      session_id: this.#claudeCodeSessionId,
-      priority,
-    };
-    this.#lastPushedContent = content;
-    try {
-      this.#inputQueue.push(msg);
-    } catch (err) {
-      console.error(
-        `[codeoid/session ${this.id}] queue push failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-  }
-
-  /**
-   * Tear down the active query loop — used on rotation and destroy.
-   * Closes the input queue (ends the SDK stream cleanly), aborts the
-   * controller, and awaits the consumer task so we don't leave orphan
-   * goroutines draining into a post-rotation session.
-   */
-  async #teardownQueryLoop(): Promise<void> {
-    this.#inputQueue?.close();
-    this.#abortController?.abort();
-    if (this.#consumerTask) {
-      try {
-        await this.#consumerTask;
-      } catch {
-        /* consumer handles its own errors */
-      }
-    }
-    this.#inputQueue = null;
-    this.#consumerTask = null;
-    this.#query = null;
-    this.#abortController = null;
+  async #teardownProvider(): Promise<void> {
+    // Capture before nulling: provider.teardown() may trigger onRecoveryNeeded,
+    // which installs a new #eventConsumerTask. Awaiting the snapshot drains
+    // the old consumer; we intentionally don't null the field again afterward
+    // so the recovery task is not orphaned.
+    const taskToAwait = this.#eventConsumerTask;
+    this.#activeRun = null;
+    this.#eventConsumerTask = null;
+    await this.#provider.teardown();
+    try { await taskToAwait; } catch { /* consumer handles its own errors */ }
   }
 
   /**
@@ -1357,25 +812,16 @@ export class Session {
     this.#persistAndBuffer(infoMsg);
     this.#broadcastRaw(infoMsg);
 
-    const q = this.#query;
-    if (q) {
+    const run = this.#activeRun;
+    if (run) {
       try {
-        // Turn-level stop; keeps the query + backing session alive.
-        await q.interrupt();
-        // The SDK emits a result for the interrupted turn through the
-        // still-open stream; the consumer loop's handler will flip us to
-        // idle. Set it now too so callers/UI see idle immediately.
+        await run.interrupt();
         if (this.#status !== "error") this.#setStatus("idle");
         return;
       } catch {
-        // interrupt() unsupported / mid-init / already-ended — fall through
-        // to the hard-abort path below so the turn definitely stops.
+        // fall through to hard abort
       }
     }
-    // Hard fallback: end the whole stream. Consumer `finally` tears down;
-    // next send() rebuilds a fresh loop.
-    this.#abortController?.abort();
-    this.#inputQueue?.close();
     if (this.#status !== "error") this.#setStatus("idle");
   }
 
@@ -1438,7 +884,7 @@ export class Session {
     this.#store.audit(sender.sub, "session.destroy", this.id);
     // Tear down the streamInput loop cleanly before wiping storage so we
     // don't leave a zombie SDK subprocess alive holding the transcript file.
-    await this.#teardownQueryLoop();
+    await this.#teardownProvider();
     for (const resolve of this.#pendingApprovals.values()) {
       resolve({ approved: false });
     }
@@ -1463,7 +909,7 @@ export class Session {
     // A session with prior scrollback already exists in Claude Code's own
     // persistent session store — next send() must use `resume`, not re-create.
     if (messages.length > 0) {
-      this.#hasQueried = true;
+      this.#provider.setHasQueried(true);
     }
   }
 
@@ -1485,9 +931,9 @@ export class Session {
       rotation: {
         count: this.#rotationCount,
         lastRotatedAt: this.#lastRotatedAt,
-        claudeCodeSessionId: this.#claudeCodeSessionId,
+        claudeCodeSessionId: this.#provider.backingSessionId,
       },
-      queuedMessages: this.#inputQueue?.size ?? 0,
+      queuedMessages: this.#provider.queuedMessages,
       model: this.#model ?? undefined,
       fallbackModel: this.#fallbackModel ?? undefined,
     };
@@ -1507,43 +953,13 @@ export class Session {
    * the DB; #usage is a cache for fast broadcasts. Also handles the error
    * surface (the old inline path used to do this).
    */
-  #recordTurnFromResult(msg: unknown): void {
-    const turn = msg as {
-      usage?: {
-        input_tokens?: number;
-        output_tokens?: number;
-        cache_read_input_tokens?: number;
-        cache_creation_input_tokens?: number;
-      };
-      total_cost_usd?: number;
-      duration_ms?: number;
-      stop_reason?: string | null;
-      is_error?: boolean;
-      error?: unknown;
-      subtype?: string;
-    };
-
-    // Surface error sub-types as system messages (used to happen in the
-    // old inline accumulator).
-    if (turn.subtype && turn.subtype !== "success" && turn.error) {
-      const errorMsg = this.#makeMessage(
-        "system",
-        `Error: ${typeof turn.error === "string" ? turn.error : JSON.stringify(turn.error)}`,
-        SYSTEM_IDENTITY,
-        undefined,
-        undefined,
-        { event: "agent_error" },
-      );
-      this.#persistAndBuffer(errorMsg);
-      this.#broadcastRaw(errorMsg);
-    }
-
+  #recordTurnFromResult(result: NormalizedTurnResult): void {
     // Anthropic semantics: input_tokens = NEW input only (not cache).
     // Total context = input + cache_read + cache_creation.
-    const input = turn.usage?.input_tokens ?? 0;
-    const output = turn.usage?.output_tokens ?? 0;
-    const cacheRead = turn.usage?.cache_read_input_tokens ?? 0;
-    const cacheCreate = turn.usage?.cache_creation_input_tokens ?? 0;
+    const input = result.inputTokens;
+    const output = result.outputTokens;
+    const cacheRead = result.cacheReadTokens;
+    const cacheCreate = result.cacheCreationTokens;
     const total = input + cacheRead + cacheCreate;
     const billable = input + cacheCreate;
     const hitRate = total > 0 ? cacheRead / total : 0;
@@ -1583,8 +999,8 @@ export class Session {
       this.#usage.outputTokens += output;
       this.#usage.cacheReadTokens += cacheRead;
       this.#usage.cacheCreationTokens += cacheCreate;
-      this.#usage.totalCostUsd += turn.total_cost_usd ?? 0;
-      this.#usage.durationMs += turn.duration_ms ?? 0;
+      this.#usage.totalCostUsd += result.totalCostUsd;
+      this.#usage.durationMs += result.durationMs;
       this.#usage.numTurns += 1;
       this.#turnsSinceLastRotation += 1;
       // PEAK tracks primary-only — ignore subagent contributions so a
@@ -1595,7 +1011,7 @@ export class Session {
       );
       this.#usage.lastTurnInputTokens = primaryCtx;
       this.#usage.lastTurnOutputTokens = output;
-      this.#usage.lastTurnCostUsd = turn.total_cost_usd ?? 0;
+      this.#usage.lastTurnCostUsd = result.totalCostUsd;
       this.#usage.lastTurnCacheHitRate = hitRate;
       this.#broadcastInfoUpdate();
       return;
@@ -1610,9 +1026,9 @@ export class Session {
       outputTokens: output,
       cacheReadTokens: cacheRead,
       cacheCreationTokens: cacheCreate,
-      totalCostUsd: turn.total_cost_usd ?? 0,
-      durationMs: turn.duration_ms ?? 0,
-      stopReason: turn.stop_reason ?? undefined,
+      totalCostUsd: result.totalCostUsd,
+      durationMs: result.durationMs,
+      stopReason: result.stopReason,
       totalInputTokens: total,
       billableInputTokens: billable,
       cacheHitRate: hitRate,
@@ -1763,7 +1179,7 @@ export class Session {
 
     // Tear down current stream so the new model kicks in on next send.
     // No effect when no loop is active.
-    await this.#teardownQueryLoop();
+    await this.#teardownProvider();
 
     const desc = findModel(resolved);
     const label = desc ? desc.label : resolved;
@@ -1848,7 +1264,7 @@ export class Session {
    * recall advertising) happens when the NEXT send fires with `#justRotated`.
    */
   async #rotate(sender: AuthContext, reason: "auto" | "manual"): Promise<void> {
-    const previousBackingId = this.#claudeCodeSessionId;
+    const previousBackingId = this.#provider.backingSessionId;
     const newBackingId = randomUUID();
     const now = Date.now();
 
@@ -1856,20 +1272,20 @@ export class Session {
     // can't find one (e.g. memory disabled), fall back to a generic prompt.
     this.#lastUserTurnBeforeRotate = this.#captureLastUserTurn();
 
-    // Tear down the current streamInput loop before minting the new backing
+    // Tear down the current provider loop before minting the new backing
     // id. Without this we'd leave a zombie consumer task subscribed to the
     // old backing session's stream; the next send() starts a fresh loop
     // against the new id.
-    await this.#teardownQueryLoop();
+    await this.#teardownProvider();
 
     // Update in-memory state first so subsequent broadcasts see the new values.
-    this.#claudeCodeSessionId = newBackingId;
     this.#rotationCount += 1;
     this.#lastRotatedAt = now;
     this.#justRotated = true;
-    // CRITICAL: reset hasQueried so the SDK creates a fresh session rather
+    // CRITICAL: reset the provider so it creates a fresh session rather
     // than trying to resume an id that has no persisted history.
-    this.#hasQueried = false;
+    this.#provider.resetToNewSession(newBackingId);
+    this.#accumulator.reset();
     // Reset rotation-trigger inputs so the next #shouldRotate()
     // doesn't immediately fire on the SAME usage figures that just
     // triggered THIS rotation. Without this:
@@ -1881,6 +1297,9 @@ export class Session {
     // After a rotation the new backing session starts fresh; the
     // ctx denominator is genuinely 0 until the first turn lands a
     // real usage row, so 0 is the right value to seed.
+    // Capture BEFORE zeroing so the rotation message shows the real pre-rotation value.
+    const ctxBefore = this.#usage.lastTurnInputTokens ?? 0;
+    const pctBefore = Math.round((ctxBefore / Session.CONTEXT_WINDOW) * 100);
     this.#usage.lastTurnInputTokens = 0;
     this.#turnsSinceLastRotation = 0;
 
@@ -1898,9 +1317,6 @@ export class Session {
       this.id,
       `reason=${reason} prev=${previousBackingId} new=${newBackingId}`,
     );
-
-    const ctxBefore = this.#usage.lastTurnInputTokens ?? 0;
-    const pctBefore = Math.round((ctxBefore / Session.CONTEXT_WINDOW) * 100);
 
     const infoMsg = this.#makeMessage(
       "info",
@@ -2018,19 +1434,16 @@ export class Session {
   }
 
   /**
-   * Look up the identity that should be credited with a given SDK
-   * tool_use_id. Falls back to the session's primary agent identity when
-   * no sub-agent mapping is recorded.
+   * Authoritative approval gate — called from canUseTool, NOT from tool_start.
+   * Has side effects in autonomous mode: decrements the turn budget and flips
+   * mode to "guarded" when the budget is exhausted.
+   *
+   * IMPORTANT: #peekAutoApprove is used for the initial tool_call message
+   * state (UI only). If you call #shouldAutoApprove from tool_start too, the
+   * budget is decremented twice per tool call (once here, once there) because
+   * tool_start runs after canUseTool's synchronous section but before its
+   * first yield — the microtask ordering is deterministic.
    */
-  #identityForToolUse(toolUseId: string | null): MessageIdentity {
-    if (!toolUseId) return this.#agentIdentity;
-    const agentId = this.#toolUseAgentId.get(toolUseId);
-    if (!agentId) return this.#agentIdentity;
-    const sub = this.#subagents.get(agentId);
-    return sub ? sub.identity : this.#agentIdentity;
-  }
-
-  /** Tool classification — used by auto-approve logic. */
   #shouldAutoApprove(toolName: string): boolean {
     if (this.#mode === "interactive") return false;
 
@@ -2054,6 +1467,23 @@ export class Session {
     return false;
   }
 
+  /**
+   * Side-effect-free read of auto-approve state. Used ONLY in the tool_start
+   * event handler to determine the initial UI phase (executing vs
+   * waiting_confirmation) without touching the turn budget or mode.
+   *
+   * The authoritative decision with side effects lives in #shouldAutoApprove,
+   * called from #makeCanUseToolFn where the actual allow/deny happens.
+   */
+  #peekAutoApprove(toolName: string): boolean {
+    if (this.#mode === "interactive") return false;
+    if (isSafeTool(toolName)) return true;
+    if (this.#mode === "autonomous") {
+      return this.#turnsRemaining === undefined || this.#turnsRemaining > 0;
+    }
+    return false;
+  }
+
   // ── Internals ─────────────────────────────────────────────────────────
 
   #waitForApproval(
@@ -2064,407 +1494,397 @@ export class Session {
     });
   }
 
-  #handleAgentMessage(msg: SDKMessage): void {
-    switch (msg.type) {
-      case "assistant": {
-        // Capture per-LLM-call usage + split by primary vs subagent.
-        // `parent_tool_use_id` null → primary agent's call; non-null →
-        // a subagent worker spawned via a Task tool. Anthropic's
-        // BetaMessage carries per-call `usage` so we can attribute each
-        // call individually rather than relying on the SDK's
-        // end-of-turn SUM (which inflates ctx on subagent-heavy turns).
-        const assistantMsg = msg as unknown as {
-          message: {
-            content: unknown;
-            usage?: {
-              input_tokens?: number;
-              output_tokens?: number;
-              cache_read_input_tokens?: number;
-              cache_creation_input_tokens?: number;
-            };
-          };
-          parent_tool_use_id: string | null;
+  async #ensureAgentIdentity(sender: AuthContext): Promise<void> {
+    const im = this.#identityManager;
+    if (im && !this.#provider.hasQueried && this.#agentIdentity.sub.startsWith("agent:")) {
+      try {
+        const { wimseUri } = await im.registerSessionAgent(this.id, this.name, sender.sub);
+        this.#agentIdentity = { sub: wimseUri, name: `${this.name} agent`, type: "agent" };
+        console.log(`[codeoid] agent identity registered: ${wimseUri}`);
+        const infoMsg = this.#makeMessage("info", "Agent identity registered", SYSTEM_IDENTITY, undefined, undefined, {
+          event: "identity.registered",
+          agentUri: wimseUri,
+          sessionName: this.name,
+          createdBy: sender.sub,
+        });
+        this.#persistAndBuffer(infoMsg);
+        this.#broadcastRaw(infoMsg);
+      } catch (err) {
+        console.error("[codeoid] agent identity registration failed:", err instanceof Error ? err.message : err);
+      }
+    }
+  }
+
+  #makeCanUseToolFn(sender: AuthContext): ToolApprovalFn {
+    return async (_toolId, approvalId, toolName, inputObj) => {
+      const autoApprove = this.#shouldAutoApprove(toolName);
+
+      // Yield once so the tool_start event is processed by the event consumer
+      // (creating the SessionMessage) before we return the approval decision.
+      await Promise.resolve();
+
+      if (autoApprove) {
+        this.#approvalIdToMessageId.delete(approvalId); // clean up — no manual approval will reference this
+        this.#store.audit(sender.sub, "session.auto_approve", this.id, `tool=${toolName} mode=${this.#mode}`);
+        this.#setStatus("tool_running");
+        return { behavior: "allow" as const, updatedInput: inputObj };
+      }
+
+      // Manual approval — wait for user response.
+      this.#setStatus("waiting_approval");
+      const { approved, updatedInput } = await this.#waitForApproval(approvalId);
+      this.#setStatus(approved ? "tool_running" : "thinking");
+
+      // Finalize the tool_call message in scrollback + transcript.
+      const msgId = this.#approvalIdToMessageId.get(approvalId);
+      if (msgId) {
+        // Approved → "executing" (tool hasn't run yet — tool_complete will
+        // set the final "completed" state with real output). Denied → "cancelled".
+        const resolvedState = (
+          approved
+            ? { phase: "executing", input: inputObj }
+            : { phase: "cancelled", reason: "denied" }
+        ) as unknown as ToolState;
+        this.#scrollback.updateMessage(msgId, (m) => {
+          const sm = m as SessionMessage;
+          if (sm.tool) sm.tool.state = resolvedState;
+        });
+        const toolMsg = this.#toolCallMessages.get(msgId);
+        if (toolMsg?.tool) {
+          const resolvedMsg: SessionMessage = { ...toolMsg, tool: { ...toolMsg.tool, state: resolvedState }, timestamp: new Date().toISOString() };
+          this.#transcriptStore.append(this.id, resolvedMsg, this.#seq++).catch(() => {});
+          this.#broadcastRaw({
+            type: "session.message.delta",
+            sessionId: this.id,
+            messageId: msgId,
+            toolStateUpdate: resolvedState,
+            timestamp: resolvedMsg.timestamp,
+          });
+        }
+        this.#approvalIdToMessageId.delete(approvalId);
+      }
+
+      if (approved) {
+        this.#store.audit(sender.sub, "session.approve", this.id, `tool=${toolName} approvalId=${approvalId}`);
+        const sanitizedPatch = sanitizeApprovalPatch(toolName, updatedInput);
+        const merged: Record<string, unknown> = sanitizedPatch ? { ...inputObj, ...sanitizedPatch } : inputObj;
+        return { behavior: "allow" as const, updatedInput: merged };
+      }
+      this.#store.audit(sender.sub, "session.deny", this.id, `tool=${toolName} approvalId=${approvalId}`);
+      return { behavior: "deny" as const, message: "Denied by user" };
+    };
+  }
+
+  async #consumeEvents(run: TurnRun, _sender: AuthContext): Promise<void> {
+    try {
+      for await (const event of run.events) {
+        await this.#handleProviderEvent(event);
+        if (event.type === "turn_done" || event.type === "error") break;
+      }
+    } catch (err) {
+      if (!this.#activeRun) return; // torn down, ignore
+      const emsg = err instanceof Error ? err.message : String(err);
+      console.error(`[codeoid/session ${this.id}] provider event consumer failed:`, err);
+      this.#setStatus("error");
+      const errorMsg = this.#makeMessage("system", `Error: ${emsg}`, SYSTEM_IDENTITY, undefined, undefined, { event: "agent_error", errorCode: "agent_error" });
+      this.#persistAndBuffer(errorMsg);
+      this.#broadcastRaw(errorMsg);
+    } finally {
+      this.#completeActiveTools();
+      this.#flushActiveAssistant();
+      this.#finalizeActiveThinking();
+      this.#chunker?.onTurnEnd();
+      if (this.#pendingApprovals.size > 0) {
+        const systemAuth: AuthContext = { sub: "system", scopes: [], delegationDepth: 0, accountId: this.accountId, projectId: this.projectId };
+        for (const [aid, resolveFn] of this.#pendingApprovals.entries()) {
+          resolveFn({ approved: false });
+          this.#dismissStaleApproval(aid, systemAuth);
+        }
+        this.#pendingApprovals.clear();
+      }
+      // Guard: only clobber run state if this consumer owns the current run.
+      // A recovery path may have started a replacement run before our finally
+      // unwinds; clearing unconditionally would null the new run's slots.
+      if (this.#activeRun === run) {
+        this.#activeRun = null;
+        this.#eventConsumerTask = null;
+        if (this.#status !== "error") this.#setStatus("idle");
+      }
+    }
+  }
+
+  async #handleProviderEvent(event: ProviderEvent): Promise<void> {
+    switch (event.type) {
+      case "text_delta": {
+        if (!this.#activeAssistantMsg) {
+          this.#activeAssistantMsg = this.#makeMessage("assistant", "", this.#agentIdentity, []);
+          this.#persistAndBuffer(this.#activeAssistantMsg);
+          this.#broadcastRaw(this.#activeAssistantMsg);
+          if (this.#status === "tool_running") this.#setStatus("thinking");
+        }
+        this.#activeAssistantMsg.content += event.content;
+        const delta: SessionMessageDelta = {
+          type: "session.message.delta",
+          sessionId: this.id,
+          messageId: this.#activeAssistantMsg.messageId,
+          contentAppend: event.content,
+          timestamp: new Date().toISOString(),
         };
-        const perCall = assistantMsg.message?.usage;
-        if (perCall) {
-          const callUsage: LLMCallUsage = {
-            inputTokens: perCall.input_tokens ?? 0,
-            cacheReadTokens: perCall.cache_read_input_tokens ?? 0,
-            cacheCreationTokens: perCall.cache_creation_input_tokens ?? 0,
-            outputTokens: perCall.output_tokens ?? 0,
-          };
-          if (assistantMsg.parent_tool_use_id === null) {
-            this.#primaryTurnCalls.push(callUsage);
-          } else {
-            this.#subagentTurnCalls.push(callUsage);
-          }
-        }
+        this.#broadcastRaw(delta);
+        break;
+      }
 
-        // SDK 0.3 types content as BetaContentBlock[]; we walk it as generic
-        // records (block["type"]/["text"]/…), so route through `unknown`.
-        const content = msg.message.content as unknown as Array<Record<string, unknown>>;
-        const textParts: string[] = [];
-        const parts: ContentPart[] = [];
-
-        for (const block of content) {
-          if (block.type === "text" && typeof block.text === "string") {
-            textParts.push(block.text);
-            parts.push({ kind: "text", text: block.text, markdown: true });
-          }
-          if (block.type === "tool_use" && typeof block.name === "string") {
-            const toolName = block.name as string;
-            const toolInput = block.input as Record<string, unknown>;
-            const sdkToolUseId = typeof block.id === "string" ? block.id : null;
-
-            // Complete any previously executing tools before starting new one
-            this.#completeActiveTools();
-
-            // Attribute this tool call to the correct agent — the parent
-            // session agent by default, or the sub-agent worker that ran it
-            // (if PreToolUse recorded a mapping).
-            const emittingIdentity = this.#identityForToolUse(sdkToolUseId);
-
-            const toolMsg = this.#makeMessage(
-              "tool_call",
-              `${toolName}(${Object.keys(toolInput).join(", ")})`,
-              emittingIdentity,
-              undefined,
-              {
-                toolId: randomUUID(),
-                name: toolName,
-                state: { phase: "executing", input: toolInput } as unknown as ToolState,
-              },
-            );
-            this.#activeToolMsgIds.push(toolMsg.messageId);
-            this.#toolCallMessages.set(toolMsg.messageId, toolMsg);
-            if (sdkToolUseId) {
-              this.#toolUseIdToMessageId.set(sdkToolUseId, toolMsg.messageId);
-            }
-            this.#persistAndBuffer(toolMsg);
-            this.#broadcastRaw(toolMsg);
-          }
-        }
-
-        const text = textParts.join("");
-        if (text) {
-          // Tool calls finished — complete them before showing response
-          this.#completeActiveTools();
-
-          if (this.#activeAssistantMsg) {
-            // Streaming already delivered this content — update in-place,
-            // persist, AND re-broadcast so clients can flip this message
-            // from "live/streaming" to "committed" in their transcript.
-            this.#activeAssistantMsg.content = text;
-            this.#activeAssistantMsg.parts = parts;
-            this.#persistAndBuffer(this.#activeAssistantMsg);
-            this.#broadcastRaw(this.#activeAssistantMsg);
-            this.#activeAssistantMsg = null;
-          } else {
-            // No streaming happened — send the full message directly
-            const assistantMsg = this.#makeMessage(
-              "assistant", text, this.#agentIdentity, parts,
-            );
-            this.#persistAndBuffer(assistantMsg);
-            this.#broadcastRaw(assistantMsg);
-          }
-        } else {
-          this.#flushActiveAssistant();
+      case "text_done": {
+        this.#accumulator.handleEvent(event);
+        this.#completeActiveTools();
+        if (this.#activeAssistantMsg) {
+          this.#activeAssistantMsg.content = event.content;
+          this.#activeAssistantMsg.parts = [{ kind: "text", text: event.content, markdown: true }];
+          this.#persistAndBuffer(this.#activeAssistantMsg);
+          this.#broadcastRaw(this.#activeAssistantMsg);
+          this.#activeAssistantMsg = null;
+        } else if (event.content) {
+          const msg = this.#makeMessage("assistant", event.content, this.#agentIdentity, [{ kind: "text", text: event.content, markdown: true }]);
+          this.#persistAndBuffer(msg);
+          this.#broadcastRaw(msg);
         }
         break;
       }
 
-      case "stream_event": {
-        // The SDK forwards the raw Anthropic stream. We care about three
-        // event shapes: content_block_start (begin thinking/text block),
-        // content_block_delta (append thinking/text chunk), content_block_stop
-        // (finalize the active block so its message commits to scrollback).
-        const event = (msg as {
-          event?: {
-            type?: string;
-            index?: number;
-            content_block?: { type?: string };
-            delta?: { type?: string; text?: string; thinking?: string };
+      case "thinking_delta": {
+        this.#accumulator.handleEvent(event);
+        if (this.#status === "tool_running") this.#setStatus("thinking");
+        if (this.#activeThinkingIndex !== event.blockIndex || !this.#activeThinkingMsg) {
+          this.#finalizeActiveThinking();
+          this.#activeThinkingMsg = this.#makeMessage("thinking", "", this.#agentIdentity, []);
+          this.#activeThinkingIndex = event.blockIndex ?? null;
+          this.#persistAndBuffer(this.#activeThinkingMsg);
+          this.#broadcastRaw(this.#activeThinkingMsg);
+        }
+        if (event.content) {
+          this.#activeThinkingMsg.content += event.content;
+          const delta: SessionMessageDelta = {
+            type: "session.message.delta",
+            sessionId: this.id,
+            messageId: this.#activeThinkingMsg.messageId,
+            contentAppend: event.content,
+            timestamp: new Date().toISOString(),
           };
-        }).event;
-        if (!event) break;
-
-        if (event.type === "content_block_start") {
-          if (event.content_block?.type === "thinking") {
-            // Model is reasoning again — leave any tool_running state.
-            if (this.#status === "tool_running") this.#setStatus("thinking");
-            // Multi-call turns (primary agent + subagents + retries) can
-            // interleave their own thinking streams. Our slot is
-            // singular — finalize the previous in-flight block BEFORE
-            // starting a new one, otherwise the old messageId orphans in
-            // the TUI's live region with a spinning cursor forever.
-            this.#finalizeActiveThinking();
-            this.#activeThinkingMsg = this.#makeMessage(
-              "thinking",
-              "",
-              this.#agentIdentity,
-              undefined,
-              undefined,
-              { event: "thinking_stream" },
-            );
-            this.#activeThinkingIndex = event.index ?? null;
-            this.#broadcastRaw(this.#activeThinkingMsg);
-          }
-          break;
-        }
-
-        if (event.type === "content_block_delta" && event.delta) {
-          // Text delta — streaming assistant response.
-          if (event.delta.type === "text_delta" && event.delta.text) {
-            if (!this.#activeAssistantMsg) {
-              // The model is generating again — if we were showing a tool as
-              // running, flip back to thinking so the indicator is accurate.
-              if (this.#status === "tool_running") this.#setStatus("thinking");
-              this.#activeAssistantMsg = this.#makeMessage(
-                "assistant", "", this.#agentIdentity,
-              );
-              this.#broadcastRaw(this.#activeAssistantMsg);
-            }
-            this.#activeAssistantMsg.content += event.delta.text;
-            const delta: SessionMessageDelta = {
-              type: "session.message.delta",
-              sessionId: this.id,
-              messageId: this.#activeAssistantMsg.messageId,
-              contentAppend: event.delta.text,
-              timestamp: new Date().toISOString(),
-            };
-            this.#broadcastRaw(delta);
-            break;
-          }
-
-          // Thinking delta — Claude's extended reasoning.
-          if (event.delta.type === "thinking_delta" && event.delta.thinking) {
-            if (!this.#activeThinkingMsg) {
-              this.#activeThinkingMsg = this.#makeMessage(
-                "thinking", "", this.#agentIdentity,
-                undefined, undefined, { event: "thinking_stream" },
-              );
-              this.#activeThinkingIndex = event.index ?? null;
-              this.#broadcastRaw(this.#activeThinkingMsg);
-            }
-            this.#activeThinkingMsg.content += event.delta.thinking;
-            const delta: SessionMessageDelta = {
-              type: "session.message.delta",
-              sessionId: this.id,
-              messageId: this.#activeThinkingMsg.messageId,
-              contentAppend: event.delta.thinking,
-              timestamp: new Date().toISOString(),
-            };
-            this.#broadcastRaw(delta);
-            break;
-          }
-        }
-
-        if (event.type === "content_block_stop") {
-          // Finalize the matching active block. Thinking blocks commit to
-          // scrollback here (with their complete content) so the user can
-          // scroll back and read the reasoning later. We also re-broadcast
-          // the message so clients can flip it from "live" to "committed"
-          // in their transcript layout.
-          if (
-            this.#activeThinkingMsg &&
-            (event.index === this.#activeThinkingIndex || event.index === undefined)
-          ) {
-            this.#persistAndBuffer(this.#activeThinkingMsg);
-            this.#broadcastRaw(this.#activeThinkingMsg);
-            this.#activeThinkingMsg = null;
-            this.#activeThinkingIndex = null;
-          }
+          this.#broadcastRaw(delta);
         }
         break;
       }
 
-      case "result": {
-        this.#flushActiveAssistant();
-        // Also finalize any thinking block that never got its
-        // content_block_stop (happens when the turn ends mid-reasoning
-        // or the API abbreviates the stream). Without this, the TUI's
-        // live region keeps spinning on a thinking message that the
-        // model won't finish emitting.
+      case "thinking_done": {
         this.#finalizeActiveThinking();
-        this.#recordTurnFromResult(msg);
-        // Turn complete. In streamInput mode the query() doesn't end — it
-        // blocks waiting for more input. If nothing's queued and no
-        // approvals are waiting, we're genuinely idle. If there's more in
-        // the queue, Claude picks it up next and status stays working.
-        const moreQueued = (this.#inputQueue?.size ?? 0) > 0;
-        const awaitingApproval = this.#pendingApprovals.size > 0;
-        if (
-          !moreQueued &&
-          !awaitingApproval &&
-          (this.#status === "thinking" || this.#status === "tool_running")
-        ) {
-          this.#setStatus("idle");
+        break;
+      }
+
+      case "tool_start": {
+        this.#accumulator.handleEvent(event);
+        // NOTE: do NOT call #completeActiveTools() here. It would cancel all
+        // currently in-flight tools, which is correct for sequential calls but
+        // silently kills parallel tool calls from concurrent subagents.
+        // Cleanup is handled by text_done and the #consumeEvents finally block.
+        // Await the ZeroID registration fence so sub-agent identity is resolved
+        // before we attribute this tool call. Bounded by a 5s timeout so a
+        // hung ZeroID service can't stall the event loop indefinitely.
+        if (event.sdkAgentId) {
+          const fence = this.#subagentRegistrations.get(event.sdkAgentId);
+          if (fence) {
+            const timeout = new Promise<void>((resolve) => setTimeout(resolve, 5000));
+            try { await Promise.race([fence, timeout]); } catch { /* use placeholder */ }
+          }
         }
-        // Broadcast regardless of status change — queue depth may have
-        // decayed (SDK consumed a message) and StatusBar needs to update.
+        const emittingIdentity = event.sdkAgentId
+          ? (this.#subagents.get(event.sdkAgentId)?.identity ?? this.#agentIdentity)
+          : this.#agentIdentity;
+        // Side-effect-free peek — budget decrement happens in canUseTool via
+        // #shouldAutoApprove. Using #shouldAutoApprove here would decrement
+        // twice per tool call (this handler runs in the same microtask batch
+        // as canUseTool's synchronous section, always after it).
+        const autoApprove = this.#peekAutoApprove(event.name);
+        const toolMsg = this.#makeMessage(
+          "tool_call",
+          `${event.name}(${Object.keys(event.input).join(", ")})`,
+          emittingIdentity,
+          undefined,
+          {
+            toolId: event.toolId,
+            name: event.name,
+            input: event.input,
+            state: autoApprove
+              ? ({ phase: "executing", input: event.input } as unknown as ToolState)
+              : ({
+                  phase: "waiting_confirmation",
+                  input: event.input,
+                  description: `${event.name}(${Object.keys(event.input).join(", ")})`,
+                  approvalId: event.approvalId,
+                } as unknown as ToolState),
+          },
+        );
+        this.#activeToolMsgIds.push(toolMsg.messageId);
+        this.#toolCallMessages.set(toolMsg.messageId, toolMsg);
+        this.#toolUseIdToMessageId.set(event.sdkToolUseId, toolMsg.messageId);
+        this.#messageIdToToolUseId.set(toolMsg.messageId, event.sdkToolUseId);
+        this.#approvalIdToMessageId.set(event.approvalId, toolMsg.messageId);
+        this.#persistAndBuffer(toolMsg);
+        this.#broadcastRaw(toolMsg);
+        if (!autoApprove) this.#setStatus("waiting_approval");
+        break;
+      }
+
+      case "tool_complete": {
+        this.#accumulator.handleEvent(event);
+        const msgId = this.#toolUseIdToMessageId.get(event.sdkToolUseId);
+        if (msgId) {
+          const toolMsg = this.#toolCallMessages.get(msgId);
+          if (toolMsg?.tool) {
+            const completedState = {
+              phase: "completed",
+              success: event.success,
+              output: event.output,
+            } as unknown as ToolState;
+            this.#scrollback.updateMessage(msgId, (m) => {
+              const sm = m as SessionMessage;
+              if (sm.tool) sm.tool.state = completedState;
+            });
+            const completedMsg: SessionMessage = {
+              ...toolMsg,
+              tool: { ...toolMsg.tool, state: completedState },
+              timestamp: new Date().toISOString(),
+            };
+            this.#transcriptStore.append(this.id, completedMsg, this.#seq++).catch(() => {});
+            this.#broadcastRaw({
+              type: "session.message.delta",
+              sessionId: this.id,
+              messageId: msgId,
+              toolStateUpdate: completedState,
+              timestamp: completedMsg.timestamp,
+            });
+            this.#toolCallMessages.delete(msgId);
+            this.#messageIdToToolUseId.delete(msgId);
+            const idx = this.#activeToolMsgIds.indexOf(msgId);
+            if (idx >= 0) this.#activeToolMsgIds.splice(idx, 1);
+          }
+          this.#toolUseIdToMessageId.delete(event.sdkToolUseId);
+        }
+        if (this.#status === "tool_running") this.#setStatus("thinking");
+        break;
+      }
+
+      case "subagent_start": {
+        const agentId = event.agentId;
+        const agentType = event.agentType;
+        const childIdentity: MessageIdentity = { sub: `anonymous:subagent:${agentId}`, name: agentType, type: "subagent" };
+        this.#subagents.set(agentId, { identity: childIdentity, agentType, spawnedAt: Date.now(), active: true });
+        const im = this.#identityManager;
+        if (im) {
+          const fence = im.registerSubagent(this.id, agentId, agentType).then((result) => {
+            const subagentEntry = this.#subagents.get(agentId);
+            if (subagentEntry) subagentEntry.identity = { sub: result.wimseUri, name: agentType, type: "subagent" };
+          }).catch((err) => {
+            console.error(`[codeoid] subagent register failed: ${err instanceof Error ? err.message : String(err)}`);
+          });
+          this.#subagentRegistrations.set(agentId, fence);
+        }
+        const infoMsg = this.#makeMessage("info", `Sub-agent spawned: ${agentType}`, this.#agentIdentity, undefined, undefined, {
+          event: "subagent.spawned",
+          subagentUri: childIdentity.sub,
+          agentType,
+          parentAgent: this.#agentIdentity.sub,
+        });
+        this.#persistAndBuffer(infoMsg);
+        this.#broadcastRaw(infoMsg);
         this.#broadcastInfoUpdate();
         break;
       }
 
-      case "system": {
-        const subtype = (msg as { subtype?: string }).subtype;
-        if (subtype === "init") {
-          // Capture per-turn MCP state. The SDK reports each configured
-          // server's connection status plus the flat list of tools it
-          // ended up exposing. Bucket the tools by server name (from the
-          // `mcp__<server>__<tool>` prefix) so the drawer can show
-          // "highflame-platform: connected · 12 tools" with a tool list
-          // expandable underneath.
-          const init = msg as {
-            mcp_servers?: { name: string; status: string }[];
-            tools?: string[];
-          };
-          this.#sdkMcpStatus.clear();
-          this.#sdkMcpTools.clear();
-          for (const s of init.mcp_servers ?? []) {
-            this.#sdkMcpStatus.set(s.name, s.status);
-            this.#sdkMcpTools.set(s.name, []);
-          }
-          for (const t of init.tools ?? []) {
-            if (!t.startsWith("mcp__")) continue;
-            const rest = t.slice("mcp__".length);
-            const sep = rest.indexOf("__");
-            if (sep <= 0) continue;
-            const server = rest.slice(0, sep);
-            const bucket = this.#sdkMcpTools.get(server) ?? [];
-            bucket.push(t);
-            this.#sdkMcpTools.set(server, bucket);
-          }
-          break;
+      case "subagent_stop": {
+        const agentId = event.agentId;
+        void this.#identityManager?.deactivateSubagent(this.id, agentId);
+        this.#subagentRegistrations.delete(agentId);
+        if (this.#subagents.delete(agentId)) {
+          this.#broadcastInfoUpdate();
         }
-        if (subtype === "api_retry") {
-          const retryMsg = msg as { attempt?: number; retry_delay_ms?: number; error_status?: number | null };
-          const infoMsg = this.#makeMessage(
-            "system",
-            `API retry: attempt ${retryMsg.attempt}, delay ${retryMsg.retry_delay_ms}ms${retryMsg.error_status ? ` (status ${retryMsg.error_status})` : ""}`,
-            SYSTEM_IDENTITY,
-            [{ kind: "progress", message: `Retrying (attempt ${retryMsg.attempt})...` }],
-            undefined,
-            { event: "api_retry", attempt: retryMsg.attempt },
-          );
+        break;
+      }
+
+      case "mcp_init": {
+        this.#sdkMcpStatus.clear();
+        this.#sdkMcpTools.clear();
+        for (const [name, status] of Object.entries(event.servers)) {
+          this.#sdkMcpStatus.set(name, status);
+          this.#sdkMcpTools.set(name, []);
+        }
+        for (const [server, tools] of Object.entries(event.tools)) {
+          this.#sdkMcpTools.set(server, tools);
+        }
+        const toolCount = Object.values(event.tools).flat().length;
+        const serverNames = Object.keys(event.servers).join(", ");
+        if (toolCount > 0 || serverNames) {
+          const infoMsg = this.#makeMessage("info", `MCP ready: ${serverNames} (${toolCount} tools)`, SYSTEM_IDENTITY, undefined, undefined, {
+            event: "mcp.init",
+            servers: event.servers,
+            tools: event.tools,
+          });
+          this.#persistAndBuffer(infoMsg);
           this.#broadcastRaw(infoMsg);
         }
         break;
       }
 
-      case "tool_progress": {
-        const progress = msg as { tool_name?: string; elapsed_time_seconds?: number; tool_use_id?: string };
-        // Emit progress part as info
-        const progressMsg = this.#makeMessage(
-          "info",
-          `${progress.tool_name ?? "Tool"} running... (${Math.round(progress.elapsed_time_seconds ?? 0)}s)`,
-          this.#agentIdentity,
-          [{ kind: "progress", message: `${progress.tool_name} running...`, elapsedMs: (progress.elapsed_time_seconds ?? 0) * 1000 }],
-          undefined,
-          { event: "tool_progress", toolName: progress.tool_name },
-        );
-        this.#broadcastRaw(progressMsg);
-        break;
-      }
-
-      case "user": {
-        // The SDK emits "user" messages that echo Claude's turn payload — these
-        // carry tool_result content blocks from tools that just executed. We
-        // correlate each tool_result back to the originating tool_call via its
-        // tool_use_id, then push a completion update (with real output) through
-        // #persistAndBuffer so the chunker can close the episode properly.
-        const content = (msg.message as { content?: unknown }).content;
-        if (!Array.isArray(content)) break;
-        let closedAny = false;
-        for (const block of content as Array<Record<string, unknown>>) {
-          if (block.type !== "tool_result") continue;
-          const useId = typeof block.tool_use_id === "string" ? block.tool_use_id : null;
-          if (!useId) continue;
-          const messageId = this.#toolUseIdToMessageId.get(useId);
-          if (!messageId) continue;
-
-          const output = extractToolResultText(block.content);
-          const isError = block.is_error === true;
-          this.#closeToolCallWithOutput(messageId, output, !isError);
-          closedAny = true;
+      case "llm_call": {
+        if (event.isPrimary) {
+          this.#primaryTurnCalls.push(event.usage);
+        } else {
+          this.#subagentTurnCalls.push(event.usage);
         }
-        // NOTE: we used to emit a synthetic `thinking: "Thinking..."`
-        // message here to visually signal "Claude is deciding next step".
-        // That's been removed — it created orphan live-region messages
-        // that never finalized (each had a fresh messageId with no
-        // content_block_stop partner). Real streaming thinking via
-        // `content_block_start` now handles this case, and the StatusBar's
-        // `working` state + WorkingIndicator cover the gap otherwise.
-        void closedAny;
+        break;
+      }
+
+      case "api_retry": {
+        const retryMsg = this.#makeMessage("info",
+          `API retry attempt ${event.attempt ?? "?"} (delay: ${event.retryDelayMs ?? 0}ms, status: ${event.errorStatus ?? "?"})`,
+          SYSTEM_IDENTITY, undefined, undefined,
+          { event: "api_retry", attempt: event.attempt, retryDelayMs: event.retryDelayMs, errorStatus: event.errorStatus },
+        );
+        this.#persistAndBuffer(retryMsg);
+        this.#broadcastRaw(retryMsg);
+        break;
+      }
+
+      case "tool_progress": {
+        // Best-effort broadcast — tool is still running.
+        break;
+      }
+
+      case "turn_done": {
+        this.#accumulator.handleEvent(event);
+        this.#recordTurnFromResult(event.result);
+        if (event.result.isError) {
+          const errText = event.result.errorMessage ?? "Turn ended with an error";
+          const errorMsg = this.#makeMessage("system", `Error: ${errText}`, SYSTEM_IDENTITY, undefined, undefined, { event: "agent_error" });
+          this.#persistAndBuffer(errorMsg);
+          this.#broadcastRaw(errorMsg);
+          this.#setStatus("error");
+        } else if (this.#status !== "error") {
+          this.#setStatus("idle");
+        }
+        break;
+      }
+
+      case "error": {
+        console.error(`[codeoid/session ${this.id}] provider error:`, event.message);
+        this.#setStatus("error");
+        const errorMsg = this.#makeMessage("system", `Error: ${event.message}`, SYSTEM_IDENTITY, undefined, undefined, { event: "agent_error" });
+        this.#persistAndBuffer(errorMsg);
+        this.#broadcastRaw(errorMsg);
         break;
       }
     }
   }
 
-  #closeToolCallWithOutput(messageId: string, output: string, success: boolean): void {
-    if (this.#toolCallsClosedByResult.has(messageId)) return;
-    this.#toolCallsClosedByResult.add(messageId);
-    // Remove from the active list IMMEDIATELY after marking closed —
-    // before any of the broadcast/persist work below. The fallback
-    // `#completeActiveTools` reads both sets to decide whether to
-    // emit a synthetic `success:true, output:""`. Closing the window
-    // synchronously means even a future call site that introduces an
-    // await between the add and the broadcast can't race a
-    // synthetic completion ahead of the real one.
-    this.#activeToolMsgIds = this.#activeToolMsgIds.filter((id) => id !== messageId);
-
-    const original = this.#toolCallMessages.get(messageId);
-    if (!original || !original.tool) return;
-
-    // Build an updated session.message that preserves identity + tool name +
-    // original input, and records the completion state with actual output.
-    const updated: SessionMessage = {
-      ...original,
-      tool: {
-        ...original.tool,
-        state: {
-          phase: "completed",
-          success,
-          output,
-        },
-      },
-      timestamp: new Date().toISOString(),
-    };
-
-    // Persist + feed the chunker so memory captures the real tool output.
-    this.#scrollback.updateMessage(messageId, (m) => {
-      const sm = m as SessionMessage;
-      if (sm.tool) sm.tool.state = updated.tool!.state;
-    });
-    this.#transcriptStore.append(this.id, updated, this.#seq++).catch(() => {});
-    this.#chunker?.onMessage(updated);
-
-    this.#broadcastRaw({
-      type: "session.message.delta",
-      sessionId: this.id,
-      messageId,
-      toolStateUpdate: updated.tool!.state,
-      timestamp: updated.timestamp,
-    });
-
-    // Already removed from #activeToolMsgIds at the top of this fn;
-    // clean up the per-tool tracking maps too. Without these
-    // deletes, long sessions accumulate O(tool_use_count) entries
-    // across `#toolUseIdToMessageId`, `#toolUseAgentId`, and
-    // `#toolCallMessages` — each hot map (`#toolUseAgentId` is
-    // consulted on every PreToolUse, `#toolCallsClosedByResult`
-    // grows monotonically). Drop the tool_use_id mappings now that
-    // the tool has terminated; keep `#toolCallsClosedByResult` as a
-    // dedup guard against double-close (it's bounded per-session
-    // anyway by tool count, but we GC older entries below).
-    for (const [tuid, mid] of this.#toolUseIdToMessageId) {
-      if (mid === messageId) {
-        this.#toolUseIdToMessageId.delete(tuid);
-        this.#toolUseAgentId.delete(tuid);
-      }
-    }
-    this.#toolCallMessages.delete(messageId);
-  }
 
   /**
    * Finalize the active assistant stream. When the model gets cut off
@@ -2558,6 +1978,16 @@ export class Session {
       toolStateUpdate: cancelledState,
       timestamp: new Date().toISOString(),
     });
+
+    // Clean up correlation maps. tool_complete normally does this; for
+    // denied/interrupted tools it never fires, so we do it here to prevent
+    // these maps growing without bound across many interrupts in long sessions.
+    const sdkToolUseId = this.#messageIdToToolUseId.get(msgId);
+    if (sdkToolUseId) {
+      this.#toolUseIdToMessageId.delete(sdkToolUseId);
+      this.#messageIdToToolUseId.delete(msgId);
+    }
+    this.#toolCallMessages.delete(msgId);
   }
 
   /** Create a SessionMessage with all required fields */
@@ -2647,40 +2077,6 @@ function formatTokenCount(n: number): string {
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
-/** Tools that only read state — safe to auto-approve in guarded mode. */
-/**
- * Load the user's externally-configured MCP servers from `~/.claude.json` so a
- * codeoid session can use them.
- *
- * codeoid runs the SDK with `settingSources: ["project"]`, which loads a
- * project `.mcp.json` but NOT the user/global scope. Servers added via
- * `claude mcp add` (the common case) live in `~/.claude.json` — top-level
- * `mcpServers` (user scope) and `projects[workdir].mcpServers` (local scope) —
- * and would otherwise be invisible. Reading them here injects them via the
- * SDK's explicit `mcpServers` option WITHOUT widening settingSources, so we
- * pick up the servers without also inheriting user-level permissions/hooks/env.
- *
- * Best-effort: any missing file / parse error yields no extra servers. Read at
- * each query start, so `/rotate` (or a daemon restart) surfaces newly-added
- * servers in a live session. The entries are already in the SDK's
- * McpServerConfig shape (Claude Code writes stdio/sse/http in that format).
- */
-function loadUserMcpServers(workdir: string): Record<string, McpServerConfig> {
-  try {
-    const raw = readFileSync(join(homedir(), ".claude.json"), "utf8");
-    const cfg = JSON.parse(raw) as {
-      mcpServers?: Record<string, McpServerConfig>;
-      projects?: Record<string, { mcpServers?: Record<string, McpServerConfig> }>;
-    };
-    return {
-      ...(cfg.mcpServers ?? {}),
-      ...(cfg.projects?.[workdir]?.mcpServers ?? {}),
-    };
-  } catch {
-    return {};
-  }
-}
-
 function isSafeTool(name: string): boolean {
   if (SAFE_TOOLS.has(name)) return true;
   // All memory recall tools are read-only.
@@ -2689,27 +2085,6 @@ function isSafeTool(name: string): boolean {
 }
 
 const SAFE_TOOLS = new Set<string>(["Read", "Grep", "Glob"]);
-
-/**
- * Extract text from an Anthropic tool_result content payload. The spec allows
- * either a plain string or an array of content blocks; we flatten both to
- * a single string for memory storage. Non-text blocks become a placeholder.
- */
-function extractToolResultText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  const parts: string[] = [];
-  for (const block of content as Array<Record<string, unknown>>) {
-    if (block.type === "text" && typeof block.text === "string") {
-      parts.push(block.text);
-    } else if (block.type === "image") {
-      parts.push("[image]");
-    } else if (typeof block.text === "string") {
-      parts.push(block.text as string);
-    }
-  }
-  return parts.join("\n");
-}
 
 /**
  * Per-tool whitelist for the `updatedInput` patch a client may send
