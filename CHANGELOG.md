@@ -6,6 +6,34 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-06-28
+
+### Fixed
+
+- File explorer now switches working directory when the active session changes,
+  instead of staying pinned to the previous session's workdir.
+- Interrupted tool calls are marked **cancelled** rather than **failed**, and
+  in-flight tool calls are reconciled correctly on session resume.
+- Guard `writeBatch` against in-flight streams to stop the TUI double-printing
+  streamed output.
+- TUI reconnects and re-mints its token on JWT expiry instead of stalling.
+- Telegram `/attach` now disconnects the old session before switching, fixing a
+  session leak on switch.
+
+### Changed
+
+- Richer README badges (npm version + downloads, coverage, provenance).
+
+## [0.1.1] - 2026-06-24
+
+### Added
+
+- Install-from-npm instructions in the README.
+
+### Changed
+
+- CI publishes to npm via OIDC Trusted Publishing (tokenless), with provenance.
+
 ## [0.1.0] - 2026-06-23
 
 Initial public release.
@@ -26,5 +54,7 @@ Initial public release.
 - ZeroID identity per session plus attenuated sub-agent tokens; every tool call
   is stamped with the acting agent's SPIFFE identity.
 
-[Unreleased]: https://github.com/saucam/codeoid/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/saucam/codeoid/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/saucam/codeoid/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/saucam/codeoid/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/saucam/codeoid/releases/tag/v0.1.0
