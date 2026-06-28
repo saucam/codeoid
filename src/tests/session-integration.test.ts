@@ -755,4 +755,54 @@ describe("T8 – regression guards: text overlap + stale status", () => {
     expect(finalPhases).not.toContain("cancelled");
     expect(finalPhases.every((p) => p === "completed")).toBe(true);
   });
+
+  it("(d) text_done arriving before tool_complete does not cancel the in-flight tool", async () => {
+    // The real Claude Agent SDK emits the committed assistant message (→ text_done)
+    // BEFORE the user/tool_result message (→ tool_complete). A previous bug had
+    // #completeActiveTools() in the text_done handler which cancelled any tool
+    // still in #activeToolMsgIds at that moment, producing ghost
+    // "cancelled — interrupted" cards in the UI.
+    //
+    // This test uses the real-world SDK ordering:
+    //   tool_start → text_done → tool_complete → turn_done
+    // to verify the tool ends as "completed", not "cancelled".
+    const toolUseId = "sdk-real-order";
+    const provider = new MockSessionProvider("claude", [
+      [
+        {
+          type: "tool_start",
+          toolId: "t-real",
+          sdkToolUseId: toolUseId,
+          name: "Read",
+          input: { file_path: "/tmp/test.ts" },
+          approvalId: "approval-real",
+        },
+        // text_done fires from the committed assistant message — BEFORE tool_result.
+        { type: "text_done", content: "Reading the file." },
+        {
+          type: "tool_complete",
+          sdkToolUseId: toolUseId,
+          output: "file contents",
+          success: true,
+        },
+        { type: "turn_done", result: mockResult({ providerId: "claude" }) },
+      ],
+    ]);
+
+    const session = makeSession(provider);
+    const { client, received } = makeClient();
+    session.attach(client);
+
+    await session.send("run bash", TEST_AUTH);
+    await waitForIdle(session);
+
+    const toolMsg = received.find((m) => m.type === "session.message" && m.role === "tool_call");
+    expect(toolMsg).toBeDefined();
+    const msgId = (toolMsg as { messageId?: string }).messageId!;
+    const lastDelta = received
+      .filter((d) => d.type === "session.message.delta" && (d as { messageId?: string }).messageId === msgId && (d as { toolStateUpdate?: { phase?: string } }).toolStateUpdate)
+      .at(-1) as { toolStateUpdate?: { phase?: string } } | undefined;
+    const finalPhase = lastDelta?.toolStateUpdate?.phase ?? (toolMsg as { tool?: { state?: { phase?: string } } }).tool?.state?.phase;
+    expect(finalPhase).toBe("completed");
+  });
 });

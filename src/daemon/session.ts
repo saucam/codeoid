@@ -1636,7 +1636,11 @@ export class Session {
 
       case "text_done": {
         this.#accumulator.handleEvent(event);
-        this.#completeActiveTools();
+        // NOTE: do NOT call #completeActiveTools() here.
+        // In the real SDK the committed assistant message (which fires text_done)
+        // is emitted BEFORE the user/tool_result message (which fires tool_complete).
+        // Calling completeActiveTools here cancels tools that are still executing.
+        // Cleanup is handled solely by the #consumeEvents finally block.
         if (this.#activeAssistantMsg) {
           this.#activeAssistantMsg.content = event.content;
           this.#activeAssistantMsg.parts = [{ kind: "text", text: event.content, markdown: true }];
@@ -1685,7 +1689,7 @@ export class Session {
         // NOTE: do NOT call #completeActiveTools() here. It would cancel all
         // currently in-flight tools, which is correct for sequential calls but
         // silently kills parallel tool calls from concurrent subagents.
-        // Cleanup is handled by text_done and the #consumeEvents finally block.
+        // Cleanup is handled solely by the #consumeEvents finally block.
         // Await the ZeroID registration fence so sub-agent identity is resolved
         // before we attribute this tool call. Bounded by a 5s timeout so a
         // hung ZeroID service can't stall the event loop indefinitely.
