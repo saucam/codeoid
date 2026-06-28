@@ -131,6 +131,11 @@ export class TerminalClient {
     console.log("\nAttached to session. Type messages below. Ctrl+C to detach.\n");
 
     let latestApprovalId: string | null = null;
+    // Track the messageId of any assistant message that arrived via streaming
+    // deltas (session.message.delta). When the final committed session.message
+    // arrives for that same ID (text_done broadcast), skip re-printing the
+    // content — it was already output chunk-by-chunk via the deltas.
+    let streamingAssistantMsgId: string | null = null;
 
     this.#streamHandler = (msg) => {
       switch (msg.type) {
@@ -141,7 +146,7 @@ export class TerminalClient {
               const id = m.identity?.name ? `\x1b[2m${m.identity.name}\x1b[0m ` : "";
               switch (m.role) {
                 case "user": console.log(`\n${id}\x1b[36m> ${m.content}\x1b[0m`); break;
-                case "assistant": process.stdout.write(m.content ?? ""); break;
+                case "assistant": if (m.content) { process.stdout.write(m.content); process.stdout.write("\n"); } break;
                 case "tool_call": console.log(`\n${id}\x1b[33m⚡ ${m.tool?.name ?? m.content}\x1b[0m`); break;
                 case "system": console.log(`\x1b[31m${m.content}\x1b[0m`); break;
                 case "info": console.log(`\x1b[2m${m.content}\x1b[0m`); break;
@@ -152,16 +157,25 @@ export class TerminalClient {
           break;
 
         case "session.message": {
-          const sm = msg as { role?: string; content?: string; tool?: { name?: string; state?: { phase?: string; approvalId?: string; description?: string } }; identity?: { name?: string; type?: string } };
+          const sm = msg as { role?: string; content?: string; messageId?: string; tool?: { name?: string; state?: { phase?: string; approvalId?: string; description?: string } }; identity?: { name?: string; type?: string } };
           const id = sm.identity?.name ? `\x1b[2m${sm.identity.name}\x1b[0m ` : "";
 
           switch (sm.role) {
             case "user":
               console.log(`\n${id}\x1b[36m> ${sm.content}\x1b[0m`);
               break;
-            case "assistant":
-              process.stdout.write(sm.content ?? "");
+            case "assistant": {
+              const msgId = sm.messageId;
+              if (msgId && msgId === streamingAssistantMsgId) {
+                // Content already printed via deltas — just end the streaming line.
+                process.stdout.write("\n");
+                streamingAssistantMsgId = null;
+              } else if (sm.content) {
+                process.stdout.write(sm.content);
+                process.stdout.write("\n");
+              }
               break;
+            }
             case "thinking":
               process.stdout.write(`\x1b[2m${sm.content}\x1b[0m`);
               break;
@@ -188,7 +202,10 @@ export class TerminalClient {
         }
 
         case "session.message.delta": {
-          const delta = msg as { contentAppend?: string; toolStateUpdate?: { phase?: string } };
+          const delta = msg as { contentAppend?: string; messageId?: string; toolStateUpdate?: { phase?: string } };
+          // Mark this messageId as "streamed via deltas" so the final
+          // committed session.message doesn't double-print the content.
+          if (delta.messageId) streamingAssistantMsgId = delta.messageId;
           if (delta.contentAppend) {
             process.stdout.write(delta.contentAppend);
           }
