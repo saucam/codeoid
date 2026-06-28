@@ -320,7 +320,12 @@ export class DaemonServer {
           }
         }
 
-        // OAuth authorization routes (/auth/authorize, /auth/callback)
+        // OAuth provider discovery — available even when OAuth isn't configured
+        if (url.pathname === "/auth/provider" && req.method === "GET") {
+          return Response.json({ provider: self.#oauthHandler ? self.#oauthHandler.providerName : null });
+        }
+
+        // OAuth authorization routes (/auth/authorize, /auth/callback, /auth/idp-callback)
         if (self.#oauthHandler && url.pathname.startsWith("/auth/")) {
           const oauthResp = await self.#oauthHandler.handleFetch(req);
           if (oauthResp) return oauthResp;

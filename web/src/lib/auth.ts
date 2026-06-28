@@ -67,6 +67,11 @@ export class AuthError extends Error {
 export async function resolveToken(opts: ResolveOptions): Promise<ResolvedAuth> {
   if (opts.token) return { token: opts.token, exchanged: false };
 
+  // OAuth flow stores a direct JWT in localStorage after the /auth/callback
+  // exchange. Use it if present — no round-trip to ZeroID needed.
+  const storedJwt = localStorage.getItem(STORAGE_KEY_TOKEN);
+  if (storedJwt && !opts.apiKey) return { token: storedJwt, exchanged: false };
+
   const apiKey = opts.apiKey ?? localStorage.getItem(STORAGE_KEY_API_KEY) ?? undefined;
   if (!apiKey) {
     throw new AuthError(
@@ -145,10 +150,75 @@ export function rememberApiKey(apiKey: string): void {
 export function forgetApiKey(): void {
   localStorage.removeItem(STORAGE_KEY_API_KEY);
   localStorage.removeItem(STORAGE_KEY_TOKEN);
+  localStorage.removeItem("codeoid.refreshToken");
+  sessionStorage.removeItem("codeoid_pkce_verifier");
+  sessionStorage.removeItem("codeoid_pkce_state");
 }
 
 export function rememberedApiKey(): string | null {
   return localStorage.getItem(STORAGE_KEY_API_KEY);
+}
+
+export function rememberedOAuthToken(): string | null {
+  return localStorage.getItem(STORAGE_KEY_TOKEN);
+}
+
+/**
+ * Fetch which OAuth provider the daemon is configured with.
+ * Returns null when OAuth is not configured (API-key-only mode).
+ */
+export async function fetchOAuthProvider(): Promise<"google" | "local" | null> {
+  try {
+    const res = await fetch("/auth/provider");
+    if (!res.ok) return null;
+    const data = (await res.json()) as { provider: string | null };
+    if (data.provider === "google" || data.provider === "local") return data.provider;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Start the OAuth 2.0 + PKCE login flow. Generates a PKCE code verifier,
+ * stores it in sessionStorage (the /auth/callback page reads it back), then
+ * redirects to the daemon's /auth/authorize endpoint.
+ */
+export async function startOAuthLogin(opts?: { scope?: string }): Promise<void> {
+  const verifierBytes = new Uint8Array(32);
+  crypto.getRandomValues(verifierBytes);
+  const verifier = base64urlEncode(verifierBytes);
+
+  const hashBuffer = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  const challenge = base64urlEncode(new Uint8Array(hashBuffer));
+
+  const stateBytes = new Uint8Array(16);
+  crypto.getRandomValues(stateBytes);
+  const state = Array.from(stateBytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+
+  sessionStorage.setItem("codeoid_pkce_verifier", verifier);
+  sessionStorage.setItem("codeoid_pkce_state", state);
+
+  const scope = opts?.scope ?? DEFAULT_WEB_SCOPES;
+  const params = new URLSearchParams({
+    client_id: "codeoid",
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+    redirect_uri: `${window.location.origin}/auth/callback`,
+    state,
+    scope,
+  });
+
+  window.location.href = `/auth/authorize?${params}`;
+}
+
+function base64urlEncode(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...Array.from(bytes)))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=/g, "");
 }
 
 /**

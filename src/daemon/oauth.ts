@@ -113,6 +113,10 @@ export class OAuthHandler {
   async handleFetch(req: Request): Promise<Response | null> {
     const url = new URL(req.url);
 
+    if (url.pathname === "/auth/provider" && req.method === "GET") {
+      return Response.json({ provider: this.#idp.name });
+    }
+
     if (url.pathname === "/auth/authorize" && req.method === "GET") {
       return this.#handleAuthorize(url);
     }
@@ -451,9 +455,8 @@ body {
 
     const token = await resp.json();
 
-    localStorage.setItem('codeoid_token', token.access_token);
-    if (token.refresh_token) localStorage.setItem('codeoid_refresh_token', token.refresh_token);
-    localStorage.setItem('codeoid_user_id', token.user_id || '');
+    localStorage.setItem('codeoid.token', token.access_token);
+    if (token.refresh_token) localStorage.setItem('codeoid.refreshToken', token.refresh_token);
 
     sessionStorage.removeItem('codeoid_pkce_verifier');
     sessionStorage.removeItem('codeoid_pkce_state');
