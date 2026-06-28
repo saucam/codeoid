@@ -620,3 +620,74 @@ describe("T7 – MockSessionProvider direct API", () => {
     expect(session.status).toBe("idle");
   });
 });
+
+// ── T8: Regression – text overlap + stale status ─────────────────────────────
+// Guards the two regressions introduced by the multi-provider PR:
+//
+//  (a) Terminal text overlap: session.message.delta events and the committed
+//      session.message from text_done must share the same messageId so the
+//      terminal client can suppress re-printing content already streamed.
+//
+//  (b) Stale amber status: session.toInfo() must reflect the live status at
+//      call time so that the web UI can update immediately from the
+//      session.attach response (rather than waiting for a future broadcast).
+
+describe("T8 – regression guards: text overlap + stale status", () => {
+  it("(a) delta and final session.message share the same messageId", async () => {
+    const chunks = ["Hello", " world"];
+    const deltas: ProviderEvent[] = chunks.map((c) => ({ type: "text_delta" as const, content: c }));
+    const provider = new MockSessionProvider("claude", [
+      [
+        ...deltas,
+        { type: "text_done", content: "Hello world" },
+        { type: "turn_done", result: mockResult({ providerId: "claude" }) },
+      ],
+    ]);
+    const session = makeSession(provider);
+    const { client, received } = makeClient();
+    session.attach(client);
+
+    await session.send("hi", TEST_AUTH);
+    await waitForIdle(session);
+
+    // Collect all messageIds that arrived via session.message.delta
+    const deltaIds = new Set(
+      received
+        .filter((m) => m.type === "session.message.delta" && m.messageId)
+        .map((m) => (m as { messageId: string }).messageId),
+    );
+    expect(deltaIds.size).toBeGreaterThan(0);
+
+    // The committed assistant message must carry one of those same IDs.
+    const finalMsg = received
+      .filter((m) => m.type === "session.message" && m.role === "assistant" && m.content)
+      .at(-1) as { messageId?: string } | undefined;
+    expect(finalMsg).toBeDefined();
+    expect(deltaIds.has(finalMsg!.messageId!)).toBe(true);
+  });
+
+  it("(b) toInfo() reflects live status — idle before/after a turn, error on provider error", async () => {
+    // Before any turn: toInfo() reports idle (this is what the web UI reads
+    // from the session.attach response to immediately correct a stale status).
+    const provider = new MockSessionProvider("claude", [
+      [
+        { type: "text_done", content: "hi" },
+        { type: "turn_done", result: mockResult({ providerId: "claude" }) },
+      ],
+      [
+        { type: "error", message: "api blew up" },
+      ],
+    ]);
+    const session = makeSession(provider);
+
+    expect(session.toInfo().status).toBe("idle");
+
+    await session.send("turn 1", TEST_AUTH);
+    await waitForIdle(session);
+    expect(session.toInfo().status).toBe("idle");
+
+    await session.send("turn 2 — error", TEST_AUTH);
+    await waitForIdle(session);
+    expect(session.toInfo().status).toBe("error");
+  });
+});
