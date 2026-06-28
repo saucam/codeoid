@@ -690,4 +690,69 @@ describe("T8 – regression guards: text overlap + stale status", () => {
     await waitForIdle(session);
     expect(session.toInfo().status).toBe("error");
   });
+
+  it("(c) parallel tool_start events do not cancel each other (subagent regression)", async () => {
+    // Two concurrent tool calls (mimicking parallel subagents). The second
+    // tool_start must NOT cancel the first — both must end as "completed".
+    const toolUseIdA = "sdk-parallel-A";
+    const toolUseIdB = "sdk-parallel-B";
+    const provider = new MockSessionProvider("claude", [
+      [
+        {
+          type: "tool_start",
+          toolId: "t-A",
+          sdkToolUseId: toolUseIdA,
+          name: "Read",
+          input: { file_path: "/tmp/a.ts" },
+          approvalId: "approval-A",
+        },
+        {
+          type: "tool_start",
+          toolId: "t-B",
+          sdkToolUseId: toolUseIdB,
+          name: "Read",
+          input: { file_path: "/tmp/b.ts" },
+          approvalId: "approval-B",
+        },
+        {
+          type: "tool_complete",
+          sdkToolUseId: toolUseIdA,
+          output: "A",
+          success: true,
+        },
+        {
+          type: "tool_complete",
+          sdkToolUseId: toolUseIdB,
+          output: "B",
+          success: true,
+        },
+        { type: "text_done", content: "Done." },
+        { type: "turn_done", result: mockResult({ providerId: "claude" }) },
+      ],
+    ]);
+
+    const session = makeSession(provider);
+    const { client, received } = makeClient();
+    session.attach(client);
+
+    await session.send("run two tools in parallel", TEST_AUTH);
+    await waitForIdle(session);
+
+    // Both tool messages must reach "completed" — neither should be cancelled.
+    const toolMsgs = received.filter((m) => m.type === "session.message" && m.role === "tool_call");
+    expect(toolMsgs).toHaveLength(2);
+
+    const finalPhases = toolMsgs.map((m) => {
+      const tool = (m as { tool?: { state?: { phase?: string } } }).tool;
+      // Walk deltas to find the last phase update for each messageId
+      const msgId = (m as { messageId?: string }).messageId;
+      const lastDelta = received
+        .filter((d) => d.type === "session.message.delta" && (d as { messageId?: string }).messageId === msgId && (d as { toolStateUpdate?: { phase?: string } }).toolStateUpdate)
+        .at(-1) as { toolStateUpdate?: { phase?: string } } | undefined;
+      return lastDelta?.toolStateUpdate?.phase ?? tool?.state?.phase;
+    });
+
+    expect(finalPhases).not.toContain("cancelled");
+    expect(finalPhases.every((p) => p === "completed")).toBe(true);
+  });
 });

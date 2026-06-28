@@ -1682,7 +1682,10 @@ export class Session {
 
       case "tool_start": {
         this.#accumulator.handleEvent(event);
-        this.#completeActiveTools();
+        // NOTE: do NOT call #completeActiveTools() here. It would cancel all
+        // currently in-flight tools, which is correct for sequential calls but
+        // silently kills parallel tool calls from concurrent subagents.
+        // Cleanup is handled by text_done and the #consumeEvents finally block.
         // Await the ZeroID registration fence so sub-agent identity is resolved
         // before we attribute this tool call. Bounded by a 5s timeout so a
         // hung ZeroID service can't stall the event loop indefinitely.
