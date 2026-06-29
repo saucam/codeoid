@@ -215,8 +215,45 @@ const SessionSchema = z
   .object({
     defaultModel: z.string().optional(),
     fallbackModel: z.string().optional(),
+    /**
+     * Hard backstop against a wedged turn. If the provider event stream goes
+     * completely silent (no events at all) for this many ms while a turn is
+     * active, the turn is treated as stalled: the run is torn down, the
+     * subprocess reaped, status reset to idle, and a clear message shown.
+     * Generous by default — long-running tools still emit `tool_progress` /
+     * partial events, so true silence for this long is a reliable hang signal.
+     * Set to 0 to disable the watchdog.
+     */
+    turnStallTimeoutMs: z.number().min(0).default(300_000),
+    /**
+     * Per-call wall-clock timeout (ms) applied to external (user-configured)
+     * MCP servers, surfaced to the SDK as each server's `timeout`. A hung MCP
+     * tool call (e.g. an unresponsive HTTP gateway) then returns an SDK error
+     * the turn loop can act on, instead of going silent. Kept BELOW
+     * turnStallTimeoutMs so it fires first — the stall watchdog stays a coarse
+     * last-resort backstop. 0 = don't set (use the SDK default). Does not apply
+     * to codeoid's in-process memory server.
+     */
+    mcpToolTimeoutMs: z.number().min(0).default(120_000),
   })
-  .default({});
+  .default({ turnStallTimeoutMs: 300_000, mcpToolTimeoutMs: 120_000 })
+  // Enforce the "SDK signals first" contract across BOTH fields — not just the
+  // defaults. An env override / config file could otherwise set the MCP timeout
+  // at or above the stall timeout, so the coarse watchdog would force-recover
+  // before the SDK's clean per-tool error fires. Exempt the opt-out cases:
+  // turnStallTimeoutMs=0 (watchdog off → nothing to race) and mcpToolTimeoutMs=0
+  // (use SDK default → relationship is moot).
+  .refine(
+    (s) =>
+      s.turnStallTimeoutMs === 0 ||
+      s.mcpToolTimeoutMs === 0 ||
+      s.mcpToolTimeoutMs < s.turnStallTimeoutMs,
+    {
+      message:
+        "must be less than session.turnStallTimeoutMs so a hung MCP call surfaces an SDK error before the stall watchdog fires (set either to 0 to opt out)",
+      path: ["mcpToolTimeoutMs"],
+    },
+  );
 
 const AutoRotateSchema = z
   .object({
@@ -367,6 +404,10 @@ export interface CodeoidConfig {
   session: {
     defaultModel?: string;
     fallbackModel?: string;
+    /** Stall watchdog: ms of total event-stream silence before a turn is force-recovered (0 = off). Defaults to 300000 when omitted. */
+    turnStallTimeoutMs?: number;
+    /** Per-call timeout (ms) for external MCP servers, surfaced as the SDK's per-server `timeout`. 0 = use SDK default. Defaults to 120000 when omitted. */
+    mcpToolTimeoutMs?: number;
   };
 }
 
@@ -420,6 +461,8 @@ const ENV_OVERRIDES: readonly EnvOverride[] = [
   { env: "CODEOID_AUTO_ROTATE_MIN_TURNS", path: "autoRotate.minTurnsBeforeRotate", kind: "int" },
   { env: "CODEOID_DEFAULT_MODEL", path: "session.defaultModel", kind: "string" },
   { env: "CODEOID_FALLBACK_MODEL", path: "session.fallbackModel", kind: "string" },
+  { env: "CODEOID_TURN_STALL_TIMEOUT_MS", path: "session.turnStallTimeoutMs", kind: "int" },
+  { env: "CODEOID_MCP_TOOL_TIMEOUT_MS", path: "session.mcpToolTimeoutMs", kind: "int" },
 ];
 
 // ── Loading ──────────────────────────────────────────────────────────────
@@ -480,6 +523,23 @@ export function loadConfig(opts: LoadOptions = {}): CodeoidConfig {
     if (raw === undefined || raw === "") continue;
     setByPath(parsed, ov.path, parseOverride(raw, ov.kind));
   }
+
+  // 3a. Re-validate after overrides. parseOverride() coerces strings to the
+  //     declared kind but does NOT enforce schema constraints (e.g. the
+  //     non-negative bound on session.turnStallTimeoutMs, or the 0..1 bounds on
+  //     the autoRotate percentages). Without this, CODEOID_TURN_STALL_TIMEOUT_MS=-1
+  //     would slip through and silently disable the stall watchdog. Re-running
+  //     RootSchema over the merged result fails fast on any out-of-range override.
+  const revalidated = RootSchema.safeParse(parsed);
+  if (!revalidated.success) {
+    const issues = revalidated.error.issues
+      .map((i) => `  ${i.path.join(".")}: ${i.message}`)
+      .join("\n");
+    throw new Error(
+      `Invalid config after applying environment overrides:\n${issues}\n(Check the corresponding CODEOID_* env vars.)`,
+    );
+  }
+  Object.assign(parsed, revalidated.data);
 
   // 3b. Resolve the ZeroID issuer (preset name or URL → concrete base URL) and
   //     pin the expected issuer claim. Every ZeroID deployment sets `iss` to

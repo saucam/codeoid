@@ -59,6 +59,7 @@ import {
   translateSDKMessage,
   parseMcpServerConfig,
   extractToolResultText,
+  withMcpToolTimeout,
 } from "../daemon/providers/claude/index.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -312,6 +313,37 @@ describe("parseMcpServerConfig", () => {
 
   it("returns null for env with non-string values", () => {
     expect(parseMcpServerConfig({ command: "x", env: { KEY: 123 } })).toBeNull();
+  });
+});
+
+// ── withMcpToolTimeout ────────────────────────────────────────────────────────
+
+describe("withMcpToolTimeout", () => {
+  it("injects timeout into external servers that don't declare one", () => {
+    const out = withMcpToolTimeout(
+      {
+        slack: { type: "http", url: "https://gw/mcp/slack" } as never,
+        local: { command: "node", args: ["x.js"] } as never,
+      },
+      120_000,
+    );
+    expect((out.slack as { timeout?: number }).timeout).toBe(120_000);
+    expect((out.local as { timeout?: number }).timeout).toBe(120_000);
+  });
+
+  it("does not override a server's explicit timeout", () => {
+    const out = withMcpToolTimeout(
+      { slack: { type: "http", url: "https://gw", timeout: 5_000 } as never },
+      120_000,
+    );
+    expect((out.slack as { timeout?: number }).timeout).toBe(5_000);
+  });
+
+  it("is a no-op when ms <= 0 (use the SDK default)", () => {
+    const servers = { slack: { type: "http", url: "https://gw" } as never };
+    expect(withMcpToolTimeout(servers, 0)).toBe(servers);
+    const out = withMcpToolTimeout(servers, 0);
+    expect((out.slack as { timeout?: number }).timeout).toBeUndefined();
   });
 });
 

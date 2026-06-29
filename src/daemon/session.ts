@@ -140,6 +140,11 @@ export class Session {
   #provider!: SessionProvider;
   #activeRun: TurnRun | null = null;
   #eventConsumerTask: Promise<void> | null = null;
+  // Wall-clock ms of the most recent provider event for the active run. The
+  // stall watchdog in #consumeEvents and the liveness guard in #sendInner read
+  // this to detect a turn whose event stream has gone silent (hung tool / dead
+  // subprocess) so the session can self-recover instead of wedging forever.
+  #lastEventAt = 0;
   #accumulator = new CanonicalHistoryAccumulator();
   // Tracks the sender of the most recently started turn. The onRecoveryNeeded
   // closure reads this instead of closing over the original send()'s sender,
@@ -153,6 +158,12 @@ export class Session {
   #seq = 0;
   #memory?: MemoryEngine;
   #chunker?: EpisodeChunker;
+  // Counts mid-turn messages in flight. When the SDK interrupts the current
+  // turn to process a pushMidTurn() injection, it emits a turn_done for the
+  // aborted partial turn BEFORE the continuation turn starts. This counter lets
+  // #consumeEvents absorb those intermediate turn_dones and keep looping instead
+  // of exiting the consumer and leaving the continuation turn without a reader.
+  #pendingMidTurnCount = 0;
   #indexScheduler?: IndexScheduler;
   #workspaceId: string;
 
@@ -680,6 +691,29 @@ export class Session {
     const effectivePriority: "now" | "next" | "later" =
       priority ?? (wasWorking ? "now" : "later");
 
+    // Liveness guard: a session can look "working" while its run is actually
+    // wedged (provider stream went silent on a hung tool / dead subprocess).
+    // Queuing a mid-turn push into a dead run silently swallows the message and
+    // the user never gets a reply. If the active run has produced no event for
+    // longer than the stall window, recover it now and start a fresh turn
+    // instead of trusting #activeRun.
+    const stallMs = this.#config?.session.turnStallTimeoutMs ?? 300_000;
+    if (
+      wasWorking &&
+      this.#activeRun &&
+      stallMs > 0 &&
+      this.#lastEventAt > 0 &&
+      Date.now() - this.#lastEventAt > stallMs
+    ) {
+      console.error(
+        `[codeoid/session ${this.id}] send arrived on a stalled run (${Date.now() - this.#lastEventAt}ms since last event); recovering before starting a fresh turn`,
+      );
+      await this.#recoverStalledRun(this.#activeRun, stallMs, {
+        continuingCurrentSend: true,
+      });
+      // Fall through to the normal (idle) turn-start path below.
+    }
+
     // For keep-warm mid-turn pushes (ClaudeProvider), inject directly into the live run.
     if (wasWorking && this.#activeRun?.pushMidTurn) {
       const hint =
@@ -699,6 +733,7 @@ export class Session {
       this.#persistAndBuffer(midTurnMsg);
       this.#broadcastRaw(midTurnMsg);
       this.#accumulator.pushUserTurn(effectivePrompt);
+      this.#pendingMidTurnCount++;
       this.#activeRun.pushMidTurn(effectivePrompt, effectivePriority ?? "now");
       this.#setStatus("thinking");
       this.#broadcastInfoUpdate();
@@ -790,6 +825,7 @@ export class Session {
    */
   async interrupt(sender: AuthContext): Promise<void> {
     this.#store.audit(sender.sub, "session.interrupt", this.id);
+    this.#pendingMidTurnCount = 0; // cancel pending mid-turn continuations
     // Finalize any in-flight streaming messages RIGHT NOW so the UI's live
     // region stops spinning on content the model won't finish emitting,
     // before we even await the SDK — instant feedback.
@@ -1576,8 +1612,79 @@ export class Session {
   }
 
   async #consumeEvents(run: TurnRun, _sender: AuthContext): Promise<void> {
+    // Stall watchdog: drive the iterator manually so we can race each pull
+    // against a timeout. If the provider stream goes completely silent for
+    // longer than the configured window (no events at all — long-running tools
+    // still emit tool_progress / partial events), the turn is treated as
+    // wedged and force-recovered. 0 disables the watchdog. See #recoverStalledRun.
+    const stallMs = this.#config?.session.turnStallTimeoutMs ?? 300_000;
+    const iter = run.events[Symbol.asyncIterator]();
+    const STALL = Symbol("stall");
+    this.#lastEventAt = Date.now();
     try {
-      for await (const event of run.events) {
+      while (true) {
+        let next: IteratorResult<ProviderEvent> | typeof STALL;
+        // A pending manual tool approval is a legitimate indefinite silent
+        // period — the provider blocks on canUseTool until the user responds.
+        // Pause the watchdog so a slow human approval isn't mistaken for a hung
+        // stream and cancelled.
+        const waitingForApproval =
+          this.#status === "waiting_approval" || this.#pendingApprovals.size > 0;
+        if (stallMs > 0 && !waitingForApproval) {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const stall = new Promise<typeof STALL>((resolve) => {
+            timer = setTimeout(() => resolve(STALL), stallMs);
+          });
+          try {
+            next = await Promise.race([iter.next(), stall]);
+          } finally {
+            if (timer) clearTimeout(timer);
+          }
+        } else {
+          next = await iter.next();
+        }
+
+        if (next === STALL) {
+          await this.#recoverStalledRun(run, stallMs);
+          return; // finally still runs; #recoverStalledRun already cleared run state
+        }
+        if (next.done) break;
+        // Ownership guard: a concurrent #sendInner liveness-guard recovery may
+        // have torn down this run while we were awaiting iter.next(). Drop any
+        // late event from the abandoned run so it can't leak into the fresh turn.
+        if (this.#activeRun !== run) break;
+        const event = next.value;
+        this.#lastEventAt = Date.now();
+        // When a mid-turn message interrupts the current turn, the SDK emits a
+        // turn_done (often with isError) for the aborted partial turn BEFORE it
+        // starts the continuation turn for the injected message. Absorb that
+        // intermediate boundary: flush per-turn state, record partial cost, and
+        // continue looping — no break, no error display, no status flip to idle.
+        // The continuation turn's events follow immediately in the same queue.
+        if (event.type === "turn_done" && this.#pendingMidTurnCount > 0) {
+          this.#pendingMidTurnCount--;
+          // Record history / cost for the interrupted partial turn.
+          this.#accumulator.handleEvent(event);
+          this.#recordTurnFromResult(event.result);
+          // Flush per-turn accumulators so the continuation turn starts clean.
+          this.#completeActiveTools();
+          this.#flushActiveAssistant();
+          this.#finalizeActiveThinking();
+          this.#chunker?.onTurnEnd();
+          // Dismiss any stale approval gates from the interrupted turn.
+          if (this.#pendingApprovals.size > 0) {
+            const systemAuth: AuthContext = { sub: "system", scopes: [], delegationDepth: 0, accountId: this.accountId, projectId: this.projectId };
+            for (const [aid, resolveFn] of this.#pendingApprovals.entries()) {
+              resolveFn({ approved: false });
+              this.#dismissStaleApproval(aid, systemAuth);
+            }
+            this.#pendingApprovals.clear();
+          }
+          // Re-assert thinking status so the UI doesn't flash idle between turns.
+          if (this.#status !== "error") this.#setStatus("thinking");
+          continue;
+        }
+
         await this.#handleProviderEvent(event);
         if (event.type === "turn_done" || event.type === "error") break;
       }
@@ -1590,6 +1697,7 @@ export class Session {
       this.#persistAndBuffer(errorMsg);
       this.#broadcastRaw(errorMsg);
     } finally {
+      this.#pendingMidTurnCount = 0; // safety: reset on any exit path
       this.#completeActiveTools();
       this.#flushActiveAssistant();
       this.#finalizeActiveThinking();
@@ -1610,6 +1718,77 @@ export class Session {
         this.#eventConsumerTask = null;
         if (this.#status !== "error") this.#setStatus("idle");
       }
+    }
+  }
+
+  /**
+   * Force-recover a wedged turn whose provider event stream went silent.
+   *
+   * Called by the #consumeEvents watchdog (after `stallMs` of no events) and by
+   * the #sendInner liveness guard (when a send arrives on an apparently-dead
+   * run). Idempotent and run-scoped: if `run` is no longer the active run, the
+   * turn already ended and we no-op.
+   *
+   * Crucially this does NOT route through #teardownProvider (which awaits the
+   * session event-consumer task — i.e. potentially itself). It nulls the run
+   * slots up front, surfaces a clear message, resets status to idle, and hard
+   * tears down the PROVIDER (abort → reap the hung subprocess). The next send()
+   * recreates a fresh query loop. The abandoned consumer (if any) unblocks when
+   * teardown closes the turn queue and its finally no-ops via the run guard.
+   */
+  async #recoverStalledRun(
+    run: TurnRun,
+    stallMs: number,
+    opts?: { continuingCurrentSend?: boolean },
+  ): Promise<void> {
+    if (this.#activeRun !== run) return; // already ended / recovered
+
+    console.error(
+      `[codeoid/session ${this.id}] turn stalled — no provider events for ${stallMs}ms; force-recovering`,
+    );
+
+    // Stop any spinning UI and release waiters BEFORE we tear down.
+    this.#completeActiveTools();
+    this.#flushActiveAssistant();
+    this.#finalizeActiveThinking();
+    this.#chunker?.onTurnEnd();
+    this.#pendingMidTurnCount = 0;
+    if (this.#pendingApprovals.size > 0) {
+      const systemAuth: AuthContext = { sub: "system", scopes: [], delegationDepth: 0, accountId: this.accountId, projectId: this.projectId };
+      for (const [aid, resolveFn] of this.#pendingApprovals.entries()) {
+        resolveFn({ approved: false });
+        this.#dismissStaleApproval(aid, systemAuth);
+      }
+      this.#pendingApprovals.clear();
+    }
+
+    // Drop the wedged run so a concurrent send() doesn't queue into it.
+    this.#activeRun = null;
+    this.#eventConsumerTask = null;
+
+    const msg = this.#makeMessage(
+      "system",
+      opts?.continuingCurrentSend
+        ? `⚠️ Previous turn timed out — no activity for ${Math.round(stallMs / 1000)}s. The session was reset and your latest message is being retried in a fresh turn.`
+        : `⚠️ Turn timed out — no activity for ${Math.round(stallMs / 1000)}s. The session was reset; send your message again to continue.`,
+      SYSTEM_IDENTITY,
+      undefined,
+      undefined,
+      { event: "turn_stalled", errorCode: "turn_stalled" },
+    );
+    this.#persistAndBuffer(msg);
+    this.#broadcastRaw(msg);
+    this.#setStatus("idle");
+
+    // Hard teardown: abort the controller and reap the (presumed hung)
+    // subprocess. Safe to await here — provider.teardown() awaits the
+    // PROVIDER's own pump, never this session's consumer.
+    try {
+      await this.#provider.teardown();
+    } catch (e) {
+      console.error(
+        `[codeoid/session ${this.id}] provider teardown during stall recovery failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
     }
   }
 
@@ -1636,7 +1815,11 @@ export class Session {
 
       case "text_done": {
         this.#accumulator.handleEvent(event);
-        this.#completeActiveTools();
+        // NOTE: do NOT call #completeActiveTools() here.
+        // In the real SDK the committed assistant message (which fires text_done)
+        // is emitted BEFORE the user/tool_result message (which fires tool_complete).
+        // Calling completeActiveTools here cancels tools that are still executing.
+        // Cleanup is handled solely by the #consumeEvents finally block.
         if (this.#activeAssistantMsg) {
           this.#activeAssistantMsg.content = event.content;
           this.#activeAssistantMsg.parts = [{ kind: "text", text: event.content, markdown: true }];
@@ -1644,9 +1827,10 @@ export class Session {
           this.#broadcastRaw(this.#activeAssistantMsg);
           this.#activeAssistantMsg = null;
         } else if (event.content) {
-          const msg = this.#makeMessage("assistant", event.content, this.#agentIdentity, [{ kind: "text", text: event.content, markdown: true }]);
-          this.#persistAndBuffer(msg);
-          this.#broadcastRaw(msg);
+          // No preceding text_delta — the SDK returned the response as a batch
+          // (happens for mid-turn now-priority continuations). Simulate streaming
+          // so the UI shows a typing animation instead of an instant text pop-in.
+          await this.#artificiallyStreamText(event.content);
         }
         break;
       }
@@ -1685,7 +1869,7 @@ export class Session {
         // NOTE: do NOT call #completeActiveTools() here. It would cancel all
         // currently in-flight tools, which is correct for sequential calls but
         // silently kills parallel tool calls from concurrent subagents.
-        // Cleanup is handled by text_done and the #consumeEvents finally block.
+        // Cleanup is handled solely by the #consumeEvents finally block.
         // Await the ZeroID registration fence so sub-agent identity is resolved
         // before we attribute this tool call. Bounded by a 5s timeout so a
         // hung ZeroID service can't stall the event loop indefinitely.
@@ -1911,6 +2095,54 @@ export class Session {
     }
     this.#persistAndBuffer(m);
     this.#broadcastRaw(m);
+  }
+
+  /**
+   * Emit text as artificial streaming deltas so the UI shows a typing animation
+   * for responses the SDK returned as a single batch (no preceding text_delta).
+   * This happens for mid-turn now-priority continuations where the SDK skips
+   * streaming and emits only an `assistant` message.
+   *
+   * Scales step size to yield ~30 animation frames at 16ms each (~480ms total),
+   * so the animation looks natural across any response length without adding
+   * meaningful latency.
+   *
+   * Interrupt safety: each loop iteration checks whether #activeAssistantMsg
+   * still points to the message we created; if interrupt() ran between frames
+   * (#flushActiveAssistant nulled it), we return early — the partial content was
+   * already committed by the flush.
+   */
+  async #artificiallyStreamText(content: string): Promise<void> {
+    const FRAME_MS = 16;
+    const steps = Math.min(30, content.length);
+    const charsPerStep = Math.ceil(content.length / steps);
+
+    const msg = this.#makeMessage("assistant", "", this.#agentIdentity, []);
+    this.#activeAssistantMsg = msg;
+    this.#persistAndBuffer(msg);
+    this.#broadcastRaw(msg);
+
+    for (let pos = 0; pos < content.length; pos += charsPerStep) {
+      if (this.#activeAssistantMsg !== msg) return; // interrupted between frames
+      const chunk = content.slice(pos, pos + charsPerStep);
+      msg.content += chunk;
+      const delta: SessionMessageDelta = {
+        type: "session.message.delta",
+        sessionId: this.id,
+        messageId: msg.messageId,
+        contentAppend: chunk,
+        timestamp: new Date().toISOString(),
+      };
+      this.#broadcastRaw(delta);
+      await new Promise<void>((r) => setTimeout(r, FRAME_MS));
+    }
+
+    if (this.#activeAssistantMsg !== msg) return; // interrupted on last frame
+    msg.content = content; // exact match regardless of ceiling-division rounding
+    msg.parts = [{ kind: "text", text: content, markdown: true }];
+    this.#persistAndBuffer(msg);
+    this.#broadcastRaw(msg);
+    this.#activeAssistantMsg = null;
   }
 
   /**

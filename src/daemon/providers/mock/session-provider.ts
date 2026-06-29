@@ -44,6 +44,13 @@ export class MockSessionProvider implements SessionProvider {
   #backingSessionId: string;
   #hasQueried = false;
   #script: ProviderEvent[][];
+  /** When true, runTurn() emits its scripted events then leaves the queue OPEN
+   *  (never closes, never emits a terminal turn_done) — simulating a provider
+   *  whose stream has gone silent (hung tool / dead subprocess). The queue is
+   *  only closed by teardown(), mirroring ClaudeProvider. */
+  #stall: boolean;
+  /** Live turn queue, so teardown() can unblock a waiting consumer like the real provider. */
+  #currentQueue: AsyncQueue<ProviderEvent> | null = null;
 
   /** Every TurnOpts passed to runTurn() — inspect in tests. */
   readonly capturedOpts: TurnOpts[] = [];
@@ -51,11 +58,12 @@ export class MockSessionProvider implements SessionProvider {
   /** Incremented each time teardown() is called — useful for asserting cleanup. */
   teardownCount = 0;
 
-  constructor(id = "mock-session", script: ProviderEvent[][] = []) {
+  constructor(id = "mock-session", script: ProviderEvent[][] = [], opts: { stall?: boolean } = {}) {
     this.id = id;
     this.displayName = `MockSession(${id})`;
     this.#backingSessionId = `${id}-backing`;
     this.#script = script.map((s) => [...s]);
+    this.#stall = opts.stall ?? false;
   }
 
   get backingSessionId(): string { return this.#backingSessionId; }
@@ -74,6 +82,10 @@ export class MockSessionProvider implements SessionProvider {
   async teardown(): Promise<void> {
     this.teardownCount++;
     this.onRecoveryNeeded = undefined;
+    // Mirror ClaudeProvider: closing the live turn queue unblocks any consumer
+    // currently awaiting the next event (e.g. a stalled run being recovered).
+    this.#currentQueue?.close();
+    this.#currentQueue = null;
   }
 
   async dispose(): Promise<void> {
@@ -93,6 +105,7 @@ export class MockSessionProvider implements SessionProvider {
     ];
 
     const queue = new AsyncQueue<ProviderEvent>();
+    this.#currentQueue = queue;
 
     // Emit events asynchronously, calling canUseTool for each tool_start
     // to simulate the SDK's PreToolUse hook firing before the tool runs.
@@ -134,6 +147,11 @@ export class MockSessionProvider implements SessionProvider {
         }
       }
     }
+
+    // Stall mode: emit the scripted events, then leave the queue OPEN (no
+    // terminal event, no close) so the consumer's next pull blocks — exactly
+    // what a hung provider stream looks like. Only teardown() closes it.
+    if (this.#stall) return;
 
     queue.close();
   }

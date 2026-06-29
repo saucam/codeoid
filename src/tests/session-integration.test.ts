@@ -45,6 +45,7 @@ import { mockResult } from "../daemon/providers/mock/index.js";
 import { AsyncQueue } from "../daemon/async-queue.js";
 import type { DaemonMessage, AuthContext } from "../protocol/types.js";
 import type { ProviderEvent, TurnRun } from "../daemon/providers/interface.js";
+import type { CodeoidConfig } from "../config.js";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -85,7 +86,11 @@ afterEach(async () => {
  * Uses existingId so the constructor skips the async saveMeta call,
  * eliminating ENOENT races with afterEach's rmSync.
  */
-function makeSession(provider: MockSessionProvider, name = "integ-test"): Session {
+function makeSession(
+  provider: MockSessionProvider,
+  name = "integ-test",
+  config?: CodeoidConfig,
+): Session {
   const id = randomUUID();
   store.createSession({
     id,
@@ -106,7 +111,25 @@ function makeSession(provider: MockSessionProvider, name = "integ-test"): Sessio
     transcriptStore,
     existingId: id,
     _testProvider: provider,
+    config,
   });
+}
+
+/** Minimal config whose only meaningful field is a tiny stall timeout, so the
+ *  watchdog fires in milliseconds instead of the 300s default. autoRotate is
+ *  included (disabled) because #shouldRotate dereferences it on every send. */
+function stallConfig(turnStallTimeoutMs: number): CodeoidConfig {
+  return {
+    session: { turnStallTimeoutMs },
+    autoRotate: {
+      enabled: false,
+      warnPct: 0.75,
+      rotatePct: 0.9,
+      hardRotatePct: 0.95,
+      minTurnsBeforeRotate: 1,
+      strategy: "task-anchor",
+    },
+  } as unknown as CodeoidConfig;
 }
 
 /** Build a stub AttachedClient that records every DaemonMessage it receives. */
@@ -148,6 +171,41 @@ function waitForIdle(session: Session, timeoutMs = 8000): Promise<void> {
       },
     };
     session.attach(watcher);
+  });
+}
+
+/**
+ * Resolve when the session broadcasts a session.status_change with the given
+ * status. Checks the current status first. Rejects after timeoutMs.
+ */
+function waitForStatus(session: Session, targetStatus: string, timeoutMs = 4000): Promise<void> {
+  if (session.status === targetStatus) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const watcherId = randomUUID();
+    const timer = setTimeout(() => {
+      session.detach(watcherId);
+      reject(new Error(`session did not reach '${targetStatus}' within ${timeoutMs}ms — status=${session.status}`));
+    }, timeoutMs);
+    const watcher: AttachedClient = {
+      id: watcherId,
+      auth: TEST_AUTH,
+      send(msg) {
+        if (msg.type === "session.status_change" && msg.status === targetStatus) {
+          clearTimeout(timer);
+          session.detach(watcherId);
+          resolve();
+        }
+      },
+    };
+    session.attach(watcher);
+    // Re-check after attaching: if the status flipped to the target in the
+    // window between the initial check and attach(), we'd otherwise miss the
+    // only broadcast and time out.
+    if (session.status === targetStatus) {
+      clearTimeout(timer);
+      session.detach(watcherId);
+      resolve();
+    }
   });
 }
 
@@ -754,5 +812,317 @@ describe("T8 – regression guards: text overlap + stale status", () => {
 
     expect(finalPhases).not.toContain("cancelled");
     expect(finalPhases.every((p) => p === "completed")).toBe(true);
+  });
+
+  it("(d) text_done arriving before tool_complete does not cancel the in-flight tool", async () => {
+    // The real Claude Agent SDK emits the committed assistant message (→ text_done)
+    // BEFORE the user/tool_result message (→ tool_complete). A previous bug had
+    // #completeActiveTools() in the text_done handler which cancelled any tool
+    // still in #activeToolMsgIds at that moment, producing ghost
+    // "cancelled — interrupted" cards in the UI.
+    //
+    // This test uses the real-world SDK ordering:
+    //   tool_start → text_done → tool_complete → turn_done
+    // to verify the tool ends as "completed", not "cancelled".
+    const toolUseId = "sdk-real-order";
+    const provider = new MockSessionProvider("claude", [
+      [
+        {
+          type: "tool_start",
+          toolId: "t-real",
+          sdkToolUseId: toolUseId,
+          name: "Read",
+          input: { file_path: "/tmp/test.ts" },
+          approvalId: "approval-real",
+        },
+        // text_done fires from the committed assistant message — BEFORE tool_result.
+        { type: "text_done", content: "Reading the file." },
+        {
+          type: "tool_complete",
+          sdkToolUseId: toolUseId,
+          output: "file contents",
+          success: true,
+        },
+        { type: "turn_done", result: mockResult({ providerId: "claude" }) },
+      ],
+    ]);
+
+    const session = makeSession(provider);
+    const { client, received } = makeClient();
+    session.attach(client);
+
+    await session.send("run bash", TEST_AUTH);
+    await waitForIdle(session);
+
+    const toolMsg = received.find((m) => m.type === "session.message" && m.role === "tool_call");
+    expect(toolMsg).toBeDefined();
+    const msgId = (toolMsg as { messageId?: string }).messageId!;
+    const lastDelta = received
+      .filter((d) => d.type === "session.message.delta" && (d as { messageId?: string }).messageId === msgId && (d as { toolStateUpdate?: { phase?: string } }).toolStateUpdate)
+      .at(-1) as { toolStateUpdate?: { phase?: string } } | undefined;
+    const finalPhase = lastDelta?.toolStateUpdate?.phase ?? (toolMsg as { tool?: { state?: { phase?: string } } }).tool?.state?.phase;
+    expect(finalPhase).toBe("completed");
+  });
+});
+
+// ── T9: Mid-turn message handling ─────────────────────────────────────────────
+
+describe("T9 – mid-turn message handling", () => {
+  /**
+   * Regression test for the bug where #consumeEvents broke on the first
+   * turn_done (the interrupted partial turn) and left the continuation turn
+   * with no consumer, causing the session to stop dead with an error instead
+   * of processing the injected message.
+   *
+   * The test drives a custom TurnRun directly:
+   *   1. Emit text_delta so the session enters "thinking" status.
+   *   2. Wait for the mid-turn send() to arrive (via pushMidTurn).
+   *   3. Emit turn_done(isError, "conversation ended mid-turn") — the aborted turn.
+   *   4. Emit the continuation turn (text_delta + text_done + turn_done(success)).
+   */
+  it("mid-turn message is consumed as a continuation turn, not an error stop", async () => {
+    const queue = new AsyncQueue<ProviderEvent>();
+    let notifyMidTurnReceived: (() => void) | null = null;
+
+    // Custom SessionProvider whose TurnRun supports pushMidTurn.
+    const provider: import("../daemon/providers/interface.js").SessionProvider = {
+      id: "claude",
+      displayName: "MidTurnTest",
+      onRecoveryNeeded: undefined,
+      backingSessionId: "mid-turn-test-backing",
+      hasQueried: false,
+      queuedMessages: 0,
+      resetToNewSession() {},
+      setHasQueried(_v: boolean) { },
+      async teardown() { queue.close(); },
+      async dispose() { queue.close(); },
+      async listModels() { return []; },
+
+      runTurn(_opts: import("../daemon/providers/interface.js").TurnOpts): TurnRun {
+        void (async () => {
+          await Promise.resolve(); // yield so #consumeEvents loop has started
+          // First turn: emit a partial text_delta so the session enters "thinking",
+          // then stall until the mid-turn message arrives via pushMidTurn.
+          queue.push({ type: "text_delta", content: "Working on original task..." });
+          await new Promise<void>((r) => { notifyMidTurnReceived = r; });
+          // Simulate SDK interrupting the turn when a now-priority message lands.
+          queue.push({
+            type: "turn_done",
+            result: mockResult({ providerId: "claude", isError: true, errorMessage: "conversation ended mid-turn" }),
+          });
+          // Continuation turn for the injected mid-turn message.
+          queue.push({ type: "text_delta", content: "Continuing with your request." });
+          queue.push({ type: "text_done", content: "Continuing with your request." });
+          queue.push({ type: "turn_done", result: mockResult({ providerId: "claude" }) });
+          queue.close();
+        })();
+
+        return {
+          events: queue,
+          interrupt: async () => { queue.close(); },
+          pushMidTurn: (_content: string, _priority: string) => {
+            notifyMidTurnReceived?.();
+          },
+        };
+      },
+    };
+
+    // makeSession() requires MockSessionProvider; construct Session directly.
+    const id = randomUUID();
+    store.createSession({
+      id,
+      name: "mid-turn-integ",
+      workdir: tmp,
+      status: "idle",
+      createdBy: TEST_AUTH.sub,
+      createdAt: new Date().toISOString(),
+      attachedClients: 0,
+      accountId: TEST_AUTH.accountId!,
+      projectId: TEST_AUTH.projectId!,
+    });
+    const { Session: SessionCtor } = await import("../daemon/session.js");
+    const session = new SessionCtor({
+      name: "mid-turn-integ",
+      workdir: tmp,
+      auth: TEST_AUTH,
+      store,
+      transcriptStore,
+      existingId: id,
+      _testProvider: provider as unknown as import("../daemon/providers/mock/session-provider.js").MockSessionProvider,
+    });
+
+    const { client, received } = makeClient();
+    session.attach(client);
+
+    // Start the first turn.
+    await session.send("original task", TEST_AUTH);
+
+    // Wait until the session is "thinking" before sending the mid-turn message.
+    await waitForStatus(session, "thinking");
+
+    // Send mid-turn message — triggers pushMidTurn on the active run.
+    await session.send("mid-turn add something", TEST_AUTH);
+
+    // Session must reach idle (not error) after both turns complete.
+    await waitForIdle(session);
+
+    expect(session.status).toBe("idle");
+
+    // No "Error: conversation ended mid-turn" should appear in the scrollback.
+    const errorMsgs = received.filter(
+      (m) =>
+        m.type === "session.message" &&
+        (m as { role?: string }).role === "system" &&
+        typeof (m as { content?: unknown }).content === "string" &&
+        ((m as { content: string }).content).startsWith("Error:"),
+    );
+    expect(errorMsgs).toHaveLength(0);
+
+    // The continuation assistant message from the mid-turn response must exist.
+    const assistantMsgs = received.filter(
+      (m) => m.type === "session.message" && (m as { role?: string }).role === "assistant",
+    );
+    expect(assistantMsgs.length).toBeGreaterThan(0);
+    const lastAssistant = assistantMsgs.at(-1) as { content?: string };
+    expect(lastAssistant?.content).toContain("Continuing");
+  });
+});
+
+// ── T9: Stall watchdog — wedged turn self-recovers ──────────────────────────────
+//
+// Regression guard for the "stuck in replying, no messages" wedge (#46): when a
+// provider's event stream goes silent without a terminal turn_done (hung tool /
+// dead subprocess), the session must NOT block forever. The watchdog force-
+// recovers the turn, reaps the provider, and a subsequent send works normally.
+describe("T9 – stall watchdog recovers a wedged turn", () => {
+  it("a turn whose stream goes silent recovers to idle, emits a timeout notice, and reaps the provider", async () => {
+    // stall:true → MockSessionProvider emits the delta then leaves the queue
+    // open forever (no turn_done, no close), exactly like a hung stream.
+    const provider = new MockSessionProvider(
+      "claude",
+      [[{ type: "text_delta", content: "working on it" }]],
+      { stall: true },
+    );
+    const session = makeSession(provider, "stall-watchdog", stallConfig(80));
+    const { client, received } = makeClient();
+    session.attach(client);
+
+    await session.send("do the thing", TEST_AUTH);
+    expect(session.status).toBe("thinking");
+
+    // Watchdog fires at 80ms → recovery. Allow generous slack for CI.
+    await waitForIdle(session, 4000);
+    expect(session.status).toBe("idle");
+
+    // A clear timeout breadcrumb was surfaced (not a silent wedge).
+    const stalledMsg = received.find(
+      (m) =>
+        m.type === "session.message" &&
+        (m as { role?: string }).role === "system" &&
+        /timed out/i.test((m as { content?: string }).content ?? ""),
+    );
+    expect(stalledMsg).toBeTruthy();
+
+    // The presumed-hung subprocess was reaped (provider torn down).
+    expect(provider.teardownCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it("after a stall recovery, the next send starts a fresh turn and gets a reply (no permanent wedge)", async () => {
+    // First turn stalls; second turn is a normal scripted reply.
+    const provider = new MockSessionProvider(
+      "claude",
+      [
+        [{ type: "text_delta", content: "hang…" }], // stalls (queue left open)
+        [
+          { type: "text_done", content: "Recovered and replied." },
+          { type: "turn_done", result: mockResult({ providerId: "claude" }) },
+        ],
+      ],
+      { stall: true },
+    );
+    const session = makeSession(provider, "stall-then-send", stallConfig(80));
+    const { client, received } = makeClient();
+    session.attach(client);
+
+    // Turn 1 wedges → watchdog recovers it.
+    await session.send("first", TEST_AUTH);
+    await waitForIdle(session, 4000);
+    expect(session.status).toBe("idle");
+
+    // Turn 2 must behave like a normal turn (not get swallowed into the dead run).
+    await session.send("second", TEST_AUTH);
+    await waitForIdle(session, 4000);
+
+    const assistantMsgs = received.filter(
+      (m) => m.type === "session.message" && (m as { role?: string }).role === "assistant",
+    );
+    const last = assistantMsgs.at(-1) as { content?: string };
+    expect(last?.content).toBe("Recovered and replied.");
+    // Two runTurn() calls: the stalled one + the recovered one.
+    expect(provider.capturedOpts.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("watchdog disabled (turnStallTimeoutMs=0) leaves a silent turn blocked (no false recovery)", async () => {
+    const provider = new MockSessionProvider(
+      "claude",
+      [[{ type: "text_delta", content: "indefinite" }]],
+      { stall: true },
+    );
+    const session = makeSession(provider, "stall-disabled", stallConfig(0));
+    const { client, received } = makeClient();
+    session.attach(client);
+
+    await session.send("go", TEST_AUTH);
+    expect(session.status).toBe("thinking");
+
+    // With the watchdog off, the turn stays "thinking" — give it room to (not) recover.
+    await new Promise<void>((r) => setTimeout(r, 300));
+    expect(session.status).toBe("thinking");
+    const stalledMsg = received.find(
+      (m) => m.type === "session.message" && /timed out/i.test((m as { content?: string }).content ?? ""),
+    );
+    expect(stalledMsg).toBeUndefined();
+
+    // Clean up the still-open run so afterEach doesn't race a live consumer.
+    await session.interrupt(TEST_AUTH);
+  });
+
+  it("does NOT fire while waiting for a manual tool approval (legitimate silent period)", async () => {
+    // Bash is a mutation tool — in guarded (default) mode it requires approval.
+    // The mock blocks in canUseTool until approve(), leaving the stream silent.
+    // The watchdog must pause during that wait, not cancel the approval prompt.
+    const provider = new MockSessionProvider(
+      "claude",
+      [
+        [
+          {
+            type: "tool_start",
+            toolId: "bash-stall",
+            sdkToolUseId: "sdk-bash-stall",
+            name: "Bash",
+            input: { command: "sleep 999" },
+            approvalId: "ap-stall-1",
+          },
+        ],
+      ],
+      { stall: true },
+    );
+    const session = makeSession(provider, "stall-approval", stallConfig(80));
+    const { client, received } = makeClient();
+    session.attach(client);
+
+    await session.send("run it", TEST_AUTH);
+    await waitForStatus(session, "waiting_approval", 4000);
+
+    // Wait well past the 80ms stall window — the watchdog must stay paused.
+    await new Promise<void>((r) => setTimeout(r, 300));
+    expect(session.status).toBe("waiting_approval");
+    const stalledMsg = received.find(
+      (m) => m.type === "session.message" && /timed out/i.test((m as { content?: string }).content ?? ""),
+    );
+    expect(stalledMsg).toBeUndefined();
+
+    // Clean up the pending approval + open run.
+    await session.interrupt(TEST_AUTH);
   });
 });
