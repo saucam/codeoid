@@ -198,6 +198,14 @@ function waitForStatus(session: Session, targetStatus: string, timeoutMs = 4000)
       },
     };
     session.attach(watcher);
+    // Re-check after attaching: if the status flipped to the target in the
+    // window between the initial check and attach(), we'd otherwise miss the
+    // only broadcast and time out.
+    if (session.status === targetStatus) {
+      clearTimeout(timer);
+      session.detach(watcherId);
+      resolve();
+    }
   });
 }
 
@@ -1061,7 +1069,8 @@ describe("T9 – stall watchdog recovers a wedged turn", () => {
       { stall: true },
     );
     const session = makeSession(provider, "stall-disabled", stallConfig(0));
-    const { received } = makeClient();
+    const { client, received } = makeClient();
+    session.attach(client);
 
     await session.send("go", TEST_AUTH);
     expect(session.status).toBe("thinking");
@@ -1099,7 +1108,8 @@ describe("T9 – stall watchdog recovers a wedged turn", () => {
       { stall: true },
     );
     const session = makeSession(provider, "stall-approval", stallConfig(80));
-    const { received } = makeClient();
+    const { client, received } = makeClient();
+    session.attach(client);
 
     await session.send("run it", TEST_AUTH);
     await waitForStatus(session, "waiting_approval", 4000);
