@@ -17,7 +17,7 @@ import { RateLimiter } from "./rate-limit.js";
 import { ShutdownManager } from "./shutdown.js";
 import { AgentIdentityManager } from "./agent-identity.js";
 import { OAuthHandler, type OAuthConfig } from "./oauth.js";
-import { GoogleOAuthProvider, LocalProvider } from "./identity-provider.js";
+import { GoogleOAuthProvider } from "./identity-provider.js";
 import { createMemory, type MemoryEngine } from "./memory/index.js";
 import {
   type CompressionRegistry,
@@ -103,14 +103,12 @@ export class DaemonServer {
     this.#shutdown = new ShutdownManager();
 
     if (config.oauth) {
-      // Choose IdP based on env config
-      const googleClientId = process.env.GOOGLE_CLIENT_ID;
-      const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET;
-
-      const idp = (googleClientId && googleClientSecret)
-        ? new GoogleOAuthProvider({ clientId: googleClientId, clientSecret: googleClientSecret })
-        : new LocalProvider();
-
+      // config.oauth is only assembled when GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET
+      // are set (see config.ts), so these are guaranteed to be present here.
+      const idp = new GoogleOAuthProvider({
+        clientId: process.env.GOOGLE_CLIENT_ID!,
+        clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
+      });
       this.#oauthHandler = new OAuthHandler(config.oauth, idp);
       console.log(`[codeoid] auth provider: ${idp.name}`);
     }

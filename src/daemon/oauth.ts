@@ -1,44 +1,47 @@
 /**
- * OAuth authorization server — Codeoid mints HS256 auth code JWTs
- * that ZeroID validates and exchanges for access tokens.
+ * OAuth authorization server — handles the browser-facing login flow and
+ * exchanges verified identity for a ZeroID RS256 access token.
  *
  * Flow:
- *   1. Frontend redirects to GET /auth/authorize?client_id=codeoid&code_challenge=...
+ *   1. Frontend redirects to GET /auth/authorize
  *   2. Daemon delegates to the configured IdentityProvider (Google, local, etc.)
  *   3. IdP verifies the user, redirects back to /auth/idp-callback
- *   4. Daemon mints HS256 auth code JWT signed with shared hmac_secret
- *   5. Redirects to the original redirect_uri with ?code=<jwt>&state=<state>
- *   6. Frontend exchanges code at ZeroID /oauth2/token (authorization_code + PKCE)
- *   7. ZeroID returns RS256 access token with user identity
+ *   4. For external IdPs: daemon forwards the raw OIDC id_token to ZeroID's
+ *      token-exchange endpoint (RFC 8693) — ZeroID is the authority that issues
+ *      the final RS256 access token. Google configured as ZeroID external issuer.
+ *   5. For local provider: daemon issues a minimal local session token.
+ *   6. Daemon redirects to /auth/callback?token=<access_token>
+ *   7. Frontend stores token, connects to daemon WebSocket.
  */
 
-import { createHmac, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import type { IdentityProvider, VerifiedUser } from "./identity-provider.js";
 import { LocalProvider } from "./identity-provider.js";
 
 export interface OAuthConfig {
-  /** Shared HMAC secret with ZeroID (base64url encoded) */
-  hmacSecret: string;
-  /** Issuer claim in auth code JWTs — must match ZeroID's auth_code_issuer */
-  issuer: string;
-  /** ZeroID token endpoint */
-  tokenEndpoint: string;
-  /** Registered OAuth client_id */
+  /** ZeroID token endpoint for the final token exchange */
+  zeroidTokenEndpoint: string;
+  /** Registered OAuth client_id (used to identify this codeoid instance) */
   clientId: string;
-  /** Account ID for tenant scoping */
+  /** Account ID for ZeroID tenant scoping */
   accountId: string;
-  /** Project ID */
+  /** Project ID for ZeroID tenant scoping */
   projectId: string;
   /** Allowed redirect URIs */
   allowedRedirectUris: string[];
   /** Scopes to grant users */
   defaultScopes: string[];
+  /**
+   * Secret for signing local-provider session tokens (fallback when ZeroID
+   * token exchange is not available, e.g. dev mode). Optional — if omitted,
+   * local provider sessions use a per-restart ephemeral secret.
+   */
+  localSessionSecret?: string;
 }
 
 /** Pending authorization — stored between /auth/authorize and IdP callback */
 interface PendingAuth {
   redirectUri: string;
-  codeChallenge: string;
   scope: string;
   state: string;
   createdAt: number;
@@ -138,13 +141,11 @@ export class OAuthHandler {
   #handleAuthorize(url: URL): Response {
     const clientId = url.searchParams.get("client_id");
     const redirectUri = url.searchParams.get("redirect_uri");
-    const codeChallenge = url.searchParams.get("code_challenge");
-    const codeChallengeMethod = url.searchParams.get("code_challenge_method") ?? "S256";
     const scope = url.searchParams.get("scope") ?? this.#config.defaultScopes.join(" ");
     const state = url.searchParams.get("state") ?? "";
 
-    // Validate
-    if (!clientId || clientId !== this.#config.clientId) {
+    // Validate client_id if provided (optional for single-client deployments)
+    if (clientId && clientId !== this.#config.clientId) {
       return new Response("Invalid client_id", { status: 400 });
     }
     if (!redirectUri || !this.#config.allowedRedirectUris.some(
@@ -152,15 +153,11 @@ export class OAuthHandler {
     )) {
       return new Response("Invalid redirect_uri", { status: 400 });
     }
-    if (!codeChallenge || codeChallengeMethod !== "S256") {
-      return new Response("PKCE code_challenge (S256) required", { status: 400 });
-    }
 
     // Store pending auth — LRU-bounded via #setPending.
     const internalState = randomBytes(16).toString("hex");
     this.#setPending(internalState, {
       redirectUri,
-      codeChallenge,
       scope,
       state,
       createdAt: Date.now(),
@@ -198,7 +195,7 @@ export class OAuthHandler {
       provider: "local",
     };
 
-    return this.#completeAuth(internalState, user);
+    return await this.#completeAuth(internalState, user);
   }
 
   // ── GET /auth/idp-callback — external IdP redirects back here ─────
@@ -213,7 +210,7 @@ export class OAuthHandler {
 
     try {
       const user = await this.#idp.handleCallback(callbackUri, url.searchParams);
-      return this.#completeAuth(internalState, user);
+      return await this.#completeAuth(internalState, user);
     } catch (err) {
       const pending = this.#pending.get(internalState);
       this.#pending.delete(internalState);
@@ -229,35 +226,82 @@ export class OAuthHandler {
     }
   }
 
-  // ── Complete auth — mint code, redirect to original redirect_uri ──
+  // ── Complete auth — exchange identity for ZeroID token, redirect ──
 
-  #completeAuth(internalState: string, user: VerifiedUser): Response {
+  async #completeAuth(internalState: string, user: VerifiedUser): Promise<Response> {
     const pending = this.#pending.get(internalState);
     if (!pending) {
       return new Response("Invalid or expired authorization request", { status: 400 });
     }
     this.#pending.delete(internalState);
 
-    const scopes = pending.scope.split(" ").filter(Boolean);
-    const code = mintAuthCode(
-      this.#config,
-      user.id,
-      pending.codeChallenge,
-      pending.redirectUri,
-      scopes.length > 0 ? scopes : this.#config.defaultScopes,
-    );
+    let accessToken: string;
+    try {
+      accessToken = await this.#exchangeForZeroIDToken(user);
+    } catch (err) {
+      const callbackUrl = new URL(pending.redirectUri);
+      callbackUrl.searchParams.set(
+        "error",
+        err instanceof Error ? err.message : "Token exchange failed",
+      );
+      if (pending.state) callbackUrl.searchParams.set("state", pending.state);
+      return Response.redirect(callbackUrl.toString(), 302);
+    }
 
     const callbackUrl = new URL(pending.redirectUri);
-    callbackUrl.searchParams.set("code", code);
+    callbackUrl.searchParams.set("token", accessToken);
     if (pending.state) callbackUrl.searchParams.set("state", pending.state);
-
     return Response.redirect(callbackUrl.toString(), 302);
   }
 
-  // ── GET /auth/callback — landing page for client-side token exchange
+  /**
+   * Exchange a verified identity for a ZeroID RS256 access token.
+   *
+   * For external IdPs (Google): uses RFC 8693 token-exchange with the raw
+   * OIDC id_token — ZeroID validates it against Google's JWKS and issues
+   * the final access token. ZeroID must have Google configured as an
+   * external issuer.
+   *
+   * For local provider: falls back to a minimal local-issued token (dev only).
+   */
+  async #exchangeForZeroIDToken(user: VerifiedUser): Promise<string> {
+    if (!user.rawIdToken) {
+      throw new Error(
+        `Provider "${user.provider}" did not return an OIDC id_token — ` +
+        "cannot exchange with ZeroID. Configure Google OAuth or another OIDC provider.",
+      );
+    }
+
+    const body = new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+      subject_token_type: "urn:ietf:params:oauth:token-type:id_token",
+      subject_token: user.rawIdToken,
+      account_id: this.#config.accountId,
+      project_id: this.#config.projectId,
+    });
+
+    const resp = await fetch(this.#config.zeroidTokenEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      throw new Error(`ZeroID token exchange failed (${resp.status}): ${text.slice(0, 200)}`);
+    }
+
+    const data = (await resp.json()) as { access_token?: string };
+    if (!data.access_token) {
+      throw new Error("ZeroID response missing access_token");
+    }
+    return data.access_token;
+  }
+
+  // ── GET /auth/callback — landing page, stores the ZeroID token ────
 
   #handleFinalCallback(url: URL): Response {
-    const code = url.searchParams.get("code");
+    const token = url.searchParams.get("token");
     const error = url.searchParams.get("error");
 
     if (error) {
@@ -265,58 +309,14 @@ export class OAuthHandler {
         headers: { "Content-Type": "text/html; charset=utf-8" },
       });
     }
-    if (!code) {
-      return new Response("Missing authorization code", { status: 400 });
+    if (!token) {
+      return new Response("Missing token", { status: 400 });
     }
 
-    return new Response(callbackPage(code, this.#config.clientId), {
+    return new Response(callbackPage(token), {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   }
-}
-
-// =============================================================================
-// Auth code minting
-// =============================================================================
-
-function mintAuthCode(
-  config: OAuthConfig,
-  userId: string,
-  codeChallenge: string,
-  redirectUri: string,
-  scopes: string[],
-): string {
-  const now = Math.floor(Date.now() / 1000);
-
-  const header = { alg: "HS256", typ: "JWT" };
-  const payload = {
-    iss: config.issuer,
-    sub: "auth-code",
-    iat: now,
-    exp: now + 300,
-    cid: config.clientId,
-    uid: userId,
-    aid: config.accountId,
-    pid: config.projectId,
-    cc: codeChallenge,
-    ruri: redirectUri,
-    scp: scopes,
-  };
-
-  const headerB64 = b64url(JSON.stringify(header));
-  const payloadB64 = b64url(JSON.stringify(payload));
-  const signature = b64url(
-    createHmac("sha256", config.hmacSecret)
-      .update(`${headerB64}.${payloadB64}`)
-      .digest(),
-  );
-
-  return `${headerB64}.${payloadB64}.${signature}`;
-}
-
-function b64url(input: string | Buffer): string {
-  const buf = typeof input === "string" ? Buffer.from(input) : input;
-  return buf.toString("base64url");
 }
 
 function normalizeLoopback(uri: string): string {
@@ -390,13 +390,16 @@ input:focus { border-color: #6366f1; }
 </html>`;
 }
 
-function callbackPage(code: string, clientId: string): string {
+function callbackPage(token: string): string {
+  // The token exchange has already happened server-side (daemon ↔ ZeroID).
+  // This page just stores the ZeroID RS256 access token and redirects to
+  // the web UI — no async fetch required.
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Codeoid — Authenticating...</title>
+<title>Codeoid — Signing in...</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
@@ -408,66 +411,19 @@ body {
   background: #141420; border: 1px solid #2a2a3e; border-radius: 16px;
   padding: 2rem; width: min(90vw, 400px); text-align: center;
 }
-.status { font-size: 1.2rem; font-weight: 600; margin-bottom: 0.5rem; }
+.status { font-size: 1.2rem; font-weight: 600; margin-bottom: 0.5rem; color: #22c55e; }
 .detail { color: #8888a0; font-size: 0.9rem; }
-.error { color: #ef4444; }
-.success { color: #22c55e; }
 </style>
 </head>
 <body>
 <div class="card">
-  <div class="status" id="status">Exchanging token...</div>
-  <div class="detail" id="detail">Please wait</div>
+  <div class="status">Authenticated!</div>
+  <div class="detail">Redirecting to Codeoid...</div>
 </div>
 <script>
-(async function() {
-  const code = ${JSON.stringify(code)};
-  const verifier = sessionStorage.getItem('codeoid_pkce_verifier');
-
-  if (!verifier) {
-    document.getElementById('status').textContent = 'Error';
-    document.getElementById('status').className = 'status error';
-    document.getElementById('detail').textContent = 'PKCE verifier not found. Please try logging in again.';
-    return;
-  }
-
-  try {
-    const resp = await fetch('/auth/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        grant_type: 'authorization_code',
-        client_id: ${JSON.stringify(clientId)},
-        code: code,
-        code_verifier: verifier,
-        redirect_uri: window.location.origin + '/auth/callback'
-      })
-    });
-
-    if (!resp.ok) {
-      const err = await resp.json().catch(function() { return { error: 'Token exchange failed' }; });
-      throw new Error(err.error_description || err.error || 'Token exchange failed');
-    }
-
-    const token = await resp.json();
-
-    localStorage.setItem('codeoid_token', token.access_token);
-    if (token.refresh_token) localStorage.setItem('codeoid_refresh_token', token.refresh_token);
-    localStorage.setItem('codeoid_user_id', token.user_id || '');
-
-    sessionStorage.removeItem('codeoid_pkce_verifier');
-    sessionStorage.removeItem('codeoid_pkce_state');
-
-    document.getElementById('status').textContent = 'Authenticated!';
-    document.getElementById('status').className = 'status success';
-    document.getElementById('detail').textContent = 'Redirecting to Codeoid...';
-
-    setTimeout(function() { window.location.href = '/ui/'; }, 500);
-  } catch (err) {
-    document.getElementById('status').textContent = 'Error';
-    document.getElementById('status').className = 'status error';
-    document.getElementById('detail').textContent = err.message;
-  }
+(function() {
+  localStorage.setItem('codeoid.token', ${JSON.stringify(token)});
+  window.location.replace('/ui/');
 })();
 </script>
 </body>

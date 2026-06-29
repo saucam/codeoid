@@ -67,6 +67,13 @@ export class AuthError extends Error {
 export async function resolveToken(opts: ResolveOptions): Promise<ResolvedAuth> {
   if (opts.token) return { token: opts.token, exchanged: false };
 
+  // After Google OAuth, /auth/callback stores a ZeroID RS256 token directly
+  // in localStorage. Use it if present and no explicit API key was supplied.
+  if (!opts.apiKey) {
+    const storedToken = localStorage.getItem(STORAGE_KEY_TOKEN);
+    if (storedToken) return { token: storedToken, exchanged: false };
+  }
+
   const apiKey = opts.apiKey ?? localStorage.getItem(STORAGE_KEY_API_KEY) ?? undefined;
   if (!apiKey) {
     throw new AuthError(
@@ -141,7 +148,7 @@ export function rememberApiKey(apiKey: string): void {
   localStorage.setItem(STORAGE_KEY_API_KEY, apiKey);
 }
 
-/** Forget the persisted API key (sign-out). Also clears any cached token. */
+/** Forget all persisted credentials (sign-out). */
 export function forgetApiKey(): void {
   localStorage.removeItem(STORAGE_KEY_API_KEY);
   localStorage.removeItem(STORAGE_KEY_TOKEN);
@@ -149,6 +156,40 @@ export function forgetApiKey(): void {
 
 export function rememberedApiKey(): string | null {
   return localStorage.getItem(STORAGE_KEY_API_KEY);
+}
+
+/** Returns the ZeroID token stored after a successful Google OAuth login. */
+export function rememberedOAuthToken(): string | null {
+  return localStorage.getItem(STORAGE_KEY_TOKEN);
+}
+
+/**
+ * Fetch which OAuth provider the daemon is configured with.
+ * Returns null when Google OAuth is not configured (API-key-only mode).
+ */
+export async function fetchOAuthProvider(): Promise<"google" | null> {
+  try {
+    const res = await fetch("/auth/provider");
+    if (!res.ok) return null;
+    const data = (await res.json()) as { provider: string | null };
+    return data.provider === "google" ? "google" : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Start the Google OAuth login flow. Redirects to the daemon's /auth/authorize;
+ * the daemon handles the Google redirect and ZeroID token exchange server-side,
+ * then lands the browser on /auth/callback with the ready access token.
+ */
+export function startOAuthLogin(opts?: { scope?: string }): void {
+  const params = new URLSearchParams({
+    client_id: "codeoid",
+    redirect_uri: `${window.location.origin}/auth/callback`,
+    scope: opts?.scope ?? DEFAULT_WEB_SCOPES,
+  });
+  window.location.href = `/auth/authorize?${params}`;
 }
 
 /**

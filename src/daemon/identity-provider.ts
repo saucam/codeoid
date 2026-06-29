@@ -28,6 +28,12 @@ export interface VerifiedUser {
   avatarUrl?: string;
   /** Which provider verified this user */
   provider: string;
+  /**
+   * Raw OIDC ID token from the upstream IdP — preserved so the daemon can
+   * forward it to ZeroID's token-exchange endpoint for final token issuance.
+   * Only set for external IdPs (Google etc.), not for LocalProvider.
+   */
+  rawIdToken?: string;
 }
 
 export interface IdentityProvider {
@@ -133,6 +139,7 @@ export class GoogleOAuthProvider implements IdentityProvider {
       name: payload.name,
       avatarUrl: payload.picture,
       provider: "google",
+      rawIdToken: tokens.id_token,
     };
   }
 }

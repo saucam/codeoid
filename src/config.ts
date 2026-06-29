@@ -305,8 +305,6 @@ const AuthSchemaFields = z
 
 const OAuthSchemaFields = z
   .object({
-    hmacSecret: z.string().optional(),
-    issuer: z.string().optional(),
     clientId: z.string().optional(),
   })
   .default({});
@@ -434,7 +432,6 @@ const ENV_OVERRIDES: readonly EnvOverride[] = [
   { env: "ZEROID_URL", path: "zeroidUrl", kind: "string" },
   { env: "ZEROID_ISSUER", path: "auth.issuer", kind: "string" },
   { env: "ZEROID_AUDIENCE", path: "auth.audience", kind: "string" },
-  { env: "CODEOID_HMAC_SECRET", path: "oauth.hmacSecret", kind: "string" },
   { env: "CODEOID_OAUTH_CLIENT_ID", path: "oauth.clientId", kind: "string" },
   { env: "ZEROID_ACCOUNT_ID", path: "agentIdentity.accountId", kind: "string" },
   { env: "ZEROID_PROJECT_ID", path: "agentIdentity.projectId", kind: "string" },
@@ -559,12 +556,16 @@ export function loadConfig(opts: LoadOptions = {}): CodeoidConfig {
   const memoryDbPath = configRelResolve(parsed.memory.dbPath);
   const memoryCacheDir = configRelResolve(parsed.memory.modelCacheDir);
 
-  // 5. Assemble OAuth only when hmacSecret is present — keeps optionality.
-  const oauth: OAuthConfig | undefined = parsed.oauth.hmacSecret
+  // 5. Assemble OAuth when Google credentials are present in env.
+  //    The daemon reads GOOGLE_CLIENT_ID/SECRET directly in server.ts to
+  //    construct the GoogleOAuthProvider — here we just decide whether to
+  //    enable the handler and supply the ZeroID exchange endpoint.
+  const googleOAuthEnabled =
+    Boolean(env.GOOGLE_CLIENT_ID) && Boolean(env.GOOGLE_CLIENT_SECRET);
+
+  const oauth: OAuthConfig | undefined = googleOAuthEnabled
     ? {
-        hmacSecret: parsed.oauth.hmacSecret,
-        issuer: parsed.oauth.issuer ?? resolvedZeroidUrl,
-        tokenEndpoint: `${resolvedZeroidUrl}/oauth2/token`,
+        zeroidTokenEndpoint: `${resolvedZeroidUrl}/oauth2/token`,
         clientId: parsed.oauth.clientId ?? "codeoid",
         accountId: parsed.agentIdentity.accountId,
         projectId: parsed.agentIdentity.projectId,
