@@ -45,6 +45,7 @@ import { mockResult } from "../daemon/providers/mock/index.js";
 import { AsyncQueue } from "../daemon/async-queue.js";
 import type { DaemonMessage, AuthContext } from "../protocol/types.js";
 import type { ProviderEvent, TurnRun } from "../daemon/providers/interface.js";
+import type { CodeoidConfig } from "../config.js";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -85,7 +86,11 @@ afterEach(async () => {
  * Uses existingId so the constructor skips the async saveMeta call,
  * eliminating ENOENT races with afterEach's rmSync.
  */
-function makeSession(provider: MockSessionProvider, name = "integ-test"): Session {
+function makeSession(
+  provider: MockSessionProvider,
+  name = "integ-test",
+  config?: CodeoidConfig,
+): Session {
   const id = randomUUID();
   store.createSession({
     id,
@@ -106,7 +111,25 @@ function makeSession(provider: MockSessionProvider, name = "integ-test"): Sessio
     transcriptStore,
     existingId: id,
     _testProvider: provider,
+    config,
   });
+}
+
+/** Minimal config whose only meaningful field is a tiny stall timeout, so the
+ *  watchdog fires in milliseconds instead of the 300s default. autoRotate is
+ *  included (disabled) because #shouldRotate dereferences it on every send. */
+function stallConfig(turnStallTimeoutMs: number): CodeoidConfig {
+  return {
+    session: { turnStallTimeoutMs },
+    autoRotate: {
+      enabled: false,
+      warnPct: 0.75,
+      rotatePct: 0.9,
+      hardRotatePct: 0.95,
+      minTurnsBeforeRotate: 1,
+      strategy: "task-anchor",
+    },
+  } as unknown as CodeoidConfig;
 }
 
 /** Build a stub AttachedClient that records every DaemonMessage it receives. */
@@ -954,5 +977,104 @@ describe("T9 – mid-turn message handling", () => {
     expect(assistantMsgs.length).toBeGreaterThan(0);
     const lastAssistant = assistantMsgs.at(-1) as { content?: string };
     expect(lastAssistant?.content).toContain("Continuing");
+  });
+});
+
+// ── T9: Stall watchdog — wedged turn self-recovers ──────────────────────────────
+//
+// Regression guard for the "stuck in replying, no messages" wedge (#46): when a
+// provider's event stream goes silent without a terminal turn_done (hung tool /
+// dead subprocess), the session must NOT block forever. The watchdog force-
+// recovers the turn, reaps the provider, and a subsequent send works normally.
+describe("T9 – stall watchdog recovers a wedged turn", () => {
+  it("a turn whose stream goes silent recovers to idle, emits a timeout notice, and reaps the provider", async () => {
+    // stall:true → MockSessionProvider emits the delta then leaves the queue
+    // open forever (no turn_done, no close), exactly like a hung stream.
+    const provider = new MockSessionProvider(
+      "claude",
+      [[{ type: "text_delta", content: "working on it" }]],
+      { stall: true },
+    );
+    const session = makeSession(provider, "stall-watchdog", stallConfig(80));
+    const { client, received } = makeClient();
+    session.attach(client);
+
+    await session.send("do the thing", TEST_AUTH);
+    expect(session.status).toBe("thinking");
+
+    // Watchdog fires at 80ms → recovery. Allow generous slack for CI.
+    await waitForIdle(session, 4000);
+    expect(session.status).toBe("idle");
+
+    // A clear timeout breadcrumb was surfaced (not a silent wedge).
+    const stalledMsg = received.find(
+      (m) =>
+        m.type === "session.message" &&
+        (m as { role?: string }).role === "system" &&
+        /timed out/i.test((m as { content?: string }).content ?? ""),
+    );
+    expect(stalledMsg).toBeTruthy();
+
+    // The presumed-hung subprocess was reaped (provider torn down).
+    expect(provider.teardownCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it("after a stall recovery, the next send starts a fresh turn and gets a reply (no permanent wedge)", async () => {
+    // First turn stalls; second turn is a normal scripted reply.
+    const provider = new MockSessionProvider(
+      "claude",
+      [
+        [{ type: "text_delta", content: "hang…" }], // stalls (queue left open)
+        [
+          { type: "text_done", content: "Recovered and replied." },
+          { type: "turn_done", result: mockResult({ providerId: "claude" }) },
+        ],
+      ],
+      { stall: true },
+    );
+    const session = makeSession(provider, "stall-then-send", stallConfig(80));
+    const { client, received } = makeClient();
+    session.attach(client);
+
+    // Turn 1 wedges → watchdog recovers it.
+    await session.send("first", TEST_AUTH);
+    await waitForIdle(session, 4000);
+    expect(session.status).toBe("idle");
+
+    // Turn 2 must behave like a normal turn (not get swallowed into the dead run).
+    await session.send("second", TEST_AUTH);
+    await waitForIdle(session, 4000);
+
+    const assistantMsgs = received.filter(
+      (m) => m.type === "session.message" && (m as { role?: string }).role === "assistant",
+    );
+    const last = assistantMsgs.at(-1) as { content?: string };
+    expect(last?.content).toBe("Recovered and replied.");
+    // Two runTurn() calls: the stalled one + the recovered one.
+    expect(provider.capturedOpts.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("watchdog disabled (turnStallTimeoutMs=0) leaves a silent turn blocked (no false recovery)", async () => {
+    const provider = new MockSessionProvider(
+      "claude",
+      [[{ type: "text_delta", content: "indefinite" }]],
+      { stall: true },
+    );
+    const session = makeSession(provider, "stall-disabled", stallConfig(0));
+    const { received } = makeClient();
+
+    await session.send("go", TEST_AUTH);
+    expect(session.status).toBe("thinking");
+
+    // With the watchdog off, the turn stays "thinking" — give it room to (not) recover.
+    await new Promise<void>((r) => setTimeout(r, 300));
+    expect(session.status).toBe("thinking");
+    const stalledMsg = received.find(
+      (m) => m.type === "session.message" && /timed out/i.test((m as { content?: string }).content ?? ""),
+    );
+    expect(stalledMsg).toBeUndefined();
+
+    // Clean up the still-open run so afterEach doesn't race a live consumer.
+    await session.interrupt(TEST_AUTH);
   });
 });

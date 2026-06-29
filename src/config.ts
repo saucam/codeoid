@@ -215,8 +215,18 @@ const SessionSchema = z
   .object({
     defaultModel: z.string().optional(),
     fallbackModel: z.string().optional(),
+    /**
+     * Hard backstop against a wedged turn. If the provider event stream goes
+     * completely silent (no events at all) for this many ms while a turn is
+     * active, the turn is treated as stalled: the run is torn down, the
+     * subprocess reaped, status reset to idle, and a clear message shown.
+     * Generous by default — long-running tools still emit `tool_progress` /
+     * partial events, so true silence for this long is a reliable hang signal.
+     * Set to 0 to disable the watchdog.
+     */
+    turnStallTimeoutMs: z.number().min(0).default(300_000),
   })
-  .default({});
+  .default({ turnStallTimeoutMs: 300_000 });
 
 const AutoRotateSchema = z
   .object({
@@ -367,6 +377,8 @@ export interface CodeoidConfig {
   session: {
     defaultModel?: string;
     fallbackModel?: string;
+    /** Stall watchdog: ms of total event-stream silence before a turn is force-recovered (0 = off). Defaults to 300000 when omitted. */
+    turnStallTimeoutMs?: number;
   };
 }
 
@@ -420,6 +432,7 @@ const ENV_OVERRIDES: readonly EnvOverride[] = [
   { env: "CODEOID_AUTO_ROTATE_MIN_TURNS", path: "autoRotate.minTurnsBeforeRotate", kind: "int" },
   { env: "CODEOID_DEFAULT_MODEL", path: "session.defaultModel", kind: "string" },
   { env: "CODEOID_FALLBACK_MODEL", path: "session.fallbackModel", kind: "string" },
+  { env: "CODEOID_TURN_STALL_TIMEOUT_MS", path: "session.turnStallTimeoutMs", kind: "int" },
 ];
 
 // ── Loading ──────────────────────────────────────────────────────────────
