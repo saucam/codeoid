@@ -236,7 +236,24 @@ const SessionSchema = z
      */
     mcpToolTimeoutMs: z.number().min(0).default(120_000),
   })
-  .default({ turnStallTimeoutMs: 300_000, mcpToolTimeoutMs: 120_000 });
+  .default({ turnStallTimeoutMs: 300_000, mcpToolTimeoutMs: 120_000 })
+  // Enforce the "SDK signals first" contract across BOTH fields — not just the
+  // defaults. An env override / config file could otherwise set the MCP timeout
+  // at or above the stall timeout, so the coarse watchdog would force-recover
+  // before the SDK's clean per-tool error fires. Exempt the opt-out cases:
+  // turnStallTimeoutMs=0 (watchdog off → nothing to race) and mcpToolTimeoutMs=0
+  // (use SDK default → relationship is moot).
+  .refine(
+    (s) =>
+      s.turnStallTimeoutMs === 0 ||
+      s.mcpToolTimeoutMs === 0 ||
+      s.mcpToolTimeoutMs < s.turnStallTimeoutMs,
+    {
+      message:
+        "must be less than session.turnStallTimeoutMs so a hung MCP call surfaces an SDK error before the stall watchdog fires (set either to 0 to opt out)",
+      path: ["mcpToolTimeoutMs"],
+    },
+  );
 
 const AutoRotateSchema = z
   .object({

@@ -139,11 +139,13 @@ describe("loadConfig — env precedence", () => {
   });
 
   it("CODEOID_TURN_STALL_TIMEOUT_MS overrides the stall watchdog timeout", () => {
+    // 200000 stays above the 120000 MCP-timeout default so the cross-field
+    // ordering refinement is satisfied.
     const c = loadConfig({
       configPath,
-      env: { CODEOID_TURN_STALL_TIMEOUT_MS: "120000" },
+      env: { CODEOID_TURN_STALL_TIMEOUT_MS: "200000" },
     });
-    expect(c.session.turnStallTimeoutMs).toBe(120000);
+    expect(c.session.turnStallTimeoutMs).toBe(200000);
   });
 
   it("rejects a negative stall timeout (env override is re-validated, not just coerced)", () => {
@@ -170,6 +172,30 @@ describe("loadConfig — env precedence", () => {
       env: { CODEOID_MCP_TOOL_TIMEOUT_MS: "30000" },
     });
     expect(c.session.mcpToolTimeoutMs).toBe(30000);
+  });
+
+  it("rejects an override pair where the MCP timeout is not below the stall timeout", () => {
+    // 400000 (MCP) >= 300000 (default stall) would let the coarse watchdog fire
+    // before the SDK's clean per-tool error — the cross-field refinement catches
+    // it even though each value is individually valid.
+    expect(() =>
+      loadConfig({
+        configPath,
+        env: { CODEOID_MCP_TOOL_TIMEOUT_MS: "400000" },
+      }),
+    ).toThrow(/mcpToolTimeoutMs|turnStallTimeoutMs/);
+  });
+
+  it("allows MCP >= stall when the watchdog is disabled (turnStallTimeoutMs=0)", () => {
+    const c = loadConfig({
+      configPath,
+      env: {
+        CODEOID_TURN_STALL_TIMEOUT_MS: "0",
+        CODEOID_MCP_TOOL_TIMEOUT_MS: "400000",
+      },
+    });
+    expect(c.session.turnStallTimeoutMs).toBe(0);
+    expect(c.session.mcpToolTimeoutMs).toBe(400000);
   });
 });
 
