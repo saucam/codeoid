@@ -157,6 +157,20 @@ describe("loadConfig — env precedence", () => {
       }),
     ).toThrow(/environment overrides|turnStallTimeoutMs/);
   });
+
+  it("defaults mcpToolTimeoutMs below turnStallTimeoutMs so the SDK signals first", () => {
+    const c = loadConfig({ configPath, env: {} });
+    expect(c.session.mcpToolTimeoutMs).toBe(120000);
+    expect(c.session.mcpToolTimeoutMs!).toBeLessThan(c.session.turnStallTimeoutMs!);
+  });
+
+  it("CODEOID_MCP_TOOL_TIMEOUT_MS overrides the MCP tool timeout", () => {
+    const c = loadConfig({
+      configPath,
+      env: { CODEOID_MCP_TOOL_TIMEOUT_MS: "30000" },
+    });
+    expect(c.session.mcpToolTimeoutMs).toBe(30000);
+  });
 });
 
 describe("loadConfig — path resolution", () => {

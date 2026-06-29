@@ -236,8 +236,13 @@ export class ClaudeProvider implements SessionProvider {
       : { sessionId: this.#claudeCodeSessionId };
 
     // Merge user MCP servers with codeoid's in-process memory server.
+    // Apply a per-call wall-clock timeout to the external (user) servers so a
+    // hung MCP tool call surfaces as an SDK error instead of silently wedging
+    // the turn. Not applied to the in-process memory server. Kept below the
+    // session stall watchdog so the SDK signals first.
+    const mcpToolTimeoutMs = init.config?.session.mcpToolTimeoutMs ?? 120_000;
     const merged: Record<string, McpServerConfig> = {
-      ...loadUserMcpServers(opts.workdir),
+      ...withMcpToolTimeout(loadUserMcpServers(opts.workdir), mcpToolTimeoutMs),
       ...(init.memory
         ? {
             codeoid_memory: buildMemoryMcpServer(init.memory, {
@@ -620,6 +625,30 @@ export function translateSDKMessage(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * Apply a per-call wall-clock `timeout` (ms) to external MCP servers so a hung
+ * tool call (e.g. an unresponsive HTTP gateway) returns an SDK error instead of
+ * silently stalling the turn. Only sets it when `ms > 0` and the server hasn't
+ * already declared its own `timeout`, so explicit per-server values still win.
+ * `timeout` is valid on every external (stdio/http/sse) McpServerConfig variant;
+ * these all come from JSON, so we re-cast at the same boundary parseMcpServerConfig uses.
+ */
+export function withMcpToolTimeout(
+  servers: Record<string, McpServerConfig>,
+  ms: number,
+): Record<string, McpServerConfig> {
+  if (ms <= 0) return servers;
+  const out: Record<string, McpServerConfig> = {};
+  for (const [name, cfg] of Object.entries(servers)) {
+    const obj = cfg as unknown as Record<string, unknown>;
+    out[name] =
+      typeof obj.timeout === "number"
+        ? cfg
+        : ({ ...obj, timeout: ms } as unknown as McpServerConfig);
+  }
+  return out;
+}
 
 function loadUserMcpServers(workdir: string): Record<string, McpServerConfig> {
   try {

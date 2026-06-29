@@ -225,8 +225,18 @@ const SessionSchema = z
      * Set to 0 to disable the watchdog.
      */
     turnStallTimeoutMs: z.number().min(0).default(300_000),
+    /**
+     * Per-call wall-clock timeout (ms) applied to external (user-configured)
+     * MCP servers, surfaced to the SDK as each server's `timeout`. A hung MCP
+     * tool call (e.g. an unresponsive HTTP gateway) then returns an SDK error
+     * the turn loop can act on, instead of going silent. Kept BELOW
+     * turnStallTimeoutMs so it fires first — the stall watchdog stays a coarse
+     * last-resort backstop. 0 = don't set (use the SDK default). Does not apply
+     * to codeoid's in-process memory server.
+     */
+    mcpToolTimeoutMs: z.number().min(0).default(120_000),
   })
-  .default({ turnStallTimeoutMs: 300_000 });
+  .default({ turnStallTimeoutMs: 300_000, mcpToolTimeoutMs: 120_000 });
 
 const AutoRotateSchema = z
   .object({
@@ -379,6 +389,8 @@ export interface CodeoidConfig {
     fallbackModel?: string;
     /** Stall watchdog: ms of total event-stream silence before a turn is force-recovered (0 = off). Defaults to 300000 when omitted. */
     turnStallTimeoutMs?: number;
+    /** Per-call timeout (ms) for external MCP servers, surfaced as the SDK's per-server `timeout`. 0 = use SDK default. Defaults to 120000 when omitted. */
+    mcpToolTimeoutMs?: number;
   };
 }
 
@@ -433,6 +445,7 @@ const ENV_OVERRIDES: readonly EnvOverride[] = [
   { env: "CODEOID_DEFAULT_MODEL", path: "session.defaultModel", kind: "string" },
   { env: "CODEOID_FALLBACK_MODEL", path: "session.fallbackModel", kind: "string" },
   { env: "CODEOID_TURN_STALL_TIMEOUT_MS", path: "session.turnStallTimeoutMs", kind: "int" },
+  { env: "CODEOID_MCP_TOOL_TIMEOUT_MS", path: "session.mcpToolTimeoutMs", kind: "int" },
 ];
 
 // ── Loading ──────────────────────────────────────────────────────────────
