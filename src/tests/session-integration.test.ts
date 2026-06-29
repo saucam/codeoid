@@ -1077,4 +1077,42 @@ describe("T9 – stall watchdog recovers a wedged turn", () => {
     // Clean up the still-open run so afterEach doesn't race a live consumer.
     await session.interrupt(TEST_AUTH);
   });
+
+  it("does NOT fire while waiting for a manual tool approval (legitimate silent period)", async () => {
+    // Bash is a mutation tool — in guarded (default) mode it requires approval.
+    // The mock blocks in canUseTool until approve(), leaving the stream silent.
+    // The watchdog must pause during that wait, not cancel the approval prompt.
+    const provider = new MockSessionProvider(
+      "claude",
+      [
+        [
+          {
+            type: "tool_start",
+            toolId: "bash-stall",
+            sdkToolUseId: "sdk-bash-stall",
+            name: "Bash",
+            input: { command: "sleep 999" },
+            approvalId: "ap-stall-1",
+          },
+        ],
+      ],
+      { stall: true },
+    );
+    const session = makeSession(provider, "stall-approval", stallConfig(80));
+    const { received } = makeClient();
+
+    await session.send("run it", TEST_AUTH);
+    await waitForStatus(session, "waiting_approval", 4000);
+
+    // Wait well past the 80ms stall window — the watchdog must stay paused.
+    await new Promise<void>((r) => setTimeout(r, 300));
+    expect(session.status).toBe("waiting_approval");
+    const stalledMsg = received.find(
+      (m) => m.type === "session.message" && /timed out/i.test((m as { content?: string }).content ?? ""),
+    );
+    expect(stalledMsg).toBeUndefined();
+
+    // Clean up the pending approval + open run.
+    await session.interrupt(TEST_AUTH);
+  });
 });

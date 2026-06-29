@@ -137,6 +137,26 @@ describe("loadConfig — env precedence", () => {
       }),
     ).toThrow(/Expected integer/);
   });
+
+  it("CODEOID_TURN_STALL_TIMEOUT_MS overrides the stall watchdog timeout", () => {
+    const c = loadConfig({
+      configPath,
+      env: { CODEOID_TURN_STALL_TIMEOUT_MS: "120000" },
+    });
+    expect(c.session.turnStallTimeoutMs).toBe(120000);
+  });
+
+  it("rejects a negative stall timeout (env override is re-validated, not just coerced)", () => {
+    // Regression: env overrides are applied AFTER the initial safeParse, so a
+    // negative value would otherwise bypass z.number().min(0) and silently
+    // disable the stall watchdog (stallMs > 0 guard reads false).
+    expect(() =>
+      loadConfig({
+        configPath,
+        env: { CODEOID_TURN_STALL_TIMEOUT_MS: "-1" },
+      }),
+    ).toThrow(/environment overrides|turnStallTimeoutMs/);
+  });
 });
 
 describe("loadConfig — path resolution", () => {

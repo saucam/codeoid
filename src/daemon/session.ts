@@ -708,7 +708,9 @@ export class Session {
       console.error(
         `[codeoid/session ${this.id}] send arrived on a stalled run (${Date.now() - this.#lastEventAt}ms since last event); recovering before starting a fresh turn`,
       );
-      await this.#recoverStalledRun(this.#activeRun, stallMs);
+      await this.#recoverStalledRun(this.#activeRun, stallMs, {
+        continuingCurrentSend: true,
+      });
       // Fall through to the normal (idle) turn-start path below.
     }
 
@@ -1622,7 +1624,13 @@ export class Session {
     try {
       while (true) {
         let next: IteratorResult<ProviderEvent> | typeof STALL;
-        if (stallMs > 0) {
+        // A pending manual tool approval is a legitimate indefinite silent
+        // period — the provider blocks on canUseTool until the user responds.
+        // Pause the watchdog so a slow human approval isn't mistaken for a hung
+        // stream and cancelled.
+        const waitingForApproval =
+          this.#status === "waiting_approval" || this.#pendingApprovals.size > 0;
+        if (stallMs > 0 && !waitingForApproval) {
           let timer: ReturnType<typeof setTimeout> | undefined;
           const stall = new Promise<typeof STALL>((resolve) => {
             timer = setTimeout(() => resolve(STALL), stallMs);
@@ -1641,6 +1649,10 @@ export class Session {
           return; // finally still runs; #recoverStalledRun already cleared run state
         }
         if (next.done) break;
+        // Ownership guard: a concurrent #sendInner liveness-guard recovery may
+        // have torn down this run while we were awaiting iter.next(). Drop any
+        // late event from the abandoned run so it can't leak into the fresh turn.
+        if (this.#activeRun !== run) break;
         const event = next.value;
         this.#lastEventAt = Date.now();
         // When a mid-turn message interrupts the current turn, the SDK emits a
@@ -1724,7 +1736,11 @@ export class Session {
    * recreates a fresh query loop. The abandoned consumer (if any) unblocks when
    * teardown closes the turn queue and its finally no-ops via the run guard.
    */
-  async #recoverStalledRun(run: TurnRun, stallMs: number): Promise<void> {
+  async #recoverStalledRun(
+    run: TurnRun,
+    stallMs: number,
+    opts?: { continuingCurrentSend?: boolean },
+  ): Promise<void> {
     if (this.#activeRun !== run) return; // already ended / recovered
 
     console.error(
@@ -1752,7 +1768,9 @@ export class Session {
 
     const msg = this.#makeMessage(
       "system",
-      `⚠️ Turn timed out — no activity for ${Math.round(stallMs / 1000)}s. The session was reset; send your message again to continue.`,
+      opts?.continuingCurrentSend
+        ? `⚠️ Previous turn timed out — no activity for ${Math.round(stallMs / 1000)}s. The session was reset and your latest message is being retried in a fresh turn.`
+        : `⚠️ Turn timed out — no activity for ${Math.round(stallMs / 1000)}s. The session was reset; send your message again to continue.`,
       SYSTEM_IDENTITY,
       undefined,
       undefined,

@@ -494,6 +494,23 @@ export function loadConfig(opts: LoadOptions = {}): CodeoidConfig {
     setByPath(parsed, ov.path, parseOverride(raw, ov.kind));
   }
 
+  // 3a. Re-validate after overrides. parseOverride() coerces strings to the
+  //     declared kind but does NOT enforce schema constraints (e.g. the
+  //     non-negative bound on session.turnStallTimeoutMs, or the 0..1 bounds on
+  //     the autoRotate percentages). Without this, CODEOID_TURN_STALL_TIMEOUT_MS=-1
+  //     would slip through and silently disable the stall watchdog. Re-running
+  //     RootSchema over the merged result fails fast on any out-of-range override.
+  const revalidated = RootSchema.safeParse(parsed);
+  if (!revalidated.success) {
+    const issues = revalidated.error.issues
+      .map((i) => `  ${i.path.join(".")}: ${i.message}`)
+      .join("\n");
+    throw new Error(
+      `Invalid config after applying environment overrides:\n${issues}\n(Check the corresponding CODEOID_* env vars.)`,
+    );
+  }
+  Object.assign(parsed, revalidated.data);
+
   // 3b. Resolve the ZeroID issuer (preset name or URL → concrete base URL) and
   //     pin the expected issuer claim. Every ZeroID deployment sets `iss` to
   //     its base URL, so defaulting auth.issuer to the resolved URL rejects
