@@ -2140,7 +2140,15 @@ export class Session {
     if (this.#activeAssistantMsg !== msg) return; // interrupted on last frame
     msg.content = content; // exact match regardless of ceiling-division rounding
     msg.parts = [{ kind: "text", text: content, markdown: true }];
-    this.#persistAndBuffer(msg);
+    // Do NOT call #persistAndBuffer again — it would push a second scrollback entry
+    // for the same messageId, causing duplicate messages on scrollback.replay.
+    // The scrollback buffer holds msg by reference so content is already up-to-date;
+    // we only need to recount bytes and persist the final state to transcript.
+    this.#scrollback.updateMessage(msg.messageId, () => {});
+    this.#transcriptStore.append(this.id, msg, this.#seq++).catch((e) => {
+      console.error(`[codeoid/session ${this.id}] transcript append failed: ${e instanceof Error ? e.message : String(e)}`);
+    });
+    this.#chunker?.onMessage(msg);
     this.#broadcastRaw(msg);
     this.#activeAssistantMsg = null;
   }
