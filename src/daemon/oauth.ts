@@ -267,8 +267,7 @@ export class OAuthHandler {
   async #exchangeForZeroIDToken(user: VerifiedUser): Promise<string> {
     if (!user.rawIdToken) {
       throw new Error(
-        `Provider "${user.provider}" did not return an OIDC id_token — ` +
-        "cannot exchange with ZeroID. Configure Google OAuth or another OIDC provider.",
+        `Provider "${user.provider}" did not return an OIDC id_token — cannot exchange with ZeroID. Configure Google OAuth or another OIDC provider.`,
       );
     }
 

@@ -324,9 +324,7 @@ function msg(
 function msgTool(
   messageId: string,
   name: string,
-  // biome-ignore lint/suspicious/noExplicitAny: test helper
   state: any,
-  // biome-ignore lint/suspicious/noExplicitAny: test helper
   input: any,
   timestamp: string,
 ): SessionMessage {
