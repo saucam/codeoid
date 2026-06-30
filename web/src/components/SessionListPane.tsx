@@ -5,7 +5,7 @@
  * chat area dominates the viewport.
  */
 
-import { Component, For, Show } from "solid-js";
+import { Component, createSignal, For, Show } from "solid-js";
 
 import { formatCostUsd, formatTokens, relativeTime } from "../lib/format";
 import { sessionAgentLabel, shortSub } from "../lib/identity";
@@ -24,6 +24,7 @@ import type { SessionInfo, SessionStatus } from "../protocol/types";
 
 import FileTree from "./files/FileTree";
 import { openNewSessionModal } from "./NewSessionModal";
+import AnalyticsPanel from "./AnalyticsPanel";
 
 /** Focus a session and, on mobile, close the off-canvas drawer. */
 function pickSession(id: string): void {
@@ -42,13 +43,23 @@ function newSession(): void {
 }
 
 const SessionListPane: Component = () => {
+  const [showAnalytics, setShowAnalytics] = createSignal(false);
+
   return (
     <Show
       when={!isLeftCollapsed()}
       fallback={<CollapsedRail />}
     >
       <aside class="row-start-2 col-start-1 flex h-full flex-col overflow-y-auto border-r border-border bg-bg-elev">
-        <SectionHeader title="Sessions" count={sessionList().length} />
+        <SectionHeader
+          title="Sessions"
+          count={sessionList().length}
+          showAnalytics={showAnalytics()}
+          onToggleAnalytics={() => setShowAnalytics((v) => !v)}
+        />
+        <Show when={showAnalytics()}>
+          <AnalyticsPanel />
+        </Show>
         <button
           type="button"
           onClick={newSession}
@@ -119,7 +130,12 @@ const CollapsedRail: Component = () => (
   </aside>
 );
 
-const SectionHeader: Component<{ title: string; count: number }> = (props) => (
+const SectionHeader: Component<{
+  title: string;
+  count: number;
+  showAnalytics: boolean;
+  onToggleAnalytics: () => void;
+}> = (props) => (
   <div class="sticky top-0 z-10 flex items-center justify-between gap-2 bg-bg-elev/95 px-3 pb-2 pt-3 text-[11px] font-medium uppercase tracking-wider text-fg-faint backdrop-blur">
     <span>{props.title}</span>
     <Show when={props.count > 0}>
@@ -129,8 +145,16 @@ const SectionHeader: Component<{ title: string; count: number }> = (props) => (
     </Show>
     <button
       type="button"
+      onClick={props.onToggleAnalytics}
+      class={`rounded p-0.5 transition hover:bg-bg-hover hover:text-fg ${props.showAnalytics ? "text-accent" : "text-fg-faint"}`}
+      title="Usage analytics"
+    >
+      ≋
+    </button>
+    <button
+      type="button"
       onClick={toggleLeftCollapsed}
-      class="ml-auto rounded p-0.5 text-fg-faint transition hover:bg-bg-hover hover:text-fg"
+      class="rounded p-0.5 text-fg-faint transition hover:bg-bg-hover hover:text-fg"
       title="Collapse sidebar"
     >
       ◂

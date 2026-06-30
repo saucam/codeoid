@@ -19,6 +19,23 @@ import { resolve, isAbsolute } from "node:path";
 import type { Episode, FileReadRecord, RecallQuery } from "./types.js";
 import type { TurnUsage } from "../../protocol/types.js";
 
+export interface DailyUsageBucket {
+  day: string;
+  costUsd: number;
+  inputTokens: number;
+  outputTokens: number;
+  numTurns: number;
+  numSessions: number;
+}
+
+export interface LifetimeUsageTotals {
+  costUsd: number;
+  inputTokens: number;
+  outputTokens: number;
+  numTurns: number;
+  numSessions: number;
+}
+
 /** Row shape as stored in SQLite. */
 interface EpisodeRow {
   id: string;
@@ -391,6 +408,68 @@ export class SqliteEpisodeStore {
       )
       .get(sessionId) as { last_turn: number } | null;
     return (row?.last_turn ?? 0) + 1;
+  }
+
+  dailyUsage(days = 30): DailyUsageBucket[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT
+           date(created_at / 1000, 'unixepoch') AS day,
+           COALESCE(SUM(total_cost_usd), 0)     AS cost_usd,
+           COALESCE(SUM(input_tokens), 0)        AS input_tokens,
+           COALESCE(SUM(output_tokens), 0)       AS output_tokens,
+           COUNT(*)                              AS num_turns,
+           COUNT(DISTINCT session_id)            AS num_sessions
+         FROM turn_usage
+         WHERE created_at >= (unixepoch() - ? * 86400) * 1000
+         GROUP BY day
+         ORDER BY day ASC`,
+      )
+      .all(days) as Array<{
+      day: string;
+      cost_usd: number;
+      input_tokens: number;
+      output_tokens: number;
+      num_turns: number;
+      num_sessions: number;
+    }>;
+
+    return rows.map((r) => ({
+      day: r.day,
+      costUsd: r.cost_usd,
+      inputTokens: r.input_tokens,
+      outputTokens: r.output_tokens,
+      numTurns: r.num_turns,
+      numSessions: r.num_sessions,
+    }));
+  }
+
+  lifetimeTotals(): LifetimeUsageTotals {
+    const row = this.#db
+      .prepare(
+        `SELECT
+           COALESCE(SUM(total_cost_usd), 0)     AS cost_usd,
+           COALESCE(SUM(input_tokens), 0)        AS input_tokens,
+           COALESCE(SUM(output_tokens), 0)       AS output_tokens,
+           COUNT(*)                              AS num_turns,
+           COUNT(DISTINCT session_id)            AS num_sessions
+         FROM turn_usage`,
+      )
+      .get() as {
+      cost_usd: number;
+      input_tokens: number;
+      output_tokens: number;
+      num_turns: number;
+      num_sessions: number;
+    };
+
+    return {
+      costUsd: row?.cost_usd ?? 0,
+      inputTokens: row?.input_tokens ?? 0,
+      outputTokens: row?.output_tokens ?? 0,
+      numTurns: row?.num_turns ?? 0,
+      numSessions: row?.num_sessions ?? 0,
+    };
   }
 
   #rowToTurnUsage(row: {
