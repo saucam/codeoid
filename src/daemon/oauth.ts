@@ -9,20 +9,22 @@
  *   4. For external IdPs: daemon forwards the raw OIDC id_token to ZeroID's
  *      token-exchange endpoint (RFC 8693) — ZeroID is the authority that issues
  *      the final RS256 access token. Google configured as ZeroID external issuer.
- *   5. For local provider: daemon issues a minimal local session token.
- *   6. Daemon redirects to /auth/callback?token=<access_token>
+ *   5. Daemon redirects to /auth/callback#token=<access_token> (fragment, never sent to server)
  *   7. Frontend stores token, connects to daemon WebSocket.
  */
 
 import { randomBytes } from "node:crypto";
 import type { IdentityProvider, VerifiedUser } from "./identity-provider.js";
-import { LocalProvider } from "./identity-provider.js";
 
 export interface OAuthConfig {
   /** ZeroID token endpoint for the final token exchange */
   zeroidTokenEndpoint: string;
   /** Registered OAuth client_id (used to identify this codeoid instance) */
   clientId: string;
+  /** Google OAuth client ID — passed to GoogleOAuthProvider */
+  googleClientId: string;
+  /** Google OAuth client secret — passed to GoogleOAuthProvider */
+  googleClientSecret: string;
   /** Account ID for ZeroID tenant scoping */
   accountId: string;
   /** Project ID for ZeroID tenant scoping */
@@ -31,12 +33,6 @@ export interface OAuthConfig {
   allowedRedirectUris: string[];
   /** Scopes to grant users */
   defaultScopes: string[];
-  /**
-   * Secret for signing local-provider session tokens (fallback when ZeroID
-   * token exchange is not available, e.g. dev mode). Optional — if omitted,
-   * local provider sessions use a per-restart ephemeral secret.
-   */
-  localSessionSecret?: string;
 }
 
 /** Pending authorization — stored between /auth/authorize and IdP callback */
@@ -64,9 +60,9 @@ export class OAuthHandler {
   #pending = new Map<string, PendingAuth>();
   #sweepTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(config: OAuthConfig, idp?: IdentityProvider) {
+  constructor(config: OAuthConfig, idp: IdentityProvider) {
     this.#config = config;
-    this.#idp = idp ?? new LocalProvider();
+    this.#idp = idp;
 
     // Clean up expired pending auths every 60s. `unref()` so the
     // timer doesn't hold the Bun event loop open after `stop()`.
@@ -237,7 +233,7 @@ export class OAuthHandler {
 
     let accessToken: string;
     try {
-      accessToken = await this.#exchangeForZeroIDToken(user);
+      accessToken = await this.#exchangeForZeroIDToken(user, pending.scope);
     } catch (err) {
       const callbackUrl = new URL(pending.redirectUri);
       callbackUrl.searchParams.set(
@@ -249,22 +245,13 @@ export class OAuthHandler {
     }
 
     const callbackUrl = new URL(pending.redirectUri);
-    callbackUrl.searchParams.set("token", accessToken);
+    // Use a URL fragment so the token is never sent to the server (not in logs, history, or Referer).
+    callbackUrl.hash = `token=${encodeURIComponent(accessToken)}`;
     if (pending.state) callbackUrl.searchParams.set("state", pending.state);
     return Response.redirect(callbackUrl.toString(), 302);
   }
 
-  /**
-   * Exchange a verified identity for a ZeroID RS256 access token.
-   *
-   * For external IdPs (Google): uses RFC 8693 token-exchange with the raw
-   * OIDC id_token — ZeroID validates it against Google's JWKS and issues
-   * the final access token. ZeroID must have Google configured as an
-   * external issuer.
-   *
-   * For local provider: falls back to a minimal local-issued token (dev only).
-   */
-  async #exchangeForZeroIDToken(user: VerifiedUser): Promise<string> {
+  async #exchangeForZeroIDToken(user: VerifiedUser, scope: string): Promise<string> {
     if (!user.rawIdToken) {
       throw new Error(
         `Provider "${user.provider}" did not return an OIDC id_token — cannot exchange with ZeroID. Configure Google OAuth or another OIDC provider.`,
@@ -275,15 +262,25 @@ export class OAuthHandler {
       grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
       subject_token_type: "urn:ietf:params:oauth:token-type:id_token",
       subject_token: user.rawIdToken,
+      client_id: this.#config.clientId,
       account_id: this.#config.accountId,
       project_id: this.#config.projectId,
+      scope,
     });
 
-    const resp = await fetch(this.#config.zeroidTokenEndpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body,
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+    let resp: Response;
+    try {
+      resp = await fetch(this.#config.zeroidTokenEndpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
@@ -300,19 +297,16 @@ export class OAuthHandler {
   // ── GET /auth/callback — landing page, stores the ZeroID token ────
 
   #handleFinalCallback(url: URL): Response {
-    const token = url.searchParams.get("token");
+    // Error case: query param (server-side readable, no token involved)
     const error = url.searchParams.get("error");
-
     if (error) {
       return new Response(errorPage(error), {
         headers: { "Content-Type": "text/html; charset=utf-8" },
       });
     }
-    if (!token) {
-      return new Response("Missing token", { status: 400 });
-    }
-
-    return new Response(callbackPage(token), {
+    // Token case: fragment — the token is never sent to the server.
+    // The callbackPage JS reads window.location.hash to extract it.
+    return new Response(callbackPage(), {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   }
@@ -389,10 +383,10 @@ input:focus { border-color: #6366f1; }
 </html>`;
 }
 
-function callbackPage(token: string): string {
+function callbackPage(): string {
   // The token exchange has already happened server-side (daemon ↔ ZeroID).
-  // This page just stores the ZeroID RS256 access token and redirects to
-  // the web UI — no async fetch required.
+  // The access token is in the URL fragment (#token=...) — never sent to server.
+  // This page's JS reads window.location.hash, stores the token, and redirects.
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -421,8 +415,15 @@ body {
 </div>
 <script>
 (function() {
-  localStorage.setItem('codeoid.token', ${JSON.stringify(token)});
-  window.location.replace('/ui/');
+  var params = new URLSearchParams(window.location.hash.slice(1));
+  var token = params.get('token');
+  if (token) {
+    localStorage.setItem('codeoid.token', token);
+    window.location.replace('/ui/');
+  } else {
+    document.querySelector('.status').textContent = 'Error';
+    document.querySelector('.detail').textContent = 'No token in URL. Please try signing in again.';
+  }
 })();
 </script>
 </body>

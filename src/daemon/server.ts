@@ -103,11 +103,9 @@ export class DaemonServer {
     this.#shutdown = new ShutdownManager();
 
     if (config.oauth) {
-      // config.oauth is only assembled when GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET
-      // are set (see config.ts), so these are guaranteed to be present here.
       const idp = new GoogleOAuthProvider({
-        clientId: process.env.GOOGLE_CLIENT_ID!,
-        clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
+        clientId: config.oauth.googleClientId,
+        clientSecret: config.oauth.googleClientSecret,
       });
       this.#oauthHandler = new OAuthHandler(config.oauth, idp);
       console.log(`[codeoid] auth provider: ${idp.name}`);

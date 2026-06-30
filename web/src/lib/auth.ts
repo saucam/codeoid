@@ -68,13 +68,15 @@ export async function resolveToken(opts: ResolveOptions): Promise<ResolvedAuth> 
   if (opts.token) return { token: opts.token, exchanged: false };
 
   // After Google OAuth, /auth/callback stores a ZeroID RS256 token directly
-  // in localStorage. Use it if present and no explicit API key was supplied.
-  if (!opts.apiKey) {
+  // in localStorage. Use it only when no API key is available (explicit or stored),
+  // so a saved API key always takes precedence over an OAuth token.
+  const storedApiKey = localStorage.getItem(STORAGE_KEY_API_KEY) ?? undefined;
+  if (!opts.apiKey && !storedApiKey) {
     const storedToken = localStorage.getItem(STORAGE_KEY_TOKEN);
     if (storedToken) return { token: storedToken, exchanged: false };
   }
 
-  const apiKey = opts.apiKey ?? localStorage.getItem(STORAGE_KEY_API_KEY) ?? undefined;
+  const apiKey = opts.apiKey ?? storedApiKey;
   if (!apiKey) {
     throw new AuthError(
       "no auth — supply CODEOID_API_KEY (a zid_sk_… token) or sign in",

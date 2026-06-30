@@ -557,16 +557,16 @@ export function loadConfig(opts: LoadOptions = {}): CodeoidConfig {
   const memoryCacheDir = configRelResolve(parsed.memory.modelCacheDir);
 
   // 5. Assemble OAuth when Google credentials are present in env.
-  //    The daemon reads GOOGLE_CLIENT_ID/SECRET directly in server.ts to
-  //    construct the GoogleOAuthProvider — here we just decide whether to
-  //    enable the handler and supply the ZeroID exchange endpoint.
-  const googleOAuthEnabled =
-    Boolean(env.GOOGLE_CLIENT_ID) && Boolean(env.GOOGLE_CLIENT_SECRET);
+  const googleClientId = env.GOOGLE_CLIENT_ID;
+  const googleClientSecret = env.GOOGLE_CLIENT_SECRET;
 
-  const oauth: OAuthConfig | undefined = googleOAuthEnabled
+  const oauth: OAuthConfig | undefined =
+    googleClientId && googleClientSecret
     ? {
         zeroidTokenEndpoint: `${resolvedZeroidUrl}/oauth2/token`,
         clientId: parsed.oauth.clientId ?? "codeoid",
+        googleClientId,
+        googleClientSecret,
         accountId: parsed.agentIdentity.accountId,
         projectId: parsed.agentIdentity.projectId,
         allowedRedirectUris: [
