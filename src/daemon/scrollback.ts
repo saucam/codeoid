@@ -24,8 +24,27 @@ const DEFAULT_CONFIG: ScrollbackConfig = {
   maxBytes: 20 * 1024 * 1024, // 20MB
 };
 
+/**
+ * Internal wrapper that records the byte size that was actually accounted
+ * into `#bytes` for this entry. Streamed messages are held by reference and
+ * grow in place between push and finalize; eviction must subtract exactly
+ * what was added, never the current (grown) serialized size — otherwise the
+ * counter drifts negative and the byte cap stops evicting.
+ */
+interface Entry {
+  msg: DaemonMessage;
+  size: number;
+}
+
+function messageIdOf(msg: DaemonMessage): string | undefined {
+  return msg.type === "session.message"
+    ? (msg as { messageId?: string }).messageId
+    : undefined;
+}
+
 export class ScrollbackBuffer {
-  #entries: DaemonMessage[] = [];
+  #entries: Entry[] = [];
+  #byId = new Map<string, Entry>();
   #bytes = 0;
   #config: ScrollbackConfig;
 
@@ -35,10 +54,30 @@ export class ScrollbackBuffer {
 
   /**
    * Push a message into the buffer. Evicts oldest entries if limits are exceeded.
+   *
+   * Upserts by messageId: pushing a message whose messageId is already
+   * buffered re-accounts the existing entry in place (keeping its position)
+   * instead of appending a second entry. Duplicate entries for one messageId
+   * corrupt scrollback.replay — clients render the message twice and
+   * virtualizers keyed on messageId collide (the #50 bug class).
    */
   push(msg: DaemonMessage): void {
-    this.#entries.push(msg);
-    this.#bytes += JSON.stringify(msg).length;
+    const messageId = messageIdOf(msg);
+    if (messageId !== undefined) {
+      const existing = this.#byId.get(messageId);
+      if (existing) {
+        const size = JSON.stringify(msg).length;
+        this.#bytes += size - existing.size;
+        existing.msg = msg;
+        existing.size = size;
+        this.#evict();
+        return;
+      }
+    }
+    const entry: Entry = { msg, size: JSON.stringify(msg).length };
+    this.#entries.push(entry);
+    if (messageId !== undefined) this.#byId.set(messageId, entry);
+    this.#bytes += entry.size;
     this.#evict();
   }
 
@@ -49,8 +88,11 @@ export class ScrollbackBuffer {
       this.#bytes > this.#config.maxBytes
     ) {
       const evicted = this.#entries.shift();
-      if (evicted) {
-        this.#bytes -= JSON.stringify(evicted).length;
+      if (!evicted) break;
+      this.#bytes -= evicted.size;
+      const id = messageIdOf(evicted.msg);
+      if (id !== undefined && this.#byId.get(id) === evicted) {
+        this.#byId.delete(id);
       }
     }
   }
@@ -60,16 +102,18 @@ export class ScrollbackBuffer {
    * Returns a snapshot — safe to iterate while new messages arrive.
    */
   read(): DaemonMessage[] {
-    return [...this.#entries];
+    return this.#entries.map((e) => e.msg);
   }
 
   /**
    * Read messages after a given timestamp (for incremental catch-up).
    */
   readSince(timestamp: string): DaemonMessage[] {
-    return this.#entries.filter(
-      (msg) => "timestamp" in msg && (msg as { timestamp: string }).timestamp > timestamp,
-    );
+    return this.#entries
+      .map((e) => e.msg)
+      .filter(
+        (msg) => "timestamp" in msg && (msg as { timestamp: string }).timestamp > timestamp,
+      );
   }
 
   /**
@@ -77,20 +121,13 @@ export class ScrollbackBuffer {
    * transitions so scrollback replay shows final states, not intermediate.
    */
   updateMessage(messageId: string, updater: (msg: DaemonMessage) => void): void {
-    for (const entry of this.#entries) {
-      if (entry.type === "session.message" && (entry as { messageId?: string }).messageId === messageId) {
-        // Re-account bytes around the in-place mutation. Tool entries are
-        // pushed small (no output) then mutated to carry large output; without
-        // adjusting #bytes here, eviction later subtracts the grown size that
-        // was never added, drifting #bytes negative and defeating the byte cap.
-        const before = JSON.stringify(entry).length;
-        updater(entry);
-        const after = JSON.stringify(entry).length;
-        this.#bytes += after - before;
-        this.#evict();
-        return;
-      }
-    }
+    const entry = this.#byId.get(messageId);
+    if (!entry) return;
+    updater(entry.msg);
+    const after = JSON.stringify(entry.msg).length;
+    this.#bytes += after - entry.size;
+    entry.size = after;
+    this.#evict();
   }
 
   /** Number of entries currently buffered. */
@@ -106,6 +143,7 @@ export class ScrollbackBuffer {
   /** Clear the buffer. */
   clear(): void {
     this.#entries = [];
+    this.#byId.clear();
     this.#bytes = 0;
   }
 }

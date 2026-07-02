@@ -157,10 +157,12 @@ export class SessionManager {
           onModels: (m) => this.#cacheModels(m),
         });
 
-        // Restore scrollback from transcript
+        // Restore scrollback from transcript, seeding the seq counter past
+        // the persisted tail so new appends continue the monotonic sequence.
         const entries = await this.#transcriptStore.loadTranscript(meta.sessionId);
         const messages = entries.map((e) => e.message);
-        session.restoreScrollback(messages);
+        const maxSeq = entries.reduce((max, e) => Math.max(max, e.seq), -1);
+        session.restoreScrollback(messages, maxSeq + 1);
 
         this.#sessions.set(session.id, session);
         // Resume is NOT a creation — don't burn a slot in the
