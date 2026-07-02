@@ -189,14 +189,30 @@ export function applyDelta(delta: SessionMessageDelta): void {
 }
 
 export function replaceScrollback(sessionId: string, messages: readonly SessionMessage[]): void {
+  // Defensive dedupe by messageId — the daemon can replay duplicate entries
+  // for the same messageId (known daemon bug, fixed separately). Mirror the
+  // upsert semantics of applyMessage: the message keeps the position of its
+  // FIRST occurrence, but the LAST occurrence's content wins.
+  const deduped: SessionMessage[] = [];
+  const posById = new Map<string, number>();
+  for (const m of messages) {
+    const at = posById.get(m.messageId);
+    if (at !== undefined) {
+      deduped[at] = m;
+    } else {
+      posById.set(m.messageId, deduped.length);
+      deduped.push(m);
+    }
+  }
+
   // Rebuild the O(1) existence index for this session before touching the
   // store — applyDelta calls hasMessage which reads idsBySession directly.
-  idsBySession.set(sessionId, new Set(messages.map((m) => m.messageId)));
+  idsBySession.set(sessionId, new Set(posById.keys()));
 
   batch(() => {
     setState(
       produce<MessagesState>((s) => {
-        s.bySession[sessionId] = [...messages];
+        s.bySession[sessionId] = deduped;
         // Per-message version bumps are intentionally omitted here. A full
         // scrollback replay replaces the array reference entirely — the
         // session epoch bump below is the cache-invalidation signal for
@@ -216,19 +232,47 @@ export function hasMessage(sessionId: string, messageId: string): boolean {
 }
 
 /**
+ * Session-destroy cache pruners. Components holding per-message caches
+ * keyed by `${sessionId}:${messageId}` (e.g. the Transcript virtualizer's
+ * itemSizeCache) register here so a DESTROYED session's keys are evicted.
+ * Deliberately NOT invoked on mere focus switches — caches surviving
+ * revisits is a feature (#73).
+ */
+type SessionCachePruner = (sessionId: string) => void;
+const sessionCachePruners = new Set<SessionCachePruner>();
+export function registerSessionCachePruner(fn: SessionCachePruner): () => void {
+  sessionCachePruners.add(fn);
+  return () => sessionCachePruners.delete(fn);
+}
+
+/**
  * Remove all message state for a session. Call when a session is destroyed
  * so its entries don't accumulate in memory indefinitely.
  */
 export function clearSessionMessages(sessionId: string): void {
+  const ids = idsBySession.get(sessionId);
   idsBySession.delete(sessionId);
   batch(() => {
     setState(
       produce<MessagesState>((s) => {
+        // Per-message version counters are keyed by messageId, not by
+        // session — without this loop they leak for every destroyed
+        // session's messages.
+        if (ids) {
+          for (const id of ids) delete s.versions[id];
+        }
         delete s.bySession[sessionId];
         delete s.epochBySession[sessionId];
       }),
     );
   });
+  for (const prune of sessionCachePruners) {
+    try {
+      prune(sessionId);
+    } catch (err) {
+      console.warn("[codeoid] session cache pruner failed:", err);
+    }
+  }
 }
 
 // Test hook — reset the entire store between tests.
