@@ -129,6 +129,10 @@ export class OAuthHandler {
       return this.#handleFinalCallback(url);
     }
 
+    if (url.pathname === "/auth/provider" && req.method === "GET") {
+      return Response.json({ provider: this.#idp.name });
+    }
+
     return null;
   }
 

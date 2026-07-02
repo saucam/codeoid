@@ -316,10 +316,15 @@ export class DaemonServer {
           }
         }
 
-        // OAuth authorization routes (/auth/authorize, /auth/callback)
-        if (self.#oauthHandler && url.pathname.startsWith("/auth/")) {
-          const oauthResp = await self.#oauthHandler.handleFetch(req);
-          if (oauthResp) return oauthResp;
+        // OAuth authorization routes (/auth/authorize, /auth/callback, /auth/provider)
+        if (url.pathname.startsWith("/auth/")) {
+          if (url.pathname === "/auth/provider" && req.method === "GET" && !self.#oauthHandler) {
+            return Response.json({ provider: null });
+          }
+          if (self.#oauthHandler) {
+            const oauthResp = await self.#oauthHandler.handleFetch(req);
+            if (oauthResp) return oauthResp;
+          }
         }
 
         // Frontend routes (Web UI etc.)
