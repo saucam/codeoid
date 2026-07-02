@@ -17,7 +17,7 @@ import { RateLimiter } from "./rate-limit.js";
 import { ShutdownManager } from "./shutdown.js";
 import { AgentIdentityManager } from "./agent-identity.js";
 import { OAuthHandler, type OAuthConfig } from "./oauth.js";
-import { GoogleOAuthProvider, LocalProvider } from "./identity-provider.js";
+import { GoogleOAuthProvider } from "./identity-provider.js";
 import { createMemory, type MemoryEngine } from "./memory/index.js";
 import {
   type CompressionRegistry,
@@ -103,14 +103,10 @@ export class DaemonServer {
     this.#shutdown = new ShutdownManager();
 
     if (config.oauth) {
-      // Choose IdP based on env config
-      const googleClientId = process.env.GOOGLE_CLIENT_ID;
-      const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET;
-
-      const idp = (googleClientId && googleClientSecret)
-        ? new GoogleOAuthProvider({ clientId: googleClientId, clientSecret: googleClientSecret })
-        : new LocalProvider();
-
+      const idp = new GoogleOAuthProvider({
+        clientId: config.oauth.googleClientId,
+        clientSecret: config.oauth.googleClientSecret,
+      });
       this.#oauthHandler = new OAuthHandler(config.oauth, idp);
       console.log(`[codeoid] auth provider: ${idp.name}`);
     }
@@ -320,10 +316,15 @@ export class DaemonServer {
           }
         }
 
-        // OAuth authorization routes (/auth/authorize, /auth/callback)
-        if (self.#oauthHandler && url.pathname.startsWith("/auth/")) {
-          const oauthResp = await self.#oauthHandler.handleFetch(req);
-          if (oauthResp) return oauthResp;
+        // OAuth authorization routes (/auth/authorize, /auth/callback, /auth/provider)
+        if (url.pathname.startsWith("/auth/")) {
+          if (url.pathname === "/auth/provider" && req.method === "GET" && !self.#oauthHandler) {
+            return Response.json({ provider: null });
+          }
+          if (self.#oauthHandler) {
+            const oauthResp = await self.#oauthHandler.handleFetch(req);
+            if (oauthResp) return oauthResp;
+          }
         }
 
         // Frontend routes (Web UI etc.)

@@ -10,7 +10,7 @@
 
 import { Component, Show, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
 
-import { rememberedApiKey } from "./lib/auth";
+import { rememberedApiKey, rememberedOAuthToken } from "./lib/auth";
 import SignIn from "./components/SignIn";
 import Shell from "./components/Shell";
 import {
@@ -36,10 +36,13 @@ const App: Component = () => {
   installApprovalNotifications();
 
   onMount(async () => {
-    const saved = rememberedApiKey();
-    if (saved) {
+    const savedKey = rememberedApiKey();
+    const savedToken = rememberedOAuthToken();
+    if (savedKey || savedToken) {
       try {
-        await bootstrap({ apiKey: saved });
+        // Prefer explicit API key exchange (yields a fresh JWT).
+        // With no apiKey, resolveToken falls back to the stored OAuth token.
+        await bootstrap(savedKey ? { apiKey: savedKey } : {});
       } catch {
         // bootstrap surfaces the reason via bootstrapError; SignIn renders it.
       }

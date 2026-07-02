@@ -289,16 +289,19 @@ describe("loadConfig — issuer presets + iss pinning", () => {
 });
 
 describe("loadConfig — oauth conditional", () => {
-  it("populates oauth only when hmacSecret is set", () => {
+  it("populates oauth only when Google credentials are set", () => {
     const none = loadConfig({ configPath, env: {} });
     expect(none.oauth).toBeUndefined();
 
     const viaEnv = loadConfig({
       configPath,
-      env: { CODEOID_HMAC_SECRET: "deadbeef" },
+      env: {
+        GOOGLE_CLIENT_ID: "client-id.apps.googleusercontent.com",
+        GOOGLE_CLIENT_SECRET: "secret",
+      },
     });
     expect(viaEnv.oauth).toBeDefined();
-    expect(viaEnv.oauth?.hmacSecret).toBe("deadbeef");
+    expect(viaEnv.oauth?.zeroidTokenEndpoint).toContain("/oauth2/token");
     expect(viaEnv.oauth?.clientId).toBe("codeoid");
   });
 });

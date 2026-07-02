@@ -219,6 +219,25 @@ export interface TurnUsage {
   primaryMaxCallInputTokens?: number;
 }
 
+// ── Usage analytics ───────────────────────────────────────────────────────────
+
+export interface DailyUsageBucket {
+  day: string;
+  costUsd: number;
+  inputTokens: number;
+  outputTokens: number;
+  numTurns: number;
+  numSessions: number;
+}
+
+export interface LifetimeUsageTotals {
+  costUsd: number;
+  inputTokens: number;
+  outputTokens: number;
+  numTurns: number;
+  numSessions: number;
+}
+
 export interface Subagent {
   /** SDK-side agent id (opaque handle). */
   agentId: string;
@@ -541,6 +560,11 @@ export interface PingMsg extends BaseClientMsg {
   type: "ping";
 }
 
+export interface UsageDailyMsg extends BaseClientMsg {
+  type: "usage.daily";
+  days?: number;
+}
+
 export type ClientMessage =
   | PingMsg
   | SessionCreateMsg
@@ -564,7 +588,8 @@ export type ClientMessage =
   | ClaudeConfigMsg
   | ModelsListMsg
   | SessionExportMsg
-  | SessionImportMsg;
+  | SessionImportMsg
+  | UsageDailyMsg;
 
 interface BaseClientMsg {
   /** Request ID for correlating responses */

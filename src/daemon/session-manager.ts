@@ -42,6 +42,7 @@ import type {
   ModelInfo,
   SessionInfo,
 } from "../protocol/types.js";
+import type { DailyUsageBucket, LifetimeUsageTotals } from "./memory/store.js";
 
 /**
  * Resolve a user-supplied workdir to an absolute, existing directory.
@@ -270,6 +271,8 @@ export class SessionManager {
         return this.#sessionExport(msg, auth);
       case "session.import":
         return this.#sessionImport(msg, auth);
+      case "usage.daily":
+        return this.#usageDaily(msg, auth);
       default: {
         // Inbound messages are cast from raw JSON at the transport, so an
         // unknown/malformed `type` reaches here. Without this the function
@@ -1298,6 +1301,39 @@ export class SessionManager {
     this.#sessions.delete(msg.sessionId);
     this.#rateLimiter.recordDestruction(auth.sub);
     return { type: "response.ok", requestId: msg.id };
+  }
+
+  #usageDaily(
+    msg: Extract<ClientMessage, { type: "usage.daily" }>,
+    auth: AuthContext,
+  ): DaemonMessage {
+    if (!this.#memory) {
+      return {
+        type: "response.ok",
+        requestId: msg.id,
+        data: {
+          daily: [] as DailyUsageBucket[],
+          lifetime: {
+            costUsd: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            numTurns: 0,
+            numSessions: 0,
+          } as LifetimeUsageTotals,
+        },
+      };
+    }
+    const days = typeof msg.days === "number" && msg.days > 0 ? Math.min(msg.days, 365) : 30;
+    const ownedSessionIds = this.#store
+      .listSessions(auth.accountId, auth.projectId)
+      .map((s) => s.id);
+    const daily = this.#memory.store.dailyUsage(days, ownedSessionIds);
+    const lifetime = this.#memory.store.lifetimeTotals(ownedSessionIds);
+    return {
+      type: "response.ok",
+      requestId: msg.id,
+      data: { daily, lifetime },
+    };
   }
 }
 
