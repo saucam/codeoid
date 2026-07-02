@@ -201,8 +201,8 @@ export class Session {
   // prompt so the agent knows what it was working on. Captured inside
   // rotate() from the most recent user_turn episode.
   #lastUserTurnBeforeRotate: string | null = null;
-  // Claude's context window. Opus 4.7 + Sonnet 4.x (1M beta) share 1M; we
-  // compute occupancy against this constant. Making it tunable per-session
+  // Claude's context window. The current Opus and Sonnet families share 1M;
+  // we compute occupancy against this constant. Making it tunable per-session
   // was considered overkill — users rarely run sub-1M models via codeoid.
   static readonly CONTEXT_WINDOW = 1_000_000;
 

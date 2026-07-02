@@ -67,7 +67,7 @@ export function StatusBar({
       ? Math.max(0, Math.floor((Date.now() - workingSince) / 1000))
       : null;
   // Resolve the denominator for ctx% from the CURRENT model's real window.
-  // Haiku 4.5 = 200k; Opus 4.7 / Sonnet 4.6 = 1M. Hardcoding 1M made a Haiku
+  // Haiku 4.5 = 200k; Opus 4.8 / Sonnet 5 = 1M. Hardcoding 1M made a Haiku
   // session at 150k look like "15%" when it's really 75% full.
   const contextWindow =
     (focused?.info.model && findModel(focused.info.model)?.contextWindow) ||
@@ -145,7 +145,7 @@ export function StatusBar({
             <>
               <Text dimColor>{" · "}</Text>
               <Text color="cyan">
-                {/* Prefer the resolved full id (e.g. "claude-opus-4-7") so
+                {/* Prefer the resolved full id (e.g. "claude-opus-4-8") so
                     operators can see the exact version routed to the SDK.
                     Falls through to whatever the session reports if we
                     don't recognize it in the catalog. */}
@@ -330,7 +330,7 @@ function pickCacheColor(u: {
 
 /**
  * Fallback context window when the session reports a model we don't recognize.
- * 1M matches the default codeoid ships with (Opus 4.7 / Sonnet 4.6 both 1M).
+ * 1M matches the default codeoid ships with (Opus 4.8 / Sonnet 5 both 1M).
  * The real denominator comes from `findModel(id).contextWindow` per-session
  * — this only kicks in for unknown ids (e.g. a passthrough `claude-foo-bar`).
  */

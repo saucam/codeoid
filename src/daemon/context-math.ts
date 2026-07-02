@@ -12,7 +12,7 @@
  *     (they're all bytes the model processed for that primary call)
  */
 
-/** Default context window for Opus 4.7 and Sonnet 4.x (with 1M beta). */
+/** Default context window for the current Opus / Sonnet families (1M). */
 export const CONTEXT_WINDOW_DEFAULT = 1_000_000;
 
 /**

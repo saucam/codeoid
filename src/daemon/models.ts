@@ -44,17 +44,17 @@ export interface ModelDescriptor {
  */
 export const MODEL_CATALOG: readonly ModelDescriptor[] = [
   {
-    id: "claude-opus-4-7",
+    id: "claude-opus-4-8",
     alias: "opus",
-    label: "Opus 4.7",
+    label: "Opus 4.8",
     contextWindow: 1_000_000,
     tier: "premium",
     description: "Deepest reasoning. Best for planning, refactoring, and hard problems.",
   },
   {
-    id: "claude-sonnet-4-6",
+    id: "claude-sonnet-5",
     alias: "sonnet",
-    label: "Sonnet 4.6",
+    label: "Sonnet 5",
     contextWindow: 1_000_000,
     tier: "balanced",
     description: "Fast and capable. Good default for day-to-day coding.",
@@ -82,7 +82,7 @@ export function findModel(identifier: string): ModelDescriptor | null {
 
 /**
  * Resolve user input → full model id. Accepts:
- *   - an alias ("opus" → "claude-opus-4-7")
+ *   - an alias ("opus" → "claude-opus-4-8")
  *   - a full known id (passed through)
  *   - any other string that looks like a Claude model id (passed through —
  *     user knows what they want; we don't gatekeep)
