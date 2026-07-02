@@ -102,8 +102,8 @@ export function setSessionStatus(id: string, status: SessionStatus): void {
 }
 
 export function removeSession(id: string): void {
-  clearSessionMessages(id);
   batch(() => {
+    clearSessionMessages(id);
     setState(
       "byId",
       produce<Record<string, SessionInfo>>((m) => {
