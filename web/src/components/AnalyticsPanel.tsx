@@ -1,4 +1,4 @@
-import { createEffect, For, Show } from "solid-js";
+import { For, Show, onMount } from "solid-js";
 import { analyticsLoading, dailyUsage, fetchAnalytics, lifetimeTotals } from "../state/analytics";
 import { formatCostUsd, formatTokens } from "../lib/format";
 import type { DailyUsageBucket } from "../protocol/types";
@@ -24,7 +24,7 @@ const LABEL_H = 14;
 const CHART_W = DAYS * (BAR_W + BAR_GAP) - BAR_GAP;
 
 const AnalyticsPanel = () => {
-  createEffect(() => { void fetchAnalytics(DAYS); });
+  onMount(() => { void fetchAnalytics(DAYS); });
 
   const padded = () => padDays(dailyUsage(), DAYS);
   const maxCost = () => Math.max(...padded().map((d) => d.costUsd), 0.001);
@@ -64,7 +64,10 @@ const AnalyticsPanel = () => {
         >
           <For each={padded()}>
             {(bucket, i) => {
-              const barH = () => Math.max(2, (bucket.costUsd / maxCost()) * CHART_H);
+              const barH = () =>
+                bucket.costUsd > 0
+                  ? Math.max(2, (bucket.costUsd / maxCost()) * CHART_H)
+                  : 0;
               const x = () => i() * (BAR_W + BAR_GAP);
               const isToday = () => bucket.day === today;
               const dayLabel = () => {

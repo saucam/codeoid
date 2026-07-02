@@ -2138,13 +2138,20 @@ export class Session {
     }
 
     if (this.#activeAssistantMsg !== msg) return; // interrupted on last frame
-    msg.content = content; // exact match regardless of ceiling-division rounding
-    msg.parts = [{ kind: "text", text: content, markdown: true }];
+    const finalParts: ContentPart[] = [{ kind: "text", text: content, markdown: true }];
+    // Reset to the placeholder size so updateMessage measures the correct
+    // before/after byte delta — the buffer holds msg by reference, so
+    // mutations here are visible to the accounting logic inside updateMessage.
+    msg.content = "";
+    msg.parts = [];
     // Do NOT call #persistAndBuffer again — it would push a second scrollback entry
     // for the same messageId, causing duplicate messages on scrollback.replay.
-    // The scrollback buffer holds msg by reference so content is already up-to-date;
-    // we only need to recount bytes and persist the final state to transcript.
-    this.#scrollback.updateMessage(msg.messageId, () => {});
+    // The updater sets final content/parts inside the buffer's size-accounting pass.
+    this.#scrollback.updateMessage(msg.messageId, (entry) => {
+      const sm = entry as SessionMessage;
+      sm.content = content;
+      sm.parts = finalParts;
+    });
     this.#transcriptStore.append(this.id, msg, this.#seq++).catch((e) => {
       console.error(`[codeoid/session ${this.id}] transcript append failed: ${e instanceof Error ? e.message : String(e)}`);
     });

@@ -410,7 +410,11 @@ export class SqliteEpisodeStore {
     return (row?.last_turn ?? 0) + 1;
   }
 
-  dailyUsage(days = 30): DailyUsageBucket[] {
+  dailyUsage(days = 30, sessionIds?: string[]): DailyUsageBucket[] {
+    const sessionFilter =
+      sessionIds && sessionIds.length > 0
+        ? `AND session_id IN (${sessionIds.map(() => "?").join(",")})`
+        : "";
     const rows = this.#db
       .prepare(
         `SELECT
@@ -421,11 +425,12 @@ export class SqliteEpisodeStore {
            COUNT(*)                              AS num_turns,
            COUNT(DISTINCT session_id)            AS num_sessions
          FROM turn_usage
-         WHERE created_at >= (unixepoch() - ? * 86400) * 1000
+         WHERE date(created_at / 1000, 'unixepoch') >= date('now', printf('-%d days', ? - 1))
+         ${sessionFilter}
          GROUP BY day
          ORDER BY day ASC`,
       )
-      .all(days) as Array<{
+      .all(days, ...(sessionIds ?? [])) as Array<{
       day: string;
       cost_usd: number;
       input_tokens: number;
@@ -444,7 +449,11 @@ export class SqliteEpisodeStore {
     }));
   }
 
-  lifetimeTotals(): LifetimeUsageTotals {
+  lifetimeTotals(sessionIds?: string[]): LifetimeUsageTotals {
+    const sessionFilter =
+      sessionIds && sessionIds.length > 0
+        ? `WHERE session_id IN (${sessionIds.map(() => "?").join(",")})`
+        : "";
     const row = this.#db
       .prepare(
         `SELECT
@@ -453,9 +462,9 @@ export class SqliteEpisodeStore {
            COALESCE(SUM(output_tokens), 0)       AS output_tokens,
            COUNT(*)                              AS num_turns,
            COUNT(DISTINCT session_id)            AS num_sessions
-         FROM turn_usage`,
+         FROM turn_usage ${sessionFilter}`,
       )
-      .get() as {
+      .get(...(sessionIds ?? [])) as {
       cost_usd: number;
       input_tokens: number;
       output_tokens: number;
