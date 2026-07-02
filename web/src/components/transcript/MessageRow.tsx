@@ -121,17 +121,20 @@ const MarkdownBlock: Component<{ text: string; streaming?: boolean }> = (props) 
   </div>
 );
 
-const ThinkingBlock: Component<{ text: string; streaming?: boolean }> = (props) => (
-  <details class="text-[12px] italic text-role-thinking" open={props.streaming}>
-    <summary class="cursor-pointer select-none text-fg-faint hover:text-fg-muted">
-      reasoning ({props.text.split("\n").length} lines)
-      <Show when={props.streaming}>
-        <span class="md-streaming-caret ml-1" aria-label="streaming" />
-      </Show>
-    </summary>
-    <div class="mt-1 whitespace-pre-wrap pl-3">{props.text}</div>
-  </details>
-);
+const ThinkingBlock: Component<{ text: string; streaming?: boolean }> = (props) => {
+  const lineCount = createMemo(() => props.text.split("\n").length);
+  return (
+    <details class="text-[12px] italic text-role-thinking" open={props.streaming}>
+      <summary class="cursor-pointer select-none text-fg-faint hover:text-fg-muted">
+        reasoning ({lineCount()} lines)
+        <Show when={props.streaming}>
+          <span class="md-streaming-caret ml-1" aria-label="streaming" />
+        </Show>
+      </summary>
+      <div class="mt-1 whitespace-pre-wrap pl-3">{props.text}</div>
+    </details>
+  );
+};
 
 const ToolBlock: Component<{ msg: SessionMessage }> = (props) => {
   const t = () => props.msg.tool!;

@@ -14,8 +14,7 @@
  * module wires broadcasts in.
  */
 
-import { createMemo, untrack } from "solid-js";
-import { batch } from "solid-js";
+import { batch, createMemo } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 
 import type {
@@ -46,6 +45,13 @@ const [state, setState] = createStore<MessagesState>({
   versions: {},
   epochBySession: {},
 });
+
+// O(1) existence index — maintained in parallel with bySession so
+// applyDelta can skip the O(N) buf.some() scan on every streaming delta.
+// Stored outside the Solid store (plain Map) so mutations don't create
+// fine-grained reactive overhead; hasMessage intentionally reads it
+// without tracking.
+const idsBySession = new Map<string, Set<string>>();
 
 /** Reactive slice — components consume this. */
 export function messagesFor(sessionId: string): SessionMessage[] {
@@ -111,6 +117,16 @@ const EMPTY: SessionMessage[] = [];
 // ---------- broadcast ingest ----------
 
 export function applyMessage(msg: SessionMessage): void {
+  // Keep the O(1) existence index in sync before the store mutation so
+  // any concurrent hasMessage call (delta arriving in the same tick) sees
+  // the correct answer immediately.
+  let idSet = idsBySession.get(msg.sessionId);
+  if (!idSet) {
+    idSet = new Set();
+    idsBySession.set(msg.sessionId, idSet);
+  }
+  idSet.add(msg.messageId);
+
   batch(() => {
     setState(
       produce<MessagesState>((s) => {
@@ -173,28 +189,50 @@ export function applyDelta(delta: SessionMessageDelta): void {
 }
 
 export function replaceScrollback(sessionId: string, messages: readonly SessionMessage[]): void {
+  // Rebuild the O(1) existence index for this session before touching the
+  // store — applyDelta calls hasMessage which reads idsBySession directly.
+  idsBySession.set(sessionId, new Set(messages.map((m) => m.messageId)));
+
   batch(() => {
     setState(
       produce<MessagesState>((s) => {
         s.bySession[sessionId] = [...messages];
-        for (const m of messages) {
-          s.versions[m.messageId] = (s.versions[m.messageId] ?? 0) + 1;
-        }
+        // Per-message version bumps are intentionally omitted here. A full
+        // scrollback replay replaces the array reference entirely — the
+        // session epoch bump below is the cache-invalidation signal for
+        // session-level consumers. Bumping N individual version counters
+        // inside produce() creates O(N) fine-grained store mutations that
+        // slow down large replays without any downstream benefit (versionOf
+        // is not used in any render path).
         s.epochBySession[sessionId] = (s.epochBySession[sessionId] ?? 0) + 1;
       }),
     );
   });
 }
 
-/** Check whether a (sessionId, messageId) pair exists in the store. */
+/** Check whether a (sessionId, messageId) pair exists in the store. O(1). */
 export function hasMessage(sessionId: string, messageId: string): boolean {
-  return untrack(() => {
-    const buf = state.bySession[sessionId];
-    return !!buf && buf.some((m) => m.messageId === messageId);
+  return idsBySession.get(sessionId)?.has(messageId) ?? false;
+}
+
+/**
+ * Remove all message state for a session. Call when a session is destroyed
+ * so its entries don't accumulate in memory indefinitely.
+ */
+export function clearSessionMessages(sessionId: string): void {
+  idsBySession.delete(sessionId);
+  batch(() => {
+    setState(
+      produce<MessagesState>((s) => {
+        delete s.bySession[sessionId];
+        delete s.epochBySession[sessionId];
+      }),
+    );
   });
 }
 
 // Test hook — reset the entire store between tests.
 export function _resetMessagesForTest(): void {
   setState({ bySession: {}, versions: {}, epochBySession: {} });
+  idsBySession.clear();
 }

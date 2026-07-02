@@ -10,7 +10,7 @@ import { batch, createMemo, createSignal } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 
 import type { SessionInfo, SessionStatus } from "../protocol/types";
-import { setFocusedSessionAccessor } from "./messages";
+import { clearSessionMessages, setFocusedSessionAccessor } from "./messages";
 
 interface SessionsState {
   byId: Record<string, SessionInfo>;
@@ -103,6 +103,7 @@ export function setSessionStatus(id: string, status: SessionStatus): void {
 
 export function removeSession(id: string): void {
   batch(() => {
+    clearSessionMessages(id);
     setState(
       "byId",
       produce<Record<string, SessionInfo>>((m) => {
