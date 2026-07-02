@@ -11,8 +11,10 @@
  *      the streaming buffer, and removes the stop-button reference.
  *   2. Re-attaching to the same session is a no-op — no disconnect, no clear.
  *   3. Attaching for the first time (no prior session) never calls disconnect.
- *   4. Switching with an active streaming buffer discards partial content so it
- *      cannot bleed into the new session's output.
+ *   4. Switching with an active streaming buffer FLUSHES buffered content to
+ *      the chat first (StreamRelay.flushAndClear) — undelivered content is
+ *      never silently discarded — and the cleared buffer cannot bleed into
+ *      the new session's output.
  *   5. Switching with an active stop-message id marks the message for deletion.
  *   6. #handleDetach clears streaming + stop-button state regardless of
  *      whether there was an active turn.
@@ -58,6 +60,17 @@ function makeUserState(clientId = "telegram:123"): UserState {
 interface SwitchDeps {
   disconnectClient: (clientId: string) => void;
   deleteMessage: (chatId: number, messageId: number) => void;
+  /**
+   * Mirror of StreamRelay.flushAndClear: deliver buffered undelivered
+   * content to the chat, then reset the buffer map.
+   */
+  flushAndClear: (state: UserState) => void;
+  /**
+   * Mirror of `await state.relay.settle()`: the handlers wait for flushed
+   * output to land before the user-visible confirmation, so "Attached to …"
+   * / "Detached from …" can't overtake buffered content.
+   */
+  settle: () => void;
 }
 
 /**
@@ -76,7 +89,8 @@ function performSwitch(
     deps.disconnectClient(state.clientId);
     state.attachedSessionId = null;
     state.attachedSessionName = null;
-    state.streaming.clear();
+    deps.flushAndClear(state);
+    deps.settle();
     if (state.stopMessageId !== null) {
       deps.deleteMessage(chatId, state.stopMessageId);
       state.stopMessageId = null;
@@ -103,7 +117,8 @@ function performDetach(
   deps.disconnectClient(state.clientId);
   state.attachedSessionId = null;
   state.attachedSessionName = null;
-  state.streaming.clear();
+  deps.flushAndClear(state);
+  deps.settle();
   if (state.stopMessageId !== null) {
     deps.deleteMessage(chatId, state.stopMessageId);
     state.stopMessageId = null;
@@ -111,14 +126,40 @@ function performDetach(
 }
 
 /** Stub deps that record calls for assertion. */
-function makeDeps(): SwitchDeps & { disconnected: string[]; deleted: [number, number][] } {
+function makeDeps(): SwitchDeps & {
+  disconnected: string[];
+  deleted: [number, number][];
+  flushed: string[];
+  /** Ordered log of side-effect calls, for sequencing assertions. */
+  ops: string[];
+} {
   const disconnected: string[] = [];
   const deleted: [number, number][] = [];
+  const flushed: string[] = [];
+  const ops: string[] = [];
   return {
-    disconnectClient: (id) => disconnected.push(id),
-    deleteMessage: (chatId, msgId) => deleted.push([chatId, msgId]),
+    disconnectClient: (id) => {
+      ops.push("disconnect");
+      disconnected.push(id);
+    },
+    deleteMessage: (chatId, msgId) => {
+      ops.push("deleteStopMessage");
+      deleted.push([chatId, msgId]);
+    },
+    flushAndClear: (state) => {
+      ops.push("flushAndClear");
+      for (const buf of state.streaming.values()) {
+        if (buf.content) flushed.push(buf.content);
+      }
+      state.streaming.clear();
+    },
+    settle: () => {
+      ops.push("settle");
+    },
     disconnected,
     deleted,
+    flushed,
+    ops,
   };
 }
 
@@ -158,7 +199,7 @@ describe("session switch — #handleAttach state transitions", () => {
     expect(deps.disconnected).toHaveLength(0);
   });
 
-  it("streaming buffer is cleared on session switch", () => {
+  it("streaming buffer is flushed to the chat, then cleared, on session switch", () => {
     const state = makeUserState();
     const deps = makeDeps();
 
@@ -170,8 +211,10 @@ describe("session switch — #handleAttach state transitions", () => {
 
     performSwitch(state, "sess-B", "session-B", CHAT_ID, deps);
 
-    // Buffer must be empty — no content from session A bleeds into session B.
+    // Buffer must be empty — no content from session A bleeds into session B —
+    // but the buffered content was delivered, not silently discarded.
     expect(state.streaming.size).toBe(0);
+    expect(deps.flushed).toEqual(["partial...", "reasoning..."]);
   });
 
   it("streaming buffer is NOT cleared when re-attaching to the same session", () => {
@@ -259,14 +302,16 @@ describe("detach — #handleDetach state transitions", () => {
     expect(deps.disconnected).toEqual(["telegram:77"]);
   });
 
-  it("clears the streaming buffer", () => {
+  it("flushes then clears the streaming buffer", () => {
     const state = makeUserState();
     state.attachedSessionId = "sess-A";
     state.streaming.set("m1", { role: "assistant", content: "partial" });
+    const deps = makeDeps();
 
-    performDetach(state, CHAT_ID, makeDeps());
+    performDetach(state, CHAT_ID, deps);
 
     expect(state.streaming.size).toBe(0);
+    expect(deps.flushed).toEqual(["partial"]);
   });
 
   it("requests stop-message deletion when one is active", () => {
@@ -323,5 +368,36 @@ describe("streaming buffer isolation", () => {
     performSwitch(state, "sess-A", "session-A", CHAT_ID, deps);
 
     expect(state.streaming.size).toBe(2);
+  });
+});
+
+// ── Tests: flush → settle → confirm ordering ──────────────────────────────────
+
+describe("switch/detach settle ordering — confirmation cannot overtake flushed output", () => {
+  it("session switch settles the relay right after flushing, before any later side effect", () => {
+    const state = makeUserState();
+    const deps = makeDeps();
+
+    performSwitch(state, "sess-A", "session-A", CHAT_ID, deps);
+    state.streaming.set("m1", { role: "assistant", content: "buffered" });
+    state.stopMessageId = 777;
+    performSwitch(state, "sess-B", "session-B", CHAT_ID, deps);
+
+    expect(deps.ops).toEqual([
+      "disconnect",
+      "flushAndClear",
+      "settle",
+      "deleteStopMessage",
+    ]);
+  });
+
+  it("detach settles the relay right after flushing", () => {
+    const state = makeUserState();
+    state.attachedSessionId = "sess-A";
+    const deps = makeDeps();
+
+    performDetach(state, CHAT_ID, deps);
+
+    expect(deps.ops).toEqual(["disconnect", "flushAndClear", "settle"]);
   });
 });

@@ -17,6 +17,7 @@
  */
 
 import { Bot, type Context, InlineKeyboard } from "grammy";
+import { autoRetry } from "@grammyjs/auto-retry";
 import { randomUUID } from "node:crypto";
 import { verifyToken } from "../../daemon/auth.js";
 import { ALL_SCOPES_STRING } from "../../protocol/scopes.js";
@@ -34,6 +35,12 @@ import type {
   ToolInfo,
 } from "../../protocol/types.js";
 import type { AttachedClient } from "../../daemon/session.js";
+import {
+  StreamRelay,
+  escMd,
+  formatSessionLine,
+  type RelayApi,
+} from "./stream.js";
 
 /** One AskUserQuestion question as it arrives in the tool input. */
 interface AskQuestion {
@@ -65,11 +72,11 @@ interface UserState {
   attachedSessionName: string | null;
   clientId: string;
   /**
-   * Per-messageId accumulator for streaming content. Telegram's rate limits
-   * make per-token streaming infeasible, so we buffer deltas and flush
-   * whenever Claude moves to a new message OR the session goes idle.
+   * Per-user stream relay. Buffers streaming deltas (Telegram's rate limits
+   * make per-token streaming infeasible) and delivers content exactly once,
+   * in order — see stream.ts for the flush rules.
    */
-  streaming: Map<string, { role: string; content: string }>;
+  relay: StreamRelay;
   /**
    * message_id of the live "⏹ Stop" control shown while a turn runs, so we
    * show exactly one per turn and remove it when the turn ends. Null when no
@@ -89,9 +96,18 @@ export class TelegramFrontend implements Frontend {
   #users = new Map<number, UserState>();
   /** Short-token → pending approval, for inline-keyboard tool approvals. */
   #approvals = new Map<string, PendingApproval>();
+  /** Send surface handed to each user's StreamRelay. */
+  #relayApi: RelayApi = {
+    sendMessage: (chatId, text, opts) =>
+      this.#bot.api.sendMessage(chatId, text, opts as never),
+  };
 
-  constructor(botToken: string, allowedUserIds: number[]) {
-    this.#bot = new Bot(botToken);
+  constructor(botToken: string, allowedUserIds: number[], bot?: Bot) {
+    // `bot` is injectable for tests (a Bot with a stubbed API transformer).
+    this.#bot = bot ?? new Bot(botToken);
+    // Honor Telegram 429s: wait for retry_after and retry instead of letting
+    // the flood error be swallowed by the `.catch(() => {})` on each send.
+    this.#bot.api.config.use(autoRetry());
     this.#allowedUserIds = new Set(allowedUserIds);
   }
 
@@ -137,6 +153,13 @@ export class TelegramFrontend implements Frontend {
   // ── Handlers ──────────────────────────────────────────────────────────
 
   #setupHandlers(): void {
+    // Never let a thrown handler error kill long polling — grammy's default
+    // error handler re-throws, which permanently stops the bot. Log and keep
+    // processing updates.
+    this.#bot.catch((err) => {
+      console.error("[codeoid:telegram] handler error:", err.error ?? err);
+    });
+
     // Gate: only allowed Telegram user IDs
     this.#bot.use(async (ctx, next) => {
       const userId = ctx.from?.id;
@@ -264,15 +287,9 @@ export class TelegramFrontend implements Frontend {
         await ctx.reply("No active sessions.");
         return;
       }
-      const lines = resp.sessions.map((s) => {
-        const icon =
-          s.status === "idle"
-            ? "🟢"
-            : s.status === "thinking" || s.status === "tool_running"
-              ? "🟡"
-              : "🔴";
-        return `${icon} *${esc(s.name)}* — ${s.status}\n   \`${s.workdir}\``;
-      });
+      // Status and workdir are escaped — a `tool_running` underscore or a
+      // path with markdown specials must not 400 the reply.
+      const lines = resp.sessions.map((s) => formatSessionLine(s));
       await ctx.reply(lines.join("\n\n"), { parse_mode: "MarkdownV2" });
     }
   }
@@ -296,7 +313,7 @@ export class TelegramFrontend implements Frontend {
     );
 
     if (resp.type === "response.ok") {
-      await ctx.reply(`Session *${esc(name)}* created\\.`, { parse_mode: "MarkdownV2" });
+      await ctx.reply(`Session *${escMd(name)}* created\\.`, { parse_mode: "MarkdownV2" });
     } else if (resp.type === "response.error") {
       await ctx.reply(`Error: ${resp.error}`);
     }
@@ -329,7 +346,11 @@ export class TelegramFrontend implements Frontend {
       this.#manager.disconnectClient(state.clientId);
       state.attachedSessionId = null;
       state.attachedSessionName = null;
-      state.streaming.clear();
+      // Deliver anything still buffered from the old session (with an
+      // interruption marker) rather than discarding it invisibly — and wait
+      // for it to land so the "Attached to …" confirmation can't overtake it.
+      state.relay.flushAndClear(chatId);
+      await state.relay.settle();
       // Remove the ⏹ Stop button for the old session. The old session's
       // idle status_change (which normally deletes it) won't arrive after
       // we disconnected, so it would otherwise linger in the chat.
@@ -345,6 +366,15 @@ export class TelegramFrontend implements Frontend {
       send: (msg: DaemonMessage) => this.#forwardToChat(chatId, userId, msg),
     };
 
+    // Mark attached BEFORE the attach call: live broadcasts can start the
+    // moment the daemon registers the client, and the stale-session gate in
+    // #forwardToChat would otherwise drop them. Restored on failure (a
+    // failed same-session re-attach must not fake a detach).
+    const prevSessionId = state.attachedSessionId;
+    const prevSessionName = state.attachedSessionName;
+    state.attachedSessionId = session.id;
+    state.attachedSessionName = name;
+
     const resp = await this.#manager.handle(
       { type: "session.attach", id: randomUUID(), sessionId: session.id },
       state.auth!,
@@ -352,10 +382,10 @@ export class TelegramFrontend implements Frontend {
     );
 
     if (resp.type === "response.ok") {
-      state.attachedSessionId = session.id;
-      state.attachedSessionName = name;
-      await ctx.reply(`Attached to *${esc(name)}*\\. Send messages here\\.`, { parse_mode: "MarkdownV2" });
+      await ctx.reply(`Attached to *${escMd(name)}*\\. Send messages here\\.`, { parse_mode: "MarkdownV2" });
     } else if (resp.type === "response.error") {
+      state.attachedSessionId = prevSessionId;
+      state.attachedSessionName = prevSessionName;
       await ctx.reply(`Error: ${resp.error}`);
     }
   }
@@ -372,7 +402,11 @@ export class TelegramFrontend implements Frontend {
     const name = state.attachedSessionName;
     state.attachedSessionId = null;
     state.attachedSessionName = null;
-    state.streaming.clear();
+    // Deliver anything still buffered before dropping state — detaching must
+    // not silently swallow streamed-but-unflushed content. Wait for it to
+    // land so the "Detached from …" confirmation can't overtake it.
+    state.relay.flushAndClear(chatId);
+    await state.relay.settle();
     if (state.stopMessageId !== null) {
       this.#bot.api.deleteMessage(chatId, state.stopMessageId).catch(() => {});
       state.stopMessageId = null;
@@ -421,7 +455,7 @@ export class TelegramFrontend implements Frontend {
       state.attachedSessionId = null;
       state.attachedSessionName = null;
     }
-    await ctx.reply(`Session *${esc(name)}* destroyed\\.`, { parse_mode: "MarkdownV2" });
+    await ctx.reply(`Session *${escMd(name)}* destroyed\\.`, { parse_mode: "MarkdownV2" });
   }
 
   // ── Search ──────────────────────────────────────────────────────────────
@@ -496,7 +530,7 @@ export class TelegramFrontend implements Frontend {
     } else {
       // Fall back to plain text for very long results
       const plain = lines.join("\n").replace(/\\([_*[\]()~`>#+\-=|{}.!\\])/g, "$1");
-      this.#sendChunked(ctx.chat!.id, plain);
+      state.relay.sendChunked(ctx.chat!.id, plain);
     }
   }
 
@@ -715,67 +749,34 @@ export class TelegramFrontend implements Frontend {
 
   #forwardToChat(chatId: number, userId: number, msg: DaemonMessage): void {
     const state = this.#users.get(userId);
-    const send = (text: string, opts?: { parse_mode?: string }) =>
-      this.#bot.api.sendMessage(chatId, text, opts as Record<string, unknown>).catch(() => {});
+    // Drop broadcasts from sessions the user is no longer attached to — an
+    // in-flight callback from the old session can still fire after a detach
+    // or switch, and must not reach the current relay/chat (a stale idle
+    // would flush the new session's buffers and print a bogus "✅ Done.").
+    if (!state || isStaleBroadcast(msg, state.attachedSessionId)) return;
+    const relay = state.relay;
 
     switch (msg.type) {
       case "session.message": {
         const m = msg;
-        // Flush any buffered streams that are stale (different messageId).
-        if (state) this.#flushStale(chatId, state, m.messageId);
-
-        switch (m.role) {
-          case "user":
-            // Echo of our own send — no need to replay.
-            break;
-          case "assistant":
-            if (m.content) {
-              this.#sendChunked(chatId, m.content);
-            } else if (state) {
-              // Empty assistant = start of a streaming block.
-              state.streaming.set(m.messageId, { role: "assistant", content: "" });
-            }
-            break;
-          case "thinking":
-            if (m.content) {
-              send(`💭 _thinking_\n${m.content.slice(0, 800)}`, { parse_mode: "Markdown" });
-            } else if (state) {
-              state.streaming.set(m.messageId, { role: "thinking", content: "" });
-            }
-            break;
-          case "tool_call": {
-            if (!m.tool) break;
-            const phase = m.tool.state.phase;
-            if (phase === "waiting_confirmation" && "approvalId" in m.tool.state) {
-              // Inline Approve/Deny (or AskUserQuestion option buttons) keyed
-              // to the exact approvalId — handles concurrent approvals.
-              this.#sendApproval(chatId, userId, m.tool);
-            } else if (phase === "executing") {
-              send(`⚡ ${m.tool.name}`);
-            } else if (phase === "completed") {
-              send(`✓ ${m.tool.name}`);
-            } else if (phase === "cancelled") {
-              send(`✗ ${m.tool.name} cancelled`);
-            }
-            break;
-          }
-          case "system":
-            if (m.content) send(`⚠️ ${m.content}`);
-            break;
-          case "info":
-            // Quiet by default on mobile.
-            break;
+        // Content buffering / exactly-once flushing lives in the relay.
+        relay.handleMessage(chatId, m);
+        if (
+          m.role === "tool_call" &&
+          m.tool &&
+          m.tool.state.phase === "waiting_confirmation" &&
+          "approvalId" in m.tool.state
+        ) {
+          // Inline Approve/Deny (or AskUserQuestion option buttons) keyed
+          // to the exact approvalId — handles concurrent approvals.
+          this.#sendApproval(chatId, userId, m.tool);
         }
         break;
       }
 
       case "session.message.delta": {
         // Buffer; don't stream to Telegram per-token (rate limits).
-        if (!state) break;
-        const buf = state.streaming.get(msg.messageId);
-        if (buf && msg.contentAppend) {
-          buf.content += msg.contentAppend;
-        }
+        relay.handleDelta(chatId, msg);
         break;
       }
 
@@ -785,7 +786,7 @@ export class TelegramFrontend implements Frontend {
         if (active) {
           // Turn started — show a one-tap ⏹ Stop control (once per turn).
           // Mobile parity with Esc on desktop: no need to type /interrupt.
-          if (state?.attachedSessionId && state.stopMessageId === null) {
+          if (state.attachedSessionId && state.stopMessageId === null) {
             const sid = state.attachedSessionId;
             const kb = new InlineKeyboard().text("⏹ Stop", `stop:${sid}`);
             this.#bot.api
@@ -799,21 +800,16 @@ export class TelegramFrontend implements Frontend {
           }
         } else if (msg.status === "idle" || msg.status === "error") {
           // Turn ended — remove the Stop control.
-          if (state && state.stopMessageId !== null) {
+          if (state.stopMessageId !== null) {
             this.#bot.api.deleteMessage(chatId, state.stopMessageId).catch(() => {});
             state.stopMessageId = null;
           }
           if (msg.status === "idle") {
-            // Flush any remaining buffered streams.
-            if (state) {
-              for (const [, buf] of state.streaming) {
-                this.#flushBuffer(chatId, buf);
-              }
-              state.streaming.clear();
-            }
-            send("✅ Done.");
+            // Flush any remaining buffered streams, then confirm — the relay
+            // queues "✅ Done." after the content so it can't overtake it.
+            relay.flushIdle(chatId);
           } else {
-            send("❌ Error.");
+            relay.send(chatId, "❌ Error.");
           }
         }
         break;
@@ -998,35 +994,6 @@ export class TelegramFrontend implements Frontend {
     }
   }
 
-  /** Flush buffered streams whose messageId is no longer current. */
-  #flushStale(chatId: number, state: UserState, currentMessageId: string): void {
-    for (const [id, buf] of state.streaming) {
-      if (id !== currentMessageId) {
-        this.#flushBuffer(chatId, buf);
-        state.streaming.delete(id);
-      }
-    }
-  }
-
-  #flushBuffer(chatId: number, buf: { role: string; content: string }): void {
-    if (!buf.content) return;
-    if (buf.role === "thinking") {
-      this.#bot.api
-        .sendMessage(chatId, `💭 _thinking_\n${buf.content.slice(0, 1500)}`, {
-          parse_mode: "Markdown",
-        } as Record<string, unknown>)
-        .catch(() => {});
-    } else {
-      this.#sendChunked(chatId, buf.content);
-    }
-  }
-
-  #sendChunked(chatId: number, text: string): void {
-    for (let i = 0; i < text.length; i += 4000) {
-      this.#bot.api.sendMessage(chatId, text.slice(i, i + 4000)).catch(() => {});
-    }
-  }
-
   // ── Helpers ───────────────────────────────────────────────────────────
 
   #getOrCreate(userId: number): UserState {
@@ -1037,7 +1004,7 @@ export class TelegramFrontend implements Frontend {
         attachedSessionId: null,
         attachedSessionName: null,
         clientId: `telegram:${userId}`,
-        streaming: new Map(),
+        relay: new StreamRelay(this.#relayApi),
         stopMessageId: null,
       };
       this.#users.set(userId, state);
@@ -1065,14 +1032,20 @@ export class TelegramFrontend implements Frontend {
   }
 }
 
-/** Escape MarkdownV2 special characters. */
-function escMd(text: string): string {
-  return text.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, (m) => `\\${m}`);
-}
-
-/** @deprecated — legacy esc used elsewhere in this file. */
-function esc(text: string): string {
-  return text.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, "\\$&");
+/**
+ * True when a session-scoped daemon broadcast belongs to a session the user
+ * is not (or no longer) attached to. Messages without a sessionId (e.g.
+ * direct responses) are never considered stale. Exported for tests.
+ */
+export function isStaleBroadcast(
+  msg: DaemonMessage,
+  attachedSessionId: string | null,
+): boolean {
+  const sid =
+    "sessionId" in msg && typeof msg.sessionId === "string"
+      ? msg.sessionId
+      : null;
+  return sid !== null && sid !== attachedSessionId;
 }
 
 /** Relative time string from a unix-ms timestamp. */
