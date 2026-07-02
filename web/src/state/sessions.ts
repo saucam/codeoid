@@ -53,6 +53,18 @@ export function sessionsSnapshot(): Readonly<Record<string, SessionInfo>> {
 
 // ---------- broadcast ingest ----------
 
+/** Cheap deep equality for small JSON-shaped values (session list fields). */
+function jsonEqual(a: unknown, b: unknown): boolean {
+  if (typeof a !== "object" || a === null || typeof b !== "object" || b === null) {
+    return false; // primitives were already compared by reference
+  }
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Sync the store to the daemon's authoritative payload.
  *
@@ -81,7 +93,12 @@ export function ingestSessionList(items: readonly SessionInfo[]): void {
           const source = it as unknown as Record<string, unknown>;
           for (const k of Object.keys(source)) {
             if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
-            if (target[k] !== source[k]) target[k] = source[k];
+            // Object-valued fields (usage, subagents, pinnedFiles) arrive as
+            // fresh references on every list refresh; reassigning them when
+            // deep-equal would notify their subscribers for nothing.
+            if (target[k] !== source[k] && !jsonEqual(target[k], source[k])) {
+              target[k] = source[k];
+            }
           }
           // Drop fields the daemon no longer sends (e.g. an optional
           // `model` that was unset). Object.hasOwn (not `in`) so inherited
