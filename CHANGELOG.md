@@ -6,6 +6,35 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-07-03
+
+### Fixed
+
+- **Daemon**: streamed assistant/thinking messages were pushed into scrollback
+  twice (stream start + finalize) — duplicating rows on every replay/attach,
+  splitting memory episodes into promptless halves, and drifting the byte
+  accounting negative so the 20MB scrollback cap never fired. Scrollback now
+  upserts by messageId with real UTF-8 byte accounting, and the transcript
+  `seq` counter resumes past the persisted tail instead of restarting at 0. (#74)
+- **Web**: transcript virtualizer was never notified on count/session changes
+  (stale layout ghosting after session switches and size-cache poisoning — the
+  residual cause of the row-overlap bug #73 targeted); scrolled-past rows
+  leaked their DOM subtrees forever; `session.list` was ingested twice per
+  refresh and rebuilt every sidebar row; pending-approval and notification
+  watchers re-scanned the full transcript on every streaming delta; usage
+  analytics showed *global* totals to identities owning zero sessions and
+  broke past ~1000 sessions (SQLite variable limit); analytics chart mixed
+  local-time and UTC day buckets. (#75)
+- **Telegram**: every streamed assistant/thinking block was delivered twice;
+  one unhandled handler error (e.g. `/ls` rendering an unescaped
+  `tool_running` status) permanently stopped long polling; flood-limited
+  (429) messages vanished silently — grammY auto-retry now honors
+  `retry_after`; interleaved broadcasts mid-stream dropped or duplicated
+  streamed text; >4000-char replies could arrive with chunks out of order;
+  tool completion/cancellation states never rendered; buffered content was
+  silently discarded on session switch/detach and stale broadcasts from a
+  detached session could write into the new session's chat. (#76)
+
 ## [0.1.2] - 2026-06-28
 
 ### Fixed
