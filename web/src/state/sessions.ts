@@ -53,14 +53,42 @@ export function sessionsSnapshot(): Readonly<Record<string, SessionInfo>> {
 
 // ---------- broadcast ingest ----------
 
-/** Replace the entire list with the daemon's authoritative payload. */
+/**
+ * Sync the store to the daemon's authoritative payload.
+ *
+ * Merges PER-ID instead of wholesale-replacing `byId`: unchanged sessions
+ * keep their store object identity, so Solid's fine-grained reactivity
+ * doesn't tear down and re-create every SessionRow on each periodic
+ * refresh — only fields that actually changed trigger updates.
+ */
 export function ingestSessionList(items: readonly SessionInfo[]): void {
   batch(() => {
     setState(
       produce<SessionsState>((s) => {
-        const next: Record<string, SessionInfo> = {};
-        for (const it of items) next[it.id] = it;
-        s.byId = next;
+        const seen = new Set<string>();
+        for (const it of items) {
+          seen.add(it.id);
+          const existing = s.byId[it.id];
+          if (!existing) {
+            s.byId[it.id] = it;
+            continue;
+          }
+          // Update changed fields in place.
+          const target = existing as unknown as Record<string, unknown>;
+          const source = it as unknown as Record<string, unknown>;
+          for (const k of Object.keys(source)) {
+            if (target[k] !== source[k]) target[k] = source[k];
+          }
+          // Drop fields the daemon no longer sends (e.g. an optional
+          // `model` that was unset).
+          for (const k of Object.keys(target)) {
+            if (!(k in source)) delete target[k];
+          }
+        }
+        // Delete sessions missing from the authoritative list.
+        for (const id of Object.keys(s.byId)) {
+          if (!seen.has(id)) delete s.byId[id];
+        }
       }),
     );
     // Auto-focus the most recently-created session if nothing is focused.

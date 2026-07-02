@@ -96,6 +96,47 @@ describe("sessions store", () => {
     expect(focusedSessionId()).toBe("a");
   });
 
+  it("ingestSessionList merges per-id: unchanged sessions keep their store object identity", () => {
+    ingestSessionList([
+      s("a", "2026-05-01T08:00:00Z", { name: "alpha" }),
+      s("b", "2026-05-02T08:00:00Z"),
+    ]);
+    const before = getSession("a");
+    // Fresh payload objects, same field values for "a", changed status for "b".
+    ingestSessionList([
+      s("a", "2026-05-01T08:00:00Z", { name: "alpha" }),
+      s("b", "2026-05-02T08:00:00Z", { status: "working" }),
+    ]);
+    expect(getSession("a")).toBe(before!);
+    expect(getSession("a")?.name).toBe("alpha");
+    expect(getSession("b")?.status).toBe("working");
+  });
+
+  it("ingestSessionList updates changed fields, adds new sessions, deletes missing ones", () => {
+    ingestSessionList([
+      s("a", "2026-05-01T08:00:00Z", { name: "old-name" }),
+      s("gone", "2026-05-02T08:00:00Z"),
+    ]);
+    const before = getSession("a");
+    ingestSessionList([
+      s("a", "2026-05-01T08:00:00Z", { name: "new-name" }),
+      s("fresh", "2026-05-03T08:00:00Z"),
+    ]);
+    // Updated in place — identity preserved even when a field changed.
+    expect(getSession("a")).toBe(before!);
+    expect(getSession("a")?.name).toBe("new-name");
+    expect(getSession("gone")).toBeUndefined();
+    expect(getSession("fresh")?.id).toBe("fresh");
+    expect(sessionList().map((x) => x.id)).toEqual(["fresh", "a"]);
+  });
+
+  it("ingestSessionList drops fields the daemon no longer sends", () => {
+    ingestSessionList([s("a", "2026-05-01T08:00:00Z", { model: "claude-opus-4-7" })]);
+    expect(getSession("a")?.model).toBe("claude-opus-4-7");
+    ingestSessionList([s("a", "2026-05-01T08:00:00Z")]);
+    expect(getSession("a")?.model).toBeUndefined();
+  });
+
   it("focusNext / focusPrev wrap around the sorted list", () => {
     ingestSessionList([
       s("a", "2026-05-01T08:00:00Z"),

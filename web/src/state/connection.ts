@@ -240,10 +240,14 @@ function routeBroadcast(msg: DaemonMessage): void {
     case "session.status_change":
       setSessionStatus(msg.sessionId, msg.status);
       return;
-    case "session.list.result":
-      ingestSessionList(msg.sessions);
-      return;
     // Solicited types resolve via the request registry; nothing to do here.
+    // `session.list.result` in particular is ONLY ever sent as the reply to
+    // a `session.list` request (verified: the daemon's session-manager emits
+    // it with `requestId: msg.id` and nowhere else), and `refreshSessions`
+    // already ingests it on the request path. The ws client forwards every
+    // frame to onMessage handlers even after resolving the pending request,
+    // so ingesting here again double-applied every refresh.
+    case "session.list.result":
     case "auth.ok":
     case "response.ok":
     case "response.error":
