@@ -53,14 +53,64 @@ export function sessionsSnapshot(): Readonly<Record<string, SessionInfo>> {
 
 // ---------- broadcast ingest ----------
 
-/** Replace the entire list with the daemon's authoritative payload. */
+/** Cheap deep equality for small JSON-shaped values (session list fields). */
+function jsonEqual(a: unknown, b: unknown): boolean {
+  if (typeof a !== "object" || a === null || typeof b !== "object" || b === null) {
+    return false; // primitives were already compared by reference
+  }
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Sync the store to the daemon's authoritative payload.
+ *
+ * Merges PER-ID instead of wholesale-replacing `byId`: unchanged sessions
+ * keep their store object identity, so Solid's fine-grained reactivity
+ * doesn't tear down and re-create every SessionRow on each periodic
+ * refresh — only fields that actually changed trigger updates.
+ */
 export function ingestSessionList(items: readonly SessionInfo[]): void {
   batch(() => {
     setState(
       produce<SessionsState>((s) => {
-        const next: Record<string, SessionInfo> = {};
-        for (const it of items) next[it.id] = it;
-        s.byId = next;
+        const seen = new Set<string>();
+        for (const it of items) {
+          seen.add(it.id);
+          const existing = s.byId[it.id];
+          if (!existing) {
+            s.byId[it.id] = it;
+            continue;
+          }
+          // Update changed fields in place. Skip prototype-polluting keys:
+          // the payload is network-sourced and JSON.parse produces
+          // "__proto__" as a plain own property — assigning it through a
+          // computed key would rewrite the object's prototype.
+          const target = existing as unknown as Record<string, unknown>;
+          const source = it as unknown as Record<string, unknown>;
+          for (const k of Object.keys(source)) {
+            if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
+            // Object-valued fields (usage, subagents, pinnedFiles) arrive as
+            // fresh references on every list refresh; reassigning them when
+            // deep-equal would notify their subscribers for nothing.
+            if (target[k] !== source[k] && !jsonEqual(target[k], source[k])) {
+              target[k] = source[k];
+            }
+          }
+          // Drop fields the daemon no longer sends (e.g. an optional
+          // `model` that was unset). Object.hasOwn (not `in`) so inherited
+          // keys like "constructor" can't mask a legitimate delete.
+          for (const k of Object.keys(target)) {
+            if (!Object.hasOwn(source, k)) delete target[k];
+          }
+        }
+        // Delete sessions missing from the authoritative list.
+        for (const id of Object.keys(s.byId)) {
+          if (!seen.has(id)) delete s.byId[id];
+        }
       }),
     );
     // Auto-focus the most recently-created session if nothing is focused.

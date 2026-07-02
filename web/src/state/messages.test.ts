@@ -3,9 +3,11 @@ import {
   _resetMessagesForTest,
   applyDelta,
   applyMessage,
+  clearSessionMessages,
   epochOf,
   hasMessage,
   messagesFor,
+  registerSessionCachePruner,
   replaceScrollback,
   versionOf,
 } from "./messages";
@@ -207,5 +209,51 @@ describe("messages store", () => {
     expect(epochOf(null)).toBe(0);
     expect(epochOf(undefined)).toBe(0);
     expect(epochOf("never-seen")).toBe(0);
+  });
+
+  it("replaceScrollback dedupes replayed duplicates by messageId, keeping the LAST occurrence's content at the first position", () => {
+    replaceScrollback("s1", [
+      makeMsg({ messageId: "m1", content: "v1" }),
+      makeMsg({ messageId: "m2", content: "other" }),
+      makeMsg({ messageId: "m1", content: "v2" }),
+      makeMsg({ messageId: "m1", content: "v3-final" }),
+    ]);
+    const buf = messagesFor("s1");
+    expect(buf).toHaveLength(2);
+    expect(buf.map((m) => m.messageId)).toEqual(["m1", "m2"]);
+    expect(buf[0]?.content).toBe("v3-final");
+    expect(hasMessage("s1", "m1")).toBe(true);
+    expect(hasMessage("s1", "m2")).toBe(true);
+  });
+
+  it("clearSessionMessages removes messages, ids, epoch AND per-message version entries", () => {
+    applyMessage(makeMsg({ messageId: "m1" }));
+    applyMessage(makeMsg({ messageId: "m2" }));
+    applyMessage(makeMsg({ sessionId: "s2", messageId: "keep" }));
+    expect(versionOf("m1")).toBe(1);
+    expect(versionOf("m2")).toBe(1);
+
+    clearSessionMessages("s1");
+
+    expect(messagesFor("s1")).toHaveLength(0);
+    expect(hasMessage("s1", "m1")).toBe(false);
+    expect(epochOf("s1")).toBe(0);
+    // versions map must not leak destroyed sessions' entries.
+    expect(versionOf("m1")).toBe(0);
+    expect(versionOf("m2")).toBe(0);
+    // Other sessions untouched.
+    expect(versionOf("keep")).toBe(1);
+    expect(hasMessage("s2", "keep")).toBe(true);
+  });
+
+  it("clearSessionMessages invokes registered session cache pruners exactly once with the sessionId", () => {
+    const pruned: string[] = [];
+    const unregister = registerSessionCachePruner((sid) => pruned.push(sid));
+    applyMessage(makeMsg({ messageId: "m1" }));
+    clearSessionMessages("s1");
+    expect(pruned).toEqual(["s1"]);
+    unregister();
+    clearSessionMessages("s1");
+    expect(pruned).toEqual(["s1"]); // unregistered — not called again
   });
 });

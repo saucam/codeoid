@@ -24,6 +24,7 @@
 
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
 
+import { findPendingApproval } from "../lib/approvals";
 import { epochOf, focusedSessionMessages } from "./messages";
 import { focusedSession, focusedSessionId } from "./sessions";
 
@@ -90,25 +91,15 @@ export function installApprovalNotifications(): void {
     if (!sid) return;
     const session = focusedSession();
     if (!session) return;
-    const arr = focusedSessionMessages();
-    let pending: {
-      approvalId: string;
-      toolName: string;
-      description: string;
-    } | null = null;
-    for (const m of arr) {
-      if (m.role !== "tool_call" || !m.tool) continue;
-      const state = m.tool.state;
-      if (state.phase === "waiting_confirmation") {
-        pending = {
-          approvalId: state.approvalId,
-          toolName: m.tool.name,
-          description: state.description ?? m.tool.name,
-        };
-        break;
-      }
-    }
-    if (!pending) return;
+    // Status-gated, turn-bounded scan — see lib/approvals.ts. Previously
+    // this walked the ENTIRE array from index 0 on every streaming delta.
+    const match = findPendingApproval(focusedSessionMessages(), session.status);
+    if (!match || !match.tool || match.tool.state.phase !== "waiting_confirmation") return;
+    const pending = {
+      approvalId: match.tool.state.approvalId,
+      toolName: match.tool.name,
+      description: match.tool.state.description ?? match.tool.name,
+    };
     if (fired.has(pending.approvalId)) return;
     if (permission() !== "granted") return;
     // Only fire when the user isn't actively looking at the page.

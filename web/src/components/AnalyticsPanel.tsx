@@ -1,20 +1,7 @@
 import { For, Show, onMount } from "solid-js";
 import { analyticsLoading, dailyUsage, fetchAnalytics, lifetimeTotals } from "../state/analytics";
 import { formatCostUsd, formatTokens } from "../lib/format";
-import type { DailyUsageBucket } from "../protocol/types";
-
-function padDays(data: DailyUsageBucket[], days: number): Array<{ day: string; costUsd: number }> {
-  const map = new Map(data.map((d) => [d.day, d.costUsd]));
-  const result = [];
-  const now = new Date();
-  for (let i = days - 1; i >= 0; i--) {
-    const d = new Date(now);
-    d.setDate(d.getDate() - i);
-    const key = d.toISOString().slice(0, 10);
-    result.push({ day: key, costUsd: map.get(key) ?? 0 });
-  }
-  return result;
-}
+import { padDays, utcDayKey } from "../lib/usage-days";
 
 const DAYS = 14;
 const BAR_W = 14;
@@ -28,7 +15,8 @@ const AnalyticsPanel = () => {
 
   const padded = () => padDays(dailyUsage(), DAYS);
   const maxCost = () => Math.max(...padded().map((d) => d.costUsd), 0.001);
-  const today = new Date().toISOString().slice(0, 10);
+  // UTC to match the daemon's sqlite date() bucketing — see lib/usage-days.
+  const today = utcDayKey(Date.now());
 
   return (
     <div class="px-3 pb-3 pt-1 border-b border-border">
@@ -71,8 +59,10 @@ const AnalyticsPanel = () => {
               const x = () => i() * (BAR_W + BAR_GAP);
               const isToday = () => bucket.day === today;
               const dayLabel = () => {
-                const d = new Date(bucket.day + "T00:00:00");
-                return d.toLocaleDateString(undefined, { weekday: "short" }).slice(0, 1);
+                const d = new Date(bucket.day + "T00:00:00Z");
+                return d
+                  .toLocaleDateString(undefined, { weekday: "short", timeZone: "UTC" })
+                  .slice(0, 1);
               };
               return (
                 <>

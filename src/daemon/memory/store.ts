@@ -411,10 +411,18 @@ export class SqliteEpisodeStore {
   }
 
   dailyUsage(days = 30, sessionIds?: string[]): DailyUsageBucket[] {
-    const sessionFilter =
-      sessionIds && sessionIds.length > 0
-        ? `AND session_id IN (${sessionIds.map(() => "?").join(",")})`
-        : "";
+    // Scoping contract: `undefined` = unscoped (internal callers only);
+    // an ARRAY — including an empty one — is a strict ownership filter.
+    // Treating [] as "no filter" let a zero-session identity read
+    // EVERYONE's usage.
+    if (sessionIds && sessionIds.length === 0) return [];
+    // Filter via json_each over a single JSON-array bind param instead of
+    // one `?` per session id: `IN (?,?,...)` blows SQLite's bound-variable
+    // limit at ~1000 sessions (the sessions table lives in a different DB
+    // file, so a JOIN isn't available here).
+    const sessionFilter = sessionIds
+      ? "AND session_id IN (SELECT value FROM json_each(?))"
+      : "";
     const rows = this.#db
       .prepare(
         `SELECT
@@ -430,7 +438,9 @@ export class SqliteEpisodeStore {
          GROUP BY day
          ORDER BY day ASC`,
       )
-      .all(days, ...(sessionIds ?? [])) as Array<{
+      .all(
+        ...(sessionIds ? [days, JSON.stringify(sessionIds)] : [days]),
+      ) as Array<{
       day: string;
       cost_usd: number;
       input_tokens: number;
@@ -450,10 +460,20 @@ export class SqliteEpisodeStore {
   }
 
   lifetimeTotals(sessionIds?: string[]): LifetimeUsageTotals {
-    const sessionFilter =
-      sessionIds && sessionIds.length > 0
-        ? `WHERE session_id IN (${sessionIds.map(() => "?").join(",")})`
-        : "";
+    // Same scoping contract as dailyUsage: [] = strict empty scope → zeros.
+    if (sessionIds && sessionIds.length === 0) {
+      return {
+        costUsd: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        numTurns: 0,
+        numSessions: 0,
+      };
+    }
+    // json_each over one JSON bind param — see dailyUsage for rationale.
+    const sessionFilter = sessionIds
+      ? "WHERE session_id IN (SELECT value FROM json_each(?))"
+      : "";
     const row = this.#db
       .prepare(
         `SELECT
@@ -464,7 +484,7 @@ export class SqliteEpisodeStore {
            COUNT(DISTINCT session_id)            AS num_sessions
          FROM turn_usage ${sessionFilter}`,
       )
-      .get(...(sessionIds ?? [])) as {
+      .get(...(sessionIds ? [JSON.stringify(sessionIds)] : [])) as {
       cost_usd: number;
       input_tokens: number;
       output_tokens: number;

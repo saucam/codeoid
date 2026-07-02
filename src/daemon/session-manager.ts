@@ -1305,30 +1305,40 @@ export class SessionManager {
     return { type: "response.ok", requestId: msg.id };
   }
 
+  #emptyUsageResponse(requestId: string): DaemonMessage {
+    return {
+      type: "response.ok",
+      requestId,
+      data: {
+        daily: [] as DailyUsageBucket[],
+        lifetime: {
+          costUsd: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          numTurns: 0,
+          numSessions: 0,
+        } as LifetimeUsageTotals,
+      },
+    };
+  }
+
   #usageDaily(
     msg: Extract<ClientMessage, { type: "usage.daily" }>,
     auth: AuthContext,
   ): DaemonMessage {
     if (!this.#memory) {
-      return {
-        type: "response.ok",
-        requestId: msg.id,
-        data: {
-          daily: [] as DailyUsageBucket[],
-          lifetime: {
-            costUsd: 0,
-            inputTokens: 0,
-            outputTokens: 0,
-            numTurns: 0,
-            numSessions: 0,
-          } as LifetimeUsageTotals,
-        },
-      };
+      return this.#emptyUsageResponse(msg.id);
     }
     const days = typeof msg.days === "number" && msg.days > 0 ? Math.min(msg.days, 365) : 30;
     const ownedSessionIds = this.#store
       .listSessions(auth.accountId, auth.projectId)
       .map((s) => s.id);
+    // An identity that owns no sessions gets zeros — never the unfiltered
+    // aggregate. (The store also enforces this: an empty array is a strict
+    // filter, not "no filter". Belt and suspenders around a tenancy leak.)
+    if (ownedSessionIds.length === 0) {
+      return this.#emptyUsageResponse(msg.id);
+    }
     const daily = this.#memory.store.dailyUsage(days, ownedSessionIds);
     const lifetime = this.#memory.store.lifetimeTotals(ownedSessionIds);
     return {
