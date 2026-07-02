@@ -347,8 +347,10 @@ export class TelegramFrontend implements Frontend {
       state.attachedSessionId = null;
       state.attachedSessionName = null;
       // Deliver anything still buffered from the old session (with an
-      // interruption marker) rather than discarding it invisibly.
+      // interruption marker) rather than discarding it invisibly — and wait
+      // for it to land so the "Attached to …" confirmation can't overtake it.
       state.relay.flushAndClear(chatId);
+      await state.relay.settle();
       // Remove the ⏹ Stop button for the old session. The old session's
       // idle status_change (which normally deletes it) won't arrive after
       // we disconnected, so it would otherwise linger in the chat.
@@ -364,6 +366,15 @@ export class TelegramFrontend implements Frontend {
       send: (msg: DaemonMessage) => this.#forwardToChat(chatId, userId, msg),
     };
 
+    // Mark attached BEFORE the attach call: live broadcasts can start the
+    // moment the daemon registers the client, and the stale-session gate in
+    // #forwardToChat would otherwise drop them. Restored on failure (a
+    // failed same-session re-attach must not fake a detach).
+    const prevSessionId = state.attachedSessionId;
+    const prevSessionName = state.attachedSessionName;
+    state.attachedSessionId = session.id;
+    state.attachedSessionName = name;
+
     const resp = await this.#manager.handle(
       { type: "session.attach", id: randomUUID(), sessionId: session.id },
       state.auth!,
@@ -371,10 +382,10 @@ export class TelegramFrontend implements Frontend {
     );
 
     if (resp.type === "response.ok") {
-      state.attachedSessionId = session.id;
-      state.attachedSessionName = name;
       await ctx.reply(`Attached to *${escMd(name)}*\\. Send messages here\\.`, { parse_mode: "MarkdownV2" });
     } else if (resp.type === "response.error") {
+      state.attachedSessionId = prevSessionId;
+      state.attachedSessionName = prevSessionName;
       await ctx.reply(`Error: ${resp.error}`);
     }
   }
@@ -392,8 +403,10 @@ export class TelegramFrontend implements Frontend {
     state.attachedSessionId = null;
     state.attachedSessionName = null;
     // Deliver anything still buffered before dropping state — detaching must
-    // not silently swallow streamed-but-unflushed content.
+    // not silently swallow streamed-but-unflushed content. Wait for it to
+    // land so the "Detached from …" confirmation can't overtake it.
     state.relay.flushAndClear(chatId);
+    await state.relay.settle();
     if (state.stopMessageId !== null) {
       this.#bot.api.deleteMessage(chatId, state.stopMessageId).catch(() => {});
       state.stopMessageId = null;
@@ -736,7 +749,11 @@ export class TelegramFrontend implements Frontend {
 
   #forwardToChat(chatId: number, userId: number, msg: DaemonMessage): void {
     const state = this.#users.get(userId);
-    if (!state) return;
+    // Drop broadcasts from sessions the user is no longer attached to — an
+    // in-flight callback from the old session can still fire after a detach
+    // or switch, and must not reach the current relay/chat (a stale idle
+    // would flush the new session's buffers and print a bogus "✅ Done.").
+    if (!state || isStaleBroadcast(msg, state.attachedSessionId)) return;
     const relay = state.relay;
 
     switch (msg.type) {
@@ -1013,6 +1030,22 @@ export class TelegramFrontend implements Frontend {
       send: (msg: DaemonMessage) => this.#forwardToChat(chatId, userId, msg),
     };
   }
+}
+
+/**
+ * True when a session-scoped daemon broadcast belongs to a session the user
+ * is not (or no longer) attached to. Messages without a sessionId (e.g.
+ * direct responses) are never considered stale. Exported for tests.
+ */
+export function isStaleBroadcast(
+  msg: DaemonMessage,
+  attachedSessionId: string | null,
+): boolean {
+  const sid =
+    "sessionId" in msg && typeof msg.sessionId === "string"
+      ? msg.sessionId
+      : null;
+  return sid !== null && sid !== attachedSessionId;
 }
 
 /** Relative time string from a unix-ms timestamp. */

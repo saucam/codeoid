@@ -19,8 +19,9 @@
 import { describe, it, expect } from "bun:test";
 import { Bot } from "grammy";
 import type { UserFromGetMe } from "grammy/types";
-import { TelegramFrontend } from "../frontends/telegram/index.js";
+import { TelegramFrontend, isStaleBroadcast } from "../frontends/telegram/index.js";
 import type { FrontendContext } from "../frontends/types.js";
+import type { DaemonMessage } from "../protocol/types.js";
 import { formatSessionLine, escMd, escCode } from "../frontends/telegram/stream.js";
 
 const ALLOWED_USER = 111;
@@ -58,10 +59,17 @@ function makeStubbedBot(
   const calls: ApiCall[] = [];
   bot.api.config.use(async (_prev, method, payload, signal) => {
     if (method === "getUpdates") {
-      // Park polling; reject on abort so bot.stop() (e.g. grammy's default
-      // error handler stopping the bot) fails fast instead of hanging.
+      // The poll loop passes the pollingAbortController signal — park it and
+      // reject on abort. bot.stop() additionally issues a signal-less
+      // getUpdates({limit: 1}) to save the offset — answer that immediately
+      // or stop() would hang forever.
+      if (!signal) return { ok: true, result: [] } as any;
       return new Promise((_resolve, reject) => {
-        signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        signal.addEventListener("abort", () => {
+          const err = new Error("aborted");
+          err.name = "AbortError";
+          reject(err);
+        });
       });
     }
     calls.push({ method, payload });
@@ -119,22 +127,27 @@ describe("Telegram bot — error handling keeps polling alive", () => {
     });
 
     const fe = new TelegramFrontend("42:TEST_TOKEN", [ALLOWED_USER], bot);
-    await fe.start(fakeContext());
+    try {
+      await fe.start(fakeContext());
 
-    // /help replies with MarkdownV2; make Telegram reject it. Drive the
-    // update through handleUpdates — the exact path grammy's polling loop
-    // uses, where the installed error handler runs. With grammy's DEFAULT
-    // handler this re-throws and long polling stops permanently.
-    fail = true;
-    // handleUpdates is TS-private but is the real polling entry point.
-    const drive = (u: unknown) => (bot as any).handleUpdates([u]) as Promise<void>;
-    await expect(drive(textUpdate(1, "/help"))).resolves.toBeUndefined();
+      // /help replies with MarkdownV2; make Telegram reject it. Drive the
+      // update through handleUpdates — the exact path grammy's polling loop
+      // uses, where the installed error handler runs. With grammy's DEFAULT
+      // handler this re-throws and long polling stops permanently.
+      fail = true;
+      // handleUpdates is TS-private but is the real polling entry point.
+      const drive = (u: unknown) => (bot as any).handleUpdates([u]) as Promise<void>;
+      await expect(drive(textUpdate(1, "/help"))).resolves.toBeUndefined();
 
-    // The bot still processes the next update.
-    const before = calls.filter((c) => c.method === "sendMessage").length;
-    await drive(textUpdate(2, "/help"));
-    const after = calls.filter((c) => c.method === "sendMessage").length;
-    expect(after).toBe(before + 1);
+      // The bot still processes the next update.
+      const before = calls.filter((c) => c.method === "sendMessage").length;
+      await drive(textUpdate(2, "/help"));
+      const after = calls.filter((c) => c.method === "sendMessage").length;
+      expect(after).toBe(before + 1);
+    } finally {
+      // Unpark the getUpdates promise so no polling handle leaks.
+      await bot.stop().catch(() => {});
+    }
   });
 });
 
@@ -157,13 +170,18 @@ describe("Telegram bot — 429 auto-retry", () => {
     });
 
     const fe = new TelegramFrontend("42:TEST_TOKEN", [ALLOWED_USER], bot);
-    await fe.start(fakeContext());
+    try {
+      await fe.start(fakeContext());
 
-    await bot.handleUpdate(textUpdate(1, "/help"));
+      await bot.handleUpdate(textUpdate(1, "/help"));
 
-    // First attempt hit 429, auto-retry re-sent it, second attempt succeeded.
-    expect(sendAttempts).toBe(2);
-    expect(calls.filter((c) => c.method === "sendMessage")).toHaveLength(2);
+      // First attempt hit 429, auto-retry re-sent it, second attempt succeeded.
+      expect(sendAttempts).toBe(2);
+      expect(calls.filter((c) => c.method === "sendMessage")).toHaveLength(2);
+    } finally {
+      // Unpark the getUpdates promise so no polling handle leaks.
+      await bot.stop().catch(() => {});
+    }
   });
 });
 
@@ -199,5 +217,47 @@ describe("/ls line rendering — MarkdownV2 escaping of runtime values", () => {
   it("escMd escapes every MarkdownV2 special; escCode escapes only ` and \\", () => {
     expect(escMd("a_b*c[d]e")).toBe("a\\_b\\*c\\[d\\]e");
     expect(escCode("a_b`c\\d")).toBe("a_b\\`c\\\\d");
+  });
+});
+
+// ── Stale-session broadcast gating (#forwardToChat) ───────────────────────────
+
+describe("isStaleBroadcast — drop daemon messages from unattached sessions", () => {
+  const sessionMsg = (sessionId: string): DaemonMessage =>
+    ({
+      type: "session.message",
+      sessionId,
+      messageId: "m1",
+      role: "assistant",
+      content: "hello",
+      identity: { sub: "agent:x", type: "agent" },
+      timestamp: new Date().toISOString(),
+    }) as DaemonMessage;
+
+  it("keeps messages for the currently attached session", () => {
+    expect(isStaleBroadcast(sessionMsg("sess-A"), "sess-A")).toBe(false);
+  });
+
+  it("drops in-flight messages from the old session after a switch", () => {
+    expect(isStaleBroadcast(sessionMsg("sess-OLD"), "sess-NEW")).toBe(true);
+  });
+
+  it("drops session-scoped messages after detach (attachedSessionId null)", () => {
+    expect(isStaleBroadcast(sessionMsg("sess-A"), null)).toBe(true);
+  });
+
+  it("drops a stale status_change (would otherwise flush + print Done in the new session)", () => {
+    const statusMsg = {
+      type: "session.status_change",
+      sessionId: "sess-OLD",
+      status: "idle",
+    } as unknown as DaemonMessage;
+    expect(isStaleBroadcast(statusMsg, "sess-NEW")).toBe(true);
+  });
+
+  it("never treats messages without a sessionId as stale", () => {
+    const pong = { type: "response.ok", requestId: "r1" } as unknown as DaemonMessage;
+    expect(isStaleBroadcast(pong, "sess-A")).toBe(false);
+    expect(isStaleBroadcast(pong, null)).toBe(false);
   });
 });

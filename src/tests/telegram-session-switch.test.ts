@@ -65,6 +65,12 @@ interface SwitchDeps {
    * content to the chat, then reset the buffer map.
    */
   flushAndClear: (state: UserState) => void;
+  /**
+   * Mirror of `await state.relay.settle()`: the handlers wait for flushed
+   * output to land before the user-visible confirmation, so "Attached to …"
+   * / "Detached from …" can't overtake buffered content.
+   */
+  settle: () => void;
 }
 
 /**
@@ -84,6 +90,7 @@ function performSwitch(
     state.attachedSessionId = null;
     state.attachedSessionName = null;
     deps.flushAndClear(state);
+    deps.settle();
     if (state.stopMessageId !== null) {
       deps.deleteMessage(chatId, state.stopMessageId);
       state.stopMessageId = null;
@@ -111,6 +118,7 @@ function performDetach(
   state.attachedSessionId = null;
   state.attachedSessionName = null;
   deps.flushAndClear(state);
+  deps.settle();
   if (state.stopMessageId !== null) {
     deps.deleteMessage(chatId, state.stopMessageId);
     state.stopMessageId = null;
@@ -122,22 +130,36 @@ function makeDeps(): SwitchDeps & {
   disconnected: string[];
   deleted: [number, number][];
   flushed: string[];
+  /** Ordered log of side-effect calls, for sequencing assertions. */
+  ops: string[];
 } {
   const disconnected: string[] = [];
   const deleted: [number, number][] = [];
   const flushed: string[] = [];
+  const ops: string[] = [];
   return {
-    disconnectClient: (id) => disconnected.push(id),
-    deleteMessage: (chatId, msgId) => deleted.push([chatId, msgId]),
+    disconnectClient: (id) => {
+      ops.push("disconnect");
+      disconnected.push(id);
+    },
+    deleteMessage: (chatId, msgId) => {
+      ops.push("deleteStopMessage");
+      deleted.push([chatId, msgId]);
+    },
     flushAndClear: (state) => {
+      ops.push("flushAndClear");
       for (const buf of state.streaming.values()) {
         if (buf.content) flushed.push(buf.content);
       }
       state.streaming.clear();
     },
+    settle: () => {
+      ops.push("settle");
+    },
     disconnected,
     deleted,
     flushed,
+    ops,
   };
 }
 
@@ -346,5 +368,36 @@ describe("streaming buffer isolation", () => {
     performSwitch(state, "sess-A", "session-A", CHAT_ID, deps);
 
     expect(state.streaming.size).toBe(2);
+  });
+});
+
+// ── Tests: flush → settle → confirm ordering ──────────────────────────────────
+
+describe("switch/detach settle ordering — confirmation cannot overtake flushed output", () => {
+  it("session switch settles the relay right after flushing, before any later side effect", () => {
+    const state = makeUserState();
+    const deps = makeDeps();
+
+    performSwitch(state, "sess-A", "session-A", CHAT_ID, deps);
+    state.streaming.set("m1", { role: "assistant", content: "buffered" });
+    state.stopMessageId = 777;
+    performSwitch(state, "sess-B", "session-B", CHAT_ID, deps);
+
+    expect(deps.ops).toEqual([
+      "disconnect",
+      "flushAndClear",
+      "settle",
+      "deleteStopMessage",
+    ]);
+  });
+
+  it("detach settles the relay right after flushing", () => {
+    const state = makeUserState();
+    state.attachedSessionId = "sess-A";
+    const deps = makeDeps();
+
+    performDetach(state, CHAT_ID, deps);
+
+    expect(deps.ops).toEqual(["disconnect", "flushAndClear", "settle"]);
   });
 });

@@ -519,3 +519,26 @@ describe("StreamRelay — flushAndClear (detach / session switch)", () => {
     expect(countOccurrences(texts(), "old session text")).toBe(1);
   });
 });
+
+// ── settle() semantics (switch/detach confirmations wait on this) ─────────────
+
+describe("StreamRelay — settle() waits for queued flush output", () => {
+  it("resolves only after slow flushed sends have landed, so a confirmation sent after settle() cannot overtake them", async () => {
+    // Every send is slow — if settle() resolved early, `sent` would still be
+    // empty when the caller proceeds to send its confirmation.
+    const fake = makeApi({ delayMs: () => 20 });
+    const relay = new StreamRelay(fake.api);
+
+    relay.handleMessage(CHAT, full("m1", "assistant", ""));
+    relay.handleDelta(CHAT, delta("m1", "buffered tail"));
+    relay.flushAndClear(CHAT);
+    await relay.settle();
+
+    // Both the flushed tail and the interruption marker are already
+    // delivered by the time settle() resolves — the /attach//detach
+    // confirmation (sent outside the relay) comes strictly after.
+    expect(fake.texts()[0]).toBe("buffered tail");
+    expect(fake.texts()[1]).toContain("✂️");
+    expect(fake.texts()).toHaveLength(2);
+  });
+});
