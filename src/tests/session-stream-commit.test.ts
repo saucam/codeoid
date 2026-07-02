@@ -77,6 +77,7 @@ class StubEmbedder implements Embedder {
   readonly modelName = "stub-embed";
   readonly dimensions = 8;
   async init(): Promise<void> {}
+  async close(): Promise<void> {}
   async embed(texts: string[]): Promise<Float32Array[]> {
     return texts.map((t) => {
       const v = new Float32Array(this.dimensions);
