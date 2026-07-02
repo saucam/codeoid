@@ -33,7 +33,12 @@ import { ScrollbackBuffer } from "../daemon/scrollback.js";
 import { Session, type AttachedClient } from "../daemon/session.js";
 import { MockSessionProvider } from "../daemon/providers/mock/session-provider.js";
 import { mockResult } from "../daemon/providers/mock/index.js";
-import { EpisodeChunker } from "../daemon/memory/index.js";
+import {
+  EpisodeChunker,
+  MemoryEngine,
+  SqliteEpisodeStore,
+} from "../daemon/memory/index.js";
+import type { Embedder } from "../daemon/memory/embedder.js";
 import type { Episode } from "../daemon/memory/types.js";
 import type { DaemonMessage, AuthContext, SessionMessage } from "../protocol/types.js";
 import { SYSTEM_IDENTITY } from "../protocol/types.js";
@@ -67,7 +72,31 @@ afterEach(async () => {
   try { rmSync(tmp, { recursive: true, force: true }); } catch {}
 });
 
-function makeSession(provider: MockSessionProvider, name = "stream-commit-test"): Session {
+/** Deterministic embedder so MemoryEngine runs offline (same as memory.test.ts). */
+class StubEmbedder implements Embedder {
+  readonly modelName = "stub-embed";
+  readonly dimensions = 8;
+  async init(): Promise<void> {}
+  async embed(texts: string[]): Promise<Float32Array[]> {
+    return texts.map((t) => {
+      const v = new Float32Array(this.dimensions);
+      for (let i = 0; i < t.length; i++) {
+        v[i % this.dimensions]! += t.charCodeAt(i) / 1000;
+      }
+      let norm = 0;
+      for (let i = 0; i < v.length; i++) norm += v[i]! * v[i]!;
+      norm = Math.sqrt(norm) || 1;
+      for (let i = 0; i < v.length; i++) v[i] = v[i]! / norm;
+      return v;
+    });
+  }
+}
+
+function makeSession(
+  provider: MockSessionProvider,
+  name = "stream-commit-test",
+  memory?: MemoryEngine,
+): Session {
   const id = randomUUID();
   store.createSession({
     id,
@@ -88,6 +117,7 @@ function makeSession(provider: MockSessionProvider, name = "stream-commit-test")
     transcriptStore,
     existingId: id,
     _testProvider: provider,
+    memory,
   });
 }
 
@@ -317,6 +347,15 @@ describe("C5 – ScrollbackBuffer upsert + byte accounting", () => {
     });
     expect(buf.bytes).toBe(JSON.stringify(m).length);
   });
+
+  it("accounts UTF-8 bytes, not UTF-16 code units", () => {
+    const buf = new ScrollbackBuffer();
+    const m = msg("m1", "नमस्ते 🙏 — multi-byte content");
+    buf.push(m);
+    const json = JSON.stringify(m);
+    expect(buf.bytes).toBe(Buffer.byteLength(json, "utf8"));
+    expect(buf.bytes).toBeGreaterThan(json.length); // .length would undercount
+  });
 });
 
 // ── C6: chunker episode pairing ───────────────────────────────────────────────
@@ -349,6 +388,36 @@ describe("C6 – one commit-time assistant message → one combined episode", ()
     expect(episodes[0]!.kind).toBe("user_turn");
     expect(episodes[0]!.content).toContain("write me a haiku");
     expect(episodes[0]!.content).toContain("an old silent pond");
+  });
+
+  it("live session feeds the chunker exactly once per streamed turn", async () => {
+    // End-to-end version of the pairing test: a real Session with a real
+    // MemoryEngine. A stray chunker feed at stream start (the pre-fix
+    // behavior) would ingest a prompt-only user_turn plus a promptless
+    // assistant_turn — this asserts exactly one combined episode lands.
+    const memStore = new SqliteEpisodeStore(join(tmp, "memory.db"));
+    const engine = new MemoryEngine({ store: memStore, embedder: new StubEmbedder() });
+    await engine.init();
+
+    const provider = new MockSessionProvider("claude", [
+      [
+        { type: "text_delta", content: "an old " },
+        { type: "text_delta", content: "silent pond" },
+        { type: "text_done", content: "an old silent pond" },
+        turnDone,
+      ],
+    ]);
+    const session = makeSession(provider, "chunker-e2e", engine);
+
+    await session.send("write me a haiku", TEST_AUTH);
+    await waitForIdle(session);
+
+    const episodes = memStore.listEpisodesForSession(session.id);
+    expect(episodes).toHaveLength(1);
+    expect(episodes[0]!.kind).toBe("user_turn");
+    expect(episodes[0]!.content).toContain("write me a haiku");
+    expect(episodes[0]!.content).toContain("an old silent pond");
+    memStore.close();
   });
 
   it("documents the pre-fix fragmentation: an empty stream-start assistant splits the turn", () => {

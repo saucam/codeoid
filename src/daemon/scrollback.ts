@@ -42,6 +42,14 @@ function messageIdOf(msg: DaemonMessage): string | undefined {
     : undefined;
 }
 
+/**
+ * Serialized size in real UTF-8 bytes. `String.length` counts UTF-16 code
+ * units, undercounting non-ASCII payloads against the byte cap.
+ */
+function serializedSizeOf(msg: DaemonMessage): number {
+  return Buffer.byteLength(JSON.stringify(msg), "utf8");
+}
+
 export class ScrollbackBuffer {
   #entries: Entry[] = [];
   #byId = new Map<string, Entry>();
@@ -66,7 +74,7 @@ export class ScrollbackBuffer {
     if (messageId !== undefined) {
       const existing = this.#byId.get(messageId);
       if (existing) {
-        const size = JSON.stringify(msg).length;
+        const size = serializedSizeOf(msg);
         this.#bytes += size - existing.size;
         existing.msg = msg;
         existing.size = size;
@@ -74,7 +82,7 @@ export class ScrollbackBuffer {
         return;
       }
     }
-    const entry: Entry = { msg, size: JSON.stringify(msg).length };
+    const entry: Entry = { msg, size: serializedSizeOf(msg) };
     this.#entries.push(entry);
     if (messageId !== undefined) this.#byId.set(messageId, entry);
     this.#bytes += entry.size;
@@ -124,7 +132,7 @@ export class ScrollbackBuffer {
     const entry = this.#byId.get(messageId);
     if (!entry) return;
     updater(entry.msg);
-    const after = JSON.stringify(entry.msg).length;
+    const after = serializedSizeOf(entry.msg);
     this.#bytes += after - entry.size;
     entry.size = after;
     this.#evict();
