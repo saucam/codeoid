@@ -20,7 +20,7 @@ import {
   workspaceIdFromPath,
 } from "../daemon/memory/index.js";
 import type { Embedder } from "../daemon/memory/embedder.js";
-import type { SessionMessage } from "../protocol/types.js";
+import type { SessionMessage, TurnUsage } from "../protocol/types.js";
 
 class StubEmbedder implements Embedder {
   readonly modelName = "stub-embed";
@@ -299,6 +299,177 @@ describe("EpisodeChunker", () => {
     // Second episode is a user_turn — the pending user prompt + final assistant reply
     // get merged into one episode keyed by user intent.
     expect(emitted[1]!.kind).toBe("user_turn");
+  });
+});
+
+// ── Usage analytics (dailyUsage / lifetimeTotals) ───────────────────────
+
+function makeTurnInput(
+  sessionId: string,
+  turnNumber: number,
+  overrides: Partial<TurnUsage> = {},
+): Parameters<SqliteEpisodeStore["recordTurnUsage"]>[0] {
+  const base: TurnUsage = {
+    turnNumber,
+    createdAt: Date.now(),
+    inputTokens: 100,
+    outputTokens: 50,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    totalCostUsd: 0.001,
+    durationMs: 500,
+    totalInputTokens: 100,
+    billableInputTokens: 100,
+    cacheHitRate: 0,
+    ...overrides,
+  };
+  return { workspaceId: "ws_analytics", sessionId, turn: base };
+}
+
+describe("SqliteEpisodeStore — dailyUsage", () => {
+  it("returns empty array when no turns exist", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    expect(store.dailyUsage()).toEqual([]);
+    store.close();
+  });
+
+  it("aggregates turns from the same day into one bucket", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    store.recordTurnUsage(makeTurnInput("s-a", 1, { totalCostUsd: 0.01, inputTokens: 200, outputTokens: 100 }));
+    store.recordTurnUsage(makeTurnInput("s-a", 2, { totalCostUsd: 0.02, inputTokens: 300, outputTokens: 150 }));
+    store.recordTurnUsage(makeTurnInput("s-b", 1, { totalCostUsd: 0.005, inputTokens: 50, outputTokens: 25 }));
+
+    const buckets = store.dailyUsage();
+    expect(buckets.length).toBe(1);
+    const b = buckets[0]!;
+    expect(b.numTurns).toBe(3);
+    expect(b.numSessions).toBe(2);
+    expect(b.costUsd).toBeCloseTo(0.035, 6);
+    expect(b.inputTokens).toBe(550);
+    expect(b.outputTokens).toBe(275);
+    expect(b.day).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    store.close();
+  });
+
+  it("filters to only the specified sessionIds", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    store.recordTurnUsage(makeTurnInput("s-a", 1, { totalCostUsd: 0.01, inputTokens: 100, outputTokens: 50 }));
+    store.recordTurnUsage(makeTurnInput("s-b", 1, { totalCostUsd: 0.02, inputTokens: 200, outputTokens: 100 }));
+
+    const buckets = store.dailyUsage(30, ["s-a"]);
+    expect(buckets.length).toBe(1);
+    expect(buckets[0]!.numTurns).toBe(1);
+    expect(buckets[0]!.numSessions).toBe(1);
+    expect(buckets[0]!.costUsd).toBeCloseTo(0.01, 6);
+    store.close();
+  });
+
+  it("filters across multiple sessionIds", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    store.recordTurnUsage(makeTurnInput("s-a", 1, { totalCostUsd: 0.01 }));
+    store.recordTurnUsage(makeTurnInput("s-b", 1, { totalCostUsd: 0.02 }));
+    store.recordTurnUsage(makeTurnInput("s-c", 1, { totalCostUsd: 0.04 }));
+
+    const buckets = store.dailyUsage(30, ["s-a", "s-b"]);
+    expect(buckets[0]!.numTurns).toBe(2);
+    expect(buckets[0]!.numSessions).toBe(2);
+    expect(buckets[0]!.costUsd).toBeCloseTo(0.03, 6);
+    store.close();
+  });
+
+  it("empty sessionIds array behaves identically to undefined (no filter)", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    store.recordTurnUsage(makeTurnInput("s-a", 1));
+    store.recordTurnUsage(makeTurnInput("s-b", 1));
+
+    const withEmpty = store.dailyUsage(30, []);
+    const withUndefined = store.dailyUsage(30, undefined);
+    expect(withEmpty[0]?.numTurns).toBe(withUndefined[0]?.numTurns);
+    expect(withEmpty[0]?.numSessions).toBe(2);
+    store.close();
+  });
+
+  it("returns empty when sessionIds filter matches nothing", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    store.recordTurnUsage(makeTurnInput("s-a", 1));
+    const buckets = store.dailyUsage(30, ["nonexistent"]);
+    expect(buckets).toEqual([]);
+    store.close();
+  });
+});
+
+describe("SqliteEpisodeStore — lifetimeTotals", () => {
+  it("returns zeros when no turns exist", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    const totals = store.lifetimeTotals();
+    expect(totals.costUsd).toBe(0);
+    expect(totals.inputTokens).toBe(0);
+    expect(totals.outputTokens).toBe(0);
+    expect(totals.numTurns).toBe(0);
+    expect(totals.numSessions).toBe(0);
+    store.close();
+  });
+
+  it("sums all turns across all sessions", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    store.recordTurnUsage(makeTurnInput("s-a", 1, { totalCostUsd: 0.01, inputTokens: 100, outputTokens: 50 }));
+    store.recordTurnUsage(makeTurnInput("s-a", 2, { totalCostUsd: 0.02, inputTokens: 200, outputTokens: 100 }));
+    store.recordTurnUsage(makeTurnInput("s-b", 1, { totalCostUsd: 0.005, inputTokens: 50, outputTokens: 25 }));
+
+    const totals = store.lifetimeTotals();
+    expect(totals.numTurns).toBe(3);
+    expect(totals.numSessions).toBe(2);
+    expect(totals.costUsd).toBeCloseTo(0.035, 6);
+    expect(totals.inputTokens).toBe(350);
+    expect(totals.outputTokens).toBe(175);
+    store.close();
+  });
+
+  it("filters to the specified sessionIds", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    store.recordTurnUsage(makeTurnInput("s-a", 1, { totalCostUsd: 0.01, inputTokens: 100, outputTokens: 50 }));
+    store.recordTurnUsage(makeTurnInput("s-b", 1, { totalCostUsd: 0.02, inputTokens: 200, outputTokens: 100 }));
+
+    const totals = store.lifetimeTotals(["s-a"]);
+    expect(totals.numTurns).toBe(1);
+    expect(totals.numSessions).toBe(1);
+    expect(totals.costUsd).toBeCloseTo(0.01, 6);
+    expect(totals.inputTokens).toBe(100);
+    store.close();
+  });
+
+  it("filters across multiple sessionIds", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    store.recordTurnUsage(makeTurnInput("s-a", 1, { totalCostUsd: 0.01 }));
+    store.recordTurnUsage(makeTurnInput("s-b", 1, { totalCostUsd: 0.02 }));
+    store.recordTurnUsage(makeTurnInput("s-c", 1, { totalCostUsd: 0.04 }));
+
+    const totals = store.lifetimeTotals(["s-a", "s-b"]);
+    expect(totals.numTurns).toBe(2);
+    expect(totals.numSessions).toBe(2);
+    expect(totals.costUsd).toBeCloseTo(0.03, 6);
+    store.close();
+  });
+
+  it("empty sessionIds array behaves identically to undefined (no filter)", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    store.recordTurnUsage(makeTurnInput("s-a", 1));
+    store.recordTurnUsage(makeTurnInput("s-b", 1));
+
+    const withEmpty = store.lifetimeTotals([]);
+    const withUndefined = store.lifetimeTotals(undefined);
+    expect(withEmpty.numTurns).toBe(withUndefined.numTurns);
+    expect(withEmpty.numSessions).toBe(2);
+    store.close();
+  });
+
+  it("returns zeros when sessionIds filter matches nothing", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    store.recordTurnUsage(makeTurnInput("s-a", 1));
+    const totals = store.lifetimeTotals(["nonexistent"]);
+    expect(totals.numTurns).toBe(0);
+    expect(totals.numSessions).toBe(0);
+    store.close();
   });
 });
 
