@@ -75,4 +75,18 @@ describe("findPendingApproval", () => {
     expect(findPendingApproval(arr, "working")).toBeNull();
     expect(findPendingApproval([], "waiting_approval")).toBeNull();
   });
+
+  it("surfaces the second parallel approval after the first resolves mid-turn", () => {
+    // The motivating scenario for the active-status gate: two approvals
+    // pend in the same turn; the daemon flips status to tool_running when
+    // the first is approved while the second still waits.
+    const arr = [msg("u1", "user"), waiting("m1", "ap-1"), waiting("m2", "ap-2")];
+    expect(findPendingApproval(arr, "waiting_approval")?.messageId).toBe("m1");
+    // First approval resolved in place; status now tool_running.
+    arr[1] = msg("m1", "tool_call", {
+      name: "Bash",
+      state: { phase: "executing" },
+    });
+    expect(findPendingApproval(arr, "tool_running")?.messageId).toBe("m2");
+  });
 });

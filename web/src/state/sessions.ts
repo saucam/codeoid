@@ -73,16 +73,21 @@ export function ingestSessionList(items: readonly SessionInfo[]): void {
             s.byId[it.id] = it;
             continue;
           }
-          // Update changed fields in place.
+          // Update changed fields in place. Skip prototype-polluting keys:
+          // the payload is network-sourced and JSON.parse produces
+          // "__proto__" as a plain own property — assigning it through a
+          // computed key would rewrite the object's prototype.
           const target = existing as unknown as Record<string, unknown>;
           const source = it as unknown as Record<string, unknown>;
           for (const k of Object.keys(source)) {
+            if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
             if (target[k] !== source[k]) target[k] = source[k];
           }
           // Drop fields the daemon no longer sends (e.g. an optional
-          // `model` that was unset).
+          // `model` that was unset). Object.hasOwn (not `in`) so inherited
+          // keys like "constructor" can't mask a legitimate delete.
           for (const k of Object.keys(target)) {
-            if (!(k in source)) delete target[k];
+            if (!Object.hasOwn(source, k)) delete target[k];
           }
         }
         // Delete sessions missing from the authoritative list.

@@ -137,6 +137,19 @@ describe("sessions store", () => {
     expect(getSession("a")?.model).toBeUndefined();
   });
 
+  it("ingestSessionList ignores prototype-polluting keys in network payloads", () => {
+    ingestSessionList([s("a", "2026-05-01T08:00:00Z")]);
+    // JSON.parse yields "__proto__" as a plain own property (unlike an
+    // object literal); the merge loop must not assign it through.
+    const evil = JSON.parse(
+      '{"id":"a","name":"renamed","workdir":"/tmp","status":"idle","createdBy":"you","createdAt":"2026-05-01T08:00:00Z","attachedClients":0,"__proto__":{"polluted":true}}',
+    ) as SessionInfo;
+    ingestSessionList([evil]);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect(Object.getPrototypeOf(getSession("a")!)).toBe(Object.prototype);
+    expect(getSession("a")?.name).toBe("renamed"); // legitimate fields still merge
+  });
+
   it("focusNext / focusPrev wrap around the sorted list", () => {
     ingestSessionList([
       s("a", "2026-05-01T08:00:00Z"),

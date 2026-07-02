@@ -25,8 +25,8 @@
 import { Component, For, Show, createMemo, createSignal } from "solid-js";
 
 import { newRequestId, send } from "../../state/connection";
-import { focusedSessionMessages } from "../../state/messages";
-import { focusedSession } from "../../state/sessions";
+import { epochOf, focusedSessionMessages } from "../../state/messages";
+import { focusedSession, focusedSessionId } from "../../state/sessions";
 import { findPendingApproval } from "../../lib/approvals";
 import type { SessionMessage } from "../../protocol/types";
 
@@ -75,9 +75,14 @@ const ApprovalBar: Component = () => {
   // Status-gated, turn-bounded scan — see lib/approvals.ts. Tracking the
   // session status here also means the memo re-fires when a racing
   // status_change lands after the tool delta, so the bar still appears.
-  const pending = createMemo<SessionMessage | null>(() =>
-    findPendingApproval(focusedSessionMessages(), focusedSession()?.status),
-  );
+  // The per-session epoch is tracked too: tool-state deltas mutate message
+  // fields in place (array identity stays stable), so without it a second
+  // parallel approval flipping to waiting_confirmation mid-turn — with no
+  // accompanying status change — would not recompute the memo.
+  const pending = createMemo<SessionMessage | null>(() => {
+    epochOf(focusedSessionId());
+    return findPendingApproval(focusedSessionMessages(), focusedSession()?.status);
+  });
 
   // Resolve the pending state once and gate every callback on its
   // *captured* approvalId. Without this, a stray click that races a
