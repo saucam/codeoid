@@ -175,9 +175,10 @@ const Transcript: Component = () => {
       return Math.ceil(raw);
     },
     getItemKey: (index) => {
+      const sid = focusedSessionId();
       const m = messages()[index];
       if (!m) return index;
-      return m.messageId;
+      return `${sid ?? ""}:${m.messageId}`;
     },
   });
 

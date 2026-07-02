@@ -215,6 +215,22 @@ export function hasMessage(sessionId: string, messageId: string): boolean {
   return idsBySession.get(sessionId)?.has(messageId) ?? false;
 }
 
+/**
+ * Remove all message state for a session. Call when a session is destroyed
+ * so its entries don't accumulate in memory indefinitely.
+ */
+export function clearSessionMessages(sessionId: string): void {
+  idsBySession.delete(sessionId);
+  batch(() => {
+    setState(
+      produce<MessagesState>((s) => {
+        delete s.bySession[sessionId];
+        delete s.epochBySession[sessionId];
+      }),
+    );
+  });
+}
+
 // Test hook — reset the entire store between tests.
 export function _resetMessagesForTest(): void {
   setState({ bySession: {}, versions: {}, epochBySession: {} });
