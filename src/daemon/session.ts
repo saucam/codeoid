@@ -931,7 +931,14 @@ export class Session {
     await this.#transcriptStore.delete(this.id);
   }
 
-  restoreScrollback(messages: DaemonMessage[]): void {
+  restoreScrollback(messages: DaemonMessage[], nextSeq?: number): void {
+    // Seed the transcript sequence counter past the loaded log's tail.
+    // Without this, post-restart appends restart at seq 0 — harmless for
+    // loadTranscript (which orders by file position) but it makes seq
+    // unusable as a monotonic replay cursor.
+    if (nextSeq !== undefined && nextSeq > this.#seq) {
+      this.#seq = nextSeq;
+    }
     for (const msg of messages) {
       if (msg.type !== "session.message") continue;
       // Reconcile tool calls frozen in a non-terminal phase (streaming /
@@ -1797,7 +1804,12 @@ export class Session {
       case "text_delta": {
         if (!this.#activeAssistantMsg) {
           this.#activeAssistantMsg = this.#makeMessage("assistant", "", this.#agentIdentity, []);
-          this.#persistAndBuffer(this.#activeAssistantMsg);
+          // Scrollback only — no transcript row, no chunker event. The buffer
+          // holds the message by reference so clients attaching mid-stream see
+          // it grow; the durable row and the chunker event are emitted once,
+          // with final content, by #commitStreamed. Feeding the chunker an
+          // empty assistant message here would emit a promptless half-episode.
+          this.#scrollback.push(this.#activeAssistantMsg);
           this.#broadcastRaw(this.#activeAssistantMsg);
           if (this.#status === "tool_running") this.#setStatus("thinking");
         }
@@ -1823,7 +1835,7 @@ export class Session {
         if (this.#activeAssistantMsg) {
           this.#activeAssistantMsg.content = event.content;
           this.#activeAssistantMsg.parts = [{ kind: "text", text: event.content, markdown: true }];
-          this.#persistAndBuffer(this.#activeAssistantMsg);
+          this.#commitStreamed(this.#activeAssistantMsg);
           this.#broadcastRaw(this.#activeAssistantMsg);
           this.#activeAssistantMsg = null;
         } else if (event.content) {
@@ -1842,7 +1854,9 @@ export class Session {
           this.#finalizeActiveThinking();
           this.#activeThinkingMsg = this.#makeMessage("thinking", "", this.#agentIdentity, []);
           this.#activeThinkingIndex = event.blockIndex ?? null;
-          this.#persistAndBuffer(this.#activeThinkingMsg);
+          // Scrollback only — see the text_delta note; committed by
+          // #finalizeActiveThinking → #commitStreamed.
+          this.#scrollback.push(this.#activeThinkingMsg);
           this.#broadcastRaw(this.#activeThinkingMsg);
         }
         if (event.content) {
@@ -2093,7 +2107,7 @@ export class Session {
     if (!m.content || m.content.length === 0) {
       m.content = "(no output)";
     }
-    this.#persistAndBuffer(m);
+    this.#commitStreamed(m);
     this.#broadcastRaw(m);
   }
 
@@ -2119,7 +2133,8 @@ export class Session {
 
     const msg = this.#makeMessage("assistant", "", this.#agentIdentity, []);
     this.#activeAssistantMsg = msg;
-    this.#persistAndBuffer(msg);
+    // Scrollback only — committed with final content below.
+    this.#scrollback.push(msg);
     this.#broadcastRaw(msg);
 
     for (let pos = 0; pos < content.length; pos += charsPerStep) {
@@ -2138,24 +2153,9 @@ export class Session {
     }
 
     if (this.#activeAssistantMsg !== msg) return; // interrupted on last frame
-    const finalParts: ContentPart[] = [{ kind: "text", text: content, markdown: true }];
-    // Reset to the placeholder size so updateMessage measures the correct
-    // before/after byte delta — the buffer holds msg by reference, so
-    // mutations here are visible to the accounting logic inside updateMessage.
-    msg.content = "";
-    msg.parts = [];
-    // Do NOT call #persistAndBuffer again — it would push a second scrollback entry
-    // for the same messageId, causing duplicate messages on scrollback.replay.
-    // The updater sets final content/parts inside the buffer's size-accounting pass.
-    this.#scrollback.updateMessage(msg.messageId, (entry) => {
-      const sm = entry as SessionMessage;
-      sm.content = content;
-      sm.parts = finalParts;
-    });
-    this.#transcriptStore.append(this.id, msg, this.#seq++).catch((e) => {
-      console.error(`[codeoid/session ${this.id}] transcript append failed: ${e instanceof Error ? e.message : String(e)}`);
-    });
-    this.#chunker?.onMessage(msg);
+    msg.content = content;
+    msg.parts = [{ kind: "text", text: content, markdown: true }];
+    this.#commitStreamed(msg);
     this.#broadcastRaw(msg);
     this.#activeAssistantMsg = null;
   }
@@ -2175,7 +2175,7 @@ export class Session {
     if (!m.content || m.content.length === 0) {
       m.content = "(reasoning elided)";
     }
-    this.#persistAndBuffer(m);
+    this.#commitStreamed(m);
     this.#broadcastRaw(m);
   }
 
@@ -2258,6 +2258,28 @@ export class Session {
       metadata,
       timestamp: new Date().toISOString(),
     };
+  }
+
+  /**
+   * Commit the final content of a streamed message. The message was pushed
+   * into scrollback (by reference) at stream start and grew in place via
+   * deltas; ScrollbackBuffer.push upserts by messageId, so this re-accounts
+   * the existing entry — or re-adds it if it was evicted mid-stream — without
+   * ever creating a duplicate. A second entry per messageId corrupts
+   * scrollback.replay: clients render the message twice and virtualizers
+   * keyed on messageId collide (the #50 bug class). The durable transcript
+   * row and the memory-chunker event are emitted here exactly once, with
+   * final content, so plain turns produce one user+assistant episode instead
+   * of two half-episodes.
+   */
+  #commitStreamed(msg: SessionMessage): void {
+    this.#scrollback.push(msg);
+    this.#transcriptStore.append(this.id, msg, this.#seq++).catch((e) => {
+      console.error(
+        `[codeoid/session ${this.id}] transcript append failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    });
+    this.#chunker?.onMessage(msg);
   }
 
   /** Persist to transcript + scrollback buffer + memory chunker */
