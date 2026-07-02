@@ -1,0 +1,218 @@
+/**
+ * Auth library tests — resolveToken precedence, OAuth token fallback,
+ * API-key exchange, and provider discovery.
+ *
+ * Auth paths covered:
+ *   A. API-key path: resolveToken exchanges zid_sk_… at ZeroID → JWT
+ *   B. OAuth path:   resolveToken falls back to codeoid.token from localStorage
+ *   C. Priority:     stored API key always beats stored OAuth token
+ *   D. fetchOAuthProvider: discovery endpoint → "google" | null
+ *   E. localStorage helpers: rememberApiKey, rememberedApiKey, forgetApiKey,
+ *      rememberedOAuthToken
+ */
+
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import {
+  resolveToken,
+  rememberApiKey,
+  rememberedApiKey,
+  forgetApiKey,
+  rememberedOAuthToken,
+  fetchOAuthProvider,
+  AuthError,
+} from "./auth";
+
+// ── localStorage mock (Node env has no browser storage) ──────────────────────
+
+const store = new Map<string, string>();
+const mockStorage = {
+  getItem: (k: string) => store.get(k) ?? null,
+  setItem: (k: string, v: string) => { store.set(k, v); },
+  removeItem: (k: string) => { store.delete(k); },
+  clear: () => store.clear(),
+  get length() { return store.size; },
+  key: (i: number) => [...store.keys()][i] ?? null,
+};
+Object.defineProperty(globalThis, "localStorage", {
+  value: mockStorage,
+  writable: true,
+  configurable: true,
+});
+
+// ── fetch mock ────────────────────────────────────────────────────────────────
+
+let savedFetch: typeof globalThis.fetch;
+
+function mockFetch(response: object, ok = true, status = 200): void {
+  (globalThis as { fetch: unknown }).fetch = async () => ({
+    ok,
+    status,
+    json: async () => response,
+    text: async () => JSON.stringify(response),
+  });
+}
+
+beforeEach(() => {
+  store.clear();
+  savedFetch = globalThis.fetch;
+});
+afterEach(() => {
+  (globalThis as { fetch: unknown }).fetch = savedFetch;
+});
+
+// ── A. API-key exchange path ──────────────────────────────────────────────────
+
+describe("resolveToken — API key exchange", () => {
+  it("exchanges a supplied zid_sk_ key for a JWT", async () => {
+    mockFetch({ access_token: "jwt-from-zeroid" });
+    const result = await resolveToken({ apiKey: "zid_sk_test123" });
+    expect(result.token).toBe("jwt-from-zeroid");
+    expect(result.exchanged).toBe(true);
+  });
+
+  it("exchanges a key stored in localStorage", async () => {
+    rememberApiKey("zid_sk_stored");
+    mockFetch({ access_token: "jwt-stored" });
+    const result = await resolveToken({});
+    expect(result.token).toBe("jwt-stored");
+    expect(result.exchanged).toBe(true);
+  });
+
+  it("throws AuthError(invalid) when key does not start with zid_sk_", async () => {
+    await expect(resolveToken({ apiKey: "bad_key_format" })).rejects.toMatchObject({
+      kind: "invalid",
+    });
+  });
+
+  it("throws AuthError(exchange_failed) when ZeroID returns non-ok", async () => {
+    mockFetch({ error: "invalid_client" }, false, 401);
+    await expect(resolveToken({ apiKey: "zid_sk_x" })).rejects.toMatchObject({
+      kind: "exchange_failed",
+    });
+  });
+
+  it("throws AuthError(exchange_failed) when ZeroID response lacks access_token", async () => {
+    mockFetch({ error_description: "missing token" });
+    await expect(resolveToken({ apiKey: "zid_sk_x" })).rejects.toMatchObject({
+      kind: "exchange_failed",
+    });
+  });
+});
+
+// ── B. OAuth token fallback path ──────────────────────────────────────────────
+
+describe("resolveToken — OAuth token fallback", () => {
+  it("returns a stored OAuth token when no API key is available", async () => {
+    store.set("codeoid.token", "oauth-rs256-token");
+    const result = await resolveToken({});
+    expect(result.token).toBe("oauth-rs256-token");
+    expect(result.exchanged).toBe(false);
+  });
+
+  it("returns a directly supplied token without touching localStorage or fetch", async () => {
+    store.set("codeoid.token", "should-not-be-used");
+    let fetchCalled = false;
+    (globalThis as { fetch: unknown }).fetch = async () => { fetchCalled = true; return {}; };
+    const result = await resolveToken({ token: "direct-token" });
+    expect(result.token).toBe("direct-token");
+    expect(result.exchanged).toBe(false);
+    expect(fetchCalled).toBe(false);
+  });
+
+  it("throws AuthError(missing) when nothing is available", async () => {
+    await expect(resolveToken({})).rejects.toMatchObject({ kind: "missing" });
+  });
+});
+
+// ── C. Priority: API key beats OAuth token ────────────────────────────────────
+
+describe("resolveToken — API key takes priority over OAuth token", () => {
+  it("uses stored API key even when an OAuth token is also in localStorage", async () => {
+    rememberApiKey("zid_sk_wins");
+    store.set("codeoid.token", "oauth-should-be-ignored");
+    mockFetch({ access_token: "jwt-from-key" });
+    const result = await resolveToken({});
+    expect(result.token).toBe("jwt-from-key");
+    expect(result.exchanged).toBe(true);
+  });
+
+  it("explicit apiKey overrides stored OAuth token", async () => {
+    store.set("codeoid.token", "oauth-should-be-ignored");
+    mockFetch({ access_token: "jwt-explicit" });
+    const result = await resolveToken({ apiKey: "zid_sk_explicit" });
+    expect(result.token).toBe("jwt-explicit");
+    expect(result.exchanged).toBe(true);
+  });
+});
+
+// ── D. fetchOAuthProvider ─────────────────────────────────────────────────────
+
+describe("fetchOAuthProvider", () => {
+  it("returns 'google' when the daemon reports provider=google", async () => {
+    mockFetch({ provider: "google" });
+    const result = await fetchOAuthProvider();
+    expect(result).toBe("google");
+  });
+
+  it("returns null when the daemon reports provider=null", async () => {
+    mockFetch({ provider: null });
+    const result = await fetchOAuthProvider();
+    expect(result).toBeNull();
+  });
+
+  it("returns null on a non-ok response (OAuth not configured → 404)", async () => {
+    mockFetch({}, false, 404);
+    const result = await fetchOAuthProvider();
+    expect(result).toBeNull();
+  });
+
+  it("returns null when fetch throws (network error)", async () => {
+    (globalThis as { fetch: unknown }).fetch = async () => { throw new Error("network"); };
+    const result = await fetchOAuthProvider();
+    expect(result).toBeNull();
+  });
+
+  it("returns null for unknown provider names", async () => {
+    mockFetch({ provider: "github" });
+    const result = await fetchOAuthProvider();
+    expect(result).toBeNull();
+  });
+});
+
+// ── E. localStorage helpers ───────────────────────────────────────────────────
+
+describe("localStorage helpers", () => {
+  it("rememberApiKey persists the key for rememberedApiKey", () => {
+    rememberApiKey("zid_sk_abc");
+    expect(rememberedApiKey()).toBe("zid_sk_abc");
+  });
+
+  it("rememberedOAuthToken reads the OAuth token from localStorage", () => {
+    store.set("codeoid.token", "rs256-token-xyz");
+    expect(rememberedOAuthToken()).toBe("rs256-token-xyz");
+  });
+
+  it("rememberedOAuthToken returns null when no OAuth token is stored", () => {
+    expect(rememberedOAuthToken()).toBeNull();
+  });
+
+  it("forgetApiKey clears both the API key and the OAuth token", () => {
+    rememberApiKey("zid_sk_toforget");
+    store.set("codeoid.token", "oauth-token");
+    forgetApiKey();
+    expect(rememberedApiKey()).toBeNull();
+    expect(rememberedOAuthToken()).toBeNull();
+  });
+});
+
+// ── F. AuthError shape ────────────────────────────────────────────────────────
+
+describe("AuthError", () => {
+  it("carries the kind discriminant and extends Error", () => {
+    const err = new AuthError("test", "missing");
+    expect(err).toBeInstanceOf(Error);
+    expect(err.kind).toBe("missing");
+    expect(err.name).toBe("AuthError");
+    expect(err.message).toBe("test");
+  });
+});
