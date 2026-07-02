@@ -377,15 +377,14 @@ describe("SqliteEpisodeStore — dailyUsage", () => {
     store.close();
   });
 
-  it("empty sessionIds array behaves identically to undefined (no filter)", () => {
+  it("empty sessionIds array is a STRICT filter — returns no buckets (zero-session identity must not see everyone's usage)", () => {
     const store = new SqliteEpisodeStore(dbPath);
     store.recordTurnUsage(makeTurnInput("s-a", 1));
     store.recordTurnUsage(makeTurnInput("s-b", 1));
 
-    const withEmpty = store.dailyUsage(30, []);
-    const withUndefined = store.dailyUsage(30, undefined);
-    expect(withEmpty[0]?.numTurns).toBe(withUndefined[0]?.numTurns);
-    expect(withEmpty[0]?.numSessions).toBe(2);
+    expect(store.dailyUsage(30, [])).toEqual([]);
+    // undefined stays unscoped (internal callers).
+    expect(store.dailyUsage(30, undefined)[0]?.numSessions).toBe(2);
     store.close();
   });
 
@@ -394,6 +393,30 @@ describe("SqliteEpisodeStore — dailyUsage", () => {
     store.recordTurnUsage(makeTurnInput("s-a", 1));
     const buckets = store.dailyUsage(30, ["nonexistent"]);
     expect(buckets).toEqual([]);
+    store.close();
+  });
+
+  it("scoping excludes other identities' sessions", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    store.recordTurnUsage(makeTurnInput("mine-1", 1, { totalCostUsd: 0.01 }));
+    store.recordTurnUsage(makeTurnInput("mine-2", 1, { totalCostUsd: 0.02 }));
+    store.recordTurnUsage(makeTurnInput("theirs-1", 1, { totalCostUsd: 5 }));
+
+    const buckets = store.dailyUsage(30, ["mine-1", "mine-2"]);
+    expect(buckets).toHaveLength(1);
+    expect(buckets[0]!.numSessions).toBe(2);
+    expect(buckets[0]!.costUsd).toBeCloseTo(0.03, 6);
+    store.close();
+  });
+
+  it("does not throw with more than 1000 session ids (old IN-list hit SQLite's variable limit)", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    store.recordTurnUsage(makeTurnInput("s-500", 1, { totalCostUsd: 0.01 }));
+    const ids = Array.from({ length: 2500 }, (_, i) => `s-${i}`);
+    const buckets = store.dailyUsage(30, ids);
+    expect(buckets).toHaveLength(1);
+    expect(buckets[0]!.numTurns).toBe(1);
+    expect(buckets[0]!.costUsd).toBeCloseTo(0.01, 6);
     store.close();
   });
 });
@@ -451,15 +474,19 @@ describe("SqliteEpisodeStore — lifetimeTotals", () => {
     store.close();
   });
 
-  it("empty sessionIds array behaves identically to undefined (no filter)", () => {
+  it("empty sessionIds array is a STRICT filter — returns zeros (zero-session identity must not see everyone's usage)", () => {
     const store = new SqliteEpisodeStore(dbPath);
     store.recordTurnUsage(makeTurnInput("s-a", 1));
     store.recordTurnUsage(makeTurnInput("s-b", 1));
 
     const withEmpty = store.lifetimeTotals([]);
-    const withUndefined = store.lifetimeTotals(undefined);
-    expect(withEmpty.numTurns).toBe(withUndefined.numTurns);
-    expect(withEmpty.numSessions).toBe(2);
+    expect(withEmpty.numTurns).toBe(0);
+    expect(withEmpty.numSessions).toBe(0);
+    expect(withEmpty.costUsd).toBe(0);
+    expect(withEmpty.inputTokens).toBe(0);
+    expect(withEmpty.outputTokens).toBe(0);
+    // undefined stays unscoped (internal callers).
+    expect(store.lifetimeTotals(undefined).numSessions).toBe(2);
     store.close();
   });
 
@@ -469,6 +496,28 @@ describe("SqliteEpisodeStore — lifetimeTotals", () => {
     const totals = store.lifetimeTotals(["nonexistent"]);
     expect(totals.numTurns).toBe(0);
     expect(totals.numSessions).toBe(0);
+    store.close();
+  });
+
+  it("scoping excludes other identities' sessions", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    store.recordTurnUsage(makeTurnInput("mine-1", 1, { totalCostUsd: 0.01, inputTokens: 100 }));
+    store.recordTurnUsage(makeTurnInput("theirs-1", 1, { totalCostUsd: 5, inputTokens: 9999 }));
+
+    const totals = store.lifetimeTotals(["mine-1"]);
+    expect(totals.numSessions).toBe(1);
+    expect(totals.costUsd).toBeCloseTo(0.01, 6);
+    expect(totals.inputTokens).toBe(100);
+    store.close();
+  });
+
+  it("does not throw with more than 1000 session ids (old IN-list hit SQLite's variable limit)", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    store.recordTurnUsage(makeTurnInput("s-1234", 1, { totalCostUsd: 0.02 }));
+    const ids = Array.from({ length: 2500 }, (_, i) => `s-${i}`);
+    const totals = store.lifetimeTotals(ids);
+    expect(totals.numTurns).toBe(1);
+    expect(totals.costUsd).toBeCloseTo(0.02, 6);
     store.close();
   });
 });

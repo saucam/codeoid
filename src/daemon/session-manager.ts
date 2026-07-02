@@ -1327,6 +1327,25 @@ export class SessionManager {
     const ownedSessionIds = this.#store
       .listSessions(auth.accountId, auth.projectId)
       .map((s) => s.id);
+    // An identity that owns no sessions gets zeros — never the unfiltered
+    // aggregate. (The store also enforces this: an empty array is a strict
+    // filter, not "no filter". Belt and suspenders around a tenancy leak.)
+    if (ownedSessionIds.length === 0) {
+      return {
+        type: "response.ok",
+        requestId: msg.id,
+        data: {
+          daily: [] as DailyUsageBucket[],
+          lifetime: {
+            costUsd: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            numTurns: 0,
+            numSessions: 0,
+          } as LifetimeUsageTotals,
+        },
+      };
+    }
     const daily = this.#memory.store.dailyUsage(days, ownedSessionIds);
     const lifetime = this.#memory.store.lifetimeTotals(ownedSessionIds);
     return {

@@ -23,8 +23,12 @@ export async function fetchAnalytics(days = 14): Promise<void> {
       setDaily(result.data.daily);
       setLifetime(result.data.lifetime);
     }
-  } catch {
-    // swallow — panel stays empty, no crash
+  } catch (err) {
+    // Panel stays empty (no crash), but never silently: a permanently
+    // blank analytics panel with zero console output made daemon-side
+    // failures (e.g. the old SQLite bound-variable overflow at ~1000
+    // sessions) undiagnosable.
+    console.error("[codeoid] usage.daily request failed:", err);
   } finally {
     setLoading(false);
   }
