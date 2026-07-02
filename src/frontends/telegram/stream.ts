@@ -70,6 +70,12 @@ export class StreamRelay {
   /** Per-messageId accumulator for streaming assistant/thinking content. */
   #buffers = new Map<string, StreamBuf>();
   /**
+   * messageId → tool name. Tool completion/cancellation arrives as a
+   * `session.message.delta` carrying only `toolStateUpdate` — the name lives
+   * on the original tool_call broadcast, so remember it here.
+   */
+  #toolNames = new Map<string, string>();
+  /**
    * All sends are chained so they reach Telegram in the order they were
    * produced — long messages chunk sequentially and "✅ Done." can never
    * overtake content.
@@ -175,6 +181,9 @@ export class StreamRelay {
       }
       case "tool_call": {
         if (!m.tool) break;
+        // Remember the name — completion/cancellation arrives as a bare
+        // toolStateUpdate delta referencing this messageId.
+        this.#toolNames.set(m.messageId, m.tool.name);
         const line = toolLine(m.tool.name, m.tool.state);
         if (line) this.send(chatId, line);
         break;
@@ -187,10 +196,23 @@ export class StreamRelay {
   }
 
   /** Handle a `session.message.delta` broadcast. */
-  handleDelta(_chatId: number, d: SessionMessageDelta): void {
+  handleDelta(chatId: number, d: SessionMessageDelta): void {
     if (d.contentAppend) {
       const buf = this.#buffers.get(d.messageId);
       if (buf) buf.content += d.contentAppend;
+    }
+    if (d.toolStateUpdate) {
+      // The daemon broadcasts tool completed/cancelled as a delta — render
+      // ✓/✗ here or the user never sees tools finish. Flush streamed text
+      // first so the tool line lands in order.
+      this.#flushOthers(chatId, d.messageId);
+      const name = this.#toolNames.get(d.messageId) ?? "tool";
+      const line = toolLine(name, d.toolStateUpdate);
+      if (line) this.send(chatId, line);
+      const phase = d.toolStateUpdate.phase;
+      if (phase === "completed" || phase === "cancelled") {
+        this.#toolNames.delete(d.messageId);
+      }
     }
   }
 
@@ -198,13 +220,26 @@ export class StreamRelay {
   flushIdle(chatId: number): void {
     for (const buf of this.#buffers.values()) this.#flushPartial(chatId, buf);
     this.#buffers.clear();
+    this.#toolNames.clear();
     // Queued after the flushes, so "Done" always follows the content.
     this.send(chatId, "✅ Done.");
   }
 
-  /** Drop all buffered state without sending (e.g. session switch). */
-  clear(): void {
+  /**
+   * Session detach/switch: deliver whatever is buffered (never discard
+   * content invisibly), mark the stream as cut short, and reset state.
+   */
+  flushAndClear(chatId: number): void {
+    let interrupted = false;
+    for (const buf of this.#buffers.values()) {
+      if (buf.content.length > buf.flushed) interrupted = true;
+      this.#flushPartial(chatId, buf);
+    }
     this.#buffers.clear();
+    this.#toolNames.clear();
+    if (interrupted) {
+      this.send(chatId, "✂️ Detached mid-stream — output above may be incomplete.");
+    }
   }
 
   /** Send the unflushed tail of every buffer except `exceptId` (kept live). */

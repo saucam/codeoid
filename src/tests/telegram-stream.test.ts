@@ -28,6 +28,7 @@ import {
 import type {
   SessionMessage,
   SessionMessageDelta,
+  ToolState,
 } from "../protocol/types.js";
 
 const CHAT = 999_001;
@@ -365,5 +366,156 @@ describe("StreamRelay — sequential chunked sends", () => {
     // First call: single chunk "aaa…\nbbb…\nccc…" (no failure — starts with a).
     // Second call: chunk1 ("b"*4000) fails once and is skipped, chunk2 still lands.
     expect(texts().at(-1)).toBe("c".repeat(4000));
+  });
+});
+
+// ── toolStateUpdate deltas (tool completed / cancelled) ───────────────────────
+
+describe("StreamRelay — toolStateUpdate deltas render tool completion", () => {
+  function toolDelta(
+    messageId: string,
+    toolStateUpdate: ToolState,
+  ): SessionMessageDelta {
+    return {
+      type: "session.message.delta",
+      sessionId: "sess-1",
+      messageId,
+      toolStateUpdate,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  it("renders ✓ with the remembered tool name when a completed delta arrives", async () => {
+    const { api, texts } = makeApi();
+    const relay = new StreamRelay(api);
+
+    relay.handleMessage(
+      CHAT,
+      full("tc1", "tool_call", "", { toolId: "t1", name: "Bash", state: { phase: "executing" } }),
+    );
+    relay.handleDelta(CHAT, toolDelta("tc1", { phase: "completed", success: true, output: "ok" }));
+    await relay.settle();
+
+    expect(texts()).toEqual(["⚡ Bash", "✓ Bash"]);
+  });
+
+  it("renders ✗ failed when the tool completed unsuccessfully", async () => {
+    const { api, texts } = makeApi();
+    const relay = new StreamRelay(api);
+
+    relay.handleMessage(
+      CHAT,
+      full("tc1", "tool_call", "", { toolId: "t1", name: "Edit", state: { phase: "executing" } }),
+    );
+    relay.handleDelta(CHAT, toolDelta("tc1", { phase: "completed", success: false }));
+    await relay.settle();
+
+    expect(texts()).toEqual(["⚡ Edit", "✗ Edit failed"]);
+  });
+
+  it("renders ✗ cancelled for a cancelled delta (denied approval)", async () => {
+    const { api, texts } = makeApi();
+    const relay = new StreamRelay(api);
+
+    // waiting_confirmation renders no line here (approval keyboard is the
+    // frontend's job) but must still register the tool name.
+    relay.handleMessage(
+      CHAT,
+      full("tc1", "tool_call", "", {
+        toolId: "t1",
+        name: "Write",
+        state: { phase: "waiting_confirmation", input: {}, description: "Write(file)", approvalId: "ap-1" },
+      }),
+    );
+    relay.handleDelta(CHAT, toolDelta("tc1", { phase: "cancelled", reason: "denied" }));
+    await relay.settle();
+
+    expect(texts()).toEqual(["✗ Write cancelled"]);
+  });
+
+  it("tool completion mid-stream flushes streamed text first (in order, no dup)", async () => {
+    const { api, texts } = makeApi();
+    const relay = new StreamRelay(api);
+
+    relay.handleMessage(CHAT, full("m1", "assistant", ""));
+    relay.handleDelta(CHAT, delta("m1", "Running the build. "));
+    relay.handleMessage(
+      CHAT,
+      full("tc1", "tool_call", "", { toolId: "t1", name: "Bash", state: { phase: "executing" } }),
+    );
+    relay.handleDelta(CHAT, delta("m1", "It passed."));
+    relay.handleDelta(CHAT, toolDelta("tc1", { phase: "completed", success: true }));
+    relay.handleMessage(CHAT, full("m1", "assistant", "Running the build. It passed."));
+    relay.flushIdle(CHAT);
+    await relay.settle();
+
+    expect(texts()).toEqual([
+      "Running the build. ",
+      "⚡ Bash",
+      "It passed.",
+      "✓ Bash",
+      "✅ Done.",
+    ]);
+  });
+
+  it("falls back to 'tool' when the name was never seen", async () => {
+    const { api, texts } = makeApi();
+    const relay = new StreamRelay(api);
+
+    relay.handleDelta(CHAT, toolDelta("unknown-id", { phase: "completed", success: true }));
+    await relay.settle();
+
+    expect(texts()).toEqual(["✓ tool"]);
+  });
+});
+
+// ── flush-on-detach / session switch ──────────────────────────────────────────
+
+describe("StreamRelay — flushAndClear (detach / session switch)", () => {
+  it("delivers buffered undelivered content with an interruption marker", async () => {
+    const { api, texts } = makeApi();
+    const relay = new StreamRelay(api);
+
+    relay.handleMessage(CHAT, full("m1", "assistant", ""));
+    relay.handleDelta(CHAT, delta("m1", "half-finished answ"));
+    relay.flushAndClear(CHAT);
+    await relay.settle();
+
+    expect(texts()[0]).toBe("half-finished answ");
+    expect(texts()[1]).toContain("✂️");
+    expect(relay.bufferCount).toBe(0);
+  });
+
+  it("no marker when nothing was pending", async () => {
+    const { api, texts } = makeApi();
+    const relay = new StreamRelay(api);
+
+    relay.handleMessage(CHAT, full("m1", "assistant", "already delivered"));
+    await relay.settle();
+    relay.flushAndClear(CHAT);
+    await relay.settle();
+
+    expect(texts()).toEqual(["already delivered"]);
+  });
+
+  it("post-clear deltas for old messageIds are dropped, fresh streams work", async () => {
+    const { api, texts } = makeApi();
+    const relay = new StreamRelay(api);
+
+    relay.handleMessage(CHAT, full("m1", "assistant", ""));
+    relay.handleDelta(CHAT, delta("m1", "old session text"));
+    relay.flushAndClear(CHAT);
+
+    // Stale delta from the old session after the switch — ignored.
+    relay.handleDelta(CHAT, delta("m1", " ghost"));
+    // New session streams normally.
+    relay.handleMessage(CHAT, full("m2", "assistant", ""));
+    relay.handleDelta(CHAT, delta("m2", "new session text"));
+    relay.flushIdle(CHAT);
+    await relay.settle();
+
+    expect(countOccurrences(texts(), "ghost")).toBe(0);
+    expect(countOccurrences(texts(), "new session text")).toBe(1);
+    expect(countOccurrences(texts(), "old session text")).toBe(1);
   });
 });

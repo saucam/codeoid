@@ -346,7 +346,9 @@ export class TelegramFrontend implements Frontend {
       this.#manager.disconnectClient(state.clientId);
       state.attachedSessionId = null;
       state.attachedSessionName = null;
-      state.relay.clear();
+      // Deliver anything still buffered from the old session (with an
+      // interruption marker) rather than discarding it invisibly.
+      state.relay.flushAndClear(chatId);
       // Remove the ⏹ Stop button for the old session. The old session's
       // idle status_change (which normally deletes it) won't arrive after
       // we disconnected, so it would otherwise linger in the chat.
@@ -389,7 +391,9 @@ export class TelegramFrontend implements Frontend {
     const name = state.attachedSessionName;
     state.attachedSessionId = null;
     state.attachedSessionName = null;
-    state.relay.clear();
+    // Deliver anything still buffered before dropping state — detaching must
+    // not silently swallow streamed-but-unflushed content.
+    state.relay.flushAndClear(chatId);
     if (state.stopMessageId !== null) {
       this.#bot.api.deleteMessage(chatId, state.stopMessageId).catch(() => {});
       state.stopMessageId = null;
