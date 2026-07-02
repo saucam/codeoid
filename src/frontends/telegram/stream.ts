@@ -232,6 +232,39 @@ export class StreamRelay {
   }
 }
 
+/** Escape MarkdownV2 special characters (for regular text context). */
+export function escMd(text: string): string {
+  return text.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, (m) => `\\${m}`);
+}
+
+/**
+ * Escape for a MarkdownV2 inline-code span. Inside code entities only
+ * backtick and backslash are special — escaping anything else (as escMd
+ * does) would render literal backslashes.
+ */
+export function escCode(text: string): string {
+  return text.replace(/[`\\]/g, "\\$&");
+}
+
+/**
+ * One /ls line. Status and workdir are runtime values and must be escaped —
+ * a `tool_running` status underscore or a backtick in a path is otherwise a
+ * MarkdownV2 parse error (Telegram 400).
+ */
+export function formatSessionLine(s: {
+  name: string;
+  status: string;
+  workdir: string;
+}): string {
+  const icon =
+    s.status === "idle"
+      ? "🟢"
+      : s.status === "thinking" || s.status === "tool_running"
+        ? "🟡"
+        : "🔴";
+  return `${icon} *${escMd(s.name)}* — ${escMd(s.status)}\n   \`${escCode(s.workdir)}\``;
+}
+
 /** Render a tool lifecycle state as a one-line chat notification. */
 export function toolLine(name: string, state: ToolState): string | null {
   switch (state.phase) {

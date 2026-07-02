@@ -17,6 +17,7 @@
  */
 
 import { Bot, type Context, InlineKeyboard } from "grammy";
+import { autoRetry } from "@grammyjs/auto-retry";
 import { randomUUID } from "node:crypto";
 import { verifyToken } from "../../daemon/auth.js";
 import { ALL_SCOPES_STRING } from "../../protocol/scopes.js";
@@ -34,7 +35,12 @@ import type {
   ToolInfo,
 } from "../../protocol/types.js";
 import type { AttachedClient } from "../../daemon/session.js";
-import { StreamRelay, type RelayApi } from "./stream.js";
+import {
+  StreamRelay,
+  escMd,
+  formatSessionLine,
+  type RelayApi,
+} from "./stream.js";
 
 /** One AskUserQuestion question as it arrives in the tool input. */
 interface AskQuestion {
@@ -96,8 +102,12 @@ export class TelegramFrontend implements Frontend {
       this.#bot.api.sendMessage(chatId, text, opts as never),
   };
 
-  constructor(botToken: string, allowedUserIds: number[]) {
-    this.#bot = new Bot(botToken);
+  constructor(botToken: string, allowedUserIds: number[], bot?: Bot) {
+    // `bot` is injectable for tests (a Bot with a stubbed API transformer).
+    this.#bot = bot ?? new Bot(botToken);
+    // Honor Telegram 429s: wait for retry_after and retry instead of letting
+    // the flood error be swallowed by the `.catch(() => {})` on each send.
+    this.#bot.api.config.use(autoRetry());
     this.#allowedUserIds = new Set(allowedUserIds);
   }
 
@@ -143,6 +153,13 @@ export class TelegramFrontend implements Frontend {
   // ── Handlers ──────────────────────────────────────────────────────────
 
   #setupHandlers(): void {
+    // Never let a thrown handler error kill long polling — grammy's default
+    // error handler re-throws, which permanently stops the bot. Log and keep
+    // processing updates.
+    this.#bot.catch((err) => {
+      console.error("[codeoid:telegram] handler error:", err.error ?? err);
+    });
+
     // Gate: only allowed Telegram user IDs
     this.#bot.use(async (ctx, next) => {
       const userId = ctx.from?.id;
@@ -270,15 +287,9 @@ export class TelegramFrontend implements Frontend {
         await ctx.reply("No active sessions.");
         return;
       }
-      const lines = resp.sessions.map((s) => {
-        const icon =
-          s.status === "idle"
-            ? "🟢"
-            : s.status === "thinking" || s.status === "tool_running"
-              ? "🟡"
-              : "🔴";
-        return `${icon} *${esc(s.name)}* — ${s.status}\n   \`${s.workdir}\``;
-      });
+      // Status and workdir are escaped — a `tool_running` underscore or a
+      // path with markdown specials must not 400 the reply.
+      const lines = resp.sessions.map((s) => formatSessionLine(s));
       await ctx.reply(lines.join("\n\n"), { parse_mode: "MarkdownV2" });
     }
   }
@@ -302,7 +313,7 @@ export class TelegramFrontend implements Frontend {
     );
 
     if (resp.type === "response.ok") {
-      await ctx.reply(`Session *${esc(name)}* created\\.`, { parse_mode: "MarkdownV2" });
+      await ctx.reply(`Session *${escMd(name)}* created\\.`, { parse_mode: "MarkdownV2" });
     } else if (resp.type === "response.error") {
       await ctx.reply(`Error: ${resp.error}`);
     }
@@ -360,7 +371,7 @@ export class TelegramFrontend implements Frontend {
     if (resp.type === "response.ok") {
       state.attachedSessionId = session.id;
       state.attachedSessionName = name;
-      await ctx.reply(`Attached to *${esc(name)}*\\. Send messages here\\.`, { parse_mode: "MarkdownV2" });
+      await ctx.reply(`Attached to *${escMd(name)}*\\. Send messages here\\.`, { parse_mode: "MarkdownV2" });
     } else if (resp.type === "response.error") {
       await ctx.reply(`Error: ${resp.error}`);
     }
@@ -427,7 +438,7 @@ export class TelegramFrontend implements Frontend {
       state.attachedSessionId = null;
       state.attachedSessionName = null;
     }
-    await ctx.reply(`Session *${esc(name)}* destroyed\\.`, { parse_mode: "MarkdownV2" });
+    await ctx.reply(`Session *${escMd(name)}* destroyed\\.`, { parse_mode: "MarkdownV2" });
   }
 
   // ── Search ──────────────────────────────────────────────────────────────
@@ -998,16 +1009,6 @@ export class TelegramFrontend implements Frontend {
       send: (msg: DaemonMessage) => this.#forwardToChat(chatId, userId, msg),
     };
   }
-}
-
-/** Escape MarkdownV2 special characters. */
-function escMd(text: string): string {
-  return text.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, (m) => `\\${m}`);
-}
-
-/** @deprecated — legacy esc used elsewhere in this file. */
-function esc(text: string): string {
-  return text.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, "\\$&");
 }
 
 /** Relative time string from a unix-ms timestamp. */
