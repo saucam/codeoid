@@ -150,6 +150,25 @@ describe("sessions store", () => {
     expect(getSession("a")?.name).toBe("renamed"); // legitimate fields still merge
   });
 
+  it("ingestSessionList keeps object-field identity when deep-equal", () => {
+    // Every list refresh delivers fresh array/object references; when the
+    // contents are unchanged the merge must not reassign the field (which
+    // would notify its subscribers on every poll for nothing).
+    ingestSessionList([
+      s("a", "2026-05-01T08:00:00Z", { pinnedFiles: ["x.ts", "y.ts"] }),
+    ]);
+    const before = getSession("a")?.pinnedFiles;
+    ingestSessionList([
+      s("a", "2026-05-01T08:00:00Z", { pinnedFiles: ["x.ts", "y.ts"] }),
+    ]);
+    expect(getSession("a")?.pinnedFiles).toBe(before); // same reference
+    // A real change still lands.
+    ingestSessionList([
+      s("a", "2026-05-01T08:00:00Z", { pinnedFiles: ["x.ts"] }),
+    ]);
+    expect(getSession("a")?.pinnedFiles).toEqual(["x.ts"]);
+  });
+
   it("focusNext / focusPrev wrap around the sorted list", () => {
     ingestSessionList([
       s("a", "2026-05-01T08:00:00Z"),
