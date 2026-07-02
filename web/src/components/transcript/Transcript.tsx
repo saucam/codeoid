@@ -27,7 +27,11 @@ import {
 import { createVirtualizer } from "@tanstack/solid-virtual";
 
 import MessageRow from "./MessageRow";
-import { epochOf, focusedSessionMessages } from "../../state/messages";
+import {
+  epochOf,
+  focusedSessionMessages,
+  registerSessionCachePruner,
+} from "../../state/messages";
 import { focusedSession, focusedSessionId } from "../../state/sessions";
 import {
   findJumpTarget,
@@ -160,6 +164,16 @@ const Transcript: Component = () => {
   // of it (DPI-dependent — "fine on my other laptop"). Ceil so reserved
   // space is always >= painted height. Keeps the ResizeObserver
   // borderBoxSize path intact.
+  // Stable per-message item key: `${sessionId}:${messageId}`. Namespacing
+  // by session keeps a revisited session's measured heights alive in
+  // `itemSizeCache` across switches (the #73 guarantee).
+  const itemKeyFor = (index: number): string | number => {
+    const sid = focusedSessionId();
+    const m = messages()[index];
+    if (!m) return index;
+    return `${sid ?? ""}:${m.messageId}`;
+  };
+
   const virtualizer = createVirtualizer({
     count: messages().length,
     getScrollElement: () => containerRef ?? null,
@@ -174,37 +188,105 @@ const Transcript: Component = () => {
           ];
       return Math.ceil(raw);
     },
-    getItemKey: (index) => {
-      const sid = focusedSessionId();
-      const m = messages()[index];
-      if (!m) return index;
-      return `${sid ?? ""}:${m.messageId}`;
-    },
+    getItemKey: (index) => itemKeyFor(index),
   });
 
-  // Push the row COUNT into the virtualizer whenever messages are appended
-  // or the focused session changes. `count` is read from the options object
-  // at creation, so a plain `createVirtualizer({ count: messages().length })`
-  // never updates — we re-apply it here.
+  // The virtualizer instance is NOT reactive on its own. Verified against
+  // the installed @tanstack/virtual-core 3.14.0 + solid-virtual 3.13.24
+  // sources (web/node_modules/@tanstack/*/dist/esm/index.js):
   //
-  // @tanstack/solid-virtual 3.x calls notify() internally when `count`
-  // changes, which updates the reactive signal that `getVirtualItems()`
-  // reads. No explicit `virtualizer.measure()` needed — that call wipes the
-  // entire itemSizeCache (keyed by stable messageId), forcing every visible
-  // row to fall back to estimateSize=96 until its ResizeObserver fires.
-  // That transient "all rows at 96px" state is exactly what causes the
-  // intermittent overlap bug: adjacent rows that are taller than 96px get
-  // wrong translateY offsets until each one re-measures. Omitting measure()
-  // means the cache survives across session switches, so revisiting a session
-  // is overlap-free and switching to a fresh session has the same cold-cache
-  // behaviour it always did (rows measure in as ResizeObserver fires).
+  //   - `setOptions()` ONLY assigns `this.options` — it does NOT notify.
+  //     (An earlier comment here claimed solid-virtual 3.x notifies
+  //     internally on count change; that is false and caused stale
+  //     layouts / the size-cache poisoning regression.)
+  //   - The solid adapter's `onChange` is the ONLY thing that pushes fresh
+  //     `getVirtualItems()` / `getTotalSize()` into the Solid store, and
+  //     `onChange` only runs via `notify()`. Absent our call it fires only
+  //     from scroll/resize observers — so when scrollTop can't move (both
+  //     sessions pinned at bottom, or an unscrollable transcript) nothing
+  //     ever syncs.
+  //   - `maybeNotify()` is memoized on [isScrolling, range.startIndex,
+  //     range.endIndex] and SKIPS the notify when the visible index range
+  //     is unchanged — which is exactly the session-switch case (two
+  //     sessions pinned at the bottom can have identical ranges). Hence we
+  //     call the unconditional `notify(false)` (TS-private, stable public
+  //     behavior at runtime) instead. It does NOT touch itemSizeCache, so
+  //     measured heights survive — unlike `measure()`, which wipes the
+  //     whole cache and re-introduces the #73 overlap bug.
+  //   - On a session SWITCH we additionally pass a fresh `getItemKey`
+  //     function identity. `getMeasurementOptions` is memoized on
+  //     [count, paddingStart, scrollMargin, getItemKey, …]; with an equal
+  //     count and the same getItemKey closure it would NOT rebuild
+  //     `measurementsCache`, leaving stale entries keyed under the OLD
+  //     session's `${sid}:${msgId}` keys. The per-element ResizeObserver
+  //     then fires for the new session's rows and `resizeItem()` writes
+  //     the NEW row heights under those OLD keys — poisoning the size
+  //     cache. A new getItemKey identity forces `getMeasurements` to
+  //     rebuild every measurement from `itemSizeCache` under the NEW keys
+  //     (cache hits for previously-visited sessions, estimateSize for
+  //     fresh ones) WITHOUT clearing any cached sizes.
+  //
+  // Timing: this createEffect runs in the same synchronous batch as the
+  // render that swaps row content, while ResizeObserver callbacks fire at
+  // the following frame boundary — so measurement keys are already correct
+  // by the time the first resize lands.
+  let prevLen = -1;
+  let prevSid: string | null | undefined = undefined;
   createEffect(() => {
     const len = messages().length;
+    const sid = focusedSessionId();
+    const sessionChanged = prevSid === undefined || sid !== prevSid;
+    const countChanged = len !== prevLen;
+    prevSid = sid;
+    prevLen = len;
+    if (!sessionChanged && !countChanged) return;
     virtualizer.setOptions({
       ...virtualizer.options,
       count: len,
+      // Fresh function identity on session switch only — see comment above.
+      ...(sessionChanged ? { getItemKey: (i: number) => itemKeyFor(i) } : {}),
     });
+    (virtualizer as unknown as { notify: (sync: boolean) => void }).notify(
+      false,
+    );
   });
+
+  // When a session is DESTROYED (not merely switched away from), drop its
+  // cached row heights — the `${sid}:` keys can never be read again and
+  // would otherwise accumulate forever. In-place deletion is intentional:
+  // `getMeasurements` is memoized on the itemSizeCache Map REFERENCE, so
+  // pruning dead keys doesn't force a relayout of the live session.
+  onMount(() => {
+    const unregister = registerSessionCachePruner((sid) => {
+      const prefix = `${sid}:`;
+      const core = virtualizer as unknown as {
+        itemSizeCache: Map<string | number, number>;
+      };
+      for (const key of [...core.itemSizeCache.keys()]) {
+        if (typeof key === "string" && key.startsWith(prefix)) {
+          core.itemSizeCache.delete(key);
+        }
+      }
+      // `measureElement(null)` is virtual-core's documented prune path: it
+      // unobserves + evicts every elementsCache entry whose DOM node is no
+      // longer connected (covers rows of the destroyed session).
+      virtualizer.measureElement(null);
+    });
+    onCleanup(unregister);
+  });
+
+  // Coalesced elementsCache sweep — used by the per-row onCleanup below.
+  let prunePending = false;
+  function scheduleElementsCachePrune(): void {
+    if (prunePending) return;
+    prunePending = true;
+    queueMicrotask(() => {
+      prunePending = false;
+      // Safe post-disposal too: this only iterates the cache and unobserves
+      // disconnected nodes.
+      virtualizer.measureElement(null);
+    });
+  }
 
   // Auto-scroll on new content, but only if the user was already at
   // the bottom. We track BOTH the messages signal AND the per-session
@@ -347,6 +429,18 @@ const Transcript: Component = () => {
                       ref={(el) => {
                         el.setAttribute("data-index", String(item.index));
                         virtualizer.measureElement(el);
+                        // Solid never calls refs with null on unmount, so
+                        // without this the virtualizer's elementsCache (and
+                        // its ResizeObserver registrations) would retain
+                        // every unmounted row's DOM subtree forever — keys
+                        // are unique per message, so nothing ever evicts.
+                        // virtual-core's `measureElement(null)` prunes all
+                        // entries whose node is disconnected; defer to a
+                        // microtask because onCleanup runs BEFORE Solid
+                        // detaches the node (isConnected is still true
+                        // here), and coalesce so a burst of unmounts does
+                        // one cache sweep, not one per row.
+                        onCleanup(() => scheduleElementsCachePrune());
                       }}
                       class="absolute left-0 top-0 w-full pb-2"
                       style={{ transform: `translateY(${item.start}px)` }}
