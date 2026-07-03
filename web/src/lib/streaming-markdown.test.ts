@@ -41,6 +41,24 @@ describe("splitStreamingBlocks", () => {
     expect(tail).toContain("still raw");
   });
 
+  it("only closes a fence on a matching closer (same char, >= length, no trailing text)", () => {
+    // A literal ```-prefixed line inside a ~~~ fence is content, not a closer.
+    const mixed = splitStreamingBlocks("~~~\n``` not a closer\n\nstill fenced\n~~~\n\nout");
+    expect(mixed.blocks[0]).toContain("still fenced");
+    expect(mixed.tail).toBe("out");
+
+    // A fence-like line with trailing text can't close either (info strings
+    // are opener-only in CommonMark).
+    const trailing = splitStreamingBlocks("```\n```not a closer\n\nstill fenced\n```\n\nout");
+    expect(trailing.blocks[0]).toContain("still fenced");
+    expect(trailing.tail).toBe("out");
+
+    // A shorter marker run can't close a longer opener; an equal/longer one can.
+    const shorter = splitStreamingBlocks("````\n```\n\nstill fenced\n````\n\nout");
+    expect(shorter.blocks[0]).toContain("still fenced");
+    expect(shorter.tail).toBe("out");
+  });
+
   it("returns everything as tail when there is no boundary", () => {
     const { blocks, tail } = splitStreamingBlocks("single para, still streaming");
     expect(blocks).toEqual([]);

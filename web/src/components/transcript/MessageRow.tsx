@@ -4,7 +4,7 @@
  * (P3 stub uses solid-markdown with shiki coming in P7).
  */
 
-import { Component, For, Match, Show, Switch, createMemo, createSignal } from "solid-js";
+import { Component, Index, Match, Show, Switch, createMemo, createSignal } from "solid-js";
 import { SolidMarkdown } from "solid-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -118,9 +118,11 @@ const MarkdownBlock: Component<{ text: string; streaming?: boolean }> = (props) 
   // SolidMarkdown on every delta — a full unified() re-parse plus a DOM
   // subtree rebuild per chunk, O(L²) over the stream. While streaming:
   //   1. coalesce delta-rate updates to one per animation frame, and
-  //   2. render completed blocks once (<For> keys by string identity, so a
-  //      stable block never re-parses) and re-parse only the live tail,
-  //      reconciling its DOM instead of rebuilding it.
+  //   2. render completed blocks once (<Index> keys by position — the list
+  //      is append-only and positions never change value, so a completed
+  //      block never re-parses, even when two blocks have identical text)
+  //      and re-parse only the live tail, reconciling its DOM instead of
+  //      rebuilding it.
   // When streaming ends the message renders as ONE document again, so the
   // final output is byte-identical to the non-streaming path.
   const throttled = createFrameThrottled(
@@ -133,7 +135,7 @@ const MarkdownBlock: Component<{ text: string; streaming?: boolean }> = (props) 
   return (
     <div class="md-prose">
       <Show when={props.streaming} fallback={<Md text={props.text} />}>
-        <For each={segments().blocks}>{(block) => <Md text={block} />}</For>
+        <Index each={segments().blocks}>{(block) => <Md text={block()} />}</Index>
         <Md text={segments().tail} reconcile />
       </Show>
       <Show when={props.streaming}>

@@ -64,9 +64,9 @@ export interface StreamingBlocks {
   tail: string;
 }
 
-/** A line that opens or closes a fenced code block (``` or ~~~, up to three
- * leading spaces per CommonMark). */
-const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})/;
+/** A fence line (``` or ~~~, up to three leading spaces per CommonMark).
+ * Captures the marker run and whatever follows it. */
+const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 
 /**
  * Split streamed markdown at blank lines OUTSIDE fenced code blocks. The
@@ -80,7 +80,12 @@ const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})/;
  */
 export function splitStreamingBlocks(text: string): StreamingBlocks {
   const blocks: string[] = [];
-  let inFence = false;
+  /** The open fence's marker char + length, or null outside a fence. A
+   * closer must use the SAME char, be at least as long, and carry nothing
+   * but whitespace after it (CommonMark) — a literal ```-prefixed line
+   * inside a ~~~ block, or a fence-like line with trailing text, is
+   * content, not a closer. */
+  let fence: { char: string; len: number } | null = null;
   let start = 0; // start offset of the current block
   let lineStart = 0;
   let blankRun = -1; // start offset of the current run of blank lines
@@ -88,22 +93,35 @@ export function splitStreamingBlocks(text: string): StreamingBlocks {
   for (let i = 0; i <= text.length; i++) {
     if (i !== text.length && text[i] !== "\n") continue;
     const line = text.slice(lineStart, i);
-    if (FENCE_LINE.test(line)) {
+    const m = FENCE_LINE.exec(line);
+    if (m && fence === null) {
       // A fence OPENING after a blank run also completes the previous
       // block — otherwise a long streaming code block would drag the
       // finished paragraph before it into every tail re-parse.
-      if (!inFence && blankRun > start) {
+      if (blankRun > start) {
         blocks.push(text.slice(start, blankRun));
         start = lineStart;
       }
-      inFence = !inFence;
+      fence = { char: m[1]![0]!, len: m[1]!.length };
       blankRun = -1;
-    } else if (!inFence && line.trim() === "") {
+    } else if (
+      m &&
+      fence !== null &&
+      m[1]![0] === fence.char &&
+      m[1]!.length >= fence.len &&
+      (m[2] ?? "").trim() === ""
+    ) {
+      // Matching closer.
+      fence = null;
+      blankRun = -1;
+    } else if (fence === null && line.trim() === "") {
       // Track where the blank run began; the block ends before it.
       if (blankRun < 0) blankRun = lineStart;
     } else {
       // First non-blank line after a blank run outside a fence → the
-      // previous block is complete.
+      // previous block is complete. (Inside a fence blankRun is always -1,
+      // so fence content — including non-closing fence-like lines — lands
+      // here harmlessly.)
       if (blankRun > start) {
         blocks.push(text.slice(start, blankRun));
         start = lineStart;
