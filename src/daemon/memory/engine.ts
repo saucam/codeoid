@@ -340,7 +340,12 @@ export class MemoryEngine {
               const v = vectors[i];
               if (v) {
                 normalize(v);
-                this.#store.setEmbedding(episodes[i]!.id, v, this.#embedder.modelName);
+                this.#store.setEmbedding(
+                  episodes[i]!.id,
+                  v,
+                  this.#embedder.modelName,
+                  episodes[i]!.workspaceId,
+                );
               }
             }
           });
