@@ -246,6 +246,67 @@ describe("messages store", () => {
     expect(hasMessage("s2", "keep")).toBe(true);
   });
 
+  it("positional index: deltas land on the right message in a large buffer (#90)", () => {
+    // 2000 messages, then patch several NON-tail targets — the map-based
+    // positional lookup must hit exactly the intended entries.
+    for (let i = 0; i < 2000; i++) {
+      applyMessage(makeMsg({ messageId: `m${i}`, content: `c${i}` }));
+    }
+    applyDelta({
+      type: "session.message.delta",
+      sessionId: "s1",
+      messageId: "m0",
+      contentAppend: "+head",
+      timestamp: "t",
+    } as SessionMessageDelta);
+    applyDelta({
+      type: "session.message.delta",
+      sessionId: "s1",
+      messageId: "m1000",
+      contentAppend: "+mid",
+      timestamp: "t",
+    } as SessionMessageDelta);
+
+    const buf = messagesFor("s1");
+    expect(buf).toHaveLength(2000);
+    expect(buf[0]!.content).toBe("c0+head");
+    expect(buf[1000]!.content).toBe("c1000+mid");
+    expect(buf[1999]!.content).toBe("c1999");
+  });
+
+  it("positional index survives re-broadcast upserts and replaceScrollback rebuilds", () => {
+    applyMessage(makeMsg({ messageId: "a", content: "A1" }));
+    applyMessage(makeMsg({ messageId: "b", content: "B1" }));
+    // Upsert keeps position; a subsequent delta still lands correctly.
+    applyMessage(makeMsg({ messageId: "a", content: "A2" }));
+    applyDelta({
+      type: "session.message.delta",
+      sessionId: "s1",
+      messageId: "a",
+      contentAppend: "+d",
+      timestamp: "t",
+    } as SessionMessageDelta);
+    expect(messagesFor("s1")[0]!.content).toBe("A2+d");
+
+    // Replay with duplicates: index must point at the DEDUPED position.
+    replaceScrollback("s1", [
+      makeMsg({ messageId: "x", content: "X1" }),
+      makeMsg({ messageId: "y", content: "Y" }),
+      makeMsg({ messageId: "x", content: "X2" }),
+    ]);
+    applyDelta({
+      type: "session.message.delta",
+      sessionId: "s1",
+      messageId: "x",
+      contentAppend: "+d",
+      timestamp: "t",
+    } as SessionMessageDelta);
+    const buf = messagesFor("s1");
+    expect(buf).toHaveLength(2);
+    expect(buf[0]!.content).toBe("X2+d");
+    expect(buf[1]!.content).toBe("Y");
+  });
+
   it("clearSessionMessages invokes registered session cache pruners exactly once with the sessionId", () => {
     const pruned: string[] = [];
     const unregister = registerSessionCachePruner((sid) => pruned.push(sid));
