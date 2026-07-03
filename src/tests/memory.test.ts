@@ -233,29 +233,99 @@ describe("MemoryEngine.recall", () => {
   });
 });
 
+const TENANT_A = { accountId: "acc-a", projectId: "proj-a" };
+const TENANT_B = { accountId: "acc-b", projectId: "proj-b" };
+
 describe("workspaceIdFromPath", () => {
-  it("returns the same ID for different subdirs of the same repo", () => {
+  it("returns the same ID for different subdirs of the same repo (same tenant)", () => {
     // Use the actual repo this test runs in (process.cwd() is the repo root,
     // which is a git repo) rather than a hardcoded path that may not exist on
     // every machine — the prior literal `/Workspace/codeoid` made git
     // rev-parse fail and fall back to path-hashing, so the IDs diverged.
     const mainRepo = process.cwd();
     const srcSubdir = join(process.cwd(), "src");
-    const mainId = workspaceIdFromPath(mainRepo);
-    const subdirId = workspaceIdFromPath(srcSubdir);
+    const mainId = workspaceIdFromPath(mainRepo, TENANT_A);
+    const subdirId = workspaceIdFromPath(srcSubdir, TENANT_A);
     // Same git repo, different subdirectory → same workspace (anchored on git-common-dir).
     expect(mainId).toBe(subdirId);
   });
 
   it("returns different IDs for unrelated directories", () => {
-    const a = workspaceIdFromPath("/tmp");
-    const b = workspaceIdFromPath("/home");
+    const a = workspaceIdFromPath("/tmp", TENANT_A);
+    const b = workspaceIdFromPath("/home", TENANT_A);
     expect(a).not.toBe(b);
   });
 
   it("falls back to path hash for non-git dirs", () => {
-    const id = workspaceIdFromPath("/tmp");
+    const id = workspaceIdFromPath("/tmp", TENANT_A);
     expect(id).toMatch(/^ws_[a-f0-9]{16}$/);
+  });
+
+  it("is stable for the same (path, tenant)", () => {
+    expect(workspaceIdFromPath("/tmp/p", TENANT_A)).toBe(
+      workspaceIdFromPath("/tmp/p", TENANT_A),
+    );
+  });
+
+  it("returns DIFFERENT ids for the same path under different tenants", () => {
+    // The core isolation property: two accounts working the same directory
+    // must not collide on a workspace id (else one's recall reads the other's).
+    expect(workspaceIdFromPath("/tmp/p", TENANT_A)).not.toBe(
+      workspaceIdFromPath("/tmp/p", TENANT_B),
+    );
+    // account and project each independently affect the id.
+    expect(
+      workspaceIdFromPath("/tmp/p", { accountId: "x", projectId: "1" }),
+    ).not.toBe(workspaceIdFromPath("/tmp/p", { accountId: "x", projectId: "2" }));
+    expect(
+      workspaceIdFromPath("/tmp/p", { accountId: "x", projectId: "1" }),
+    ).not.toBe(workspaceIdFromPath("/tmp/p", { accountId: "y", projectId: "1" }));
+  });
+});
+
+describe("tenant isolation (episode store + engine)", () => {
+  function makeEpisode(workspaceId: string, sessionId: string, summary: string) {
+    return {
+      workspaceId,
+      sessionId,
+      kind: "user_turn" as const,
+      summary,
+      content: `${summary} — secret body for ${sessionId}`,
+      filePaths: [],
+      tokenEstimate: 10,
+      createdAt: Date.now(),
+      createdBy: sessionId,
+    };
+  }
+
+  it("does not leak episodes across tenants sharing a directory", async () => {
+    // Same workdir, two tenants → two distinct workspace ids.
+    const workdir = "/tmp/shared-checkout";
+    const wsA = workspaceIdFromPath(workdir, TENANT_A);
+    const wsB = workspaceIdFromPath(workdir, TENANT_B);
+    expect(wsA).not.toBe(wsB);
+
+    const store = new SqliteEpisodeStore(dbPath);
+    const engine = new MemoryEngine({ store, embedder: new StubEmbedder() });
+    await engine.init();
+
+    // Tenant A ingests a sensitive episode.
+    engine.ingest(makeEpisode(wsA, "sess-a", "read the API key from config"));
+    await engine.drain();
+
+    // Tenant B recalls in the SAME directory → sees nothing of A's.
+    const bHits = await engine.recall({ query: "API key", workspaceId: wsB });
+    expect(bHits).toHaveLength(0);
+    expect(engine.timeline(wsB)).toHaveLength(0);
+    expect(store.listRecent(wsB, 10)).toHaveLength(0);
+    expect(store.ftsSearch(wsB, "API key", 10)).toHaveLength(0);
+
+    // Tenant A still recalls its own episode.
+    const aHits = await engine.recall({ query: "API key", workspaceId: wsA });
+    expect(aHits.length).toBeGreaterThan(0);
+    expect(aHits[0]!.episode.content).toContain("secret body for sess-a");
+
+    await engine.close();
   });
 });
 
@@ -264,7 +334,7 @@ describe("EpisodeChunker", () => {
     const emitted: Array<{ kind: string; toolName?: string; summary: string }> = [];
     const chunker = new EpisodeChunker(
       {
-        workspaceId: workspaceIdFromPath("/tmp/project"),
+        workspaceId: workspaceIdFromPath("/tmp/project", TENANT_A),
         sessionId: "s1",
         createdBy: "u",
       },

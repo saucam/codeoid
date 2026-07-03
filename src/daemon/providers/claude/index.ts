@@ -29,7 +29,6 @@ import type { AgentIdentityManager } from "../../agent-identity.js";
 import type { Store } from "../../store.js";
 import {
   buildMemoryMcpServer,
-  workspaceIdFromPath,
   type MemoryEngine,
 } from "../../memory/index.js";
 import type { CompressionRegistry } from "../../compress/index.js";
@@ -46,6 +45,10 @@ export interface ClaudeProviderInit {
   sessionId: string;
   /** Persisted backing id from Store, or the session id itself on first run. */
   initialBackingId: string;
+  /** Tenant-scoped memory workspace id (computed once by Session). Used to bind
+   * the memory MCP server so recall/timeline read the SAME scope episodes are
+   * written under. */
+  workspaceId: string;
   store: Store;
   identityManager?: AgentIdentityManager;
   /** Codeoid memory engine — injected as an MCP server. */
@@ -246,7 +249,7 @@ export class ClaudeProvider implements SessionProvider {
       ...(init.memory
         ? {
             codeoid_memory: buildMemoryMcpServer(init.memory, {
-              workspaceId: workspaceIdFromPath(opts.workdir),
+              workspaceId: init.workspaceId,
               sessionId,
             }),
           }

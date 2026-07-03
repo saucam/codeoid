@@ -12,7 +12,11 @@ import { SqliteEpisodeStore } from "./store.js";
 import { createEmbedder, type EmbedderConfig } from "./embedder.js";
 import { MemoryEngine } from "./engine.js";
 
-export { SqliteEpisodeStore, workspaceIdFromPath } from "./store.js";
+export {
+  SqliteEpisodeStore,
+  workspaceIdFromPath,
+  type WorkspaceTenant,
+} from "./store.js";
 export { MemoryEngine, type SessionSearchHit } from "./engine.js";
 export { EpisodeChunker, extractFilePaths } from "./chunker.js";
 export { buildMemoryMcpServer } from "./mcp.js";
