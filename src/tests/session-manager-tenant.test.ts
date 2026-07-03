@@ -68,6 +68,9 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  // Sessions created via the manager fire-and-forget meta writes; drain them
+  // before deleting the dir so a pending atomic rename doesn't ENOENT.
+  try { await transcript.flush(); } catch {}
   try { await memory.close(); } catch {}
   try { store.close(); } catch {}
   try { rmSync(tmp, { recursive: true, force: true }); } catch {}
