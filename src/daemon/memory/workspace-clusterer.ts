@@ -84,6 +84,10 @@ export class WorkspaceClusterer {
   async recluster(): Promise<void> {
     if (this.#running) return; // single flight — a pass is already underway
     this.#running = true;
+    // Snapshot the pending counter: onEpisode() keeps incrementing while the
+    // pass is awaiting, and those mid-pass arrivals must still count toward
+    // the NEXT threshold — the pass only consumed what preceded it.
+    const consumed = this.#episodesSinceLast;
     try {
       const episodes = this.#store.listRecentForClustering(
         this.#workspaceId,
@@ -91,7 +95,7 @@ export class WorkspaceClusterer {
       );
       if (episodes.length < MIN_EPISODES_FOR_CLUSTERING) {
         this.#labeled = [];
-        this.#finishPass([]);
+        this.#finishPass([], consumed);
         return;
       }
       const clusters = await clusterEpisodesYielding(episodes, { k: 8 });
@@ -103,7 +107,7 @@ export class WorkspaceClusterer {
         })),
       );
       this.#labeled = labeled;
-      this.#finishPass(clusters);
+      this.#finishPass(clusters, consumed);
     } catch (err) {
       console.error(
         `[codeoid/memory] recluster failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -113,9 +117,9 @@ export class WorkspaceClusterer {
     }
   }
 
-  #finishPass(clusters: Cluster[]): void {
+  #finishPass(clusters: Cluster[], consumed: number): void {
     this.#lastClusteredAt = this.#now();
-    this.#episodesSinceLast = 0;
+    this.#episodesSinceLast = Math.max(0, this.#episodesSinceLast - consumed);
     // Evict cached labels whose cluster no longer exists — the cache used to
     // grow without bound over a long-lived daemon.
     if (this.#labeler instanceof CachedLabeler) {

@@ -381,6 +381,41 @@ describe("WorkspaceClusterer", () => {
     expect(calls).toBe(clusterer.clusters.length);
   });
 
+  it("keeps episodes that arrive mid-pass counted toward the next threshold", async () => {
+    seedWorkspace([
+      { count: 40, axis: 0, summaryPrefix: "memory edit", tool: "Edit", dir: "src/memory" },
+    ]);
+    const clock = { t: 1_000_000 };
+    let calls = 0;
+    const slow: Labeler = {
+      async label(_c: Cluster): Promise<ClusterLabel> {
+        calls++;
+        await new Promise((r) => setTimeout(r, 5));
+        return { label: "topic", source: "heuristic" };
+      },
+    };
+    const clusterer = new WorkspaceClusterer({
+      store,
+      workspaceId: WS,
+      labeler: slow,
+      now: () => clock.t,
+    });
+
+    const pass = clusterer.recluster();
+    // Arrivals while the pass is in flight — the pass didn't consume these,
+    // so they must still count toward the NEXT trigger threshold.
+    for (let i = 0; i < 10; i++) clusterer.onEpisode();
+    await pass;
+    const callsAfterFirstPass = calls;
+    expect(callsAfterFirstPass).toBeGreaterThan(0);
+
+    // Interval elapses; the mid-pass arrivals alone must re-trigger.
+    clock.t += 5 * 60_000;
+    clusterer.onEpisode();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(calls).toBeGreaterThan(callsAfterFirstPass);
+  });
+
   it("prunes the label cache after every pass", async () => {
     class SpyCachedLabeler extends CachedLabeler {
       pruneCalls: string[][] = [];
