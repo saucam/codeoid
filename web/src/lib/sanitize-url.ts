@@ -59,6 +59,12 @@ export function safeLinkUri(uri: string): string {
 export function safeImageUri(src: string): string {
   const url = (src ?? "").trim();
   if (url === "") return "";
+  // Protocol-relative / network-path references (//host, and backslash-
+  // obfuscated variants /\host, \\host that browsers normalize) fetch
+  // cross-origin under the page's scheme — a zero-click exfil channel. Treat
+  // them like http(s), NOT same-origin, so they must be caught before the
+  // root-relative `/` allowance below.
+  if (/^[/\\]{2}/.test(url)) return "";
   const first = url.charAt(0);
   if (first === "#" || first === "/") return url; // anchor / root-relative
 

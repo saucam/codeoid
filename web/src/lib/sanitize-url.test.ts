@@ -55,6 +55,14 @@ describe("safeImageUri", () => {
     expect(safeImageUri("http://attacker.example/p.gif")).toBe("");
   });
 
+  it("blocks protocol-relative and backslash-obfuscated remote images", () => {
+    expect(safeImageUri("//attacker.example/p.gif")).toBe("");
+    expect(safeImageUri("/\\attacker.example/p.gif")).toBe("");
+    expect(safeImageUri("\\\\attacker.example\\p.gif")).toBe("");
+    // A single leading slash is same-origin and still allowed.
+    expect(safeImageUri("/assets/ok.png")).toBe("/assets/ok.png");
+  });
+
   it("blocks dangerous and non-image data schemes", () => {
     expect(safeImageUri("javascript:alert(1)")).toBe("");
     expect(safeImageUri("data:text/html,<script>alert(1)</script>")).toBe("");

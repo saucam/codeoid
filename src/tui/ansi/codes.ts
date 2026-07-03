@@ -150,7 +150,10 @@ export function sanitizeTerminalOutput(s: string): string {
 		.replace(ANSI_DEVICE_CTRL, "")
 		.replace(ANSI_CSI_NON_SGR, "")
 		.replace(ANSI_ESC_OTHER, "")
-		.replace(/\x1b$/, "")
+		// A dangling escape introducer at end-of-chunk (lone `ESC`, or `ESC [`
+		// with params/intermediates but no final byte) would otherwise be
+		// completed by the first bytes of the NEXT write — strip it too.
+		.replace(/\x1b\[?[0-?]*[ -/]*$/, "")
 		.replace(C0_UNSAFE, "");
 }
 

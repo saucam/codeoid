@@ -66,6 +66,22 @@ describe("sanitizeTerminalOutput", () => {
     expect(sanitizeTerminalOutput(mixed)).toBe(link);
   });
 
+  it("strips a dangling escape introducer at end-of-chunk (cross-write safety)", () => {
+    // A chunk ending in `ESC` or `ESC [ …` (no final byte) must not survive to
+    // be completed by the next write's bytes.
+    expect(sanitizeTerminalOutput("foo\x1b")).toBe("foo");
+    expect(sanitizeTerminalOutput("foo\x1b[")).toBe("foo");
+    expect(sanitizeTerminalOutput("foo\x1b[31")).toBe("foo");
+    expect(sanitizeTerminalOutput("foo\x1b[?25")).toBe("foo");
+    // A COMPLETE trailing SGR is still preserved.
+    expect(sanitizeTerminalOutput(`foo${ESC}[31m`)).toBe(`foo${ESC}[31m`);
+    // Simulate a split attack: `ESC[` at the end of one chunk + `2J` at the
+    // start of the next must NOT reconstruct a clear-screen after sanitizing.
+    const a = sanitizeTerminalOutput("line\x1b[");
+    const b = sanitizeTerminalOutput("2Jrest");
+    expect(a + b).not.toContain(`${ESC}[2J`);
+  });
+
   it("is stricter than stripAnsi (which misses cursor/screen CSI)", () => {
     const attack = `x${ESC}[2Jy`; // clear-screen CSI embedded in content
     // stripAnsi (built for width math) leaves the cursor/screen CSI in place …
