@@ -63,12 +63,16 @@ function normalizeWorkdir(input: string): string | null {
   }
 }
 
-/** Eager-resume bounds. Resume runs before the daemon listens, and each
- * session's full transcript is read into memory — so an unbounded resume can
- * block startup or OOM. Cap to the newest-N sessions and stop past a deadline;
- * the rest stay on disk (loadable on a future restart with a higher cap). */
+/** Eager-resume bounds. Resume runs before the daemon listens — so an
+ * unbounded resume can block startup or OOM. Cap to the newest-N sessions and
+ * stop past a deadline (applied WITHIN each transcript parse too, not just
+ * between sessions); the rest stay on disk (loadable on a future restart). */
 const RESUME_MAX_SESSIONS = 50;
 const RESUME_DEADLINE_MS = 20_000;
+/** Per-session transcript read budget on resume. Scrollback keeps at most
+ * 20 MiB / 5000 messages — parsing history past that would be evicted on
+ * arrival, so cap the read slightly above the scrollback byte cap. */
+const RESUME_TRANSCRIPT_MAX_BYTES = 24 * 1024 * 1024;
 
 /** Provider assumed when a client doesn't say which catalog it wants.
  *  Sessions are Claude-backed today; when the provider registry is wired
@@ -165,10 +169,15 @@ export class SessionManager {
 
         // Restore scrollback from transcript, seeding the seq counter past
         // the persisted tail so new appends continue the monotonic sequence.
-        const entries = await this.#transcriptStore.loadTranscript(meta.sessionId);
+        // Byte-budgeted + deadline-aware: one huge transcript can neither
+        // OOM the daemon nor eat the whole resume window by itself.
+        const entries = await this.#transcriptStore.loadTranscript(meta.sessionId, {
+          maxBytes: RESUME_TRANSCRIPT_MAX_BYTES,
+          deadlineAt: deadline,
+        });
         const messages = entries.map((e) => e.message);
         const maxSeq = entries.reduce((max, e) => Math.max(max, e.seq), -1);
-        session.restoreScrollback(messages, maxSeq + 1);
+        session.restoreScrollback(messages, maxSeq + 1, entries.map((e) => e.bytes));
 
         this.#sessions.set(session.id, session);
         // Resume is NOT a creation — don't burn a slot in the

@@ -153,3 +153,58 @@ describe("SessionManager tenant-scoped handlers", () => {
     expect(imported.newSessionId).not.toBe(sessionId); // import mints a new id
   });
 });
+
+describe("SessionManager.resumeSessions", () => {
+  it("rebuilds a session from disk and replays the transcript into scrollback", async () => {
+    const sid = "resume-target";
+    await transcript.saveMeta({
+      sessionId: sid,
+      sessionName: "resumed",
+      workdir: tmp,
+      createdBy: AUTH.sub,
+      createdAt: new Date().toISOString(),
+      lastStatus: "idle",
+      lastActivityAt: new Date().toISOString(),
+      accountId: AUTH.accountId!,
+      projectId: AUTH.projectId!,
+    });
+    const contents = ["alpha", "beta", "gamma"];
+    for (let i = 0; i < contents.length; i++) {
+      await transcript.append(
+        sid,
+        {
+          type: "session.message",
+          sessionId: sid,
+          messageId: `resume-msg-${i}`,
+          role: "assistant",
+          content: contents[i]!,
+          identity: { sub: AUTH.sub, displayName: "t" } as never,
+          timestamp: new Date().toISOString(),
+        },
+        i,
+      );
+    }
+    await transcript.flush();
+
+    expect(await manager.resumeSessions()).toBe(1);
+
+    // Attaching replays the restored scrollback — proving the bounded
+    // transcript load fed restoreScrollback end-to-end.
+    const received: Array<{ type: string; messages?: Array<{ content: string }> }> = [];
+    const client = {
+      id: "resume-client",
+      auth: AUTH,
+      send: (m: unknown) => received.push(m as never),
+    };
+    const res = (await manager.handle(
+      { type: "session.attach", id: "req-attach", sessionId: sid },
+      AUTH,
+      client,
+    )) as { type: string };
+    expect(res.type).toBe("response.ok");
+
+    const replay = received.find((m) => m.type === "scrollback.replay");
+    expect(replay).toBeDefined();
+    expect(replay!.messages?.map((m) => m.content)).toEqual(contents);
+  });
+});

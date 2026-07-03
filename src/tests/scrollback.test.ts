@@ -135,3 +135,26 @@ describe("ScrollbackBuffer", () => {
     expect(buf.bytes).toBe(JSON.stringify(buf.read()[0]).length);
   });
 });
+
+describe("ScrollbackBuffer — sizeHint", () => {
+  test("push honors a caller-provided size hint instead of re-serializing", () => {
+    // Real serialized size of each message is ~150+ bytes; hints say 10.
+    // With a 300-byte cap, hinted accounting keeps all five messages —
+    // re-serialization would have evicted some.
+    const buf = new ScrollbackBuffer({ maxEntries: 1000, maxBytes: 300 });
+    for (let i = 0; i < 5; i++) {
+      buf.push(makeMsg(`hinted message ${i} ${"p".repeat(200)}`), 10);
+    }
+    expect(buf.length).toBe(5);
+    expect(buf.bytes).toBe(50);
+  });
+
+  test("push re-accounts an existing entry using the new size hint", () => {
+    const buf = new ScrollbackBuffer({ maxEntries: 1000, maxBytes: 1000 });
+    const msg = makeMsg("original");
+    buf.push(msg, 10);
+    buf.push({ ...msg, content: "updated" }, 25);
+    expect(buf.length).toBe(1);
+    expect(buf.bytes).toBe(25);
+  });
+});

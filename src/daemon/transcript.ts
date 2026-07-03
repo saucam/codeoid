@@ -14,9 +14,9 @@
  */
 
 import { existsSync, mkdirSync } from "node:fs";
-import { appendFile, rename, writeFile } from "node:fs/promises";
+import { appendFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { DaemonMessage, SessionStatus } from "../protocol/types.js";
+import type { DaemonMessage, SessionMessage, SessionStatus } from "../protocol/types.js";
 
 /** Persistent entry in the transcript. */
 export interface TranscriptEntry {
@@ -26,7 +26,49 @@ export interface TranscriptEntry {
   timestamp: string;
   /** The message that was broadcast. */
   message: DaemonMessage;
+  /**
+   * UTF-8 byte length of the JSONL line this entry was loaded from (of the
+   * LAST line, for messages updated across several lines). Populated by
+   * loadTranscript only — never persisted. Lets resume seed scrollback size
+   * accounting without re-serializing every historical message.
+   */
+  bytes?: number;
 }
+
+/** Byte-budget / deadline knobs for loadTranscript. */
+export interface LoadTranscriptOptions {
+  /**
+   * Read at most this many bytes, taken from the NEWEST end of the log
+   * (older segments — and the head of the oldest file that still fits —
+   * are skipped). Resume passes the scrollback cap: anything past it would
+   * be evicted right after being parsed anyway.
+   */
+  maxBytes?: number;
+  /**
+   * Absolute epoch-ms deadline. Checked every few hundred lines DURING the
+   * parse (not just between files): when exceeded, parsing stops and the
+   * entries merged so far are returned, so one huge transcript can't wedge
+   * daemon startup past the resume deadline.
+   */
+  deadlineAt?: number;
+}
+
+/** Tuning knobs, injectable for tests. */
+export interface TranscriptStoreOptions {
+  /** Rotate the live JSONL past this size. Default 32 MiB. */
+  segmentMaxBytes?: number;
+  /** Rotated segments kept per session (older ones are deleted). Default 2. */
+  maxRotatedSegments?: number;
+}
+
+const DEFAULT_SEGMENT_MAX_BYTES = 32 * 1024 * 1024;
+const DEFAULT_MAX_ROTATED_SEGMENTS = 2;
+/** Per-line cap on persisted tool output — the transcript is a resume/replay
+ * log, not an archival copy of every 10 MB build log a tool ever printed.
+ * The in-memory scrollback (and the live broadcast) keep the full output. */
+const TOOL_OUTPUT_PERSIST_CAP = 64 * 1024;
+/** Lines between deadline checks while parsing a transcript. */
+const DEADLINE_CHECK_EVERY = 512;
 
 /** Session metadata stored alongside transcript for fast resume. */
 export interface TranscriptMeta {
@@ -62,9 +104,24 @@ export class TranscriptStore {
   #metaWriteChain = new Map<string, Promise<void>>();
   /** Per-session promise chain for `append()`. See append() docs. */
   #appendChain = new Map<string, Promise<void>>();
+  /** Live-file byte counter per session, so rotation doesn't stat per append.
+   * Seeded lazily from the file's on-disk size on the first append. */
+  #liveBytes = new Map<string, number>();
+  #segmentMaxBytes: number;
+  #maxRotatedSegments: number;
 
-  constructor(transcriptDir: string) {
+  constructor(transcriptDir: string, opts: TranscriptStoreOptions = {}) {
     this.#dir = transcriptDir;
+    // Sanity-clamp the internal tuning knobs — a zero/negative/fractional
+    // value would make rotation thrash or produce unreadable segment paths.
+    this.#segmentMaxBytes = Math.max(
+      1,
+      Math.floor(opts.segmentMaxBytes ?? DEFAULT_SEGMENT_MAX_BYTES),
+    );
+    this.#maxRotatedSegments = Math.max(
+      1,
+      Math.floor(opts.maxRotatedSegments ?? DEFAULT_MAX_ROTATED_SEGMENTS),
+    );
     if (!existsSync(this.#dir)) {
       mkdirSync(this.#dir, { recursive: true });
     }
@@ -84,9 +141,14 @@ export class TranscriptStore {
     ]);
   }
 
-  /** Path to a session's transcript file. */
+  /** Path to a session's live (currently-appended) transcript file. */
   transcriptPath(sessionId: string): string {
     return join(this.#dir, `${sessionId}.jsonl`);
+  }
+
+  /** Path to rotated segment `n` (1 = newest rotated, higher = older). */
+  #segmentPath(sessionId: string, n: number): string {
+    return `${this.transcriptPath(sessionId)}.${n}`;
   }
 
   /** Path to a session's metadata file. */
@@ -104,10 +166,9 @@ export class TranscriptStore {
     const entry: TranscriptEntry = {
       seq,
       timestamp: "timestamp" in msg ? (msg as { timestamp: string }).timestamp : new Date().toISOString(),
-      message: msg,
+      message: capPersistedToolOutput(msg),
     };
 
-    const path = this.transcriptPath(sessionId);
     const line = `${JSON.stringify(entry)}\n`;
 
     // True append. The previous implementation read the entire file
@@ -128,7 +189,7 @@ export class TranscriptStore {
     const prev = this.#appendChain.get(sessionId) ?? Promise.resolve();
     const next = prev
       .catch(() => undefined)
-      .then(() => appendFile(path, line, "utf-8"));
+      .then(() => this.#appendWithRotation(sessionId, line));
     this.#appendChain.set(
       sessionId,
       next.finally(() => {
@@ -138,6 +199,61 @@ export class TranscriptStore {
       }),
     );
     return next;
+  }
+
+  /**
+   * Append one line to the live file, rotating it into a numbered segment
+   * first when it would exceed the size ceiling. Runs inside the per-session
+   * append chain, so the size counter and the rename can't race other writes.
+   * Rotation is what keeps both disk usage AND the resume-time read bounded —
+   * before it, transcripts grew without bound and were re-read whole.
+   */
+  async #appendWithRotation(sessionId: string, line: string): Promise<void> {
+    const path = this.transcriptPath(sessionId);
+    const lineBytes = Buffer.byteLength(line, "utf-8");
+
+    let liveBytes = this.#liveBytes.get(sessionId);
+    if (liveBytes === undefined) {
+      const f = Bun.file(path);
+      liveBytes = (await f.exists()) ? f.size : 0;
+    }
+
+    if (liveBytes > 0 && liveBytes + lineBytes > this.#segmentMaxBytes) {
+      await this.#rotate(sessionId);
+      liveBytes = 0;
+    }
+
+    await appendFile(path, line, "utf-8");
+    this.#liveBytes.set(sessionId, liveBytes + lineBytes);
+  }
+
+  /** Shift segments one slot older (dropping the oldest) and move the live
+   * file into slot 1. Retention: live + #maxRotatedSegments segments.
+   * Only ENOENT is tolerated (segment not written yet / live file deleted
+   * concurrently) — any other rename failure is logged, since silently
+   * continuing could overwrite a segment that never shifted. */
+  async #rotate(sessionId: string): Promise<void> {
+    await rm(this.#segmentPath(sessionId, this.#maxRotatedSegments), { force: true });
+    for (let i = this.#maxRotatedSegments - 1; i >= 1; i--) {
+      try {
+        await rename(this.#segmentPath(sessionId, i), this.#segmentPath(sessionId, i + 1));
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+          console.error(
+            `[codeoid] transcript ${sessionId}: segment shift ${i}→${i + 1} failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+    }
+    try {
+      await rename(this.transcriptPath(sessionId), this.#segmentPath(sessionId, 1));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.error(
+          `[codeoid] transcript ${sessionId}: rotate live→1 failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
   }
 
   /**
@@ -212,65 +328,129 @@ export class TranscriptStore {
   }
 
   /**
-   * Load a session's transcript entries — used for scrollback replay on resume.
+   * Load a session's transcript entries — used for scrollback replay on
+   * resume (byte-budgeted, deadline-aware) and by share.pack (unbounded).
    *
    * Entries with the same messageId are applied in order (append-only log).
-   * Later entries for the same messageId are updates (e.g. tool state transitions).
-   * Returns the final merged state of each unique message.
+   * Later entries for the same messageId are updates (e.g. tool state
+   * transitions). Returns the final merged state of each unique message.
+   *
+   * Files are STREAM-parsed line by line (never `file.text()`-ed whole), and
+   * with `maxBytes` set, only the newest window of the log is read at all:
+   * rotated segments — and the head of the oldest file that straddles the
+   * budget — are skipped, since resume's scrollback would evict everything
+   * past its cap anyway.
    */
-  async loadTranscript(sessionId: string): Promise<TranscriptEntry[]> {
-    const path = this.transcriptPath(sessionId);
-    const file = Bun.file(path);
-
-    if (!await file.exists()) return [];
-
-    const text = await file.text();
-    const raw: TranscriptEntry[] = [];
-
-    for (const line of text.split("\n")) {
-      if (!line.trim()) continue;
-      try {
-        raw.push(JSON.parse(line));
-      } catch {
-        // Skip corrupted lines
-      }
+  async loadTranscript(
+    sessionId: string,
+    opts: LoadTranscriptOptions = {},
+  ): Promise<TranscriptEntry[]> {
+    // Oldest → newest: [.N, …, .1, live].
+    const candidates: string[] = [];
+    for (let i = this.#maxRotatedSegments; i >= 1; i--) {
+      candidates.push(this.#segmentPath(sessionId, i));
     }
+    candidates.push(this.transcriptPath(sessionId));
 
-    // Merge entries by messageId — later entries update earlier ones
-    const byMessageId = new Map<string, TranscriptEntry>();
-    const order: string[] = [];
-
-    for (const entry of raw) {
-      const msg = entry.message;
-      const messageId = (msg as { messageId?: string }).messageId;
-
-      if (!messageId) {
-        // No messageId (e.g. status_change) — keep as-is with synthetic key
-        const key = `_seq_${entry.seq}`;
-        byMessageId.set(key, entry);
-        order.push(key);
+    // Walk newest-first, keeping files while budget remains; the oldest
+    // surviving file may enter mid-way (offset > 0, first partial line
+    // dropped by the reader).
+    const chosen: Array<{ path: string; offset: number }> = [];
+    let budget = opts.maxBytes ?? Number.POSITIVE_INFINITY;
+    let skippedBytes = 0;
+    for (let i = candidates.length - 1; i >= 0; i--) {
+      const f = Bun.file(candidates[i]!);
+      if (!(await f.exists())) continue;
+      if (budget <= 0) {
+        skippedBytes += f.size;
         continue;
       }
-
-      if (byMessageId.has(messageId)) {
-        // Update: merge the newer entry over the older one
-        const existing = byMessageId.get(messageId)!;
-        const existingMsg = existing.message as unknown as Record<string, unknown>;
-        const newMsg = msg as unknown as Record<string, unknown>;
-
-        // Shallow merge — newer fields overwrite older, preserving what's not in the update
-        for (const [k, v] of Object.entries(newMsg)) {
-          if (v !== undefined) existingMsg[k] = v;
-        }
-        // Deep merge tool state specifically
-        if (newMsg.tool && existingMsg.tool) {
-          Object.assign(existingMsg.tool as Record<string, unknown>, newMsg.tool as Record<string, unknown>);
-        }
-        existing.seq = entry.seq; // update seq to latest
+      if (f.size <= budget) {
+        chosen.unshift({ path: candidates[i]!, offset: 0 });
+        budget -= f.size;
       } else {
-        // First occurrence — insert
-        byMessageId.set(messageId, { ...entry, message: { ...msg as object } as typeof msg });
-        order.push(messageId);
+        skippedBytes += f.size - budget;
+        chosen.unshift({ path: candidates[i]!, offset: f.size - budget });
+        budget = 0;
+      }
+    }
+    if (skippedBytes > 0) {
+      console.warn(
+        `[codeoid] transcript ${sessionId}: replay window capped at ${opts.maxBytes} bytes — ${skippedBytes} bytes of older history left on disk (still exported by share.pack).`,
+      );
+    }
+
+    // Merge entries by messageId — later entries update earlier ones.
+    const byMessageId = new Map<string, TranscriptEntry>();
+    const order: string[] = [];
+    let sinceDeadlineCheck = 0;
+
+    outer: for (const { path, offset } of chosen) {
+      for await (const line of readLines(path, offset)) {
+        if (++sinceDeadlineCheck >= DEADLINE_CHECK_EVERY) {
+          sinceDeadlineCheck = 0;
+          if (opts.deadlineAt !== undefined && Date.now() > opts.deadlineAt) {
+            console.warn(
+              `[codeoid] transcript ${sessionId}: resume deadline hit mid-parse — replaying the ${order.length} message(s) merged so far.`,
+            );
+            break outer;
+          }
+        }
+        if (!line.trim()) continue;
+        let entry: TranscriptEntry;
+        try {
+          entry = JSON.parse(line);
+        } catch {
+          continue; // Skip corrupted lines
+        }
+        // Valid JSON isn't necessarily a valid entry — `null`, arrays, or
+        // primitives would throw on the field accesses below. Skip them the
+        // same way as corrupted lines.
+        if (
+          entry === null ||
+          typeof entry !== "object" ||
+          Array.isArray(entry) ||
+          typeof entry.message !== "object" ||
+          entry.message === null
+        ) {
+          continue;
+        }
+        const bytes = Buffer.byteLength(line, "utf-8");
+
+        const msg = entry.message;
+        const messageId = (msg as { messageId?: string }).messageId;
+
+        if (!messageId) {
+          // No messageId (e.g. status_change) — keep as-is with synthetic key
+          const key = `_seq_${entry.seq}`;
+          byMessageId.set(key, { ...entry, bytes });
+          order.push(key);
+          continue;
+        }
+
+        if (byMessageId.has(messageId)) {
+          // Update: merge the newer entry over the older one
+          const existing = byMessageId.get(messageId)!;
+          const existingMsg = existing.message as unknown as Record<string, unknown>;
+          const newMsg = msg as unknown as Record<string, unknown>;
+
+          // Shallow merge — newer fields overwrite older, preserving what's not in the update
+          for (const [k, v] of Object.entries(newMsg)) {
+            if (v !== undefined) existingMsg[k] = v;
+          }
+          // Deep merge tool state specifically
+          if (newMsg.tool && existingMsg.tool) {
+            Object.assign(existingMsg.tool as Record<string, unknown>, newMsg.tool as Record<string, unknown>);
+          }
+          existing.seq = entry.seq; // update seq to latest
+          // The merged message is at least as large as its latest full line —
+          // good enough for scrollback's byte accounting.
+          existing.bytes = Math.max(existing.bytes ?? 0, bytes);
+        } else {
+          // First occurrence — insert
+          byMessageId.set(messageId, { ...entry, message: { ...msg as object } as typeof msg, bytes });
+          order.push(messageId);
+        }
       }
     }
 
@@ -278,14 +458,87 @@ export class TranscriptStore {
   }
 
   /**
-   * Delete a session's transcript and metadata.
+   * Delete a session's transcript (live file + rotated segments) and metadata.
    */
   async delete(sessionId: string): Promise<void> {
-    const { unlinkSync } = await import("node:fs");
-    const transcriptPath = this.transcriptPath(sessionId);
-    const metaPath = this.metaPath(sessionId);
+    // Drain this session's in-flight fire-and-forget writes first — a
+    // pending append/meta chain settling after the removals below would
+    // recreate the file and resurrect the session on the next restart.
+    await Promise.allSettled([
+      this.#appendChain.get(sessionId),
+      this.#metaWriteChain.get(sessionId),
+    ]);
+    this.#liveBytes.delete(sessionId);
 
-    try { unlinkSync(transcriptPath); } catch { /* ignore */ }
-    try { unlinkSync(metaPath); } catch { /* ignore */ }
+    await rm(this.transcriptPath(sessionId), { force: true });
+    await rm(this.metaPath(sessionId), { force: true });
+    for (let i = 1; i <= this.#maxRotatedSegments; i++) {
+      await rm(this.#segmentPath(sessionId, i), { force: true });
+    }
   }
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────
+
+/**
+ * Stream a file's lines without materialising the whole file. With
+ * `offset > 0` the read starts mid-file and the first (partial) line is
+ * dropped — callers slice from a byte budget, not a line boundary.
+ */
+async function* readLines(path: string, offset: number): AsyncGenerator<string> {
+  const file = Bun.file(path);
+  const blob = offset > 0 ? file.slice(offset) : file;
+  const decoder = new TextDecoder();
+  let remainder = "";
+  let dropFirst = offset > 0;
+
+  for await (const chunk of blob.stream()) {
+    remainder += decoder.decode(chunk, { stream: true });
+    const lines = remainder.split("\n");
+    remainder = lines.pop()!;
+    for (const line of lines) {
+      if (dropFirst) {
+        dropFirst = false;
+        continue;
+      }
+      yield line;
+    }
+  }
+  remainder += decoder.decode();
+  if (remainder && !dropFirst) yield remainder;
+}
+
+/**
+ * Cap the tool output persisted per transcript line. Tool results routinely
+ * carry entire file contents / build logs; persisting them verbatim is the
+ * dominant term in transcript growth (up to three lines per tool call, one
+ * with the full output). The live broadcast and in-memory scrollback keep
+ * the full text — only the on-disk replay copy is trimmed.
+ */
+function capPersistedToolOutput(msg: DaemonMessage): DaemonMessage {
+  if (msg.type !== "session.message") return msg;
+  const tool = (msg as SessionMessage).tool;
+  if (!tool || tool.state.phase !== "completed") return msg;
+  const output = tool.state.output;
+  if (typeof output !== "string") return msg;
+  // Cap by real UTF-8 bytes, not UTF-16 code units — non-ASCII CLI output
+  // (CJK, box-drawing, emoji) would otherwise persist 2-3× past the cap.
+  const outputBytes = Buffer.byteLength(output, "utf-8");
+  if (outputBytes <= TOOL_OUTPUT_PERSIST_CAP) return msg;
+  // The byte slice can split a multi-byte char at the boundary; a non-fatal
+  // decode turns that into U+FFFD instead of throwing.
+  const truncated = new TextDecoder("utf-8", { fatal: false }).decode(
+    Buffer.from(output, "utf-8").subarray(0, TOOL_OUTPUT_PERSIST_CAP),
+  );
+
+  return {
+    ...msg,
+    tool: {
+      ...tool,
+      state: {
+        ...tool.state,
+        output: `${truncated}\n… [output truncated for persistence: ${outputBytes} bytes total]`,
+      },
+    },
+  } as DaemonMessage;
 }
