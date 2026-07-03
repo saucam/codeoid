@@ -420,6 +420,106 @@ describe("tenant isolation (episode store + engine)", () => {
   });
 });
 
+describe("SqliteEpisodeStore — vector cache incrementality", () => {
+  const WS = "ws_veccache";
+
+  function makeEpisode(summary: string, embedding?: Float32Array) {
+    return {
+      workspaceId: WS,
+      sessionId: "sess-vec",
+      kind: "user_turn" as const,
+      summary,
+      content: summary,
+      filePaths: [],
+      tokenEstimate: 5,
+      embedding,
+      embeddingModel: embedding ? "stub" : undefined,
+      createdAt: Date.now(),
+      createdBy: "u",
+    };
+  }
+
+  it("setEmbedding extends a built matrix in place instead of clearing it", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    store.insert(makeEpisode("first", new Float32Array([1, 0, 0, 0])));
+    const matrix = store.loadVectorMatrix(WS);
+    expect(matrix.ids).toHaveLength(1);
+
+    const ep2 = store.insert(makeEpisode("second"));
+    store.setEmbedding(ep2.id, new Float32Array([0, 1, 0, 0]), "stub", WS);
+
+    // Same object — the cache survived the write — and it has the new row.
+    const after = store.loadVectorMatrix(WS);
+    expect(after).toBe(matrix);
+    expect(after.ids).toEqual([after.ids[0]!, ep2.id]);
+    expect(Array.from(after.vectors[1]!)).toEqual([0, 1, 0, 0]);
+
+    // The cached rows match what a cold rebuild would read from SQLite.
+    // (Row ORDER differs — the rebuild SELECT is unordered — but recall's
+    // cosine scan is order-independent, so compare by id.)
+    const cold = new SqliteEpisodeStore(dbPath);
+    const rebuilt = cold.loadVectorMatrix(WS);
+    expect([...rebuilt.ids].sort()).toEqual([...after.ids].sort());
+    expect(Array.from(rebuilt.vectors[rebuilt.ids.indexOf(ep2.id)]!)).toEqual([0, 1, 0, 0]);
+    cold.close();
+    store.close();
+  });
+
+  it("insert with embedding appends to a built matrix", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    store.insert(makeEpisode("first", new Float32Array([1, 0])));
+    const matrix = store.loadVectorMatrix(WS);
+
+    const ep2 = store.insert(makeEpisode("second", new Float32Array([0.5, 0.5])));
+
+    const after = store.loadVectorMatrix(WS);
+    expect(after).toBe(matrix);
+    expect(after.ids).toHaveLength(2);
+    expect(after.ids[1]).toBe(ep2.id);
+    expect(Array.from(after.vectors[1]!)).toEqual([0.5, 0.5]);
+    store.close();
+  });
+
+  it("re-embedding an episode replaces its cached vector without duplicating", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    const ep = store.insert(makeEpisode("first", new Float32Array([1, 0])));
+    const matrix = store.loadVectorMatrix(WS);
+
+    store.setEmbedding(ep.id, new Float32Array([0, 1]), "stub-v2", WS);
+
+    const after = store.loadVectorMatrix(WS);
+    expect(after).toBe(matrix);
+    expect(after.ids).toEqual([ep.id]);
+    expect(Array.from(after.vectors[0]!)).toEqual([0, 1]);
+    store.close();
+  });
+
+  it("caches nothing until the first load, then reads new rows from SQLite", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    const ep = store.insert(makeEpisode("first"));
+    // No matrix built yet — this write must not conjure a partial cache.
+    store.setEmbedding(ep.id, new Float32Array([1, 0]), "stub", WS);
+
+    const matrix = store.loadVectorMatrix(WS);
+    expect(matrix.ids).toEqual([ep.id]);
+    expect(Array.from(matrix.vectors[0]!)).toEqual([1, 0]);
+    store.close();
+  });
+
+  it("copies the vector so later caller mutation can't desync the cache", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    const ep = store.insert(makeEpisode("first", new Float32Array([1, 0])));
+    store.loadVectorMatrix(WS);
+
+    const v = new Float32Array([0, 1]);
+    store.setEmbedding(ep.id, v, "stub", WS);
+    v[0] = 99;
+
+    expect(Array.from(store.loadVectorMatrix(WS).vectors[0]!)).toEqual([0, 1]);
+    store.close();
+  });
+});
+
 describe("EpisodeChunker", () => {
   it("emits one tool_call episode per completed tool invocation", () => {
     const emitted: Array<{ kind: string; toolName?: string; summary: string }> = [];
