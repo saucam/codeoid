@@ -75,6 +75,10 @@ afterEach(async () => {
   // races with the previous test's in-flight I/O, producing spurious
   // "Cannot use a closed database" and ENOENT errors.
   await new Promise<void>((r) => setTimeout(r, 100));
+  // The sleep alone is a heuristic — under CI load a pending saveMeta
+  // temp+rename can outlive it and ENOENT after rmSync, failing whichever
+  // test happens to be running. Drain the write chains deterministically.
+  try { await transcriptStore.flush(); } catch {}
   try { store.close(); } catch {}
   try { rmSync(tmp, { recursive: true, force: true }); } catch {}
 });
