@@ -14,11 +14,14 @@ import { join } from "node:path";
 import {
   SqliteEpisodeStore,
   clusterEpisodes,
+  clusterEpisodesYielding,
   HeuristicLabeler,
   CachedLabeler,
   MIN_EPISODES_FOR_CLUSTERING,
   buildWorkspaceIndex,
   IndexScheduler,
+  WorkspaceClusterer,
+  workspaceClustererFor,
   type Labeler,
   type Cluster,
   type ClusterLabel,
@@ -276,5 +279,128 @@ describe("index scheduler with clusters flag", () => {
     } else {
       expect(out).toContain("# Memory Index");
     }
+  });
+});
+
+describe("SqliteEpisodeStore.listRecentForClustering", () => {
+  it("returns a lean, embedded-only, newest-first projection", () => {
+    seedWorkspace([
+      { count: 5, axis: 0, summaryPrefix: "lean", tool: "Edit", dir: "src/lean" },
+    ]);
+    // Un-embedded episode — must be excluded from the clustering feed.
+    store.insert({
+      workspaceId: WS,
+      sessionId: "s9",
+      kind: "user_turn",
+      summary: "no vector yet",
+      content: "huge content that clustering must never hydrate",
+      filePaths: [],
+      tokenEstimate: 1,
+      createdAt: 1_800_000_000_000,
+      createdBy: "u",
+    });
+
+    const rows = store.listRecentForClustering(WS, 3);
+    expect(rows).toHaveLength(3);
+    // Newest first, and the un-embedded row is absent.
+    expect(rows[0]!.summary).toBe("lean 4");
+    // Lean projection: no content column, embedding decoded and usable.
+    expect("content" in rows[0]!).toBe(false);
+    expect(rows[0]!.embedding).toBeInstanceOf(Float32Array);
+    expect(rows[0]!.filePaths).toEqual(["src/lean/file-4.ts"]);
+    expect(rows[0]!.toolName).toBe("Edit");
+  });
+});
+
+describe("clusterEpisodesYielding", () => {
+  it("produces the same clusters as the synchronous entry point", async () => {
+    seedWorkspace([
+      { count: 40, axis: 0, summaryPrefix: "memory edit", tool: "Edit", dir: "src/memory" },
+      { count: 40, axis: 15, summaryPrefix: "tui render", tool: "Write", dir: "src/tui" },
+    ]);
+    const eps = store.listRecentForClustering(WS, 100);
+    const sync = clusterEpisodes(eps, { k: 2, seed: 42 });
+    const yielded = await clusterEpisodesYielding(eps, { k: 2, seed: 42 });
+    expect(yielded.map((c) => c.signature)).toEqual(sync.map((c) => c.signature));
+    expect(yielded.map((c) => c.members.length)).toEqual(sync.map((c) => c.members.length));
+  });
+});
+
+describe("WorkspaceClusterer", () => {
+  it("is shared per (store, workspace) and pays labeling once across schedulers", async () => {
+    seedWorkspace([
+      { count: 40, axis: 0, summaryPrefix: "memory edit", tool: "Edit", dir: "src/memory" },
+      { count: 40, axis: 15, summaryPrefix: "tui render", tool: "Write", dir: "src/tui" },
+    ]);
+    let calls = 0;
+    const counting: Labeler = {
+      async label(_c: Cluster): Promise<ClusterLabel> {
+        calls++;
+        return { label: `topic-${calls}`, source: "heuristic" };
+      },
+    };
+    const clusterer = workspaceClustererFor({ store, workspaceId: WS, labeler: counting });
+    // Any later resolution for the same (store, workspace) is the SAME object.
+    expect(workspaceClustererFor({ store, workspaceId: WS })).toBe(clusterer);
+
+    const schedA = new IndexScheduler({
+      store, workspaceId: WS, currentSessionId: "sA", clustersEnabled: true, debounceMs: 0,
+    });
+    const schedB = new IndexScheduler({
+      store, workspaceId: WS, currentSessionId: "sB", clustersEnabled: true, debounceMs: 0,
+    });
+
+    await clusterer.recluster();
+    const callsAfterFirstPass = calls;
+    expect(callsAfterFirstPass).toBeGreaterThan(0);
+
+    // Both sessions' index rebuilds consume the SAME workspace clusters —
+    // no per-session re-hydration, k-means, or labeling.
+    expect(schedA.forceRebuild()).toContain("## Topic clusters");
+    expect(schedB.forceRebuild()).toContain("## Topic clusters");
+    expect(calls).toBe(callsAfterFirstPass);
+  });
+
+  it("single-flights concurrent recluster passes", async () => {
+    seedWorkspace([
+      { count: 40, axis: 0, summaryPrefix: "memory edit", tool: "Edit", dir: "src/memory" },
+    ]);
+    let calls = 0;
+    const slow: Labeler = {
+      async label(_c: Cluster): Promise<ClusterLabel> {
+        calls++;
+        await new Promise((r) => setTimeout(r, 10));
+        return { label: "slow", source: "heuristic" };
+      },
+    };
+    const clusterer = new WorkspaceClusterer({ store, workspaceId: WS, labeler: slow });
+    await Promise.all([clusterer.recluster(), clusterer.recluster(), clusterer.recluster()]);
+
+    expect(clusterer.clusters.length).toBeGreaterThan(0);
+    // One pass worth of labeling, not three.
+    expect(calls).toBe(clusterer.clusters.length);
+  });
+
+  it("prunes the label cache after every pass", async () => {
+    class SpyCachedLabeler extends CachedLabeler {
+      pruneCalls: string[][] = [];
+      override prune(liveSignatures: Iterable<string>): void {
+        const sigs = [...liveSignatures];
+        this.pruneCalls.push(sigs);
+        super.prune(sigs);
+      }
+    }
+    seedWorkspace([
+      { count: 40, axis: 0, summaryPrefix: "memory edit", tool: "Edit", dir: "src/memory" },
+    ]);
+    const spy = new SpyCachedLabeler(new HeuristicLabeler());
+    const clusterer = new WorkspaceClusterer({ store, workspaceId: WS, labeler: spy });
+
+    await clusterer.recluster();
+    expect(spy.pruneCalls).toHaveLength(1);
+    // The cache is trimmed to exactly the signatures that still exist.
+    expect(new Set(spy.pruneCalls[0])).toEqual(
+      new Set(clusterer.clusters.map((lc) => lc.cluster.signature)),
+    );
   });
 });

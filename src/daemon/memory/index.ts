@@ -26,10 +26,17 @@ export { buildWorkspaceIndex, MAX_INDEX_BYTES } from "./index-builder.js";
 export { IndexScheduler } from "./index-scheduler.js";
 export {
   clusterEpisodes,
+  clusterEpisodesYielding,
   MIN_EPISODES_FOR_CLUSTERING,
   type Cluster,
   type ClusterMember,
+  type ClusterableEpisode,
 } from "./cluster.js";
+export {
+  WorkspaceClusterer,
+  workspaceClustererFor,
+  type WorkspaceClustererOptions,
+} from "./workspace-clusterer.js";
 export {
   HeuristicLabeler,
   HaikuLabeler,

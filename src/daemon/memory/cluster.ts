@@ -17,8 +17,20 @@
 import { createHash } from "node:crypto";
 import type { Episode } from "./types.js";
 
+/**
+ * The subset of an Episode that clustering + labeling actually read. Loading
+ * full Episodes (notably `content`, which can carry entire tool outputs)
+ * into the heap just to k-means their embeddings was the dominant memory
+ * cost of a recluster — `SqliteEpisodeStore.listRecentForClustering`
+ * hydrates only this projection.
+ */
+export type ClusterableEpisode = Pick<
+  Episode,
+  "id" | "summary" | "filePaths" | "createdAt" | "toolName"
+> & { embedding?: Float32Array };
+
 export interface ClusterMember {
-  episode: Episode;
+  episode: ClusterableEpisode;
   /** Similarity to the cluster centroid (dot product for unit vectors). */
   similarity: number;
 }
@@ -60,9 +72,42 @@ export const MIN_EPISODES_FOR_CLUSTERING = 30;
  * drained the embed queue before calling for best results.
  */
 export function clusterEpisodes(
-  episodes: Episode[],
+  episodes: ClusterableEpisode[],
   opts: KMeansOptions = {},
 ): Cluster[] {
+  const gen = clusterSteps(episodes, opts);
+  let step = gen.next();
+  while (!step.done) step = gen.next();
+  return step.value;
+}
+
+/**
+ * Same algorithm, but yields the event loop between Lloyd's iterations.
+ * Each iteration over 1000 × 384-dim vectors × 8 centroids is a few
+ * megaflops of synchronous math; run back-to-back the full pass blocks the
+ * shared daemon event loop for hundreds of ms, freezing every session's
+ * token streaming. Interleaving with setImmediate caps the per-slice block
+ * at one iteration.
+ */
+export async function clusterEpisodesYielding(
+  episodes: ClusterableEpisode[],
+  opts: KMeansOptions = {},
+): Promise<Cluster[]> {
+  const gen = clusterSteps(episodes, opts);
+  let step = gen.next();
+  while (!step.done) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    step = gen.next();
+  }
+  return step.value;
+}
+
+/** K-means core as a generator — one `yield` per Lloyd's iteration, so the
+ * sync and yielding entry points share the exact same algorithm. */
+function* clusterSteps(
+  episodes: ClusterableEpisode[],
+  opts: KMeansOptions,
+): Generator<undefined, Cluster[]> {
   const embedded = episodes.filter((e) => e.embedding);
   if (embedded.length < MIN_EPISODES_FOR_CLUSTERING) return [];
 
@@ -79,7 +124,9 @@ export function clusterEpisodes(
 
   // Initialize with k-means++ — pick first centroid randomly, then each
   // subsequent one weighted by distance² to nearest existing centroid.
-  const centroids = kmeansPlusPlusInit(vectors, k, opts.seed ?? 42);
+  // (yield* so the yielding entry point can breathe between centroid picks —
+  // init is k full passes over the vectors, as heavy as Lloyd's iterations.)
+  const centroids = yield* kmeansPlusPlusInit(vectors, k, opts.seed ?? 42);
 
   // Lloyd's iterations.
   const assignments = new Int32Array(embedded.length);
@@ -128,10 +175,14 @@ export function clusterEpisodes(
       const cn = centroids[c]!;
       for (let d = 0; d < dim; d++) cn[d] = s[d]! / norm;
     }
+    yield;
   }
 
-  // Build Cluster output with member similarities + signatures.
-  const clustersRaw: Array<{ ep: Episode; sim: number; c: number }> = [];
+  // Build Cluster output with member similarities + signatures. This final
+  // pass (N×dim similarity + per-cluster sorts) is its own sizable chunk —
+  // give the yielding driver one more chance to breathe before it.
+  yield;
+  const clustersRaw: Array<{ ep: ClusterableEpisode; sim: number; c: number }> = [];
   for (let i = 0; i < embedded.length; i++) {
     const c = assignments[i]!;
     const v = vectors[i]!;
@@ -172,11 +223,11 @@ export function clusterEpisodes(
 
 // ── Internals ────────────────────────────────────────────────────────────
 
-function kmeansPlusPlusInit(
+function* kmeansPlusPlusInit(
   vectors: Float32Array[],
   k: number,
   seed: number,
-): Float32Array[] {
+): Generator<undefined, Float32Array[]> {
   const rng = mulberry32(seed);
   const dim = vectors[0]!.length;
   const centroids: Float32Array[] = [];
@@ -188,6 +239,7 @@ function kmeansPlusPlusInit(
   const dist = new Float32Array(vectors.length);
   // Work with (1 - similarity) as distance for unit vectors.
   for (let c = 1; c < k; c++) {
+    yield;
     let total = 0;
     for (let i = 0; i < vectors.length; i++) {
       let nearest = Number.NEGATIVE_INFINITY;
