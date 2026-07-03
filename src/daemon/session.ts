@@ -335,7 +335,9 @@ export class Session {
     this.#identityManager = opts.identityManager;
     this.#memory = opts.memory;
     this.#config = opts.config;
-    this.#workspaceId = workspaceIdFromPath(opts.workdir);
+    // Tenant-scoped (auth carries account_id/project_id) so two accounts in
+    // the same directory never share memory.
+    this.#workspaceId = workspaceIdFromPath(opts.workdir, opts.auth);
     // Rotation counters — populated from Store so they survive restart.
     const stats = this.#store.getRotationStats(this.id);
     this.#rotationCount = stats.count;
@@ -357,6 +359,10 @@ export class Session {
     this.#provider = opts._testProvider ?? new ClaudeProvider({
       sessionId: this.id,
       initialBackingId: this.#store.getClaudeCodeSessionId(this.id) ?? this.id,
+      // Pass the tenant-scoped workspace id in rather than have the provider
+      // re-derive it (which would drop the tenant and desync the memory MCP
+      // binding from where episodes are actually stored).
+      workspaceId: this.#workspaceId,
       store: opts.store,
       identityManager: opts.identityManager,
       memory: opts.memory,

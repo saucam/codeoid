@@ -18,7 +18,7 @@ import { ShutdownManager } from "./shutdown.js";
 import { AgentIdentityManager } from "./agent-identity.js";
 import { OAuthHandler, type OAuthConfig } from "./oauth.js";
 import { GoogleOAuthProvider } from "./identity-provider.js";
-import { createMemory, type MemoryEngine } from "./memory/index.js";
+import { createMemory, workspaceIdFromPath, type MemoryEngine } from "./memory/index.js";
 import {
   type CompressionRegistry,
   createRegistry,
@@ -195,6 +195,27 @@ export class DaemonServer {
         console.log(
           `[codeoid] memory enabled — episodes -> ${this.#config.memory.dbPath}`,
         );
+        // One-time: re-key episodes written under the old path-only workspace
+        // ids to the tenant-scoped ids, so memory from before the upgrade stays
+        // recallable. Gate on needsWorkspaceMigration() so the session-table
+        // read only happens on the first boot, not every restart. Best-effort.
+        if (this.#memory.store.needsWorkspaceMigration()) {
+          try {
+            const r = this.#memory.store.migrateWorkspaceIdsToTenant(
+              this.#store.listAllSessionsForMigration(),
+              workspaceIdFromPath,
+            );
+            if (r.migrated) {
+              console.log(
+                `[codeoid] memory: re-keyed ${r.reKeyed} pre-upgrade episode(s) to tenant-scoped workspaces`,
+              );
+            }
+          } catch (err) {
+            console.error(
+              `[codeoid] memory workspace migration failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
       } catch (err) {
         console.error(
           `[codeoid] memory init failed, continuing without recall: ${err instanceof Error ? err.message : String(err)}`,

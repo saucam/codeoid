@@ -342,7 +342,9 @@ export class SessionManager {
           transcript: this.#transcriptStore,
           store: this.#store,
           memory: this.#memory ?? null,
-          workspaceIdFor: workspaceIdFromPath,
+          // Bind the exporter's tenant so the derived workspace id matches the
+          // tenant-scoped ids episodes were written under.
+          workspaceIdFor: (wd: string) => workspaceIdFromPath(wd, auth),
         },
       );
 
@@ -476,7 +478,9 @@ export class SessionManager {
         {
           transcript: this.#transcriptStore,
           memory: this.#memory ?? null,
-          workspaceIdFor: workspaceIdFromPath,
+          // Bind the importer's tenant so imported episodes land under the same
+          // tenant-scoped workspace id this importer will read from.
+          workspaceIdFor: (wd: string) => workspaceIdFromPath(wd, auth),
           registerSession: async (init: ImportedSessionInit) => {
             // Create the Session shell first so we have an id; we don't
             // start() its query loop — the importer attaches via the
@@ -1046,7 +1050,9 @@ export class SessionManager {
     let workspaceId = "";
     if (scope === "workspace") {
       const anchorPath = msg.workdir ?? this.#guessCallerWorkdir(auth);
-      if (anchorPath) workspaceId = workspaceIdFromPath(anchorPath);
+      // auth carries the tenant (account_id/project_id) — scope by it so a
+      // caller can't recall episodes from another tenant sharing the path.
+      if (anchorPath) workspaceId = workspaceIdFromPath(anchorPath, auth);
     }
 
     // Provide a session-name map so the ranker can boost exact-name hits.

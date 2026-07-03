@@ -70,6 +70,20 @@ export class TranscriptStore {
     }
   }
 
+  /**
+   * Await all in-flight per-session append + meta writes to settle. The writes
+   * are fire-and-forget (append per message, `saveMeta` on every status flip),
+   * so without draining them a teardown of the transcript dir — a graceful
+   * shutdown, or a test's temp-dir cleanup — races a pending atomic rename and
+   * surfaces as an unhandled ENOENT. Call before removing the dir or exiting.
+   */
+  async flush(): Promise<void> {
+    await Promise.allSettled([
+      ...this.#metaWriteChain.values(),
+      ...this.#appendChain.values(),
+    ]);
+  }
+
   /** Path to a session's transcript file. */
   transcriptPath(sessionId: string): string {
     return join(this.#dir, `${sessionId}.jsonl`);

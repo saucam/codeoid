@@ -18,6 +18,7 @@ import {
   MemoryEngine,
   EpisodeChunker,
   workspaceIdFromPath,
+  legacyWorkspaceIdFromPath,
 } from "../daemon/memory/index.js";
 import type { Embedder } from "../daemon/memory/embedder.js";
 import type { SessionMessage, TurnUsage } from "../protocol/types.js";
@@ -233,29 +234,189 @@ describe("MemoryEngine.recall", () => {
   });
 });
 
+const TENANT_A = { accountId: "acc-a", projectId: "proj-a" };
+const TENANT_B = { accountId: "acc-b", projectId: "proj-b" };
+
 describe("workspaceIdFromPath", () => {
-  it("returns the same ID for different subdirs of the same repo", () => {
+  it("returns the same ID for different subdirs of the same repo (same tenant)", () => {
     // Use the actual repo this test runs in (process.cwd() is the repo root,
     // which is a git repo) rather than a hardcoded path that may not exist on
     // every machine — the prior literal `/Workspace/codeoid` made git
     // rev-parse fail and fall back to path-hashing, so the IDs diverged.
     const mainRepo = process.cwd();
     const srcSubdir = join(process.cwd(), "src");
-    const mainId = workspaceIdFromPath(mainRepo);
-    const subdirId = workspaceIdFromPath(srcSubdir);
+    const mainId = workspaceIdFromPath(mainRepo, TENANT_A);
+    const subdirId = workspaceIdFromPath(srcSubdir, TENANT_A);
     // Same git repo, different subdirectory → same workspace (anchored on git-common-dir).
     expect(mainId).toBe(subdirId);
   });
 
   it("returns different IDs for unrelated directories", () => {
-    const a = workspaceIdFromPath("/tmp");
-    const b = workspaceIdFromPath("/home");
+    const a = workspaceIdFromPath("/tmp", TENANT_A);
+    const b = workspaceIdFromPath("/home", TENANT_A);
     expect(a).not.toBe(b);
   });
 
   it("falls back to path hash for non-git dirs", () => {
-    const id = workspaceIdFromPath("/tmp");
+    const id = workspaceIdFromPath("/tmp", TENANT_A);
     expect(id).toMatch(/^ws_[a-f0-9]{16}$/);
+  });
+
+  it("is stable for the same (path, tenant)", () => {
+    expect(workspaceIdFromPath("/tmp/p", TENANT_A)).toBe(
+      workspaceIdFromPath("/tmp/p", TENANT_A),
+    );
+  });
+
+  it("returns DIFFERENT ids for the same path under different tenants", () => {
+    // The core isolation property: two accounts working the same directory
+    // must not collide on a workspace id (else one's recall reads the other's).
+    expect(workspaceIdFromPath("/tmp/p", TENANT_A)).not.toBe(
+      workspaceIdFromPath("/tmp/p", TENANT_B),
+    );
+    // account and project each independently affect the id.
+    expect(
+      workspaceIdFromPath("/tmp/p", { accountId: "x", projectId: "1" }),
+    ).not.toBe(workspaceIdFromPath("/tmp/p", { accountId: "x", projectId: "2" }));
+    expect(
+      workspaceIdFromPath("/tmp/p", { accountId: "x", projectId: "1" }),
+    ).not.toBe(workspaceIdFromPath("/tmp/p", { accountId: "y", projectId: "1" }));
+  });
+});
+
+describe("workspace-id migration (re-key legacy episodes to tenant)", () => {
+  function insertEp(
+    store: SqliteEpisodeStore,
+    workspaceId: string,
+    sessionId: string,
+    summary: string,
+  ) {
+    return store.insert({
+      workspaceId,
+      sessionId,
+      kind: "user_turn",
+      summary,
+      content: `${summary} — body`,
+      filePaths: [],
+      tokenEstimate: 10,
+      createdAt: Date.now(),
+      createdBy: sessionId,
+    });
+  }
+  const sess = (id: string, workdir: string, t: typeof TENANT_A) => ({
+    id,
+    workdir,
+    accountId: t.accountId,
+    projectId: t.projectId,
+  });
+
+  it("re-keys a session's legacy episodes to the tenant-scoped id, once", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    const workdir = "/tmp/legacy-proj";
+    const oldWs = legacyWorkspaceIdFromPath(workdir);
+    const newWs = workspaceIdFromPath(workdir, TENANT_A);
+    expect(oldWs).not.toBe(newWs);
+
+    const ep = insertEp(store, oldWs, "s1", "did a thing");
+    expect(store.listRecent(newWs, 10)).toHaveLength(0); // invisible pre-migration
+    expect(store.needsWorkspaceMigration()).toBe(true);
+
+    const r = store.migrateWorkspaceIdsToTenant([sess("s1", workdir, TENANT_A)], workspaceIdFromPath);
+    expect(r.migrated).toBe(true);
+    expect(store.needsWorkspaceMigration()).toBe(false); // guard flips after run
+    expect(r.reKeyed).toBeGreaterThanOrEqual(1);
+
+    // Visible under the tenant-scoped id now; gone from the old id.
+    expect(store.listRecent(newWs, 10).map((e) => e.id)).toEqual([ep.id]);
+    expect(store.listRecent(oldWs, 10)).toHaveLength(0);
+
+    // Guarded — a second run is a no-op.
+    expect(store.migrateWorkspaceIdsToTenant([sess("s1", workdir, TENANT_A)], workspaceIdFromPath).migrated).toBe(false);
+    store.close();
+  });
+
+  it("keeps two tenants that shared a directory separate", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    const workdir = "/tmp/shared-checkout";
+    const oldWs = legacyWorkspaceIdFromPath(workdir);
+    const epA = insertEp(store, oldWs, "sa", "tenant A secret");
+    const epB = insertEp(store, oldWs, "sb", "tenant B secret");
+
+    store.migrateWorkspaceIdsToTenant(
+      [sess("sa", workdir, TENANT_A), sess("sb", workdir, TENANT_B)],
+      workspaceIdFromPath,
+    );
+
+    expect(store.listRecent(workspaceIdFromPath(workdir, TENANT_A), 10).map((e) => e.id)).toEqual([epA.id]);
+    expect(store.listRecent(workspaceIdFromPath(workdir, TENANT_B), 10).map((e) => e.id)).toEqual([epB.id]);
+    store.close();
+  });
+
+  it("recovers an orphan (destroyed session) only when its workspace is single-tenant", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    const soloDir = "/tmp/solo-proj";
+    const sharedDir = "/tmp/shared-proj";
+    const soloOrphan = insertEp(store, legacyWorkspaceIdFromPath(soloDir), "gone-1", "solo orphan");
+    const sharedOrphan = insertEp(store, legacyWorkspaceIdFromPath(sharedDir), "gone-2", "shared orphan");
+
+    store.migrateWorkspaceIdsToTenant(
+      [
+        sess("s-solo", soloDir, TENANT_A), // single tenant → orphan recovered
+        sess("s-shared-a", sharedDir, TENANT_A), // two tenants on sharedDir →
+        sess("s-shared-b", sharedDir, TENANT_B), // ambiguous → orphan left alone
+      ],
+      workspaceIdFromPath,
+    );
+
+    expect(store.listRecent(workspaceIdFromPath(soloDir, TENANT_A), 10).map((e) => e.id)).toContain(soloOrphan.id);
+    expect(store.getEpisode(sharedOrphan.id)!.workspaceId).toBe(legacyWorkspaceIdFromPath(sharedDir));
+    store.close();
+  });
+});
+
+describe("tenant isolation (episode store + engine)", () => {
+  function makeEpisode(workspaceId: string, sessionId: string, summary: string) {
+    return {
+      workspaceId,
+      sessionId,
+      kind: "user_turn" as const,
+      summary,
+      content: `${summary} — secret body for ${sessionId}`,
+      filePaths: [],
+      tokenEstimate: 10,
+      createdAt: Date.now(),
+      createdBy: sessionId,
+    };
+  }
+
+  it("does not leak episodes across tenants sharing a directory", async () => {
+    // Same workdir, two tenants → two distinct workspace ids.
+    const workdir = "/tmp/shared-checkout";
+    const wsA = workspaceIdFromPath(workdir, TENANT_A);
+    const wsB = workspaceIdFromPath(workdir, TENANT_B);
+    expect(wsA).not.toBe(wsB);
+
+    const store = new SqliteEpisodeStore(dbPath);
+    const engine = new MemoryEngine({ store, embedder: new StubEmbedder() });
+    await engine.init();
+
+    // Tenant A ingests a sensitive episode.
+    engine.ingest(makeEpisode(wsA, "sess-a", "read the API key from config"));
+    await engine.drain();
+
+    // Tenant B recalls in the SAME directory → sees nothing of A's.
+    const bHits = await engine.recall({ query: "API key", workspaceId: wsB });
+    expect(bHits).toHaveLength(0);
+    expect(engine.timeline(wsB)).toHaveLength(0);
+    expect(store.listRecent(wsB, 10)).toHaveLength(0);
+    expect(store.ftsSearch(wsB, "API key", 10)).toHaveLength(0);
+
+    // Tenant A still recalls its own episode.
+    const aHits = await engine.recall({ query: "API key", workspaceId: wsA });
+    expect(aHits.length).toBeGreaterThan(0);
+    expect(aHits[0]!.episode.content).toContain("secret body for sess-a");
+
+    await engine.close();
   });
 });
 
@@ -264,7 +425,7 @@ describe("EpisodeChunker", () => {
     const emitted: Array<{ kind: string; toolName?: string; summary: string }> = [];
     const chunker = new EpisodeChunker(
       {
-        workspaceId: workspaceIdFromPath("/tmp/project"),
+        workspaceId: workspaceIdFromPath("/tmp/project", TENANT_A),
         sessionId: "s1",
         createdBy: "u",
       },

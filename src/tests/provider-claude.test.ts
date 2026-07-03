@@ -74,6 +74,7 @@ function makeProvider(): ClaudeProvider {
   return new ClaudeProvider({
     sessionId: "test-session",
     initialBackingId: "test-backing",
+    workspaceId: "ws_test",
     store: {
       audit: () => {},
       getClaudeCodeSessionId: () => null,
