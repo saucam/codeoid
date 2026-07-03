@@ -14,6 +14,7 @@ import {
   identityLabel,
   shortSub,
 } from "../../lib/identity";
+import { safeImageUri, safeLinkUri } from "../../lib/sanitize-url";
 import type {
   MessageRole,
   SessionMessage,
@@ -113,6 +114,10 @@ const MarkdownBlock: Component<{ text: string; streaming?: boolean }> = (props) 
     <SolidMarkdown
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       remarkPlugins={[remarkGfm as any]}
+      // Untrusted model output: allowlist link schemes (blocks javascript:/data:)
+      // and drop remote image src (zero-click exfil). See lib/sanitize-url.
+      transformLinkUri={safeLinkUri}
+      transformImageUri={safeImageUri}
       children={props.text}
     />
     <Show when={props.streaming}>
