@@ -39,6 +39,7 @@
  */
 
 import type { SessionInfo, SessionMessage } from "../../protocol/types.js";
+import { sanitizeTerminalOutput } from "./codes.js";
 import {
 	renderMessage,
 	renderSessionBanner,
@@ -327,7 +328,11 @@ export class ScrollbackWriter {
 	 * above the live region.
 	 */
 	#writeAtomic(data: string): void {
-		const trimmed = data.endsWith("\n") ? data.slice(0, -1) : data;
+		// Strip terminal-control escapes that untrusted message/stream content
+		// could smuggle in (OSC 52 clipboard writes, cursor/screen control, …).
+		// Our own SGR styling and OSC-8 file links are preserved.
+		const safe = sanitizeTerminalOutput(data);
+		const trimmed = safe.endsWith("\n") ? safe.slice(0, -1) : safe;
 		this.deps.log(trimmed);
 	}
 }

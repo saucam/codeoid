@@ -104,6 +104,56 @@ export function stripAnsi(s: string): string {
 	return s.replace(ANSI_OSC, "").replace(ANSI_SGR, "");
 }
 
+// ── Untrusted-content sanitizer ───────────────────────────────────────────────
+//
+// `stripAnsi` removes ALL escapes (for width math). The security sanitizer below
+// does the opposite trade-off: it removes only the escape sequences that let
+// UNTRUSTED content (model output, tool stdout, file contents, streamed deltas)
+// *act on* the user's terminal, while preserving the SGR color/style and OSC-8
+// hyperlinks that our own renderer emits — so styled scrollback still renders.
+
+/** OSC sequences other than OSC-8 hyperlinks: clipboard write (52), window /
+ * icon title (0/1/2), and any other `ESC ] <cmd> ; … (BEL | ST)`. OSC-8
+ * (`ESC ] 8 ; …`, emitted by `osc8.ts`) is preserved via the negative lookahead. */
+const ANSI_OSC_NON8 = /\x1b\](?!8[;\x07\x1b])[^\x07\x1b]*(?:\x07|\x1b\\)?/g;
+/** DCS / APC / PM / SOS device-control strings: `ESC (P|_|^|X) … (ST)?`. */
+const ANSI_DEVICE_CTRL = /\x1b[P_^X][^\x1b]*(?:\x1b\\)?/g;
+/** CSI sequences other than SGR — cursor moves, screen clears, mode sets. The
+ * final byte is anything in `@`…`~` EXCEPT `m` (0x6d), which is SGR and stays. */
+const ANSI_CSI_NON_SGR = /\x1b\[[0-?]*[ -/]*[@-ln-~]/g;
+/** Any other single-char `ESC` sequence (charset select, full reset, keypad…),
+ * but never `ESC [` (CSI/SGR) or `ESC ]` (OSC/OSC-8), which are handled above. */
+const ANSI_ESC_OTHER = /\x1b[^[\]]/g;
+/** C0 control bytes that must not reach the terminal from untrusted content.
+ * Excludes TAB (09), LF (0a), CR (0d), ESC (1b), and BEL (07). ESC is consumed
+ * by the sequence rules above so SGR / OSC-8 introducers survive; BEL is the
+ * OSC terminator (kept so preserved OSC-8 links stay intact — a lone BEL only
+ * rings the terminal bell). */
+const C0_UNSAFE = /[\x00-\x06\x08\x0b\x0c\x0e-\x1a\x1c-\x1f\x7f]/g;
+
+/**
+ * Neutralize terminal control sequences embedded in UNTRUSTED content before it
+ * is written to the TTY. Removes clipboard writes (OSC 52), title spoofing
+ * (OSC 0/1/2), cursor/screen manipulation (non-SGR CSI), and device-control
+ * strings (DCS/APC/PM/SOS); preserves SGR color/style and OSC-8 hyperlinks that
+ * the renderer itself emits. Newlines, tabs, and carriage returns survive; other
+ * C0 controls do not.
+ *
+ * Apply at every boundary where model/tool bytes reach the terminal. Preserving
+ * OSC-8 keeps our clickable file links working; an OSC-8 link smuggled through
+ * untrusted content survives as a (low-severity) residual — see SECURITY.md.
+ */
+export function sanitizeTerminalOutput(s: string): string {
+	if (!s) return s;
+	return s
+		.replace(ANSI_OSC_NON8, "")
+		.replace(ANSI_DEVICE_CTRL, "")
+		.replace(ANSI_CSI_NON_SGR, "")
+		.replace(ANSI_ESC_OTHER, "")
+		.replace(/\x1b$/, "")
+		.replace(C0_UNSAFE, "");
+}
+
 /**
  * East-asian wide ranges (subset — enough for CJK + common emoji blocks).
  * A full table is huge; this covers the 99%+ case for code/docs/chat text.
