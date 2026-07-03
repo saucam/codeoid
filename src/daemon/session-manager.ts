@@ -70,6 +70,11 @@ function normalizeWorkdir(input: string): string | null {
 const RESUME_MAX_SESSIONS = 50;
 const RESUME_DEADLINE_MS = 20_000;
 
+/** Provider assumed when a client doesn't say which catalog it wants.
+ *  Sessions are Claude-backed today; when the provider registry is wired
+ *  into session creation this becomes the configured default provider. */
+export const DEFAULT_PROVIDER_ID = "claude";
+
 /** Sort key for resume ordering: most-recently-active first. Falls back to
  * createdAt, then 0, so a malformed timestamp never throws. */
 function resumeSortKey(m: { lastActivityAt?: string; createdAt?: string }): number {
@@ -85,9 +90,10 @@ export class SessionManager {
   #identityManager?: AgentIdentityManager;
   #rateLimiter: RateLimiter;
   #memory?: MemoryEngine;
-  /** Live model catalog from the backend (via SDK supportedModels), cached
-   *  daemon-wide once any session initializes. Null until then. */
-  #modelsCache: ModelInfo[] | null = null;
+  /** Live model catalogs by provider id (via each backend's supportedModels
+   *  equivalent), cached daemon-wide once any session of that provider
+   *  initializes. Empty until then. */
+  #modelsCache = new Map<string, ModelInfo[]>();
   #config?: CodeoidConfig;
   #compressionRegistry?: CompressionRegistry;
 
@@ -154,7 +160,7 @@ export class SessionManager {
           memory: this.#memory,
           config: this.#config,
           compressionRegistry: this.#compressionRegistry,
-          onModels: (m) => this._cacheModels(m),
+          onModels: (providerId, m) => this._cacheModels(providerId, m),
         });
 
         // Restore scrollback from transcript, seeding the seq counter past
@@ -487,7 +493,7 @@ export class SessionManager {
               ...(this.#memory ? { memory: this.#memory } : {}),
               config: this.#config,
               compressionRegistry: this.#compressionRegistry,
-              onModels: (m) => this._cacheModels(m),
+              onModels: (providerId, m) => this._cacheModels(providerId, m),
             });
             this.#sessions.set(session.id, session);
             this.#rateLimiter.recordCreation(auth.sub);
@@ -578,76 +584,85 @@ export class SessionManager {
   }
 
   /**
-   * Cache the live model catalog reported by a session's SDK query. The list
-   * is version-static across sessions, so the first one to report wins and we
-   * stop overwriting (cheap idempotence; avoids churn from every new session).
+   * Cache the live model catalog a provider reported. The list is
+   * version-static per provider within a daemon lifetime, so the first
+   * report per provider wins and we stop overwriting (cheap idempotence;
+   * avoids churn from every new session).
    *
-   * The first report of each daemon lifetime is also persisted to SQLite, so
-   * subsequent boots serve current model names before any turn runs (see
-   * `#currentModels`) instead of the baked-in fallback that goes stale
-   * between codeoid releases.
+   * The first report of each daemon lifetime is also persisted to SQLite
+   * (keyed by provider id), so subsequent boots serve current model names
+   * before any turn runs (see `#currentModels`) instead of the baked-in
+   * fallback that goes stale between codeoid releases.
    *
    * TypeScript-private (not `#`) so unit tests can exercise the persistence
-   * path directly without a live SDK query — same convention as
+   * path directly without a live backend query — same convention as
    * `Session._applyInterruptedStateToTool`. Do NOT call from production code
    * outside the `onModels` wiring.
    */
   private _cacheModels(
+    providerId: string,
     raw: ReadonlyArray<{ value: string; displayName: string; description?: string }>,
   ): void {
-    if (this.#modelsCache || raw.length === 0) return;
-    this.#modelsCache = raw.map((m) => ({
+    if (this.#modelsCache.has(providerId) || raw.length === 0) return;
+    const models = raw.map((m) => ({
       value: m.value,
       displayName: m.displayName,
       ...(m.description ? { description: m.description } : {}),
       isDefault: m.value === "default",
     }));
+    this.#modelsCache.set(providerId, models);
     try {
-      this.#store.saveModelCatalog(this.#modelsCache);
+      this.#store.saveModelCatalog(providerId, models);
     } catch (err) {
       // Persistence is best-effort — the in-memory cache still serves this
       // lifetime; next boot just falls back one tier further.
       console.error(
-        `[codeoid/models] failed to persist model catalog: ${err instanceof Error ? err.message : String(err)}`,
+        `[codeoid/models] failed to persist ${providerId} model catalog: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
 
   /**
-   * The model catalog to serve, best source first:
-   *   1. live    — reported by a session's SDK query this daemon lifetime
+   * The model catalog to serve for a provider, best source first:
+   *   1. live    — reported by that provider's backend this daemon lifetime
    *   2. cached  — the last live list persisted by a previous lifetime
-   *   3. fallback — the baked-in catalog (first-ever boot only)
+   *   3. fallback — the baked-in catalog (claude only; other providers have
+   *                 no baked-in list and serve empty until they report)
    * `live` is true only for tier 1, so clients keep refetching until the
    * backend has actually been asked this lifetime.
    */
-  #currentModels(): { models: ModelInfo[]; live: boolean } {
-    if (this.#modelsCache) return { models: this.#modelsCache, live: true };
-    const persisted = this.#persistedModels();
+  #currentModels(providerId: string): { models: ModelInfo[]; live: boolean } {
+    const liveModels = this.#modelsCache.get(providerId);
+    if (liveModels) return { models: liveModels, live: true };
+    const persisted = this.#persistedModels(providerId);
     if (persisted) return { models: persisted, live: false };
-    return { models: fallbackModelInfos(), live: false };
+    return {
+      models: providerId === DEFAULT_PROVIDER_ID ? fallbackModelInfos() : [],
+      live: false,
+    };
   }
 
-  /** Lazily-loaded persisted catalog (null = never reported / unreadable). */
-  #persistedModelsLoaded = false;
-  #persistedModelsValue: ModelInfo[] | null = null;
-  #persistedModels(): ModelInfo[] | null {
-    if (!this.#persistedModelsLoaded) {
-      this.#persistedModelsLoaded = true;
+  /** Lazily-loaded persisted catalogs (null = never reported / unreadable). */
+  #persistedModelsCache = new Map<string, ModelInfo[] | null>();
+  #persistedModels(providerId: string): ModelInfo[] | null {
+    if (!this.#persistedModelsCache.has(providerId)) {
+      let value: ModelInfo[] | null = null;
       try {
-        this.#persistedModelsValue = this.#store.getModelCatalog();
+        value = this.#store.getModelCatalog(providerId);
       } catch {
-        this.#persistedModelsValue = null;
+        value = null;
       }
+      this.#persistedModelsCache.set(providerId, value);
     }
-    return this.#persistedModelsValue;
+    return this.#persistedModelsCache.get(providerId) ?? null;
   }
 
   #modelsList(
     msg: Extract<ClientMessage, { type: "models.list" }>,
   ): DaemonMessage {
-    const { models, live } = this.#currentModels();
-    return { type: "models.list.result", requestId: msg.id, models, live };
+    const provider = msg.provider ?? DEFAULT_PROVIDER_ID;
+    const { models, live } = this.#currentModels(provider);
+    return { type: "models.list.result", requestId: msg.id, models, live, provider };
   }
 
   async #fsBrowseDir(
@@ -838,7 +853,7 @@ export class SessionManager {
       memory: this.#memory,
       config: this.#config,
       compressionRegistry: this.#compressionRegistry,
-      onModels: (m) => this._cacheModels(m),
+      onModels: (providerId, m) => this._cacheModels(providerId, m),
     });
 
     this.#sessions.set(session.id, session);
@@ -1135,11 +1150,12 @@ export class SessionManager {
         code: "not_found",
       };
     }
-    // Validate against the live backend catalog (or the fallback). Accepts a
-    // canonical value, a case-insensitive display name (`opus` → "Opus"), or
-    // a full claude-* id. An unknown value is rejected here with the set of
-    // valid choices, so `/model o` gets actionable feedback.
-    const { models } = this.#currentModels();
+    // Validate against the session's provider catalog (live, persisted, or
+    // fallback). Accepts a canonical value, a case-insensitive display name
+    // (`opus` → "Opus"), or a full claude-* id. An unknown value is rejected
+    // here with the set of valid choices, so `/model o` gets actionable
+    // feedback.
+    const { models } = this.#currentModels(session.providerId);
     const resolvedModel = resolveAgainstList(msg.model, models);
     if (!resolvedModel) {
       return {

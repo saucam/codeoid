@@ -74,17 +74,20 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS idx_session_pins_session ON session_pins(session_id);
 
-      -- Last live model catalog reported by the Claude Code backend
-      -- (single-row table). Served as the models.list fallback on boots
-      -- where no session has run a turn yet, so the picker shows current
-      -- model names instead of a baked-in list that goes stale between
-      -- codeoid releases.
-      CREATE TABLE IF NOT EXISTS cached_model_catalog (
-        id          INTEGER PRIMARY KEY CHECK (id = 1),
+      -- Last live model catalog per provider (claude, gemini, openai, ...),
+      -- as reported by that provider's backend. Served as the models.list
+      -- fallback on boots where no session has run a turn yet, so the picker
+      -- shows current model names instead of a baked-in list that goes stale
+      -- between codeoid releases.
+      CREATE TABLE IF NOT EXISTS provider_model_catalogs (
+        provider_id TEXT PRIMARY KEY,
         models_json TEXT NOT NULL,
         cached_at   TEXT NOT NULL DEFAULT (datetime('now'))
       );
     `);
+    // Pre-release single-row predecessor of provider_model_catalogs — never
+    // shipped in a tagged version; drop from dev databases that ran the branch.
+    this.#db.exec("DROP TABLE IF EXISTS cached_model_catalog");
   }
 
   /**
@@ -289,33 +292,45 @@ export class Store {
   // ── Model catalog cache ───────────────────────────────────────────────
 
   /**
-   * Persist the live model catalog reported by the Claude Code backend.
-   * Single-row upsert — the latest report wins across daemon lifetimes.
+   * Persist the live model catalog a provider's backend reported. One row
+   * per provider id — the latest report wins across daemon lifetimes.
    */
-  saveModelCatalog(models: readonly ModelInfo[]): void {
+  saveModelCatalog(providerId: string, models: readonly ModelInfo[]): void {
     this.#db
       .prepare(
-        `INSERT INTO cached_model_catalog (id, models_json, cached_at)
-         VALUES (1, ?, datetime('now'))
-         ON CONFLICT(id) DO UPDATE SET
+        `INSERT INTO provider_model_catalogs (provider_id, models_json, cached_at)
+         VALUES (?, ?, datetime('now'))
+         ON CONFLICT(provider_id) DO UPDATE SET
            models_json = excluded.models_json,
            cached_at = excluded.cached_at`,
       )
-      .run(JSON.stringify(models));
+      .run(providerId, JSON.stringify(models));
   }
 
   /**
-   * The last persisted live model catalog, or null when no session has ever
-   * reported one (first-ever boot) or the stored JSON is unreadable.
+   * The last persisted live model catalog for a provider, or null when that
+   * provider has never reported one (first-ever boot) or the stored JSON is
+   * unreadable.
    */
-  getModelCatalog(): ModelInfo[] | null {
+  getModelCatalog(providerId: string): ModelInfo[] | null {
     const row = this.#db
-      .prepare("SELECT models_json FROM cached_model_catalog WHERE id = 1")
-      .get() as { models_json: string } | null;
+      .prepare("SELECT models_json FROM provider_model_catalogs WHERE provider_id = ?")
+      .get(providerId) as { models_json: string } | null;
     if (!row) return null;
     try {
-      const parsed = JSON.parse(row.models_json) as ModelInfo[];
-      return Array.isArray(parsed) && parsed.length > 0 ? parsed : null;
+      const parsed: unknown = JSON.parse(row.models_json);
+      if (!Array.isArray(parsed)) return null;
+      // Structural validation — a row written by a future/older version with
+      // a different shape degrades to the next fallback tier instead of
+      // serving malformed entries to pickers.
+      const valid = parsed.filter(
+        (m): m is ModelInfo =>
+          !!m &&
+          typeof m === "object" &&
+          typeof (m as ModelInfo).value === "string" &&
+          typeof (m as ModelInfo).displayName === "string",
+      );
+      return valid.length > 0 ? valid : null;
     } catch {
       return null;
     }

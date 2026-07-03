@@ -17,7 +17,7 @@ import {
   resolveAgainstList,
 } from "../daemon/models.js";
 import { Store } from "../daemon/store.js";
-import { SessionManager } from "../daemon/session-manager.js";
+import { SessionManager, DEFAULT_PROVIDER_ID } from "../daemon/session-manager.js";
 import { TranscriptStore } from "../daemon/transcript.js";
 
 describe("resolveAgainstList (live-backend resolution)", () => {
@@ -198,36 +198,39 @@ describe("model catalog persistence (Store)", () => {
   });
 
   it("returns null before any catalog was saved", () => {
-    expect(store.getModelCatalog()).toBeNull();
+    expect(store.getModelCatalog("claude")).toBeNull();
   });
 
-  it("round-trips a saved catalog", () => {
+  it("round-trips a saved catalog per provider", () => {
     const models = [
       { value: "default", displayName: "Default (recommended)", isDefault: true },
       { value: "fable", displayName: "Fable 5", isDefault: false },
     ];
-    store.saveModelCatalog(models);
-    expect(store.getModelCatalog()).toEqual(models);
+    store.saveModelCatalog("claude", models);
+    expect(store.getModelCatalog("claude")).toEqual(models);
+    expect(store.getModelCatalog("gemini")).toBeNull(); // no cross-provider leak
   });
 
-  it("upserts — the latest save wins", () => {
-    store.saveModelCatalog([{ value: "a", displayName: "A", isDefault: false }]);
-    store.saveModelCatalog([{ value: "b", displayName: "B", isDefault: true }]);
-    const got = store.getModelCatalog();
-    expect(got).toHaveLength(1);
-    expect(got?.[0]?.value).toBe("b");
+  it("providers are isolated rows; upsert per provider — latest save wins", () => {
+    store.saveModelCatalog("claude", [{ value: "a", displayName: "A", isDefault: false }]);
+    store.saveModelCatalog("gemini", [{ value: "g", displayName: "G", isDefault: true }]);
+    store.saveModelCatalog("claude", [{ value: "b", displayName: "B", isDefault: true }]);
+    expect(store.getModelCatalog("claude")?.[0]?.value).toBe("b");
+    expect(store.getModelCatalog("gemini")?.[0]?.value).toBe("g");
   });
 
   it("survives a store reopen (new daemon lifetime)", () => {
-    store.saveModelCatalog([{ value: "opus", displayName: "Opus 4.8", isDefault: true }]);
+    store.saveModelCatalog("claude", [
+      { value: "opus", displayName: "Opus 4.8", isDefault: true },
+    ]);
     store.close();
     const reopened = new Store(join(tmp, "codeoid.db"));
-    expect(reopened.getModelCatalog()?.[0]?.displayName).toBe("Opus 4.8");
+    expect(reopened.getModelCatalog("claude")?.[0]?.displayName).toBe("Opus 4.8");
     reopened.close();
   });
 });
 
-describe("models.list serves live → persisted → baked-in fallback", () => {
+describe("models.list serves live → persisted → baked-in fallback, per provider", () => {
   let tmp: string;
   let store: Store;
 
@@ -245,6 +248,10 @@ describe("models.list serves live → persisted → baked-in fallback", () => {
     { value: "opus", displayName: "Opus 4.8" },
   ];
 
+  type CacheModels = {
+    _cacheModels(providerId: string, m: { value: string; displayName: string }[]): void;
+  };
+
   beforeEach(() => {
     tmp = mkdtempSync(join(tmpdir(), "codeoid-modeltier-"));
     store = new Store(join(tmp, "codeoid.db"));
@@ -255,43 +262,74 @@ describe("models.list serves live → persisted → baked-in fallback", () => {
     try { rmSync(tmp, { recursive: true, force: true }); } catch {}
   });
 
-  async function listModels(manager: SessionManager) {
+  async function listModels(manager: SessionManager, provider?: string) {
     const client = { id: "client-models-test", auth: AUTH, send: () => {} };
     const res = (await manager.handle(
-      { type: "models.list", id: "req-models" },
+      { type: "models.list", id: "req-models", ...(provider ? { provider } : {}) },
       AUTH,
       client,
-    )) as { type: string; models: { value: string; displayName: string }[]; live: boolean };
+    )) as {
+      type: string;
+      models: { value: string; displayName: string }[];
+      live: boolean;
+      provider: string;
+    };
     expect(res.type).toBe("models.list.result");
     return res;
   }
 
-  it("first-ever boot: baked-in fallback, live=false", async () => {
+  it("first-ever boot: baked-in fallback for the default provider, live=false", async () => {
     const manager = new SessionManager(store, new TranscriptStore(join(tmp, "t")));
     const res = await listModels(manager);
     expect(res.live).toBe(false);
+    expect(res.provider).toBe(DEFAULT_PROVIDER_ID);
     expect(res.models.map((m) => m.value)).toEqual(
       fallbackModelInfos().map((m) => m.value),
     );
   });
 
-  it("after a session reports models: live=true and the list is persisted", async () => {
+  it("non-default provider with no reports yet: empty list, not the claude fallback", async () => {
     const manager = new SessionManager(store, new TranscriptStore(join(tmp, "t")));
-    (manager as unknown as { _cacheModels(m: typeof LIVE): void })._cacheModels(LIVE);
+    const res = await listModels(manager, "gemini");
+    expect(res.live).toBe(false);
+    expect(res.provider).toBe("gemini");
+    expect(res.models).toEqual([]);
+  });
+
+  it("after a provider reports: live=true and the list is persisted under that provider", async () => {
+    const manager = new SessionManager(store, new TranscriptStore(join(tmp, "t")));
+    (manager as unknown as CacheModels)._cacheModels("claude", LIVE);
 
     const res = await listModels(manager);
     expect(res.live).toBe(true);
     expect(res.models.map((m) => m.value)).toEqual(["default", "fable", "opus"]);
-    expect(store.getModelCatalog()?.map((m) => m.value)).toEqual([
+    expect(store.getModelCatalog("claude")?.map((m) => m.value)).toEqual([
       "default",
       "fable",
       "opus",
+    ]);
+    expect(store.getModelCatalog("gemini")).toBeNull();
+  });
+
+  it("catalogs are per-provider: one provider going live does not leak into another", async () => {
+    const manager = new SessionManager(store, new TranscriptStore(join(tmp, "t")));
+    const cache = manager as unknown as CacheModels;
+    cache._cacheModels("claude", LIVE);
+    cache._cacheModels("gemini", [{ value: "gemini-pro", displayName: "Gemini Pro" }]);
+
+    expect((await listModels(manager, "claude")).models.map((m) => m.value)).toEqual([
+      "default",
+      "fable",
+      "opus",
+    ]);
+    expect((await listModels(manager, "gemini")).models.map((m) => m.value)).toEqual([
+      "gemini-pro",
     ]);
   });
 
   it("next boot before any turn: persisted list served, live=false", async () => {
     const first = new SessionManager(store, new TranscriptStore(join(tmp, "t")));
-    (first as unknown as { _cacheModels(m: typeof LIVE): void })._cacheModels(LIVE);
+    (first as unknown as CacheModels)._cacheModels("claude", LIVE);
 
     // Fresh manager = fresh daemon lifetime, same store.
     const second = new SessionManager(store, new TranscriptStore(join(tmp, "t")));
@@ -300,13 +338,13 @@ describe("models.list serves live → persisted → baked-in fallback", () => {
     expect(res.models.map((m) => m.value)).toEqual(["default", "fable", "opus"]);
   });
 
-  it("first live report wins for the lifetime; empty reports are ignored", async () => {
+  it("first live report wins per provider for the lifetime; empty reports ignored", async () => {
     const manager = new SessionManager(store, new TranscriptStore(join(tmp, "t")));
-    const cache = manager as unknown as { _cacheModels(m: unknown[]): void };
-    cache._cacheModels([]);
+    const cache = manager as unknown as CacheModels;
+    cache._cacheModels("claude", []);
     expect((await listModels(manager)).live).toBe(false);
-    cache._cacheModels(LIVE);
-    cache._cacheModels([{ value: "other", displayName: "Other" }]);
+    cache._cacheModels("claude", LIVE);
+    cache._cacheModels("claude", [{ value: "other", displayName: "Other" }]);
     const res = await listModels(manager);
     expect(res.models.map((m) => m.value)).toEqual(["default", "fable", "opus"]);
   });
