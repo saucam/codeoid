@@ -68,13 +68,18 @@ export class ScrollbackBuffer {
    * instead of appending a second entry. Duplicate entries for one messageId
    * corrupt scrollback.replay — clients render the message twice and
    * virtualizers keyed on messageId collide (the #50 bug class).
+   *
+   * `sizeHint` lets callers that already know the message's serialized size
+   * (resume replays it straight off a transcript line) skip the
+   * JSON.stringify here — restoring thousands of messages otherwise
+   * re-serializes every one of them purely for byte accounting.
    */
-  push(msg: DaemonMessage): void {
+  push(msg: DaemonMessage, sizeHint?: number): void {
     const messageId = messageIdOf(msg);
     if (messageId !== undefined) {
       const existing = this.#byId.get(messageId);
       if (existing) {
-        const size = serializedSizeOf(msg);
+        const size = sizeHint ?? serializedSizeOf(msg);
         this.#bytes += size - existing.size;
         existing.msg = msg;
         existing.size = size;
@@ -82,7 +87,7 @@ export class ScrollbackBuffer {
         return;
       }
     }
-    const entry: Entry = { msg, size: serializedSizeOf(msg) };
+    const entry: Entry = { msg, size: sizeHint ?? serializedSizeOf(msg) };
     this.#entries.push(entry);
     if (messageId !== undefined) this.#byId.set(messageId, entry);
     this.#bytes += entry.size;

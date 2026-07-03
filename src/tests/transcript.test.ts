@@ -176,3 +176,122 @@ describe("TranscriptStore", () => {
     expect((e2[0].message as SessionMessage).content).toBe("session two");
   });
 });
+
+describe("TranscriptStore — rotation, bounded load, output cap (#85)", () => {
+  test("rotates the live file past the segment ceiling; load spans all segments", async () => {
+    const small = new TranscriptStore(tmpDir, { segmentMaxBytes: 600, maxRotatedSegments: 2 });
+    const ids: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      const msg = makeMsg(`message number ${i} ${"x".repeat(120)}`);
+      ids.push(msg.messageId);
+      await small.append("rot", msg, i);
+    }
+    await small.flush();
+
+    // The live file stayed under the ceiling and at least one segment exists.
+    expect(Bun.file(small.transcriptPath("rot")).size).toBeLessThanOrEqual(600);
+    expect(await Bun.file(`${small.transcriptPath("rot")}.1`).exists()).toBe(true);
+
+    // An unbounded load reads across all segments in order.
+    const entries = await small.loadTranscript("rot");
+    const loadedIds = entries.map((e) => (e.message as SessionMessage).messageId);
+    // Oldest segments beyond the retention window are deleted, so we expect
+    // a SUFFIX of the ids, in order, ending at the newest.
+    expect(loadedIds.length).toBeGreaterThan(0);
+    expect(loadedIds).toEqual(ids.slice(ids.length - loadedIds.length));
+  });
+
+  test("merges message updates across a segment boundary", async () => {
+    const small = new TranscriptStore(tmpDir, { segmentMaxBytes: 400, maxRotatedSegments: 2 });
+    const first = makeMsg("original content");
+    await small.append("merge", first, 0);
+    // Enough traffic to force the first message's line into a rotated segment.
+    await small.append("merge", makeMsg(`filler ${"y".repeat(300)}`), 1);
+    // Update the FIRST message from the live file.
+    await small.append("merge", { ...first, content: "updated content" }, 2);
+    await small.flush();
+    expect(await Bun.file(`${small.transcriptPath("merge")}.1`).exists()).toBe(true);
+
+    const entries = await small.loadTranscript("merge");
+    const merged = entries.find(
+      (e) => (e.message as SessionMessage).messageId === first.messageId,
+    );
+    expect(merged).toBeDefined();
+    expect((merged!.message as SessionMessage).content).toBe("updated content");
+    expect(merged!.seq).toBe(2);
+  });
+
+  test("maxBytes reads only the newest tail of the log", async () => {
+    const ids: string[] = [];
+    for (let i = 0; i < 50; i++) {
+      const msg = makeMsg(`entry ${i} ${"z".repeat(100)}`);
+      ids.push(msg.messageId);
+      await store.append("tail", msg, i);
+    }
+    await store.flush();
+    const total = Bun.file(store.transcriptPath("tail")).size;
+
+    const entries = await store.loadTranscript("tail", { maxBytes: Math.floor(total / 4) });
+    const loadedIds = entries.map((e) => (e.message as SessionMessage).messageId);
+
+    expect(loadedIds.length).toBeGreaterThan(0);
+    expect(loadedIds.length).toBeLessThan(50);
+    // Strictly the newest suffix, in order — never the head of the file.
+    expect(loadedIds).toEqual(ids.slice(ids.length - loadedIds.length));
+    expect(loadedIds.at(-1)).toBe(ids.at(-1));
+    // Entries carry the line-length hint for scrollback accounting.
+    expect(entries.every((e) => typeof e.bytes === "number" && e.bytes > 0)).toBe(true);
+  });
+
+  test("deadlineAt stops a parse mid-file instead of wedging", async () => {
+    // 1200 lines > the 512-line deadline-check stride, so an already-expired
+    // deadline must abort the parse partway through.
+    for (let i = 0; i < 1200; i++) {
+      await store.append("slow", makeMsg(`line ${i}`), i);
+    }
+    await store.flush();
+
+    const entries = await store.loadTranscript("slow", { deadlineAt: Date.now() - 1 });
+    expect(entries.length).toBeGreaterThan(0);
+    expect(entries.length).toBeLessThan(1200);
+  });
+
+  test("caps persisted tool output while leaving the in-memory message alone", async () => {
+    const bigOutput = "A".repeat(80 * 1024);
+    const toolMsg: SessionMessage = {
+      ...makeMsg("ran the tool"),
+      role: "tool_call",
+      tool: {
+        toolId: "t1",
+        name: "Bash",
+        state: { phase: "completed", success: true, output: bigOutput },
+      },
+    };
+    await store.append("cap", toolMsg, 0);
+    await store.flush();
+
+    // Caller's object untouched (broadcast/scrollback keep the full output).
+    expect(toolMsg.tool!.state.phase === "completed" && toolMsg.tool!.state.output).toBe(bigOutput);
+
+    const entries = await store.loadTranscript("cap");
+    const persisted = (entries[0]!.message as SessionMessage).tool!.state;
+    expect(persisted.phase).toBe("completed");
+    const output = persisted.phase === "completed" ? persisted.output! : "";
+    expect(output.length).toBeLessThan(70 * 1024);
+    expect(output).toContain("[output truncated for persistence: 81920 chars total]");
+  });
+
+  test("delete removes rotated segments too", async () => {
+    const small = new TranscriptStore(tmpDir, { segmentMaxBytes: 300, maxRotatedSegments: 2 });
+    for (let i = 0; i < 8; i++) {
+      await small.append("gone", makeMsg(`del ${i} ${"w".repeat(120)}`), i);
+    }
+    await small.flush();
+    expect(await Bun.file(`${small.transcriptPath("gone")}.1`).exists()).toBe(true);
+
+    await small.delete("gone");
+    expect(await Bun.file(small.transcriptPath("gone")).exists()).toBe(false);
+    expect(await Bun.file(`${small.transcriptPath("gone")}.1`).exists()).toBe(false);
+    expect(await Bun.file(`${small.transcriptPath("gone")}.2`).exists()).toBe(false);
+  });
+});

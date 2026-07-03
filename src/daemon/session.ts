@@ -948,7 +948,11 @@ export class Session {
     await this.#transcriptStore.delete(this.id);
   }
 
-  restoreScrollback(messages: DaemonMessage[], nextSeq?: number): void {
+  restoreScrollback(
+    messages: DaemonMessage[],
+    nextSeq?: number,
+    sizeHints?: ReadonlyArray<number | undefined>,
+  ): void {
     // Seed the transcript sequence counter past the loaded log's tail.
     // Without this, post-restart appends restart at seq 0 — harmless for
     // loadTranscript (which orders by file position) but it makes seq
@@ -956,7 +960,8 @@ export class Session {
     if (nextSeq !== undefined && nextSeq > this.#seq) {
       this.#seq = nextSeq;
     }
-    for (const msg of messages) {
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i]!;
       if (msg.type !== "session.message") continue;
       // Reconcile tool calls frozen in a non-terminal phase (streaming /
       // waiting_confirmation / executing) by a daemon restart. The in-memory
@@ -964,7 +969,9 @@ export class Session {
       // `#pendingApprovals` — is gone, so without this clients replay them as
       // forever-"running" (and the ApprovalBar resurrects ghost prompts the
       // user can't answer). Rewrite to `cancelled` / `interrupted`.
-      this.#scrollback.push(reconcileResumedMessage(msg));
+      // The size hint (the transcript line's byte length, when the caller
+      // loaded from disk) spares scrollback a re-serialization per message.
+      this.#scrollback.push(reconcileResumedMessage(msg), sizeHints?.[i]);
     }
     // A session with prior scrollback already exists in Claude Code's own
     // persistent session store — next send() must use `resume`, not re-create.
