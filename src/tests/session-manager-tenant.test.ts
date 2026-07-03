@@ -129,14 +129,16 @@ describe("SessionManager tenant-scoped handlers", () => {
       {
         type: "session.import",
         id: "req-import",
-        bundle,
+        source: { kind: "inline", bundle },
         targetWorkdir: tmp,
       } as never,
       AUTH,
       CLIENT,
-    )) as { type: string };
-    // Either a successful import or a well-formed error — both exercised the
-    // tenant-bound workspaceIdFor path; a thrown/undefined response would not.
-    expect(["session.import.result", "response.error"]).toContain(imported.type);
+    )) as { type: string; newSessionId?: string };
+    // Assert the SUCCESS path explicitly — a regression that breaks the
+    // tenant-bound workspaceIdFor and makes import always error must fail here.
+    expect(imported.type).toBe("session.import.result");
+    expect(imported.newSessionId).toBeDefined();
+    expect(imported.newSessionId).not.toBe(sessionId); // import mints a new id
   });
 });
