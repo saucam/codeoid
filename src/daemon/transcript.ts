@@ -220,20 +220,31 @@ export class TranscriptStore {
   }
 
   /** Shift segments one slot older (dropping the oldest) and move the live
-   * file into slot 1. Retention: live + #maxRotatedSegments segments. */
+   * file into slot 1. Retention: live + #maxRotatedSegments segments.
+   * Only ENOENT is tolerated (segment not written yet / live file deleted
+   * concurrently) — any other rename failure is logged, since silently
+   * continuing could overwrite a segment that never shifted. */
   async #rotate(sessionId: string): Promise<void> {
     await rm(this.#segmentPath(sessionId, this.#maxRotatedSegments), { force: true });
     for (let i = this.#maxRotatedSegments - 1; i >= 1; i--) {
       try {
         await rename(this.#segmentPath(sessionId, i), this.#segmentPath(sessionId, i + 1));
-      } catch {
-        // Segment doesn't exist yet — nothing to shift.
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+          console.error(
+            `[codeoid] transcript ${sessionId}: segment shift ${i}→${i + 1} failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
       }
     }
     try {
       await rename(this.transcriptPath(sessionId), this.#segmentPath(sessionId, 1));
-    } catch {
-      // Live file vanished (concurrent delete) — appendFile will recreate it.
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.error(
+          `[codeoid] transcript ${sessionId}: rotate live→1 failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
   }
 
@@ -430,13 +441,12 @@ export class TranscriptStore {
    * Delete a session's transcript (live file + rotated segments) and metadata.
    */
   async delete(sessionId: string): Promise<void> {
-    const { unlinkSync } = await import("node:fs");
     this.#liveBytes.delete(sessionId);
 
-    try { unlinkSync(this.transcriptPath(sessionId)); } catch { /* ignore */ }
-    try { unlinkSync(this.metaPath(sessionId)); } catch { /* ignore */ }
+    await rm(this.transcriptPath(sessionId), { force: true });
+    await rm(this.metaPath(sessionId), { force: true });
     for (let i = 1; i <= this.#maxRotatedSegments; i++) {
-      try { unlinkSync(this.#segmentPath(sessionId, i)); } catch { /* ignore */ }
+      await rm(this.#segmentPath(sessionId, i), { force: true });
     }
   }
 }
@@ -483,7 +493,16 @@ function capPersistedToolOutput(msg: DaemonMessage): DaemonMessage {
   const tool = (msg as SessionMessage).tool;
   if (!tool || tool.state.phase !== "completed") return msg;
   const output = tool.state.output;
-  if (typeof output !== "string" || output.length <= TOOL_OUTPUT_PERSIST_CAP) return msg;
+  if (typeof output !== "string") return msg;
+  // Cap by real UTF-8 bytes, not UTF-16 code units — non-ASCII CLI output
+  // (CJK, box-drawing, emoji) would otherwise persist 2-3× past the cap.
+  const outputBytes = Buffer.byteLength(output, "utf-8");
+  if (outputBytes <= TOOL_OUTPUT_PERSIST_CAP) return msg;
+  // The byte slice can split a multi-byte char at the boundary; a non-fatal
+  // decode turns that into U+FFFD instead of throwing.
+  const truncated = new TextDecoder("utf-8", { fatal: false }).decode(
+    Buffer.from(output, "utf-8").subarray(0, TOOL_OUTPUT_PERSIST_CAP),
+  );
 
   return {
     ...msg,
@@ -491,7 +510,7 @@ function capPersistedToolOutput(msg: DaemonMessage): DaemonMessage {
       ...tool,
       state: {
         ...tool.state,
-        output: `${output.slice(0, TOOL_OUTPUT_PERSIST_CAP)}\n… [output truncated for persistence: ${output.length} chars total]`,
+        output: `${truncated}\n… [output truncated for persistence: ${outputBytes} bytes total]`,
       },
     },
   } as DaemonMessage;

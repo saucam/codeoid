@@ -278,7 +278,35 @@ describe("TranscriptStore — rotation, bounded load, output cap (#85)", () => {
     expect(persisted.phase).toBe("completed");
     const output = persisted.phase === "completed" ? persisted.output! : "";
     expect(output.length).toBeLessThan(70 * 1024);
-    expect(output).toContain("[output truncated for persistence: 81920 chars total]");
+    expect(output).toContain("[output truncated for persistence: 81920 bytes total]");
+  });
+
+  test("caps persisted tool output by UTF-8 bytes, not UTF-16 code units", async () => {
+    // 32k CJK chars = 32k code units but ~96 KB of UTF-8 — over the 64 KiB
+    // cap even though the CHARACTER count is well under it.
+    const bigOutput = "語".repeat(32 * 1024);
+    const toolMsg: SessionMessage = {
+      ...makeMsg("ran the tool"),
+      role: "tool_call",
+      tool: {
+        toolId: "t2",
+        name: "Bash",
+        state: { phase: "completed", success: true, output: bigOutput },
+      },
+    };
+    await store.append("cap-utf8", toolMsg, 0);
+    await store.flush();
+
+    const entries = await store.loadTranscript("cap-utf8");
+    const persisted = (entries[0]!.message as SessionMessage).tool!.state;
+    const output = persisted.phase === "completed" ? persisted.output! : "";
+    expect(output).toContain("bytes total]");
+    // The kept prefix is byte-capped (the small marker suffix rides on top).
+    // Slack of one U+FFFD: a slice through a multi-byte char decodes to a
+    // replacement char that re-encodes up to 2 bytes larger than the stub.
+    const prefix = output.slice(0, output.lastIndexOf("\n…"));
+    expect(Buffer.byteLength(prefix, "utf-8")).toBeLessThanOrEqual(64 * 1024 + 3);
+    expect(Buffer.byteLength(prefix, "utf-8")).toBeGreaterThan(60 * 1024);
   });
 
   test("delete removes rotated segments too", async () => {

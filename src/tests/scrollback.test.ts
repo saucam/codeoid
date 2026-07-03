@@ -148,4 +148,13 @@ describe("ScrollbackBuffer — sizeHint", () => {
     expect(buf.length).toBe(5);
     expect(buf.bytes).toBe(50);
   });
+
+  test("push re-accounts an existing entry using the new size hint", () => {
+    const buf = new ScrollbackBuffer({ maxEntries: 1000, maxBytes: 1000 });
+    const msg = makeMsg("original");
+    buf.push(msg, 10);
+    buf.push({ ...msg, content: "updated" }, 25);
+    expect(buf.length).toBe(1);
+    expect(buf.bytes).toBe(25);
+  });
 });
