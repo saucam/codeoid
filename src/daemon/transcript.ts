@@ -112,8 +112,16 @@ export class TranscriptStore {
 
   constructor(transcriptDir: string, opts: TranscriptStoreOptions = {}) {
     this.#dir = transcriptDir;
-    this.#segmentMaxBytes = opts.segmentMaxBytes ?? DEFAULT_SEGMENT_MAX_BYTES;
-    this.#maxRotatedSegments = opts.maxRotatedSegments ?? DEFAULT_MAX_ROTATED_SEGMENTS;
+    // Sanity-clamp the internal tuning knobs — a zero/negative/fractional
+    // value would make rotation thrash or produce unreadable segment paths.
+    this.#segmentMaxBytes = Math.max(
+      1,
+      Math.floor(opts.segmentMaxBytes ?? DEFAULT_SEGMENT_MAX_BYTES),
+    );
+    this.#maxRotatedSegments = Math.max(
+      1,
+      Math.floor(opts.maxRotatedSegments ?? DEFAULT_MAX_ROTATED_SEGMENTS),
+    );
     if (!existsSync(this.#dir)) {
       mkdirSync(this.#dir, { recursive: true });
     }
@@ -395,6 +403,18 @@ export class TranscriptStore {
         } catch {
           continue; // Skip corrupted lines
         }
+        // Valid JSON isn't necessarily a valid entry — `null`, arrays, or
+        // primitives would throw on the field accesses below. Skip them the
+        // same way as corrupted lines.
+        if (
+          entry === null ||
+          typeof entry !== "object" ||
+          Array.isArray(entry) ||
+          typeof entry.message !== "object" ||
+          entry.message === null
+        ) {
+          continue;
+        }
         const bytes = Buffer.byteLength(line, "utf-8");
 
         const msg = entry.message;
@@ -441,6 +461,13 @@ export class TranscriptStore {
    * Delete a session's transcript (live file + rotated segments) and metadata.
    */
   async delete(sessionId: string): Promise<void> {
+    // Drain this session's in-flight fire-and-forget writes first — a
+    // pending append/meta chain settling after the removals below would
+    // recreate the file and resurrect the session on the next restart.
+    await Promise.allSettled([
+      this.#appendChain.get(sessionId),
+      this.#metaWriteChain.get(sessionId),
+    ]);
     this.#liveBytes.delete(sessionId);
 
     await rm(this.transcriptPath(sessionId), { force: true });
