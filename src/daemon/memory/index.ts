@@ -15,6 +15,7 @@ import { MemoryEngine } from "./engine.js";
 export {
   SqliteEpisodeStore,
   workspaceIdFromPath,
+  legacyWorkspaceIdFromPath,
   type WorkspaceTenant,
 } from "./store.js";
 export { MemoryEngine, type SessionSearchHit } from "./engine.js";

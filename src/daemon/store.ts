@@ -148,6 +148,29 @@ export class Store {
       );
   }
 
+  /**
+   * Every persisted session's tenant + workdir, across ALL tenants. Used only
+   * by the one-time memory workspace-id migration, which needs to re-key
+   * episodes to their owning session's tenant regardless of who's connected.
+   */
+  listAllSessionsForMigration(): Array<{
+    id: string;
+    workdir: string;
+    accountId: string;
+    projectId: string;
+  }> {
+    return this.#db
+      .prepare(
+        "SELECT id, workdir, account_id AS accountId, project_id AS projectId FROM sessions",
+      )
+      .all() as Array<{
+        id: string;
+        workdir: string;
+        accountId: string;
+        projectId: string;
+      }>;
+  }
+
   listSessions(accountId: string, projectId: string): SessionInfo[] {
     const rows = this.#db
       .prepare("SELECT * FROM sessions WHERE account_id = ? AND project_id = ?")

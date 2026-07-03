@@ -18,6 +18,7 @@ import {
   MemoryEngine,
   EpisodeChunker,
   workspaceIdFromPath,
+  legacyWorkspaceIdFromPath,
 } from "../daemon/memory/index.js";
 import type { Embedder } from "../daemon/memory/embedder.js";
 import type { SessionMessage, TurnUsage } from "../protocol/types.js";
@@ -280,6 +281,94 @@ describe("workspaceIdFromPath", () => {
     expect(
       workspaceIdFromPath("/tmp/p", { accountId: "x", projectId: "1" }),
     ).not.toBe(workspaceIdFromPath("/tmp/p", { accountId: "y", projectId: "1" }));
+  });
+});
+
+describe("workspace-id migration (re-key legacy episodes to tenant)", () => {
+  function insertEp(
+    store: SqliteEpisodeStore,
+    workspaceId: string,
+    sessionId: string,
+    summary: string,
+  ) {
+    return store.insert({
+      workspaceId,
+      sessionId,
+      kind: "user_turn",
+      summary,
+      content: `${summary} — body`,
+      filePaths: [],
+      tokenEstimate: 10,
+      createdAt: Date.now(),
+      createdBy: sessionId,
+    });
+  }
+  const sess = (id: string, workdir: string, t: typeof TENANT_A) => ({
+    id,
+    workdir,
+    accountId: t.accountId,
+    projectId: t.projectId,
+  });
+
+  it("re-keys a session's legacy episodes to the tenant-scoped id, once", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    const workdir = "/tmp/legacy-proj";
+    const oldWs = legacyWorkspaceIdFromPath(workdir);
+    const newWs = workspaceIdFromPath(workdir, TENANT_A);
+    expect(oldWs).not.toBe(newWs);
+
+    const ep = insertEp(store, oldWs, "s1", "did a thing");
+    expect(store.listRecent(newWs, 10)).toHaveLength(0); // invisible pre-migration
+
+    const r = store.migrateWorkspaceIdsToTenant([sess("s1", workdir, TENANT_A)], workspaceIdFromPath);
+    expect(r.migrated).toBe(true);
+    expect(r.reKeyed).toBeGreaterThanOrEqual(1);
+
+    // Visible under the tenant-scoped id now; gone from the old id.
+    expect(store.listRecent(newWs, 10).map((e) => e.id)).toEqual([ep.id]);
+    expect(store.listRecent(oldWs, 10)).toHaveLength(0);
+
+    // Guarded — a second run is a no-op.
+    expect(store.migrateWorkspaceIdsToTenant([sess("s1", workdir, TENANT_A)], workspaceIdFromPath).migrated).toBe(false);
+    store.close();
+  });
+
+  it("keeps two tenants that shared a directory separate", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    const workdir = "/tmp/shared-checkout";
+    const oldWs = legacyWorkspaceIdFromPath(workdir);
+    const epA = insertEp(store, oldWs, "sa", "tenant A secret");
+    const epB = insertEp(store, oldWs, "sb", "tenant B secret");
+
+    store.migrateWorkspaceIdsToTenant(
+      [sess("sa", workdir, TENANT_A), sess("sb", workdir, TENANT_B)],
+      workspaceIdFromPath,
+    );
+
+    expect(store.listRecent(workspaceIdFromPath(workdir, TENANT_A), 10).map((e) => e.id)).toEqual([epA.id]);
+    expect(store.listRecent(workspaceIdFromPath(workdir, TENANT_B), 10).map((e) => e.id)).toEqual([epB.id]);
+    store.close();
+  });
+
+  it("recovers an orphan (destroyed session) only when its workspace is single-tenant", () => {
+    const store = new SqliteEpisodeStore(dbPath);
+    const soloDir = "/tmp/solo-proj";
+    const sharedDir = "/tmp/shared-proj";
+    const soloOrphan = insertEp(store, legacyWorkspaceIdFromPath(soloDir), "gone-1", "solo orphan");
+    const sharedOrphan = insertEp(store, legacyWorkspaceIdFromPath(sharedDir), "gone-2", "shared orphan");
+
+    store.migrateWorkspaceIdsToTenant(
+      [
+        sess("s-solo", soloDir, TENANT_A), // single tenant → orphan recovered
+        sess("s-shared-a", sharedDir, TENANT_A), // two tenants on sharedDir →
+        sess("s-shared-b", sharedDir, TENANT_B), // ambiguous → orphan left alone
+      ],
+      workspaceIdFromPath,
+    );
+
+    expect(store.listRecent(workspaceIdFromPath(soloDir, TENANT_A), 10).map((e) => e.id)).toContain(soloOrphan.id);
+    expect(store.getEpisode(sharedOrphan.id)!.workspaceId).toBe(legacyWorkspaceIdFromPath(sharedDir));
+    store.close();
   });
 });
 

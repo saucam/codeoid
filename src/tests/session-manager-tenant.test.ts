@@ -119,6 +119,14 @@ describe("SessionManager tenant-scoped handlers", () => {
     expect(created.type).toBe("response.ok");
     const sessionId = created.data!.id;
 
+    // The workspace-id migration reads tenant + workdir from this list.
+    const allSessions = store.listAllSessionsForMigration();
+    expect(allSessions.find((s) => s.id === sessionId)).toMatchObject({
+      workdir: tmp,
+      accountId: AUTH.accountId,
+      projectId: AUTH.projectId,
+    });
+
     const exported = (await manager.handle(
       { type: "session.export", id: "req-export", sessionId },
       AUTH,
