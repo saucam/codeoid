@@ -382,6 +382,8 @@ export interface ModelsListResultMsg {
   requestId: string;
   models: ModelInfo[];
   live: boolean;
+  /** Provider whose catalog this is (e.g. "claude", "gemini"). */
+  provider: string;
 }
 
 export interface SessionExportMsg extends BaseClientMsg {

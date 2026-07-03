@@ -859,6 +859,11 @@ export interface ClaudeConfigMsg extends BaseClientMsg {
  */
 export interface ModelsListMsg extends BaseClientMsg {
   type: "models.list";
+  /**
+   * Which provider's catalog to return. Optional and additive — omitted by
+   * older clients, in which case the daemon's default provider is assumed.
+   */
+  provider?: string;
 }
 
 /** One selectable model as reported by the Claude Code backend. */
@@ -1058,8 +1063,13 @@ export interface ModelsListResultMsg {
   type: "models.list.result";
   requestId: string;
   models: ModelInfo[];
-  /** True when these came from the live backend; false = built-in fallback. */
+  /**
+   * True when these came from the live backend this daemon lifetime;
+   * false = persisted last-known list or built-in fallback.
+   */
   live: boolean;
+  /** Provider whose catalog this is (e.g. "claude", "gemini"). */
+  provider: string;
 }
 
 export interface SessionExportResultMsg {

@@ -83,10 +83,16 @@ export interface SessionCreateOptions {
   existingId?: string;
   /**
    * Called once per session with the live model catalog the backend
-   * supports (from the SDK's `supportedModels()`). The manager caches it
-   * daemon-wide so `/model` validation + the picker use the real list.
+   * supports (e.g. the Claude Code SDK's `supportedModels()`), tagged with
+   * the reporting provider's id so the manager can cache catalogs
+   * per-provider — codeoid is provider-agnostic and each backend serves a
+   * different model list. The manager caches it daemon-wide so `/model`
+   * validation + the picker use the real list.
    */
-  onModels?: (models: ReadonlyArray<{ value: string; displayName: string; description?: string }>) => void;
+  onModels?: (
+    providerId: string,
+    models: ReadonlyArray<{ value: string; displayName: string; description?: string }>,
+  ) => void;
   /** Optional memory engine — when provided, episodes are chunked and stored for recall. */
   memory?: MemoryEngine;
   /**
@@ -356,7 +362,10 @@ export class Session {
       memory: opts.memory,
       config: opts.config,
       compressionRegistry: opts.compressionRegistry,
-      onModels: opts.onModels,
+      // Tag model reports with the provider's own id — the arrow runs only
+      // after construction (models arrive async on first query), so
+      // this.#provider is set by then. Works unchanged for any provider.
+      onModels: (m) => opts.onModels?.(this.#provider.id, m),
     });
 
     // Restore any pinned files the user had on this session before.
@@ -436,6 +445,8 @@ export class Session {
   }
 
   get status(): SessionStatus { return this.#status; }
+  /** Id of the provider backing this session (e.g. "claude"). */
+  get providerId(): string { return this.#provider.id; }
   get attachedClientCount(): number { return this.#clients.size; }
 
   /**
