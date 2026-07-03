@@ -27,7 +27,7 @@ import type {
   ContentPart,
   ToolState,
 } from "../protocol/types.js";
-import { authToIdentity, SYSTEM_IDENTITY } from "../protocol/types.js";
+import { authToIdentity, isActiveStatus, SYSTEM_IDENTITY } from "../protocol/types.js";
 import type { Store } from "./store.js";
 import type { AgentIdentityManager } from "./agent-identity.js";
 import { ScrollbackBuffer } from "./scrollback.js";
@@ -65,6 +65,13 @@ const MEMORY_SYSTEM_PROMPT_APPEND = [
   "",
   "Memory stores every tool call and assistant reply across all past sessions in this directory. It is the source of truth for history — summaries in your context may be partial.",
 ].join("\n");
+
+/**
+ * Trailing-debounce window for persisting ACTIVE status flips (thinking ↔
+ * tool_running — several per tool call). Terminal states bypass it; this only
+ * bounds how stale a crashed daemon's view of an in-flight turn can be.
+ */
+const STATUS_PERSIST_DEBOUNCE_MS = 500;
 
 /** A connected client that can receive messages from this session. */
 export interface AttachedClient {
@@ -137,6 +144,9 @@ export class Session {
   readonly projectId: string;
 
   #status: SessionStatus = "idle";
+  /** Trailing-debounce timer coalescing persistence of ACTIVE status flips
+   * (thinking ↔ tool_running). See #setStatus. */
+  #statusPersistTimer: ReturnType<typeof setTimeout> | null = null;
   #clients = new Map<string, AttachedClient>();
   #store: Store;
   #transcriptStore: TranscriptStore;
@@ -934,6 +944,13 @@ export class Session {
   }
 
   async destroy(sender: AuthContext): Promise<void> {
+    // Cancel any pending debounced status persist — a write firing after the
+    // deletes below would resurrect the meta file for a destroyed session,
+    // which restart resume would then pick up as a ghost.
+    if (this.#statusPersistTimer) {
+      clearTimeout(this.#statusPersistTimer);
+      this.#statusPersistTimer = null;
+    }
     this.#store.audit(sender.sub, "session.destroy", this.id);
     // Tear down the streamInput loop cleanly before wiping storage so we
     // don't leave a zombie SDK subprocess alive holding the transcript file.
@@ -2326,20 +2343,30 @@ export class Session {
   }
 
   #setStatus(status: SessionStatus): void {
+    // Many call sites re-assert the current value (thinking → thinking
+    // between the tool calls of a long turn). Those carry no information
+    // for clients or for resume — skip the persistence AND the broadcast.
+    if (status === this.#status) return;
     this.#status = status;
-    this.#store.updateSessionStatus(this.id, status);
 
-    this.#transcriptStore.saveMeta({
-      sessionId: this.id,
-      sessionName: this.name,
-      workdir: this.workdir,
-      createdBy: this.createdBy,
-      createdAt: this.createdAt,
-      lastStatus: status,
-      lastActivityAt: new Date().toISOString(),
-      accountId: this.accountId,
-      projectId: this.projectId,
-    }).catch(() => {});
+    // Persisted status exists for restart resume (and the session list).
+    // Terminal / parked states (idle, waiting_approval, error) mark durable
+    // turn boundaries, so they write through immediately — shutdown's
+    // drain() polls in-memory status to idle and then closes the store, so
+    // the idle write must not sit behind a timer. The ACTIVE pair flips on
+    // every tool call; coalesce those behind a short trailing debounce so a
+    // 200-tool-call turn costs a handful of writes instead of hundreds of
+    // sync UPDATEs + meta temp-file renames on the shared event loop. A
+    // crash can lose at most the debounce window of thinking/tool_running —
+    // states resume reconciles as interrupted anyway.
+    if (isActiveStatus(status)) {
+      this.#statusPersistTimer ??= setTimeout(() => {
+        this.#statusPersistTimer = null;
+        this.#persistStatus();
+      }, STATUS_PERSIST_DEBOUNCE_MS);
+    } else {
+      this.#persistStatus();
+    }
 
     this.#broadcastRaw({
       type: "session.status_change",
@@ -2347,6 +2374,33 @@ export class Session {
       status,
       timestamp: new Date().toISOString(),
     });
+  }
+
+  /** Write the CURRENT status through to the sessions DB + transcript meta,
+   * cancelling any pending debounced write (it would be redundant). */
+  #persistStatus(): void {
+    if (this.#statusPersistTimer) {
+      clearTimeout(this.#statusPersistTimer);
+      this.#statusPersistTimer = null;
+    }
+    try {
+      this.#store.updateSessionStatus(this.id, this.#status);
+    } catch {
+      // A debounced write can fire after shutdown closed the DB (or after a
+      // test tore the store down). Losing an in-flight active status is
+      // harmless — resume reconciles those — and must not crash the daemon.
+    }
+    this.#transcriptStore.saveMeta({
+      sessionId: this.id,
+      sessionName: this.name,
+      workdir: this.workdir,
+      createdBy: this.createdBy,
+      createdAt: this.createdAt,
+      lastStatus: this.#status,
+      lastActivityAt: new Date().toISOString(),
+      accountId: this.accountId,
+      projectId: this.projectId,
+    }).catch(() => {});
   }
 }
 

@@ -70,11 +70,15 @@ export class FsAccessError extends Error {
  * Resolve a user-supplied path (relative to workdir) into an absolute
  * canonical path that's guaranteed to live inside `workdir`. Throws
  * `FsAccessError` on traversal / symlink escapes.
+ *
+ * `workdirRoot` is the canonicalised workdir the check ran against —
+ * returned so callers that need it (e.g. to relativise child entries)
+ * don't have to re-`realpath` the workdir themselves.
  */
 export async function resolveSafe(
   workdir: string,
   userPath: string,
-): Promise<{ absolute: string; relative: string }> {
+): Promise<{ absolute: string; relative: string; workdirRoot: string }> {
   // Canonicalise the workdir once. If the workdir itself doesn't exist
   // we can't host fs operations against it.
   let canonicalWorkdir: string;
@@ -117,14 +121,14 @@ export async function resolveSafe(
   }
 
   const rel = path.relative(canonicalWorkdir, resolved) || ".";
-  return { absolute: resolved, relative: rel };
+  return { absolute: resolved, relative: rel, workdirRoot: canonicalWorkdir };
 }
 
 export async function handleFsList(
   msg: Pick<FsListMsg, "id" | "path">,
   workdir: string,
 ): Promise<FsListResultMsg> {
-  const { absolute, relative } = await resolveSafe(workdir, msg.path);
+  const { absolute, relative, workdirRoot } = await resolveSafe(workdir, msg.path);
 
   let stat: Awaited<ReturnType<typeof fs.stat>>;
   try {
@@ -154,10 +158,10 @@ export async function handleFsList(
     if (out.length >= MAX_LIST_ENTRIES) break;
     if (DEFAULT_HIDDEN.has(dirent.name)) continue;
     const childAbs = path.join(absolute, dirent.name);
-    const childRel = path.relative(
-      await fs.realpath(workdir),
-      childAbs,
-    );
+    // workdirRoot was canonicalised once in resolveSafe — re-realpath'ing
+    // the workdir per entry made listing a 5 000-entry directory pay 5 000
+    // redundant awaited syscalls.
+    const childRel = path.relative(workdirRoot, childAbs);
     let kind: "file" | "directory" = dirent.isDirectory() ? "directory" : "file";
     const isSymlink = dirent.isSymbolicLink();
     let size: number | undefined;

@@ -33,7 +33,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -1124,5 +1124,61 @@ describe("T9 – stall watchdog recovers a wedged turn", () => {
 
     // Clean up the pending approval + open run.
     await session.interrupt(TEST_AUTH);
+  });
+});
+
+// ── T7: status persistence — dedupe, write-through, debounce ──────────────────
+
+describe("T7 – status persistence", () => {
+  it("suppresses duplicate status broadcasts and persists terminal states immediately", async () => {
+    const provider = new MockSessionProvider("claude", [
+      [
+        { type: "text_delta", content: "hi " },
+        { type: "text_done", content: "hi there" },
+        { type: "turn_done", result: mockResult({ providerId: "claude" }) },
+      ],
+    ]);
+    const session = makeSession(provider, "status-dedupe");
+    const { client, received } = makeClient();
+    session.attach(client);
+
+    await session.send("hello", TEST_AUTH);
+    await waitForIdle(session);
+
+    // The turn re-asserts "thinking" several times internally; clients see
+    // each distinct status exactly once: thinking → idle.
+    const statuses = received
+      .filter((m) => m.type === "session.status_change")
+      .map((m) => (m as { status: string }).status);
+    expect(statuses).toEqual(["thinking", "idle"]);
+
+    // Terminal state wrote through immediately — no debounce window to wait out.
+    expect(store.getSession(session.id)?.status).toBe("idle");
+    await transcriptStore.flush();
+    const meta = JSON.parse(
+      readFileSync(transcriptStore.metaPath(session.id), "utf-8"),
+    ) as { lastStatus: string };
+    expect(meta.lastStatus).toBe("idle");
+  });
+
+  it("debounces persistence of active statuses instead of writing per flip", async () => {
+    // A stalling provider holds the session in an ACTIVE status past the
+    // 500 ms debounce window; a 2 s watchdog recovers it afterwards.
+    const provider = new MockSessionProvider("claude", [[]], { stall: true });
+    const session = makeSession(provider, "status-debounce", stallConfig(2000));
+
+    await session.send("wedge", TEST_AUTH);
+    expect(session.status).toBe("thinking");
+    // In-memory state flipped, but the sync UPDATE is deferred — the DB row
+    // still shows the status the session was created with.
+    expect(store.getSession(session.id)?.status).toBe("idle");
+
+    // …until the trailing debounce fires with the CURRENT value.
+    await new Promise<void>((r) => setTimeout(r, 700));
+    expect(store.getSession(session.id)?.status).toBe("thinking");
+
+    // Watchdog recovery lands on idle (terminal → immediate write-through).
+    await waitForIdle(session, 6000);
+    expect(store.getSession(session.id)?.status).toBe("idle");
   });
 });

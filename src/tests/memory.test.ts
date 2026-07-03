@@ -10,6 +10,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { execSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -281,6 +282,25 @@ describe("workspaceIdFromPath", () => {
     expect(
       workspaceIdFromPath("/tmp/p", { accountId: "x", projectId: "1" }),
     ).not.toBe(workspaceIdFromPath("/tmp/p", { accountId: "y", projectId: "1" }));
+  });
+
+  it("memoizes per (path, tenant): a repeat lookup skips re-derivation", () => {
+    const dir = mkdtempSync(join(tmpdir(), "codeoid-memo-"));
+    try {
+      const before = workspaceIdFromPath(dir, TENANT_A);
+      // Turning the directory into a git repo would change a FRESH derivation
+      // (git-common-dir anchor instead of path hash)…
+      execSync("git init", { cwd: dir, stdio: "ignore" });
+      // …but the repeat lookup serves the memoized id — stable within a
+      // daemon lifetime, the same trade-off Session makes by capturing
+      // #workspaceId once at construction.
+      expect(workspaceIdFromPath(dir, TENANT_A)).toBe(before);
+      // A different tenant is a different cache key → fresh derivation
+      // (which sees the git repo), and tenant isolation still holds.
+      expect(workspaceIdFromPath(dir, TENANT_B)).not.toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
