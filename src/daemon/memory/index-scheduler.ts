@@ -21,14 +21,12 @@ import type { SqliteEpisodeStore } from "./store.js";
 import {
   buildWorkspaceIndex,
   type IndexOptions,
-  type LabeledCluster,
 } from "./index-builder.js";
+import type { Labeler } from "./cluster-labeler.js";
 import {
-  clusterEpisodes,
-  MIN_EPISODES_FOR_CLUSTERING,
-  type Cluster,
-} from "./cluster.js";
-import { createLabeler, type Labeler } from "./cluster-labeler.js";
+  workspaceClustererFor,
+  type WorkspaceClusterer,
+} from "./workspace-clusterer.js";
 
 /** Rebuild once EPISODE_THRESHOLD new episodes have accumulated. */
 const EPISODE_THRESHOLD = 5;
@@ -36,10 +34,6 @@ const EPISODE_THRESHOLD = 5;
 const TIME_THRESHOLD_MS = 60_000;
 /** Minimum gap between successive rebuilds (protects prompt cache). */
 const DEBOUNCE_MS = 15_000;
-/** How often to re-cluster (more expensive, doesn't need to track each episode). */
-const RECLUSTER_INTERVAL_MS = 5 * 60_000;
-/** Pending-episode floor below which clustering skips the re-run. */
-const RECLUSTER_EPISODE_THRESHOLD = 10;
 
 export interface IndexSchedulerOptions {
   store: SqliteEpisodeStore;
@@ -55,8 +49,12 @@ export interface IndexSchedulerOptions {
   now?: () => number;
   /** Opt-in clustering. Defaults to the CODEOID_MEMORY_CLUSTERS env flag. */
   clustersEnabled?: boolean;
-  /** Custom labeler (tests inject heuristic labelers). */
+  /** Custom labeler (tests inject heuristic labelers). Honored on the FIRST
+   * scheduler to touch a workspace — the clusterer is shared after that. */
   labeler?: Labeler;
+  /** Explicit clusterer injection (tests). Defaults to the shared
+   * per-(store, workspace) instance. */
+  clusterer?: WorkspaceClusterer;
 }
 
 export class IndexScheduler {
@@ -70,13 +68,10 @@ export class IndexScheduler {
   #cachedAt = 0;
   #pendingEpisodes = 0;
 
-  // ── Clustering state (opt-in) ────────────────────────────────────────
-  #clustersEnabled: boolean;
-  #labeler: Labeler;
-  #labeledClusters: LabeledCluster[] = [];
-  #lastClusteredAt = 0;
-  #reclusterRunning = false;
-  #episodesSinceLastCluster = 0;
+  /** Shared per-(store, workspace) clustering — null when clustering is off.
+   * Sharing is the point: N sessions in one workspace used to each hydrate
+   * 1000 episodes, run their own k-means, and pay their own Haiku labels. */
+  #clusterer: WorkspaceClusterer | null;
 
   constructor(opts: IndexSchedulerOptions) {
     this.#opts = opts;
@@ -84,20 +79,25 @@ export class IndexScheduler {
     this.#timeThresholdMs = opts.timeThresholdMs ?? TIME_THRESHOLD_MS;
     this.#debounceMs = opts.debounceMs ?? DEBOUNCE_MS;
     this.#now = opts.now ?? Date.now;
-    this.#clustersEnabled =
+    const clustersEnabled =
       opts.clustersEnabled ?? process.env.CODEOID_MEMORY_CLUSTERS === "1";
-    this.#labeler = opts.labeler ?? createLabeler();
+    this.#clusterer = clustersEnabled
+      ? opts.clusterer ??
+        workspaceClustererFor({
+          store: opts.store,
+          workspaceId: opts.workspaceId,
+          labeler: opts.labeler,
+          now: opts.now,
+        })
+      : null;
   }
 
   /** Call after every episode.ingest — increments the pending counter. */
   onEpisode(): void {
     this.#pendingEpisodes += 1;
-    this.#episodesSinceLastCluster += 1;
-    // Kick an async re-cluster when enough new material has arrived.
+    // The shared clusterer may kick an async workspace-wide re-cluster.
     // Runs in the background — doesn't block the caller's turn.
-    if (this.#clustersEnabled && this.#shouldRecluster()) {
-      void this.#recluster();
-    }
+    this.#clusterer?.onEpisode();
   }
 
   /**
@@ -143,68 +143,20 @@ export class IndexScheduler {
   }
 
   #rebuild(): void {
-    // Cold-start the clusters if enabled and we haven't computed them yet.
-    if (
-      this.#clustersEnabled &&
-      this.#lastClusteredAt === 0 &&
-      !this.#reclusterRunning
-    ) {
-      void this.#recluster();
-    }
+    // Cold-start the workspace clusters if enabled and none exist yet.
+    this.#clusterer?.coldStart();
+    const clusters = this.#clusterer?.clusters ?? [];
     this.#cached = buildWorkspaceIndex(
       {
         store: this.#opts.store,
         workspaceId: this.#opts.workspaceId,
         workdir: this.#opts.workdir,
         currentSessionId: this.#opts.currentSessionId,
-        clusters: this.#labeledClusters.length > 0 ? this.#labeledClusters : undefined,
+        clusters: clusters.length > 0 ? clusters : undefined,
       },
       this.#opts.indexOptions,
     );
     this.#cachedAt = this.#now();
     this.#pendingEpisodes = 0;
-  }
-
-  // ── Background clustering ────────────────────────────────────────────
-
-  #shouldRecluster(): boolean {
-    if (this.#reclusterRunning) return false;
-    if (this.#episodesSinceLastCluster < RECLUSTER_EPISODE_THRESHOLD) return false;
-    const age = this.#now() - this.#lastClusteredAt;
-    return age >= RECLUSTER_INTERVAL_MS;
-  }
-
-  async #recluster(): Promise<void> {
-    if (this.#reclusterRunning) return;
-    this.#reclusterRunning = true;
-    try {
-      const episodes = this.#opts.store.listRecent(
-        this.#opts.workspaceId,
-        1000, // cluster over the most recent 1k episodes; older content has lower discovery value
-      );
-      if (episodes.length < MIN_EPISODES_FOR_CLUSTERING) {
-        this.#labeledClusters = [];
-        this.#lastClusteredAt = this.#now();
-        this.#episodesSinceLastCluster = 0;
-        return;
-      }
-      const clusters = clusterEpisodes(episodes, { k: 8 });
-      // Label in parallel — CachedLabeler short-circuits on repeat signatures.
-      const labeled = await Promise.all(
-        clusters.map(async (c: Cluster) => ({
-          cluster: c,
-          label: (await this.#labeler.label(c)).label,
-        })),
-      );
-      this.#labeledClusters = labeled;
-      this.#lastClusteredAt = this.#now();
-      this.#episodesSinceLastCluster = 0;
-    } catch (err) {
-      console.error(
-        `[codeoid/memory] recluster failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    } finally {
-      this.#reclusterRunning = false;
-    }
   }
 }
