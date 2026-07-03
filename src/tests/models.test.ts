@@ -17,6 +17,8 @@ import {
   resolveAgainstList,
 } from "../daemon/models.js";
 import { Store } from "../daemon/store.js";
+import { SessionManager } from "../daemon/session-manager.js";
+import { TranscriptStore } from "../daemon/transcript.js";
 
 describe("resolveAgainstList (live-backend resolution)", () => {
   const live = [
@@ -176,5 +178,136 @@ describe("Store session.model persistence", () => {
     expect(got.model).toBe("claude-opus-4-7");
     expect(got.fallbackModel).toBe("claude-sonnet-4-6");
     reopened.close();
+  });
+});
+
+// ── Persisted live model catalog (models.list fallback tiering) ──────────────
+
+describe("model catalog persistence (Store)", () => {
+  let tmp: string;
+  let store: Store;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "codeoid-modelcat-"));
+    store = new Store(join(tmp, "codeoid.db"));
+  });
+
+  afterEach(() => {
+    try { store.close(); } catch {}
+    try { rmSync(tmp, { recursive: true, force: true }); } catch {}
+  });
+
+  it("returns null before any catalog was saved", () => {
+    expect(store.getModelCatalog()).toBeNull();
+  });
+
+  it("round-trips a saved catalog", () => {
+    const models = [
+      { value: "default", displayName: "Default (recommended)", isDefault: true },
+      { value: "fable", displayName: "Fable 5", isDefault: false },
+    ];
+    store.saveModelCatalog(models);
+    expect(store.getModelCatalog()).toEqual(models);
+  });
+
+  it("upserts — the latest save wins", () => {
+    store.saveModelCatalog([{ value: "a", displayName: "A", isDefault: false }]);
+    store.saveModelCatalog([{ value: "b", displayName: "B", isDefault: true }]);
+    const got = store.getModelCatalog();
+    expect(got).toHaveLength(1);
+    expect(got?.[0]?.value).toBe("b");
+  });
+
+  it("survives a store reopen (new daemon lifetime)", () => {
+    store.saveModelCatalog([{ value: "opus", displayName: "Opus 4.8", isDefault: true }]);
+    store.close();
+    const reopened = new Store(join(tmp, "codeoid.db"));
+    expect(reopened.getModelCatalog()?.[0]?.displayName).toBe("Opus 4.8");
+    reopened.close();
+  });
+});
+
+describe("models.list serves live → persisted → baked-in fallback", () => {
+  let tmp: string;
+  let store: Store;
+
+  const AUTH = {
+    sub: "user:models-test",
+    scopes: [],
+    delegationDepth: 0,
+    accountId: "acc",
+    projectId: "proj",
+  };
+
+  const LIVE = [
+    { value: "default", displayName: "Default (recommended)" },
+    { value: "fable", displayName: "Fable 5" },
+    { value: "opus", displayName: "Opus 4.8" },
+  ];
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "codeoid-modeltier-"));
+    store = new Store(join(tmp, "codeoid.db"));
+  });
+
+  afterEach(() => {
+    try { store.close(); } catch {}
+    try { rmSync(tmp, { recursive: true, force: true }); } catch {}
+  });
+
+  async function listModels(manager: SessionManager) {
+    const client = { id: "client-models-test", auth: AUTH, send: () => {} };
+    const res = (await manager.handle(
+      { type: "models.list", id: "req-models" },
+      AUTH,
+      client,
+    )) as { type: string; models: { value: string; displayName: string }[]; live: boolean };
+    expect(res.type).toBe("models.list.result");
+    return res;
+  }
+
+  it("first-ever boot: baked-in fallback, live=false", async () => {
+    const manager = new SessionManager(store, new TranscriptStore(join(tmp, "t")));
+    const res = await listModels(manager);
+    expect(res.live).toBe(false);
+    expect(res.models.map((m) => m.value)).toEqual(
+      fallbackModelInfos().map((m) => m.value),
+    );
+  });
+
+  it("after a session reports models: live=true and the list is persisted", async () => {
+    const manager = new SessionManager(store, new TranscriptStore(join(tmp, "t")));
+    (manager as unknown as { _cacheModels(m: typeof LIVE): void })._cacheModels(LIVE);
+
+    const res = await listModels(manager);
+    expect(res.live).toBe(true);
+    expect(res.models.map((m) => m.value)).toEqual(["default", "fable", "opus"]);
+    expect(store.getModelCatalog()?.map((m) => m.value)).toEqual([
+      "default",
+      "fable",
+      "opus",
+    ]);
+  });
+
+  it("next boot before any turn: persisted list served, live=false", async () => {
+    const first = new SessionManager(store, new TranscriptStore(join(tmp, "t")));
+    (first as unknown as { _cacheModels(m: typeof LIVE): void })._cacheModels(LIVE);
+
+    // Fresh manager = fresh daemon lifetime, same store.
+    const second = new SessionManager(store, new TranscriptStore(join(tmp, "t")));
+    const res = await listModels(second);
+    expect(res.live).toBe(false); // clients keep refetching until live
+    expect(res.models.map((m) => m.value)).toEqual(["default", "fable", "opus"]);
+  });
+
+  it("first live report wins for the lifetime; empty reports are ignored", async () => {
+    const manager = new SessionManager(store, new TranscriptStore(join(tmp, "t")));
+    const cache = manager as unknown as { _cacheModels(m: unknown[]): void };
+    cache._cacheModels([]);
+    expect((await listModels(manager)).live).toBe(false);
+    cache._cacheModels(LIVE);
+    cache._cacheModels([{ value: "other", displayName: "Other" }]);
+    const res = await listModels(manager);
+    expect(res.models.map((m) => m.value)).toEqual(["default", "fable", "opus"]);
   });
 });

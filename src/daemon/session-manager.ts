@@ -154,7 +154,7 @@ export class SessionManager {
           memory: this.#memory,
           config: this.#config,
           compressionRegistry: this.#compressionRegistry,
-          onModels: (m) => this.#cacheModels(m),
+          onModels: (m) => this._cacheModels(m),
         });
 
         // Restore scrollback from transcript, seeding the seq counter past
@@ -487,7 +487,7 @@ export class SessionManager {
               ...(this.#memory ? { memory: this.#memory } : {}),
               config: this.#config,
               compressionRegistry: this.#compressionRegistry,
-              onModels: (m) => this.#cacheModels(m),
+              onModels: (m) => this._cacheModels(m),
             });
             this.#sessions.set(session.id, session);
             this.#rateLimiter.recordCreation(auth.sub);
@@ -581,8 +581,18 @@ export class SessionManager {
    * Cache the live model catalog reported by a session's SDK query. The list
    * is version-static across sessions, so the first one to report wins and we
    * stop overwriting (cheap idempotence; avoids churn from every new session).
+   *
+   * The first report of each daemon lifetime is also persisted to SQLite, so
+   * subsequent boots serve current model names before any turn runs (see
+   * `#currentModels`) instead of the baked-in fallback that goes stale
+   * between codeoid releases.
+   *
+   * TypeScript-private (not `#`) so unit tests can exercise the persistence
+   * path directly without a live SDK query — same convention as
+   * `Session._applyInterruptedStateToTool`. Do NOT call from production code
+   * outside the `onModels` wiring.
    */
-  #cacheModels(
+  private _cacheModels(
     raw: ReadonlyArray<{ value: string; displayName: string; description?: string }>,
   ): void {
     if (this.#modelsCache || raw.length === 0) return;
@@ -592,13 +602,45 @@ export class SessionManager {
       ...(m.description ? { description: m.description } : {}),
       isDefault: m.value === "default",
     }));
+    try {
+      this.#store.saveModelCatalog(this.#modelsCache);
+    } catch (err) {
+      // Persistence is best-effort — the in-memory cache still serves this
+      // lifetime; next boot just falls back one tier further.
+      console.error(
+        `[codeoid/models] failed to persist model catalog: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
-  /** The live model catalog if cached, else the built-in fallback. */
+  /**
+   * The model catalog to serve, best source first:
+   *   1. live    — reported by a session's SDK query this daemon lifetime
+   *   2. cached  — the last live list persisted by a previous lifetime
+   *   3. fallback — the baked-in catalog (first-ever boot only)
+   * `live` is true only for tier 1, so clients keep refetching until the
+   * backend has actually been asked this lifetime.
+   */
   #currentModels(): { models: ModelInfo[]; live: boolean } {
-    return this.#modelsCache
-      ? { models: this.#modelsCache, live: true }
-      : { models: fallbackModelInfos(), live: false };
+    if (this.#modelsCache) return { models: this.#modelsCache, live: true };
+    const persisted = this.#persistedModels();
+    if (persisted) return { models: persisted, live: false };
+    return { models: fallbackModelInfos(), live: false };
+  }
+
+  /** Lazily-loaded persisted catalog (null = never reported / unreadable). */
+  #persistedModelsLoaded = false;
+  #persistedModelsValue: ModelInfo[] | null = null;
+  #persistedModels(): ModelInfo[] | null {
+    if (!this.#persistedModelsLoaded) {
+      this.#persistedModelsLoaded = true;
+      try {
+        this.#persistedModelsValue = this.#store.getModelCatalog();
+      } catch {
+        this.#persistedModelsValue = null;
+      }
+    }
+    return this.#persistedModelsValue;
   }
 
   #modelsList(
@@ -796,7 +838,7 @@ export class SessionManager {
       memory: this.#memory,
       config: this.#config,
       compressionRegistry: this.#compressionRegistry,
-      onModels: (m) => this.#cacheModels(m),
+      onModels: (m) => this._cacheModels(m),
     });
 
     this.#sessions.set(session.id, session);

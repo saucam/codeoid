@@ -5,7 +5,7 @@
  */
 
 import { Database } from "bun:sqlite";
-import type { SessionInfo, SessionStatus } from "../protocol/types.js";
+import type { ModelInfo, SessionInfo, SessionStatus } from "../protocol/types.js";
 
 export class Store {
   #db: Database;
@@ -73,6 +73,17 @@ export class Store {
         FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
       );
       CREATE INDEX IF NOT EXISTS idx_session_pins_session ON session_pins(session_id);
+
+      -- Last live model catalog reported by the Claude Code backend
+      -- (single-row table). Served as the models.list fallback on boots
+      -- where no session has run a turn yet, so the picker shows current
+      -- model names instead of a baked-in list that goes stale between
+      -- codeoid releases.
+      CREATE TABLE IF NOT EXISTS cached_model_catalog (
+        id          INTEGER PRIMARY KEY CHECK (id = 1),
+        models_json TEXT NOT NULL,
+        cached_at   TEXT NOT NULL DEFAULT (datetime('now'))
+      );
     `);
   }
 
@@ -273,6 +284,41 @@ export class Store {
 
   deleteSession(id: string): void {
     this.#db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
+  }
+
+  // ── Model catalog cache ───────────────────────────────────────────────
+
+  /**
+   * Persist the live model catalog reported by the Claude Code backend.
+   * Single-row upsert — the latest report wins across daemon lifetimes.
+   */
+  saveModelCatalog(models: readonly ModelInfo[]): void {
+    this.#db
+      .prepare(
+        `INSERT INTO cached_model_catalog (id, models_json, cached_at)
+         VALUES (1, ?, datetime('now'))
+         ON CONFLICT(id) DO UPDATE SET
+           models_json = excluded.models_json,
+           cached_at = excluded.cached_at`,
+      )
+      .run(JSON.stringify(models));
+  }
+
+  /**
+   * The last persisted live model catalog, or null when no session has ever
+   * reported one (first-ever boot) or the stored JSON is unreadable.
+   */
+  getModelCatalog(): ModelInfo[] | null {
+    const row = this.#db
+      .prepare("SELECT models_json FROM cached_model_catalog WHERE id = 1")
+      .get() as { models_json: string } | null;
+    if (!row) return null;
+    try {
+      const parsed = JSON.parse(row.models_json) as ModelInfo[];
+      return Array.isArray(parsed) && parsed.length > 0 ? parsed : null;
+    } catch {
+      return null;
+    }
   }
 
   // ── Audit ─────────────────────────────────────────────────────────────
