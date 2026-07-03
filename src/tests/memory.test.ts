@@ -319,9 +319,11 @@ describe("workspace-id migration (re-key legacy episodes to tenant)", () => {
 
     const ep = insertEp(store, oldWs, "s1", "did a thing");
     expect(store.listRecent(newWs, 10)).toHaveLength(0); // invisible pre-migration
+    expect(store.needsWorkspaceMigration()).toBe(true);
 
     const r = store.migrateWorkspaceIdsToTenant([sess("s1", workdir, TENANT_A)], workspaceIdFromPath);
     expect(r.migrated).toBe(true);
+    expect(store.needsWorkspaceMigration()).toBe(false); // guard flips after run
     expect(r.reKeyed).toBeGreaterThanOrEqual(1);
 
     // Visible under the tenant-scoped id now; gone from the old id.
