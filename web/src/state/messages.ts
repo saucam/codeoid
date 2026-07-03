@@ -46,12 +46,17 @@ const [state, setState] = createStore<MessagesState>({
   epochBySession: {},
 });
 
-// O(1) existence index — maintained in parallel with bySession so
-// applyDelta can skip the O(N) buf.some() scan on every streaming delta.
+// O(1) positional index — sessionId → (messageId → array index), maintained
+// in parallel with bySession. The #73/#75 fix added an existence Set so
+// applyDelta could skip an O(N) buf.some(); the POSITIONAL lookup stayed a
+// findIndex-from-0, though, so every streaming delta on a 5000-message
+// session still walked all 5000 store-proxied entries inside produce() —
+// O(N) per event, O(N²) over the session (#90). Indices stay valid because
+// the buffer is append-only; replaceScrollback rebuilds the map wholesale.
 // Stored outside the Solid store (plain Map) so mutations don't create
 // fine-grained reactive overhead; hasMessage intentionally reads it
 // without tracking.
-const idsBySession = new Map<string, Set<string>>();
+const indexBySession = new Map<string, Map<string, number>>();
 
 /** Reactive slice — components consume this. */
 export function messagesFor(sessionId: string): SessionMessage[] {
@@ -117,23 +122,26 @@ const EMPTY: SessionMessage[] = [];
 // ---------- broadcast ingest ----------
 
 export function applyMessage(msg: SessionMessage): void {
-  // Keep the O(1) existence index in sync before the store mutation so
-  // any concurrent hasMessage call (delta arriving in the same tick) sees
-  // the correct answer immediately.
-  let idSet = idsBySession.get(msg.sessionId);
-  if (!idSet) {
-    idSet = new Set();
-    idsBySession.set(msg.sessionId, idSet);
+  // Keep the O(1) index in sync before the store mutation so any concurrent
+  // hasMessage call (delta arriving in the same tick) sees the correct
+  // answer immediately.
+  let index = indexBySession.get(msg.sessionId);
+  if (!index) {
+    index = new Map();
+    indexBySession.set(msg.sessionId, index);
   }
-  idSet.add(msg.messageId);
+  const at = index.get(msg.messageId);
 
   batch(() => {
     setState(
       produce<MessagesState>((s) => {
         const buf = (s.bySession[msg.sessionId] ??= []);
-        const existing = buf.findIndex((m) => m.messageId === msg.messageId);
-        if (existing >= 0) buf[existing] = msg;
-        else buf.push(msg);
+        if (at !== undefined) {
+          buf[at] = msg;
+        } else {
+          index.set(msg.messageId, buf.length);
+          buf.push(msg);
+        }
         s.versions[msg.messageId] = (s.versions[msg.messageId] ?? 0) + 1;
         s.epochBySession[msg.sessionId] =
           (s.epochBySession[msg.sessionId] ?? 0) + 1;
@@ -146,14 +154,13 @@ export function applyDelta(delta: SessionMessageDelta): void {
   // Only mutate if the parent message exists. Stale deltas (delivered
   // before scrollback replay or after eviction) are dropped silently —
   // the daemon's replay will resync us on attach.
-  if (!hasMessage(delta.sessionId, delta.messageId)) return;
+  const idx = indexBySession.get(delta.sessionId)?.get(delta.messageId);
+  if (idx === undefined) return;
   batch(() => {
     setState(
       produce<MessagesState>((s) => {
         const buf = s.bySession[delta.sessionId];
         if (!buf) return;
-        const idx = buf.findIndex((m) => m.messageId === delta.messageId);
-        if (idx < 0) return;
         const target = buf[idx];
         if (!target) return;
 
@@ -205,9 +212,10 @@ export function replaceScrollback(sessionId: string, messages: readonly SessionM
     }
   }
 
-  // Rebuild the O(1) existence index for this session before touching the
-  // store — applyDelta calls hasMessage which reads idsBySession directly.
-  idsBySession.set(sessionId, new Set(posById.keys()));
+  // Rebuild the O(1) positional index for this session before touching the
+  // store — applyDelta reads indexBySession directly. `posById` already IS
+  // messageId → deduped position, so reuse it wholesale.
+  indexBySession.set(sessionId, posById);
 
   batch(() => {
     setState(
@@ -228,7 +236,7 @@ export function replaceScrollback(sessionId: string, messages: readonly SessionM
 
 /** Check whether a (sessionId, messageId) pair exists in the store. O(1). */
 export function hasMessage(sessionId: string, messageId: string): boolean {
-  return idsBySession.get(sessionId)?.has(messageId) ?? false;
+  return indexBySession.get(sessionId)?.has(messageId) ?? false;
 }
 
 /**
@@ -250,8 +258,8 @@ export function registerSessionCachePruner(fn: SessionCachePruner): () => void {
  * so its entries don't accumulate in memory indefinitely.
  */
 export function clearSessionMessages(sessionId: string): void {
-  const ids = idsBySession.get(sessionId);
-  idsBySession.delete(sessionId);
+  const ids = indexBySession.get(sessionId);
+  indexBySession.delete(sessionId);
   batch(() => {
     setState(
       produce<MessagesState>((s) => {
@@ -259,7 +267,7 @@ export function clearSessionMessages(sessionId: string): void {
         // session — without this loop they leak for every destroyed
         // session's messages.
         if (ids) {
-          for (const id of ids) delete s.versions[id];
+          for (const id of ids.keys()) delete s.versions[id];
         }
         delete s.bySession[sessionId];
         delete s.epochBySession[sessionId];
@@ -278,5 +286,5 @@ export function clearSessionMessages(sessionId: string): void {
 // Test hook — reset the entire store between tests.
 export function _resetMessagesForTest(): void {
   setState({ bySession: {}, versions: {}, epochBySession: {} });
-  idsBySession.clear();
+  indexBySession.clear();
 }
