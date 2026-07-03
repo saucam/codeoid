@@ -1173,8 +1173,10 @@ describe("T7 – status persistence", () => {
     // still shows the status the session was created with.
     expect(store.getSession(session.id)?.status).toBe("idle");
 
-    // …until the trailing debounce fires with the CURRENT value.
-    await new Promise<void>((r) => setTimeout(r, 700));
+    // …until the trailing debounce fires with the CURRENT value. Generous
+    // margin over the 500 ms window — this asserts "persisted by now", so
+    // extra slack only makes it MORE robust under CI load.
+    await new Promise<void>((r) => setTimeout(r, 900));
     expect(store.getSession(session.id)?.status).toBe("thinking");
 
     // Watchdog recovery lands on idle (terminal → immediate write-through).

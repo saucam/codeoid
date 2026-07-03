@@ -2385,10 +2385,16 @@ export class Session {
     }
     try {
       this.#store.updateSessionStatus(this.id, this.#status);
-    } catch {
+    } catch (err) {
       // A debounced write can fire after shutdown closed the DB (or after a
       // test tore the store down). Losing an in-flight active status is
       // harmless — resume reconciles those — and must not crash the daemon.
+      // Terminal states DO matter for restart resume, so surface those.
+      if (!isActiveStatus(this.#status)) {
+        console.error(
+          `[codeoid/session ${this.id}] status persist failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
     this.#transcriptStore.saveMeta({
       sessionId: this.id,
