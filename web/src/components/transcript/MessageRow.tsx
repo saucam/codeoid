@@ -4,7 +4,7 @@
  * (P3 stub uses solid-markdown with shiki coming in P7).
  */
 
-import { Component, Match, Show, Switch, createMemo, createSignal } from "solid-js";
+import { Component, For, Match, Show, Switch, createMemo, createSignal } from "solid-js";
 import { SolidMarkdown } from "solid-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -15,6 +15,10 @@ import {
   shortSub,
 } from "../../lib/identity";
 import { safeImageUri, safeLinkUri } from "../../lib/sanitize-url";
+import {
+  createFrameThrottled,
+  splitStreamingBlocks,
+} from "../../lib/streaming-markdown";
 import type {
   MessageRole,
   SessionMessage,
@@ -109,21 +113,48 @@ const Plain: Component<{ text: string }> = (props) => (
   </div>
 );
 
-const MarkdownBlock: Component<{ text: string; streaming?: boolean }> = (props) => (
-  <div class="md-prose">
-    <SolidMarkdown
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      remarkPlugins={[remarkGfm as any]}
-      // Untrusted model output: allowlist link schemes (blocks javascript:/data:)
-      // and drop remote image src (zero-click exfil). See lib/sanitize-url.
-      transformLinkUri={safeLinkUri}
-      transformImageUri={safeImageUri}
-      children={props.text}
-    />
-    <Show when={props.streaming}>
-      <span class="md-streaming-caret" aria-label="streaming" />
-    </Show>
-  </div>
+const MarkdownBlock: Component<{ text: string; streaming?: boolean }> = (props) => {
+  // #87: streaming markdown used to hand the WHOLE accumulated string to
+  // SolidMarkdown on every delta — a full unified() re-parse plus a DOM
+  // subtree rebuild per chunk, O(L²) over the stream. While streaming:
+  //   1. coalesce delta-rate updates to one per animation frame, and
+  //   2. render completed blocks once (<For> keys by string identity, so a
+  //      stable block never re-parses) and re-parse only the live tail,
+  //      reconciling its DOM instead of rebuilding it.
+  // When streaming ends the message renders as ONE document again, so the
+  // final output is byte-identical to the non-streaming path.
+  const throttled = createFrameThrottled(
+    () => props.text,
+    () => props.streaming === true,
+  );
+  const segments = createMemo(() =>
+    props.streaming ? splitStreamingBlocks(throttled()) : { blocks: [], tail: "" },
+  );
+  return (
+    <div class="md-prose">
+      <Show when={props.streaming} fallback={<Md text={props.text} />}>
+        <For each={segments().blocks}>{(block) => <Md text={block} />}</For>
+        <Md text={segments().tail} reconcile />
+      </Show>
+      <Show when={props.streaming}>
+        <span class="md-streaming-caret" aria-label="streaming" />
+      </Show>
+    </div>
+  );
+};
+
+/** One markdown document — the shared SolidMarkdown configuration. */
+const Md: Component<{ text: string; reconcile?: boolean }> = (props) => (
+  <SolidMarkdown
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    remarkPlugins={[remarkGfm as any]}
+    // Untrusted model output: allowlist link schemes (blocks javascript:/data:)
+    // and drop remote image src (zero-click exfil). See lib/sanitize-url.
+    transformLinkUri={safeLinkUri}
+    transformImageUri={safeImageUri}
+    renderingStrategy={props.reconcile ? "reconcile" : "memo"}
+    children={props.text}
+  />
 );
 
 const ThinkingBlock: Component<{ text: string; streaming?: boolean }> = (props) => {
