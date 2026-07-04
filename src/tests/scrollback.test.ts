@@ -158,3 +158,58 @@ describe("ScrollbackBuffer — sizeHint", () => {
     expect(buf.bytes).toBe(25);
   });
 });
+
+describe("ScrollbackBuffer — readChunked (#84)", () => {
+  const sizeOf = (m: SessionMessage) => Buffer.byteLength(JSON.stringify(m), "utf8");
+
+  test("returns [] for an empty buffer", () => {
+    expect(new ScrollbackBuffer().readChunked(1000)).toEqual([]);
+  });
+
+  test("returns a single chunk when everything fits the budget", () => {
+    const buf = new ScrollbackBuffer();
+    buf.push(makeMsg("a"));
+    buf.push(makeMsg("b"));
+    const chunks = buf.readChunked(10 * 1024 * 1024);
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]).toHaveLength(2);
+  });
+
+  test("partitions into ordered chunks that cover every message exactly once", () => {
+    const buf = new ScrollbackBuffer();
+    const pushed: SessionMessage[] = [];
+    for (let i = 0; i < 10; i++) {
+      const m = makeMsg(`m${i}-${"x".repeat(100)}`);
+      pushed.push(m);
+      buf.push(m);
+    }
+    // Budget that holds ~2 messages, forcing multiple chunks.
+    const budget = sizeOf(pushed[0]!) * 2 + 10;
+    const chunks = buf.readChunked(budget);
+
+    expect(chunks.length).toBeGreaterThan(1);
+    // Flattened chunks equal the buffer read() — same messages, same order.
+    const flat = chunks.flat();
+    expect(flat).toEqual(buf.read());
+    // No empty chunks; every multi-message chunk stays within the budget.
+    for (const chunk of chunks) {
+      expect(chunk.length).toBeGreaterThan(0);
+      if (chunk.length > 1) {
+        const bytes = chunk.reduce((n, m) => n + sizeOf(m as SessionMessage), 0);
+        expect(bytes).toBeLessThanOrEqual(budget);
+      }
+    }
+  });
+
+  test("a message larger than the budget occupies its own chunk (never split)", () => {
+    const buf = new ScrollbackBuffer();
+    buf.push(makeMsg("a"));
+    buf.push(makeMsg("B".repeat(5000)));
+    buf.push(makeMsg("c"));
+    const chunks = buf.readChunked(500);
+    expect(chunks).toHaveLength(3);
+    expect(chunks[1]).toHaveLength(1);
+    expect((chunks[1]![0] as SessionMessage).content.startsWith("B")).toBe(true);
+    expect(chunks.flat()).toEqual(buf.read());
+  });
+});

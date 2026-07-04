@@ -119,6 +119,37 @@ export class ScrollbackBuffer {
   }
 
   /**
+   * Partition buffered messages into ordered chunks (oldest→newest), each
+   * holding at most ~`maxBytes` of serialized message payload. Used to replay
+   * a large scrollback across multiple WS frames so no single frame exceeds
+   * the server's outbound backpressure limit (#84) and no one-shot stringify
+   * of the whole buffer stalls the event loop.
+   *
+   * Uses the byte sizes already accounted per entry — no re-serialization. A
+   * single message larger than `maxBytes` occupies its own chunk (never split);
+   * such a chunk can exceed `maxBytes`, which is unavoidable without dropping
+   * the message. Returns [] for an empty buffer.
+   */
+  readChunked(maxBytes: number): DaemonMessage[][] {
+    const chunks: DaemonMessage[][] = [];
+    let current: DaemonMessage[] = [];
+    let currentBytes = 0;
+    for (const entry of this.#entries) {
+      // Start a new chunk when adding this entry would overflow the budget,
+      // but never emit an empty chunk (a lone oversized message stays put).
+      if (current.length > 0 && currentBytes + entry.size > maxBytes) {
+        chunks.push(current);
+        current = [];
+        currentBytes = 0;
+      }
+      current.push(entry.msg);
+      currentBytes += entry.size;
+    }
+    if (current.length > 0) chunks.push(current);
+    return chunks;
+  }
+
+  /**
    * Read messages after a given timestamp (for incremental catch-up).
    */
   readSince(timestamp: string): DaemonMessage[] {

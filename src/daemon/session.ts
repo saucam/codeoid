@@ -73,11 +73,29 @@ const MEMORY_SYSTEM_PROMPT_APPEND = [
  */
 const STATUS_PERSIST_DEBOUNCE_MS = 500;
 
+/**
+ * Max serialized message payload per scrollback.replay frame (#84). Kept well
+ * under the server's 16 MB WS outbound backpressure limit (server.ts) so a
+ * single chunk — plus the frame envelope and any concurrent traffic — never
+ * trips closeOnBackpressureLimit. Scrollback whose total fits one chunk is
+ * still replayed as a single legacy frame; only larger sessions are chunked.
+ */
+const REPLAY_CHUNK_BYTES = 4 * 1024 * 1024;
+
 /** A connected client that can receive messages from this session. */
 export interface AttachedClient {
   id: string;
   auth: AuthContext;
   send(msg: DaemonMessage): void;
+  /**
+   * Optional backpressure signal: resolves once the client's outbound buffer
+   * has drained enough to accept more data. Used to pace a chunked scrollback
+   * replay (#84) so chunks don't accumulate past the WS backpressure limit and
+   * force-close the socket. Transports without backpressure awareness
+   * (in-memory test clients, Telegram) omit it — callers treat absence as
+   * "always ready" (`await client.flush?.()` is a no-op).
+   */
+  flush?(): Promise<void>;
 }
 
 export interface SessionCreateOptions {
@@ -552,14 +570,73 @@ export class Session {
     this.#clients.set(client.id, client);
     this.#store.audit(client.auth.sub, "session.attach", this.id);
 
-    // Replay scrollback — full SessionMessage objects, not deltas
-    const messages = this.#scrollback.read() as SessionMessage[];
-    if (messages.length > 0) {
-      client.send({
+    // Replay scrollback — full SessionMessage objects, not deltas. Partition
+    // by byte budget so a large session can't emit one oversized frame that
+    // trips the WS backpressure limit and force-closes the client (#84).
+    const chunks = this.#scrollback.readChunked(REPLAY_CHUNK_BYTES) as SessionMessage[][];
+    if (chunks.length === 0) return;
+
+    if (chunks.length === 1) {
+      // Common case: the whole scrollback fits one frame. Send it synchronously
+      // in the legacy single-frame shape (no seq/final) — behaviour and wire
+      // format are unchanged for every session small enough to fit.
+      client.send({ type: "scrollback.replay", sessionId: this.id, messages: chunks[0]! });
+      return;
+    }
+
+    // Large scrollback: stream chunks oldest→newest, pacing on socket drain so
+    // frames don't accumulate past the backpressure limit. Because that pacing
+    // is async, live broadcasts to this client are buffered until the replay
+    // finishes — otherwise a newer live message could land ahead of older
+    // replayed ones. The buffering wrapper is what #broadcastRaw sees; replay
+    // frames go straight to the raw client, then the buffered live messages in
+    // order, then the wrapper becomes a pass-through.
+    const raw = client;
+    const buffer: DaemonMessage[] = [];
+    let replaying = true;
+    const buffered: AttachedClient = {
+      id: raw.id,
+      auth: raw.auth,
+      send: (m) => {
+        if (replaying) buffer.push(m);
+        else raw.send(m);
+      },
+      flush: raw.flush?.bind(raw),
+    };
+    this.#clients.set(raw.id, buffered);
+
+    void this.#streamReplay(raw, buffered, chunks).finally(() => {
+      // Flush live messages that arrived during replay, in order — but only if
+      // this client is still the current attachment (not detached/replaced).
+      if (this.#clients.get(raw.id) === buffered) {
+        for (const m of buffer) raw.send(m);
+      }
+      replaying = false;
+      buffer.length = 0;
+    });
+  }
+
+  /**
+   * Stream a chunked scrollback replay to a client, waiting for the socket to
+   * drain between chunks. `token` is the buffering wrapper currently registered
+   * in #clients; if it's been replaced (detach / re-attach) mid-replay we stop.
+   */
+  async #streamReplay(
+    raw: AttachedClient,
+    token: AttachedClient,
+    chunks: SessionMessage[][],
+  ): Promise<void> {
+    const last = chunks.length - 1;
+    for (let i = 0; i <= last; i++) {
+      if (this.#clients.get(raw.id) !== token) return;
+      raw.send({
         type: "scrollback.replay",
         sessionId: this.id,
-        messages,
+        messages: chunks[i]!,
+        seq: i,
+        final: i === last,
       });
+      if (i < last) await raw.flush?.();
     }
   }
 

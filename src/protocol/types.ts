@@ -1201,11 +1201,26 @@ export interface SessionInfoUpdateMsg {
  *
  * Contains full SessionMessage objects (not deltas). The scrollback
  * buffer merges deltas into complete messages before replay.
+ *
+ * Chunked replay (`seq`/`final`, additive & optional — #84): when a
+ * session's scrollback is too large to flush as one WS frame under the
+ * server's outbound backpressure limit, the daemon splits it into ordered
+ * chunks (oldest→newest) and paces them on socket drain. `seq` is the
+ * 0-based chunk index; `final` marks the last chunk. Both are ABSENT on a
+ * single-frame replay (the legacy shape). Clients: reset scrollback when
+ * `seq` is absent or 0, append when `seq > 0`, and treat the replay as
+ * complete on `final` (or when `seq` is absent). Clients that predate these
+ * fields ignore them and replace on each frame — ending on the newest chunk,
+ * which degrades gracefully rather than crashing.
  */
 export interface ScrollbackReplayMsg {
   type: "scrollback.replay";
   sessionId: string;
   messages: SessionMessage[];
+  /** 0-based chunk index of a chunked replay. Absent = single-frame replay. */
+  seq?: number;
+  /** True on the last chunk of a chunked replay. Absent = single-frame replay. */
+  final?: boolean;
 }
 
 /** Result of a session.search query. */

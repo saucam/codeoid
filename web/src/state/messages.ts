@@ -234,6 +234,43 @@ export function replaceScrollback(sessionId: string, messages: readonly SessionM
   });
 }
 
+/**
+ * Append a chunk of a multi-frame scrollback replay (#84). The daemon splits a
+ * large scrollback into ordered chunks (oldest→newest): chunk 0 arrives via
+ * replaceScrollback (which resets the session), and subsequent chunks extend it
+ * here. Upserts by messageId — last occurrence wins, keeping the original
+ * position — so a redelivered chunk stays idempotent. Normal (non-duplicate)
+ * appends are O(1) per message.
+ */
+export function appendScrollback(sessionId: string, messages: readonly SessionMessage[]): void {
+  if (messages.length === 0) return;
+  // Reuse the O(1) positional index (messageId → array position), kept in sync
+  // before the store mutation exactly like applyMessage.
+  let index = indexBySession.get(sessionId);
+  if (!index) {
+    index = new Map();
+    indexBySession.set(sessionId, index);
+  }
+
+  batch(() => {
+    setState(
+      produce<MessagesState>((s) => {
+        const buf = (s.bySession[sessionId] ??= []);
+        for (const m of messages) {
+          const at = index.get(m.messageId);
+          if (at !== undefined) {
+            buf[at] = m; // redelivered chunk: upsert in place, keep position
+          } else {
+            index.set(m.messageId, buf.length);
+            buf.push(m);
+          }
+        }
+        s.epochBySession[sessionId] = (s.epochBySession[sessionId] ?? 0) + 1;
+      }),
+    );
+  });
+}
+
 /** Check whether a (sessionId, messageId) pair exists in the store. O(1). */
 export function hasMessage(sessionId: string, messageId: string): boolean {
   return indexBySession.get(sessionId)?.has(messageId) ?? false;

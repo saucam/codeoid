@@ -24,6 +24,7 @@ import { ingestSessionList, mergeSession, setSessionStatus } from "./sessions";
 import {
   applyDelta,
   applyMessage,
+  appendScrollback,
   replaceScrollback,
 } from "./messages";
 
@@ -232,7 +233,13 @@ function routeBroadcast(msg: DaemonMessage): void {
       applyDelta(msg);
       return;
     case "scrollback.replay":
-      replaceScrollback(msg.sessionId, msg.messages);
+      // Chunked replay (#84): chunk 0 (or a single-frame legacy replay, where
+      // seq is absent) resets the session; later chunks append in order.
+      if (msg.seq === undefined || msg.seq === 0) {
+        replaceScrollback(msg.sessionId, msg.messages);
+      } else {
+        appendScrollback(msg.sessionId, msg.messages);
+      }
       return;
     case "session.info_update":
       mergeSession(msg.session);

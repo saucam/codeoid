@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
   _resetMessagesForTest,
+  appendScrollback,
   applyDelta,
   applyMessage,
   clearSessionMessages,
@@ -224,6 +225,44 @@ describe("messages store", () => {
     expect(buf[0]?.content).toBe("v3-final");
     expect(hasMessage("s1", "m1")).toBe(true);
     expect(hasMessage("s1", "m2")).toBe(true);
+  });
+
+  it("appendScrollback extends a reset buffer in order (chunked replay #84)", () => {
+    // Mirrors the wire flow: chunk 0 resets via replaceScrollback, later
+    // chunks append.
+    replaceScrollback("s1", [
+      makeMsg({ messageId: "c0-a" }),
+      makeMsg({ messageId: "c0-b" }),
+    ]);
+    appendScrollback("s1", [
+      makeMsg({ messageId: "c1-a" }),
+      makeMsg({ messageId: "c1-b" }),
+    ]);
+    appendScrollback("s1", [makeMsg({ messageId: "c2-a" })]);
+
+    expect(messagesFor("s1").map((m) => m.messageId)).toEqual([
+      "c0-a", "c0-b", "c1-a", "c1-b", "c2-a",
+    ]);
+    expect(hasMessage("s1", "c2-a")).toBe(true);
+  });
+
+  it("appendScrollback bumps the session epoch and no-ops on an empty chunk", () => {
+    replaceScrollback("s1", [makeMsg({ messageId: "m0" })]);
+    const before = epochOf("s1");
+    appendScrollback("s1", [makeMsg({ messageId: "m1" })]);
+    expect(epochOf("s1")).toBe(before + 1);
+    appendScrollback("s1", []);
+    expect(epochOf("s1")).toBe(before + 1); // empty chunk is a no-op
+  });
+
+  it("appendScrollback upserts a redelivered messageId, keeping its position", () => {
+    replaceScrollback("s1", [makeMsg({ messageId: "m0", content: "zero" })]);
+    appendScrollback("s1", [makeMsg({ messageId: "m1", content: "v1" })]);
+    // Redeliver m1 with new content — must update in place, not duplicate.
+    appendScrollback("s1", [makeMsg({ messageId: "m1", content: "v2" })]);
+    const buf = messagesFor("s1");
+    expect(buf.map((m) => m.messageId)).toEqual(["m0", "m1"]);
+    expect(buf[1]?.content).toBe("v2");
   });
 
   it("clearSessionMessages removes messages, ids, epoch AND per-message version entries", () => {

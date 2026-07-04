@@ -373,7 +373,7 @@ export class DaemonServer {
         closeOnBackpressureLimit: true,
         open(ws) {
           // Auth timeout — client must authenticate within 10 seconds
-          const data = ws.data as { clientId: string; authenticated: boolean; auth: AuthContext | null; authTimer?: ReturnType<typeof setTimeout> };
+          const data = ws.data as { clientId: string; authenticated: boolean; auth: AuthContext | null; authTimer?: ReturnType<typeof setTimeout>; drainWaiters?: Array<() => void> };
           data.authTimer = setTimeout(() => {
             if (!data.authenticated) {
               ws.close(4001, "Authentication timeout");
@@ -382,7 +382,7 @@ export class DaemonServer {
         },
 
         async message(ws, rawMessage) {
-          const data = ws.data as { clientId: string; authenticated: boolean; auth: AuthContext | null; authTimer?: ReturnType<typeof setTimeout> };
+          const data = ws.data as { clientId: string; authenticated: boolean; auth: AuthContext | null; authTimer?: ReturnType<typeof setTimeout>; drainWaiters?: Array<() => void> };
           let parsed: Record<string, unknown>;
 
           try {
@@ -451,6 +451,19 @@ export class DaemonServer {
                 ws.send(JSON.stringify(m));
               } catch { /* client may have disconnected */ }
             },
+            // Resolves once the outbound buffer has drained below one replay
+            // chunk, so a chunked scrollback replay (#84) paces itself and never
+            // accumulates past backpressureLimit. Resolved by `drain` (or, if the
+            // socket dies mid-replay, by `close`).
+            flush: () => {
+              const LOW_WATER = 4 * 1024 * 1024;
+              const buffered = (ws as unknown as { getBufferedAmount(): number }).getBufferedAmount();
+              if (buffered <= LOW_WATER) return Promise.resolve();
+              return new Promise<void>((resolve) => {
+                if (!data.drainWaiters) data.drainWaiters = [];
+                data.drainWaiters.push(resolve);
+              });
+            },
           };
 
           try {
@@ -466,9 +479,27 @@ export class DaemonServer {
           }
         },
 
+        // Backpressure relieved — release any replay chunk waiting to be sent
+        // (see the client `flush` above and Session#streamReplay, #84).
+        drain(ws) {
+          const data = ws.data as { drainWaiters?: Array<() => void> };
+          const waiters = data.drainWaiters;
+          if (waiters && waiters.length > 0) {
+            data.drainWaiters = [];
+            for (const resolve of waiters) resolve();
+          }
+        },
+
         close(ws) {
-          const data = ws.data as { clientId: string; authTimer?: ReturnType<typeof setTimeout> };
+          const data = ws.data as { clientId: string; authTimer?: ReturnType<typeof setTimeout>; drainWaiters?: Array<() => void> };
           if (data.authTimer) clearTimeout(data.authTimer);
+          // Unblock any in-flight replay flush so its stream loop can observe
+          // the detach and stop instead of awaiting a drain that never comes.
+          if (data.drainWaiters && data.drainWaiters.length > 0) {
+            const waiters = data.drainWaiters;
+            data.drainWaiters = [];
+            for (const resolve of waiters) resolve();
+          }
           self.#manager.disconnectClient(data.clientId);
           self.#sockets.delete(data.clientId);
         },
