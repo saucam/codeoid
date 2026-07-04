@@ -30,6 +30,19 @@ import type { Frontend, FrontendContext } from "../frontends/types.js";
 import type { Server } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
+/**
+ * Per-connection state carried on `ws.data`. Defined once and cast against in
+ * every websocket handler so the shape can't drift between them; `drainWaiters`
+ * backs the scrollback-replay backpressure pacing (#84).
+ */
+type SocketData = {
+  clientId: string;
+  authenticated: boolean;
+  auth: AuthContext | null;
+  authTimer?: ReturnType<typeof setTimeout>;
+  drainWaiters?: Array<() => void>;
+};
+
 // ── Token-proxy guards ──────────────────────────────────────────────────────
 // The /oauth2/token proxy is unauthenticated (pre-auth exchange), so cap body
 // size, restrict content types, and rate-limit per source IP so it can't be
@@ -244,7 +257,7 @@ export class DaemonServer {
         // WebSocket upgrade
         if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
           const success = server.upgrade(req, {
-            data: { clientId: randomUUID(), authenticated: false, auth: null as AuthContext | null },
+            data: { clientId: randomUUID(), authenticated: false, auth: null } satisfies SocketData,
           });
           return success
             ? undefined
@@ -373,7 +386,7 @@ export class DaemonServer {
         closeOnBackpressureLimit: true,
         open(ws) {
           // Auth timeout — client must authenticate within 10 seconds
-          const data = ws.data as { clientId: string; authenticated: boolean; auth: AuthContext | null; authTimer?: ReturnType<typeof setTimeout>; drainWaiters?: Array<() => void> };
+          const data = ws.data as SocketData;
           data.authTimer = setTimeout(() => {
             if (!data.authenticated) {
               ws.close(4001, "Authentication timeout");
@@ -382,7 +395,7 @@ export class DaemonServer {
         },
 
         async message(ws, rawMessage) {
-          const data = ws.data as { clientId: string; authenticated: boolean; auth: AuthContext | null; authTimer?: ReturnType<typeof setTimeout>; drainWaiters?: Array<() => void> };
+          const data = ws.data as SocketData;
           let parsed: Record<string, unknown>;
 
           try {
@@ -482,7 +495,7 @@ export class DaemonServer {
         // Backpressure relieved — release any replay chunk waiting to be sent
         // (see the client `flush` above and Session#streamReplay, #84).
         drain(ws) {
-          const data = ws.data as { drainWaiters?: Array<() => void> };
+          const data = ws.data as SocketData;
           const waiters = data.drainWaiters;
           if (waiters && waiters.length > 0) {
             data.drainWaiters = [];
@@ -491,7 +504,7 @@ export class DaemonServer {
         },
 
         close(ws) {
-          const data = ws.data as { clientId: string; authTimer?: ReturnType<typeof setTimeout>; drainWaiters?: Array<() => void> };
+          const data = ws.data as SocketData;
           if (data.authTimer) clearTimeout(data.authTimer);
           // Unblock any in-flight replay flush so its stream loop can observe
           // the detach and stop instead of awaiting a drain that never comes.
