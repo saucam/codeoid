@@ -557,6 +557,121 @@ describe("T5 – session resume / scrollback replay", () => {
   });
 });
 
+// ── T5b: chunked scrollback replay for large sessions (#84) ──────────────────
+
+describe("T5b – chunked scrollback replay (#84)", () => {
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+  const MB = 1024 * 1024;
+
+  /** Three ~3MB messages so the 4MB replay-chunk budget yields one chunk each. */
+  function restoreLargeScrollback(session: Session): string[] {
+    const ids = ["big-0", "big-1", "big-2"];
+    session.restoreScrollback(
+      ids.map((id, i) => ({
+        type: "session.message" as const,
+        sessionId: session.id,
+        messageId: id,
+        role: "assistant" as const,
+        content: "x".repeat(3 * MB) + i,
+        identity: { sub: "agent:test", name: "Claude", type: "agent" as const },
+        timestamp: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
+      })),
+    );
+    return ids;
+  }
+
+  /** Client whose flush() is gated — the test releases each chunk explicitly. */
+  function makePacedClient(id = randomUUID()) {
+    const received: DaemonMessage[] = [];
+    let resolveFlush: (() => void) | null = null;
+    const client: AttachedClient = {
+      id,
+      auth: TEST_AUTH,
+      send: (m) => received.push(m),
+      flush: () => new Promise<void>((res) => { resolveFlush = res; }),
+    };
+    return {
+      client,
+      received,
+      releaseFlush: () => { const r = resolveFlush; resolveFlush = null; r?.(); },
+    };
+  }
+
+  const replayFrames = (received: DaemonMessage[]) =>
+    received.filter((m) => m.type === "scrollback.replay") as Extract<
+      DaemonMessage,
+      { type: "scrollback.replay" }
+    >[];
+
+  it("splits a large scrollback into ordered seq'd frames covering every message", async () => {
+    const session = makeSession(new MockSessionProvider("claude"));
+    const ids = restoreLargeScrollback(session);
+
+    // Auto-resolving flush so the whole replay streams to completion.
+    const received: DaemonMessage[] = [];
+    const client: AttachedClient = {
+      id: randomUUID(),
+      auth: TEST_AUTH,
+      send: (m) => received.push(m),
+      flush: () => Promise.resolve(),
+    };
+    session.attach(client);
+    await tick();
+    await tick();
+
+    const frames = replayFrames(received);
+    expect(frames).toHaveLength(3);
+    frames.forEach((f, i) => {
+      expect(f.seq).toBe(i);
+      expect(f.final).toBe(i === frames.length - 1);
+    });
+    // Concatenating the chunks reproduces the full scrollback in order.
+    expect(frames.flatMap((f) => f.messages.map((m) => m.messageId))).toEqual(ids);
+  });
+
+  it("paces chunks on flush and stops streaming if the client detaches mid-replay", async () => {
+    const session = makeSession(new MockSessionProvider("claude"));
+    restoreLargeScrollback(session);
+    const { client, received, releaseFlush } = makePacedClient();
+
+    session.attach(client);
+    await tick();
+    // Only the first chunk is out; the stream is parked awaiting drain.
+    expect(replayFrames(received)).toHaveLength(1);
+    expect(replayFrames(received)[0]!.seq).toBe(0);
+
+    session.detach(client.id);
+    releaseFlush();
+    await tick();
+    // Detach observed before the next send — no further chunks.
+    expect(replayFrames(received)).toHaveLength(1);
+  });
+
+  it("buffers live broadcasts during a chunked replay so they arrive after it", async () => {
+    const session = makeSession(new MockSessionProvider("claude"));
+    restoreLargeScrollback(session);
+    const { client, received, releaseFlush } = makePacedClient();
+
+    session.attach(client);
+    await tick();
+
+    // A live broadcast lands mid-replay (chunk 0 sent, awaiting flush).
+    session.rename("renamed-mid-replay", TEST_AUTH);
+    await tick();
+    // It must be buffered, not delivered ahead of the older replayed chunks.
+    expect(received.some((m) => m.type === "session.info_update")).toBe(false);
+
+    releaseFlush(); await tick(); // chunk 1
+    releaseFlush(); await tick(); // chunk 2 (final) → replay done, buffer flushed
+
+    const types = received.map((m) => m.type);
+    const lastReplayIdx = types.lastIndexOf("scrollback.replay");
+    const infoIdx = types.indexOf("session.info_update");
+    expect(infoIdx).toBeGreaterThan(lastReplayIdx);
+    expect(replayFrames(received)).toHaveLength(3);
+  });
+});
+
 // ── T6: ZeroID fence timeout ──────────────────────────────────────────────────
 
 describe("T6 – ZeroID fence 5 s timeout", () => {

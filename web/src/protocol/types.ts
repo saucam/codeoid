@@ -492,6 +492,14 @@ export interface ScrollbackReplayMsg {
   type: "scrollback.replay";
   sessionId: string;
   messages: SessionMessage[];
+  /**
+   * Chunked replay (#84, additive & optional). When set, the daemon split a
+   * large scrollback into ordered chunks (oldest→newest). Reset scrollback
+   * when `seq` is absent or 0; append when `seq > 0`; the replay is complete
+   * on `final` (or when `seq` is absent — a single-frame legacy replay).
+   */
+  seq?: number;
+  final?: boolean;
 }
 
 export interface SessionSearchSnippet {
