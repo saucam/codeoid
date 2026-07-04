@@ -136,8 +136,10 @@ Read-only — no act/spawn risk.
   `session.ts:810`), injected only for the conductor: `fleet_list`, `fleet_find`
   (calls the P1 pipeline), `fleet_summary` (compressed, not raw scrollback),
   `fleet_recall`, `machine_map` (workspaces + git/running state).
-- **Expose `fleet_find`/`fleet_list` over the daemon WS protocol too** (not only as
-  conductor MCP tools) so *clients* get a search-powered session list later.
+- *(Optional, later)* A protocol-level `fleet.find`/`fleet.list` message would give
+  clients an **instant fleet-search box** that skips an LLM turn — but per the mobile
+  plan (§8) the conductor needs **zero new wire types**; clients light it up by
+  attaching to the conductor session. Defer unless a client wants LLM-free search.
 
 **Exit:** via CLI (`codeoid attach conductor`), "which session was the authz fix?"
 resolves correctly across workspaces; conductor holds only an index, never raw
@@ -170,9 +172,9 @@ conductor context stays O(active threads).
 separately.
 
 **Slices**
-- **Web (SolidJS):** a **conductor pane** (attaches to the conductor session) +ADD a
-  **session list** view with a search box wired to the protocol `fleet_find`/`list`
-  (so the human gets NL session search too, not just the conductor LLM).
+- **Web (SolidJS):** a **conductor pane** (attaches to the conductor session) plus a
+  **session list** view. NL session search is served by the conductor itself; an
+  optional LLM-free search box would use the deferred `fleet.find` message (P3).
 - **Telegram:** route DMs to the conductor session; `/sessions` lists + lets you
   switch/attach to any session (reuse the embedded `SessionManager` access).
 - Both are thin `Frontend` plugins over the same daemon — no new state owner.
@@ -210,9 +212,9 @@ mostly a new front end over the *existing* protocol.
   rendered as a separate, switchable list; tapping one attaches to it.
 - Confirm-before-act (R3) and approval prompts (R4) render as native mobile
   confirmations over the `approvalId` flow.
-- Contract check: ensure *every* conductor capability the mobile app needs is on
-  the WS protocol (not trapped as in-process MCP) — this is why P3 exposes
-  `fleet_find`/`list` over the protocol.
+- Contract check: confirmed by the mobile plan (§8) — the conductor needs **no new
+  wire types**; the app attaches to the conductor session like any other. The one
+  *optional* addition is the deferred protocol-level `fleet.find` search box (P3).
 
 **Exit:** mobile app shows the conductor chat + a separate switchable session list;
 switching sessions and approving actions work identically to web.
@@ -231,6 +233,84 @@ per-instruction bounce cap (loop guard).
 spend has a ceiling. Great Highflame dogfood story.
 
 ---
+
+## Informed by firstmate (prior art)
+
+See [conductor-prior-art-firstmate.md](./conductor-prior-art-firstmate.md) — a
+shipped conductor built as codeoid's architectural inverse. It validates our
+daemon + identity + structured-memory foundation and yields refinements folded
+into the phases:
+
+- **P3/P4 — conductor is read-only over targets *by construction*.** The
+  `codeoid_fleet` surface is read + dispatch only; no file/git/shell-write tool on
+  target repos. All mutation flows through crewmates behind approval — and we
+  *enforce* it by denying write scopes to the conductor identity (firstmate can
+  only ask via prompt). Turns R3/R4 into an architectural invariant.
+- **P4 — supervision is zero-token + event-driven.** Conductor LLM turns fire only
+  on *actionable* daemon events; benign ones are absorbed with no turn; heartbeat
+  backstop with exponential backoff; actionable events hit a durable queue for
+  crash recovery. Daemon push beats firstmate's bash pane-scraping.
+- **P4 — dispatch carries a `shape`: ship vs scout.** ship → PR/merge → teardown;
+  scout → report, never pushes, scratch worktree.
+- **P4 — per-workspace autonomy modes** (`no-mistakes`/`direct-PR`/`local-only` +
+  `+yolo`) replace blanket confirm, and map directly onto the Cedar layer (P8).
+- **P4 — sentinel/out-of-band marker** so daemon-injected event digests are never
+  confused with real user messages.
+- **P5 — `/afk` batched-digest away-mode + `/stow` knowledge sweep** as conductor UX.
+- **P5/meta — harness dispatch profiles** (NL rules → per-task harness/model/effort)
+  feed the meta-harness direction.
+- **Topology (future) — secondmates:** domain sub-conductors via the *same*
+  delegation-depth identity chain; keeps the single global conductor as v1 default.
+
+## Reconciliation with the mobile app plan
+
+[mobile-app-design.md](./mobile-app-design.md) (Expo/React Native, separate
+`codeoid-mobile` repo) is conductor-aware and mostly *agrees* with this plan.
+
+**Aligned:**
+- **IA matches our topology.** Mobile makes "the conductor" a pinnable **home
+  surface** and the session list a secondary **fleet view** — exactly our
+  single-global-conductor + separately-listed/switchable-sessions decision.
+- **Approvals are the shared crown jewel.** Our confirm-before-send (R3/P4) rides
+  the `approvalId` mechanism; mobile turns that same mechanism into **native push +
+  voice approvals** ("approve / deny / show me the diff first"). The conductor is
+  the backend; the phone is its highest-value front door.
+- **Voice-approval convergence.** Mobile borrows `iris`'s `hermesGate` (propose →
+  read-back → user must actually *speak* → only then act) — the same invariant as
+  firstmate's read-only-by-construction and our R3: **enforce confirm-before-
+  side-effect in code, not by trusting the model.** Three independent sources agree.
+
+**Correction — the conductor needs ZERO new client↔daemon wire types.** The mobile
+doc's §8 is right: the conductor is just a session, and its fleet actions render as
+ordinary tool calls in the transcript. So the earlier P3/P7 idea of "expose
+`fleet_find` over the WS protocol so clients get a search box" is **not required**
+and is downgraded to an optional later enhancement (a client-side instant
+fleet-search that skips an LLM turn). v1 clients — web, Telegram, mobile — light up
+the conductor purely by attaching to the conductor session. This *unblocks* mobile:
+it builds its whole P0–P4 on today's attach/scrollback/session-list surface and
+surfaces the conductor the moment our P3+ lands.
+
+**Shared prerequisite — extract `@codeoid/protocol` + `@codeoid/core`** (wire types
++ WS client + reducers) from `codeoid` once, up front. Mobile P0 requires it; the
+conductor and `web/` benefit too (ends today's type triplication). Do it regardless
+of which track leads.
+
+**Two workstreams, one contract:**
+- *Conductor* (this plan, P0–P8) — daemon-side: session resolution, identity, fleet
+  tools, dispatch, act-on-behalf. Protocol-complete for clients at **P3**.
+- *Mobile* (mobile-design P0–P5, separate `codeoid-mobile` repo) — the RN client;
+  only its P5 (conductor surface) depends on this plan's **P1 + P3**. Everything
+  before P5 ships on today's protocol.
+
+**Sequencing recommendation — conductor backend first.** Do the shared core
+extraction, then **P1 (session resolution)** as the risk-retiring go/no-go gate:
+it's the moat, it has **no prior art** (firstmate and Happy both lack it), it
+improves every existing client, and it's the riskiest unknown — prove it before
+building a front-end around it. The mobile app proceeds **in parallel** on today's
+protocol (it is not blocked), and the two converge at mobile-P5. Shipping mobile
+*first* gives you "control one session from your phone" (which Happy already does);
+shipping the conductor *first* is what makes the eventual mobile app "supervise a
+fleet by voice" — the position no competitor holds.
 
 ## Dependency graph
 
