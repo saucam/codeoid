@@ -37,7 +37,8 @@
 | **P1** | Session-resolution retrieval upgrade *(linchpin)* | fuzzy ref → right session, cross-workspace, sub-2s | P0 |
 | **P2** | Conductor identity foundation | durable owner-delegated conductor identity | P0 |
 | **P3** | Conductor session + read-only fleet tools | conductor can list/find/summarize the fleet | P1, P2 |
-| **P4** | Dispatch + routing (send/spawn) | "continue the authz fix" → confirm → act; child digests | P3 |
+| **P4** | Dispatch + routing (durable queue + roles + hardening) | confirm → act; **restart-proof** workers; child digests | P3 |
+| **P4.5** | Routines (scheduled + triggered autonomy) | unattended cron/webhook fleet tasks; `[SILENT]` monitors | P4 |
 | **P5** | Front doors: web + Telegram | conductor chat + separate switchable session list | P4 |
 | **P6** | Act on behalf (email/web/calendar) | approval-gated egress via delegated children | P4 |
 | **P7** | Mobile app contract + conductor screen | mobile renders conductor + session switcher | P5 |
@@ -153,16 +154,66 @@ child transcripts.
 
 **Slices**
 - `fleet_send` (fire-and-forget to an existing session), `fleet_interrupt`,
-  `fleet_spawn` (disposable child with a delegated identity from P2).
+  `fleet_spawn` (disposable child with a delegated identity from P2). Dispatch
+  carries a **`shape`: ship vs scout** (deliver-a-change vs investigate-and-report).
+- **Durable work-queue backbone** *(hermes Kanban)*: back dispatch with a
+  SQLite task board + a dispatcher loop that atomically claims, reclaims stale
+  claims, and **auto-blocks a task after N consecutive failures** (anti-spin,
+  complements the stuck-loop guard below). Restart-proof — a spawned worker survives
+  a daemon restart because its claim + state live in the DB, not the turn.
+- **Delegate role model** *(hermes leaf/orchestrator)*: a spawned child is a
+  **`leaf`** (focused worker — no `fleet_spawn`/`send`/act-on-behalf) unless granted
+  **`orchestrator`** (may spawn, bounded `max_spawn_depth`/`max_concurrent`).
+  Enforced via **ZeroID scopes**, not a config flag — this *is* R1 delegation-depth +
+  read-only-by-construction, made cryptographic.
 - **Routing safety (R3):** send-class to an existing user-owned session first
   proposes with **repo + branch + content shown**, acts only on confirm (reuse the
-  `approvalId` correlation flow); reads stay silent.
+  `approvalId` correlation flow); reads stay silent. Per-workspace autonomy mode
+  (`no-mistakes`/`direct-PR`/`local-only` + `+yolo`) sets how much confirm is needed.
+- **Zero-token event-driven supervision** *(firstmate)*: the daemon absorbs benign
+  events and wakes a conductor turn only on *actionable* ones; heartbeat backstop
+  with exponential backoff; a durable event queue for crash recovery.
+- **Session-lifecycle hardening** *(hermes)*: `resume_pending` (soft — continue the
+  transcript) vs `suspended` (hard wipe); **stuck-loop escalation** (auto-suspend a
+  worker active across 3+ restarts); a `.clean_shutdown` marker; a **burst-collapse
+  message queue** (single next-up slot + FIFO overflow) so message bursts never
+  process out of order.
 - **Event-driven digests:** child completion emits an event → conductor turn
   receives a *compressed* result (never raw transcript) — the never-OOC guarantee.
 
 **Exit:** "continue the authz `latest_only` fix in that session" → resolves →
 confirms (right repo/branch) → sends; a spawned child's result returns as a digest;
-conductor context stays O(active threads).
+a worker survives a daemon restart and resumes; conductor context stays
+O(active threads).
+
+---
+
+## P4.5 — Routines (scheduled + triggered autonomy)
+
+**Goal:** turn the conductor from a fleet *supervisor* into a personal *assistant* —
+it runs tasks unattended, on a schedule or an external trigger.
+
+**Slices** *(hermes cron / webhooks)*
+- **Scheduled jobs:** cron expressions + human intervals ("every 2h", "0 2 * * *",
+  one-shot ISO timestamps). Per-job `skills` / `model` / `workdir` / delivery-target.
+- **Triggered jobs:** webhook subscriptions (GitHub events, generic API POST with
+  HMAC auth) that dispatch a fleet task from the payload.
+- **Script-injection + `[SILENT]` pattern:** a pre-run script does the mechanical
+  work (fetch/diff/compute), its stdout becomes the prompt context, and the job
+  emits nothing unless something changed — zero-spam, near-zero-token monitors.
+  (`no_agent=true` makes the script the whole job.)
+- **Cron hardening:** hard per-run interrupt (a runaway loop can't monopolize the
+  scheduler), a tick file-lock (no duplicate ticks across processes), catchup/grace
+  windows, and routine output lands in its **own** session frame — never corrupting
+  the conductor's main-conversation role alternation.
+- Delivery reuses the P5 front doors; a routine can also deliver to a file or an
+  existing session with no front door at all.
+
+**Exit:** "every night, triage the backlog and open a draft PR" runs unattended and
+delivers a digest; a monitor stays silent until it fires; a GitHub PR event triggers
+a scoped review — all under the conductor's identity, audited, and cost-metered.
+
+**Depends on:** P4 (a routine fires dispatch). Delivery breadth grows with P5.
 
 ---
 
@@ -262,6 +313,29 @@ into the phases:
 - **Topology (future) — secondmates:** domain sub-conductors via the *same*
   delegation-depth identity chain; keeps the single global conductor as v1 default.
 
+## Informed by hermes (prior art)
+
+See [conductor-prior-art-hermes.md](./conductor-prior-art-hermes.md) — Nous's
+hermes-agent, the most complete personal-assistant prior art. It occupies the
+personal-assistant niche firstmate doesn't, and drove two changes above:
+
+- **P4 upgraded** — durable Kanban-style work-queue (atomic claim, stale reclaim,
+  failure-limit auto-block → restart-proof workers) + the `leaf`/`orchestrator`
+  delegate role model (enforced via ZeroID scopes, not config flags) +
+  session-lifecycle hardening (resume_pending / stuck-loop escalation /
+  clean-shutdown / burst-collapse message queue).
+- **New P4.5 — Routines** — scheduled + webhook/event-triggered autonomy with the
+  script-injection `[SILENT]` monitor pattern and cron hardening. This is the piece
+  that makes the conductor a personal *assistant*, not only a fleet supervisor.
+- **Mined for later:** the multi-platform gateway shape (`SessionSource` +
+  deterministic session-key) for P5 beyond web+Telegram; zero-context-cost tool-RPC
+  scripts; the Curator safe-autonomy invariants (archive-not-delete, pinned-exempt,
+  agent-provenance-scoped) if we add agent-authored skills; ACP interop; and
+  serverless-persistence (Modal/Daytona) for a cheap always-on cloud conductor.
+- **Where codeoid stays ahead:** cryptographic identity (hermes is allowlist +
+  DM-pairing), rerank + bi-temporal retrieval (hermes is FTS5 + LLM-summary), and a
+  typed modular daemon (hermes is a Python monolith with 250–738 KB god-files).
+
 ## Reconciliation with the mobile app plan
 
 [mobile-app-design.md](./mobile-app-design.md) (Expo/React Native, separate
@@ -317,6 +391,7 @@ fleet by voice" — the position no competitor holds.
 ```
 P0 ──┬── P1 (retrieval) ──┐
      └── P2 (identity) ───┴── P3 (conductor + read) ── P4 (dispatch)
+                                                          ├── P4.5 (routines)
                                                           ├── P5 (web + telegram) ── P7 (mobile)
                                                           ├── P6 (act on behalf)
                                                           └── P8 (governance, later)
