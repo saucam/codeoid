@@ -15,10 +15,22 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./schemas": {
+      "types": "./src/schemas.ts",
+      "default": "./src/schemas.ts"
     }
   },
-  "files": ["src", "README.md"],
+  "files": ["src", "!src/**/*.test.ts", "README.md"],
   "publishConfig": {
     "access": "public"
+  },
+  "peerDependencies": {
+    "zod": "^4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "zod": {
+      "optional": true
+    }
   }
 }

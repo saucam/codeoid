@@ -18,6 +18,7 @@ import type {
   ResponseErrorMsg,
   ResponseOkMsg,
 } from "../protocol/types";
+import { CAPABILITIES, PROTOCOL_VERSION } from "../protocol/types";
 
 export type ClientStatus =
   | { kind: "idle" }
@@ -374,11 +375,18 @@ export class CodeoidClient {
         // We may have awaited above — bail if a newer connect superseded
         // this socket meanwhile.
         if (this.#ws !== ws) return;
-        // Daemon requires the first frame to carry an auth token. Shape
-        // matches the existing Rust client: `{ type: "auth", token }`.
-        // (Daemon only checks the `token` field; `type` is ignored.)
+        // Daemon requires the first frame to be the auth handshake. Beyond
+        // the token we declare our protocol version + capabilities so the
+        // daemon can tailor behaviour per connection (additive — older
+        // daemons ignore the extra fields).
         try {
-          ws.send(JSON.stringify({ type: "auth", token: this.#token }));
+          ws.send(JSON.stringify({
+            type: "auth",
+            token: this.#token,
+            protocolVersion: PROTOCOL_VERSION,
+            capabilities: [CAPABILITIES.PARTS, CAPABILITIES.CHUNKED_REPLAY],
+            client: "codeoid-web",
+          }));
         } catch (err) {
           this.#log("warn", "auth send failed (socket closed during refresh)", { err });
         }

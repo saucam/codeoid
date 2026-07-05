@@ -27,6 +27,60 @@ import type { Scope } from "./scopes.js";
  */
 export const PROTOCOL_VERSION = 1;
 
+/**
+ * Capability identifiers exchanged during the auth handshake (see `AuthMsg` /
+ * `AuthOkMsg`). Capabilities are the additive-evolution mechanism for
+ * behaviour (as opposed to message shape, which the "ignore unknown" rule
+ * covers): a client declares what it can consume, the daemon declares what it
+ * can produce, and either side simply doesn't use what the other didn't
+ * declare. Unknown capability strings MUST be ignored, never rejected.
+ */
+export const CAPABILITIES = {
+  /** Client renders rich `parts[]` content (vs the plain `content` fallback). */
+  PARTS: "parts",
+  /** Chunked scrollback replay (`scrollback.replay` with `seq`/`final`). */
+  CHUNKED_REPLAY: "replay.chunked",
+  /** Sequence-based incremental resume on `session.attach`. */
+  SEQ_RESUME: "replay.resume",
+  /** Duplicate-send suppression via `session.send.clientMsgId`. */
+  SEND_IDEMPOTENCY: "send.idempotency",
+} as const;
+
+export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
+
+/**
+ * Wire-level input limits, enforced by the daemon on inbound messages and
+ * published here so clients can pre-validate instead of learning limits from
+ * `invalid_request` errors. All limits are counted in UTF-16 code units
+ * (JS `string.length`) unless stated otherwise.
+ *
+ * `SEND_TEXT_MAX` exists as a token-bill safety net: prompt text goes
+ * straight into the model's context, so an accidental multi-megabyte paste
+ * would burn real money in a single turn. Large inputs belong in
+ * `attachments` (bounded per-file, surfaced to the model as files it can
+ * read selectively).
+ */
+export const LIMITS = {
+  /** Max `session.send.text` length. ~1M chars ≈ hundreds of thousands of tokens. */
+  SEND_TEXT_MAX: 1_000_000,
+  /** Max session name length (`session.create` / `session.rename`). */
+  NAME_MAX: 256,
+  /** Max filesystem path length accepted anywhere a path is sent. */
+  PATH_MAX: 4096,
+  /** Max `session.search.query` length. */
+  QUERY_MAX: 1024,
+  /** Max number of attachments on a single `session.send`. */
+  ATTACHMENTS_MAX: 32,
+  /** Max inline `Attachment.content` length. */
+  ATTACHMENT_CONTENT_MAX: 2_000_000,
+  /** Max `Attachment.data` (base64) length — bounded by the 16 MiB WS frame cap. */
+  ATTACHMENT_DATA_MAX: 12_000_000,
+  /** Max correlation / approval / client-generated id length. */
+  ID_MAX: 128,
+  /** Max model id / alias length (`session.set_model`). */
+  MODEL_MAX: 256,
+} as const;
+
 // =============================================================================
 // Session metadata
 // =============================================================================
@@ -554,6 +608,31 @@ export interface SessionMessageDelta {
 // =============================================================================
 // Client → Daemon messages
 // =============================================================================
+
+/**
+ * The authentication handshake — the FIRST frame a client sends on a new
+ * WebSocket connection, before any `ClientMessage`. Not part of the
+ * `ClientMessage` union: it carries no request `id` (the reply is `auth.ok`
+ * or a socket close), and no other message is accepted until it succeeds.
+ *
+ * `protocolVersion` and `capabilities` make version/feature negotiation
+ * bidirectional: the daemon already advertises its version on `auth.ok`;
+ * these let the client declare what IT speaks, so the daemon can tailor
+ * behaviour per connection (e.g. skip the plain-`content` fallback for a
+ * `parts`-capable client). Both optional — clients that predate them are
+ * treated as legacy (no capabilities, unknown version).
+ */
+export interface AuthMsg {
+  type: "auth";
+  /** ZeroID-issued JWT. */
+  token: string;
+  /** The client's compiled-in `PROTOCOL_VERSION`. */
+  protocolVersion?: number;
+  /** Capability identifiers the client supports — see `CAPABILITIES`. */
+  capabilities?: string[];
+  /** Free-form client name/version for diagnostics (e.g. "codeoid-web/0.1.3"). */
+  client?: string;
+}
 
 /** Liveness heartbeat — daemon replies with `response.ok`. */
 export interface PingMsg extends BaseClientMsg {
@@ -1148,6 +1227,12 @@ export interface AuthOkMsg {
    * that predate this field will see `undefined` and skip the check.
    */
   protocolVersion?: number;
+  /**
+   * Capability identifiers the daemon supports — see `CAPABILITIES`.
+   * Clients feature-detect on this instead of version-sniffing. Absent on
+   * daemons that predate capability negotiation.
+   */
+  capabilities?: string[];
 }
 
 export interface ResponseOkMsg {

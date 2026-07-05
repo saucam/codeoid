@@ -24,11 +24,19 @@ import {
   createRegistry,
 } from "./compress/index.js";
 import type { CodeoidConfig } from "../config.js";
-import { PROTOCOL_VERSION, type AuthContext, type ClientMessage, type DaemonMessage } from "../protocol/types.js";
+import { CAPABILITIES, PROTOCOL_VERSION, type AuthContext, type DaemonMessage } from "../protocol/types.js";
+import { parseAuthMsg, parseClientMessage } from "@codeoid/protocol/schemas";
 import type { AttachedClient } from "./session.js";
 import type { Frontend, FrontendContext } from "../frontends/types.js";
 import type { Server } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
+
+/**
+ * Capabilities THIS daemon advertises on `auth.ok`. Grow this list as
+ * capability-gated behaviour lands; clients feature-detect on it instead of
+ * version-sniffing.
+ */
+const SERVER_CAPABILITIES: string[] = [CAPABILITIES.CHUNKED_REPLAY];
 
 /**
  * Per-connection state carried on `ws.data`. Defined once and cast against in
@@ -41,6 +49,10 @@ type SocketData = {
   auth: AuthContext | null;
   authTimer?: ReturnType<typeof setTimeout>;
   drainWaiters?: Array<() => void>;
+  /** Protocol version the client declared on its auth frame (absent = legacy client). */
+  protocolVersion?: number;
+  /** Capabilities the client declared on its auth frame (absent = legacy client). */
+  capabilities?: string[];
 };
 
 // ── Token-proxy guards ──────────────────────────────────────────────────────
@@ -405,23 +417,34 @@ export class DaemonServer {
             return;
           }
 
-          // First message must be auth
+          // First message must be a valid auth frame (schema-validated —
+          // unknown fields stripped, malformed frames close the socket).
           if (!data.authenticated) {
             if (data.authTimer) clearTimeout(data.authTimer);
-            const token = typeof parsed.token === "string" ? parsed.token : undefined;
-            if (!token) {
-              ws.close(4001, "Missing auth token");
+            const authParse = parseAuthMsg(parsed);
+            if (!authParse.ok) {
+              ws.close(4001, `Invalid auth message: ${authParse.error}`.slice(0, 123));
               return;
             }
+            const authMsg = authParse.value;
 
             try {
-              data.auth = await verifyToken(token, authConfig);
+              data.auth = await verifyToken(authMsg.token, authConfig);
             } catch (err) {
               ws.close(4003, `Authentication failed: ${err instanceof Error ? err.message : "unknown"}`);
               return;
             }
 
             data.authenticated = true;
+            // Record what the client declared so capability-gated behaviour
+            // (parts-only streaming, seq resume, …) can branch per connection.
+            data.protocolVersion = authMsg.protocolVersion;
+            data.capabilities = authMsg.capabilities;
+            if (authMsg.client || authMsg.protocolVersion !== undefined) {
+              console.log(
+                `[codeoid] client authenticated: ${authMsg.client ?? "unknown"} proto=${authMsg.protocolVersion ?? "?"} caps=[${(authMsg.capabilities ?? []).join(",")}]`,
+              );
+            }
             self.#sockets.set(data.clientId, { ws: ws as unknown as WebSocket, clientId: data.clientId, auth: data.auth });
 
             ws.send(JSON.stringify({
@@ -433,6 +456,7 @@ export class DaemonServer {
               },
               scopes: data.auth.scopes,
               protocolVersion: PROTOCOL_VERSION,
+              capabilities: SERVER_CAPABILITIES,
             }));
             return;
           }
@@ -454,8 +478,22 @@ export class DaemonServer {
             return;
           }
 
-          // Authenticated — route through session manager
-          const msg = parsed as unknown as ClientMessage;
+          // Authenticated — validate against the protocol schemas before
+          // acting. Unknown fields are stripped (forward-compat: a newer
+          // client may send additive fields); unknown message types and
+          // out-of-bounds payloads (e.g. text > LIMITS.SEND_TEXT_MAX) are
+          // rejected with invalid_request instead of reaching daemon logic.
+          const inbound = parseClientMessage(parsed);
+          if (!inbound.ok) {
+            ws.send(JSON.stringify({
+              type: "response.error",
+              requestId: typeof parsed.id === "string" ? parsed.id : "",
+              error: inbound.error,
+              code: "invalid_request",
+            }));
+            return;
+          }
+          const msg = inbound.value;
           const client: AttachedClient = {
             id: data.clientId,
             auth: data.auth!,
