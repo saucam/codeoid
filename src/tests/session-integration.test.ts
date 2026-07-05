@@ -1328,6 +1328,12 @@ describe("T9 – stall watchdog recovers a wedged turn", () => {
       (m) => m.type === "session.message" && /timed out|stalled/i.test((m as { content?: string }).content ?? ""),
     );
     expect(stalledMsg).toBeUndefined();
+    // Pin the post-send state so an overlapping-turn regression fails loudly:
+    // exactly the first run + the send's fresh turn (no third), and — the key
+    // discriminator vs the old bug — NO forced provider teardown (the stall
+    // recovery path called provider.teardown(), so it would show ≥ 1 here).
+    expect(provider.capturedOpts.length).toBe(2);
+    expect(provider.teardownCount).toBe(0);
 
     await session.interrupt(TEST_AUTH);
   });
