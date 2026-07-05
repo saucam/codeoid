@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "bun:test";
 import {
   formatTokens,
   formatCostUsd,
@@ -6,7 +6,7 @@ import {
   formatPercent,
   elapsedSince,
   relativeTime,
-} from "./format";
+} from "./format.js";
 
 describe("formatTokens", () => {
   it("renders sub-thousand counts as integers", () => {

@@ -12,6 +12,7 @@ import { createSignal } from "solid-js";
 
 import { resolveToken } from "../lib/auth";
 import { CodeoidClient, type ClientStatus } from "../lib/ws";
+import { CAPABILITIES } from "../protocol/types";
 import type {
   AuthOkMsg,
   ClientMessage,
@@ -167,6 +168,10 @@ export async function bootstrap(opts: { apiKey?: string; token?: string } = {}):
     client = new CodeoidClient({
       url: DAEMON_URL,
       token: resolved.token,
+      // What this frontend can consume — the daemon tailors per-connection
+      // behaviour to these (see the protocol's CAPABILITIES).
+      capabilities: [CAPABILITIES.PARTS, CAPABILITIES.CHUNKED_REPLAY, CAPABILITIES.SEQ_RESUME],
+      clientName: "codeoid-web",
       // Fresh-token supplier for reconnects: re-exchange the stored zid_sk_
       // key for a new JWT (resolveToken with no `token` reads the persisted
       // key from localStorage). Falls back to the last token if the user

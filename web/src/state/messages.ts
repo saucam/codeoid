@@ -16,13 +16,9 @@
 
 import { batch, createMemo } from "solid-js";
 import { createStore, produce } from "solid-js/store";
+import { dedupeReplay, mergeDeltaInto } from "@codeoid/core";
 
-import type {
-  ContentPart,
-  SessionMessage,
-  SessionMessageDelta,
-  ToolState,
-} from "../protocol/types";
+import type { SessionMessage, SessionMessageDelta } from "../protocol/types";
 
 interface MessagesState {
   /** sessionId -> messages array (in arrival order). */
@@ -164,28 +160,10 @@ export function applyDelta(delta: SessionMessageDelta): void {
         const target = buf[idx];
         if (!target) return;
 
-        if (delta.contentAppend) {
-          target.content = (target.content ?? "") + delta.contentAppend;
-        }
-        if (delta.partsAppend && delta.partsAppend.length > 0) {
-          const parts: ContentPart[] = target.parts ? [...target.parts] : [];
-          parts.push(...delta.partsAppend);
-          target.parts = parts;
-        }
-        if (delta.partsUpdate && delta.partsUpdate.length > 0) {
-          const parts: ContentPart[] = target.parts ? [...target.parts] : [];
-          for (const upd of delta.partsUpdate) {
-            const i = upd.index;
-            if (i >= 0 && i < parts.length) parts[i] = upd.part;
-            else parts.push(upd.part);
-          }
-          target.parts = parts;
-        }
-        if (delta.toolStateUpdate && target.tool) {
-          // ToolState is a discriminated union; assigning replaces wholesale.
-          target.tool = { ...target.tool, state: delta.toolStateUpdate satisfies ToolState };
-        }
-        target.timestamp = delta.timestamp;
+        // The merge semantics live in @codeoid/core so every frontend
+        // accumulates transcripts identically; inside produce() the store
+        // proxy records the same fine-grained paths the inline code did.
+        mergeDeltaInto(target, delta);
 
         s.versions[delta.messageId] = (s.versions[delta.messageId] ?? 0) + 1;
         s.epochBySession[delta.sessionId] =
@@ -196,21 +174,9 @@ export function applyDelta(delta: SessionMessageDelta): void {
 }
 
 export function replaceScrollback(sessionId: string, messages: readonly SessionMessage[]): void {
-  // Defensive dedupe by messageId — the daemon can replay duplicate entries
-  // for the same messageId (known daemon bug, fixed separately). Mirror the
-  // upsert semantics of applyMessage: the message keeps the position of its
-  // FIRST occurrence, but the LAST occurrence's content wins.
-  const deduped: SessionMessage[] = [];
-  const posById = new Map<string, number>();
-  for (const m of messages) {
-    const at = posById.get(m.messageId);
-    if (at !== undefined) {
-      deduped[at] = m;
-    } else {
-      posById.set(m.messageId, deduped.length);
-      deduped.push(m);
-    }
-  }
+  // Defensive dedupe by messageId (shared kernel — first position kept,
+  // last content wins, mirroring upsert semantics).
+  const { messages: deduped, posById } = dedupeReplay(messages);
 
   // Rebuild the O(1) positional index for this session before touching the
   // store — applyDelta reads indexBySession directly. `posById` already IS

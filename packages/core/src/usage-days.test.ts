@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { padDays, utcDayKey } from "./usage-days";
+import { describe, it, expect } from "bun:test";
+import { padDays, utcDayKey } from "./usage-days.js";
 
 describe("utcDayKey", () => {
   it("derives the day in UTC, not local time", () => {
