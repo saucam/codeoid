@@ -1,2 +1,5 @@
-export * from "./types.js";
-export * from "./scopes.js";
+// Re-export shim. The canonical protocol now lives in the @codeoid/protocol
+// package (packages/protocol) so the daemon, web UI, and mobile client share
+// one source of truth. Kept so existing "../protocol/…" imports keep resolving;
+// new code should import from "@codeoid/protocol" directly.
+export * from "@codeoid/protocol";

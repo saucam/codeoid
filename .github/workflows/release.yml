@@ -49,10 +49,25 @@ jobs:
             exit 1
           fi
 
+      # @codeoid/protocol is a workspace dependency of codeoid; publish it FIRST
+      # (only when its version is new) so codeoid's published dep resolves.
+      # NOTE: requires a separate npm Trusted Publisher configured for
+      # @codeoid/protocol at npmjs.com (same OIDC setup as codeoid) before the
+      # first release that introduces a new protocol version.
+      - name: Publish @codeoid/protocol (OIDC) — only if version is new
+        run: |
+          cd packages/protocol
+          VER="$(node -p "require('./package.json').version")"
+          if npm view "@codeoid/protocol@$VER" version >/dev/null 2>&1; then
+            echo "@codeoid/protocol@$VER already published — skipping"
+          else
+            npm publish --provenance --access public
+          fi
+
       # No NODE_AUTH_TOKEN: auth comes from the GitHub OIDC id-token via npm's
       # Trusted Publisher (configured on the package at npmjs.com). Provenance
       # is generated automatically from the same OIDC identity.
-      - name: Publish to npm (OIDC Trusted Publishing)
+      - name: Publish codeoid to npm (OIDC Trusted Publishing)
         run: npm publish --provenance --access public
 
       - name: Create GitHub Release
