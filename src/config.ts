@@ -217,11 +217,17 @@ const SessionSchema = z
     fallbackModel: z.string().optional(),
     /**
      * Hard backstop against a wedged turn. If the provider event stream goes
-     * completely silent (no events at all) for this many ms while a turn is
-     * active, the turn is treated as stalled: the run is torn down, the
-     * subprocess reaped, status reset to idle, and a clear message shown.
-     * Generous by default — long-running tools still emit `tool_progress` /
-     * partial events, so true silence for this long is a reliable hang signal.
+     * completely silent (no events at all) for this many ms while the MODEL
+     * should be producing output (status "thinking"), the turn is treated as
+     * stalled: the run is torn down, the subprocess reaped, status reset to
+     * idle, and a clear message shown.
+     *
+     * The watchdog PAUSES whenever silence is legitimate: during tool
+     * execution (a multi-minute Bash run, Task subagents, web research emit
+     * NO events until they complete) and while a manual approval is pending.
+     * Hung tools are covered by finer mechanisms instead — mcpToolTimeoutMs
+     * for MCP calls, the SDK's own per-tool timeouts, stream closure on a
+     * dead subprocess, and user interrupt.
      * Set to 0 to disable the watchdog.
      */
     turnStallTimeoutMs: z.number().min(0).default(300_000),
@@ -402,7 +408,7 @@ export interface CodeoidConfig {
   session: {
     defaultModel?: string;
     fallbackModel?: string;
-    /** Stall watchdog: ms of total event-stream silence before a turn is force-recovered (0 = off). Defaults to 300000 when omitted. */
+    /** Stall watchdog: ms of event-stream silence while the model should be generating before a turn is force-recovered (0 = off; paused during tool execution and pending approvals). Defaults to 300000 when omitted. */
     turnStallTimeoutMs?: number;
     /** Per-call timeout (ms) for external MCP servers, surfaced as the SDK's per-server `timeout`. 0 = use SDK default. Defaults to 120000 when omitted. */
     mcpToolTimeoutMs?: number;
