@@ -127,13 +127,21 @@ export class ScrollbackBuffer {
    * the streaming path calls this once per delta, so it must stay O(1) with
    * no re-serialization. Bumps the buffer counter, marks the entry as
    * mutated-at-that-seq (so incremental resume resends the merged message),
-   * and returns the new seq for stamping the outgoing delta frame.
+   * stamps the buffered message so later replays emit a self-consistent
+   * per-message seq (entry.seq === msg.seq), and returns the new seq for
+   * stamping the outgoing delta frame.
+   *
+   * The seq stamp is deliberately NOT byte-re-accounted: the drift is bounded
+   * (~15 bytes per entry, once) and re-serializing per delta would put a full
+   * JSON.stringify on the per-token hot path.
+   *
    * Returns undefined when the message is unknown/evicted.
    */
   touch(messageId: string): number | undefined {
     const entry = this.#byId.get(messageId);
     if (!entry) return undefined;
     entry.seq = ++this.#seq;
+    if (entry.msg.type === "session.message") entry.msg.seq = entry.seq;
     return entry.seq;
   }
 
@@ -222,6 +230,9 @@ export class ScrollbackBuffer {
     if (!entry) return;
     updater(entry.msg);
     entry.seq = ++this.#seq;
+    // Keep the buffered message's wire seq consistent with the entry —
+    // stamped BEFORE re-accounting, so the bytes stay exact here.
+    if (entry.msg.type === "session.message") entry.msg.seq = entry.seq;
     const after = serializedSizeOf(entry.msg);
     this.#bytes += after - entry.size;
     entry.size = after;

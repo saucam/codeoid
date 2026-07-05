@@ -242,6 +242,10 @@ describe("ScrollbackBuffer — seq & incremental resume (replay.resume)", () => 
     const seq = buf.touch(m.messageId);
     expect(seq).toBe(2);
     expect(buf.maxSeq).toBe(2);
+    // The buffered message is re-stamped so replays emit a self-consistent
+    // per-message seq (entry.seq === msg.seq), never a stale push-time value.
+    expect(m.seq).toBe(2);
+    expect((buf.read()[0] as SessionMessage).seq).toBe(2);
     expect(buf.touch("nope")).toBeUndefined();
     expect(buf.maxSeq).toBe(2); // failed touch doesn't burn a seq
   });
@@ -253,13 +257,15 @@ describe("ScrollbackBuffer — seq & incremental resume (replay.resume)", () => 
     buf.push(makeMsg("other"));
     const cursor = buf.maxSeq; // client saw both
 
-    // Mutation via updateMessage → entry must be resent to a resuming client.
+    // Mutation via updateMessage → entry must be resent to a resuming client,
+    // carrying the post-mutation seq (not the stale push-time one).
     buf.updateMessage(m.messageId, (msg) => {
       (msg as SessionMessage).content = "v2";
     });
     const tail = buf.readChunkedSince(cursor, 10 * 1024 * 1024).flat();
     expect(tail).toHaveLength(1);
     expect((tail[0] as SessionMessage).content).toBe("v2");
+    expect((tail[0] as SessionMessage).seq).toBe(buf.maxSeq);
 
     // Fully caught up → empty.
     expect(buf.readChunkedSince(buf.maxSeq, 10 * 1024 * 1024)).toEqual([]);
