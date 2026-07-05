@@ -3,6 +3,7 @@ import { SqliteEpisodeStore } from "./store";
 import { MemoryEngine } from "./engine";
 import type { Embedder } from "./embedder";
 import type { Episode } from "./types";
+import type { Reranker } from "./reranker";
 
 /**
  * Deterministic fake embedder — an 8-dim char-histogram vector. Related text
@@ -27,6 +28,17 @@ class FakeEmbedder implements Embedder {
   async close(): Promise<void> {}
 }
 
+/** Deterministic fake reranker — boosts any doc mentioning "telescope" so the
+ * rerank stage visibly reorders regardless of the fusion order. */
+class FakeReranker implements Reranker {
+  readonly modelName = "fake-rerank";
+  async init(): Promise<void> {}
+  async rerank(_query: string, docs: string[]): Promise<number[]> {
+    return docs.map((d) => (d.toLowerCase().includes("telescope") ? 10 : 0));
+  }
+  async close(): Promise<void> {}
+}
+
 function ep(
   workspaceId: string,
   sessionId: string,
@@ -46,9 +58,9 @@ function ep(
   };
 }
 
-async function seededEngine(): Promise<MemoryEngine> {
+async function seededEngine(reranker?: Reranker): Promise<MemoryEngine> {
   const store = new SqliteEpisodeStore(":memory:");
-  const engine = new MemoryEngine({ store, embedder: new FakeEmbedder() });
+  const engine = new MemoryEngine({ store, embedder: new FakeEmbedder(), reranker });
   await engine.init();
   engine.ingest(ep("wsA", "sA1", "unicorn deploy", "alpha unicorn deployment pipeline"));
   engine.ingest(ep("wsA", "sA2", "widget refactor", "beta widget refactor cleanup"));
@@ -94,5 +106,15 @@ describe("cross-workspace (global) resolution", () => {
     expect(store.ftsSearchGlobal("keyword-one", 10).map((r) => r.id)).toEqual(["e1"]);
     expect(store.episodesByIds(["e2", "e1"]).map((e) => e.id)).toEqual(["e2", "e1"]);
     store.close();
+  });
+
+  test("rerank reorders the top-k by cross-encoder score", async () => {
+    const engine = await seededEngine(new FakeReranker());
+    const noRerank = await engine.searchSessions({ query: "widget", rerank: false });
+    const withRerank = await engine.searchSessions({ query: "widget", rerank: true });
+    // The fake reranker boosts the "telescope" session (sB1) to #1.
+    expect(withRerank[0]?.sessionId).toBe("sB1");
+    expect(withRerank[0]?.sessionId).not.toBe(noRerank[0]?.sessionId);
+    await engine.close();
   });
 });

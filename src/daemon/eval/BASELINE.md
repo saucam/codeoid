@@ -17,6 +17,9 @@ MEMORY_DB=/path/to/memory.db bun run src/daemon/eval/baseline.ts
 | **Within-workspace** (you already know the repo) | 89.2% | 0.937 | 100% | 100% | 431 / 1502 ms |
 | **Cross-workspace** (conductor's real need — naive per-ws merge) | **35.1%** | 0.540 | 75.7% | 81.1% | 2140 / 4224 ms |
 | **Cross-workspace — GLOBAL fusion (P1 slice 1)** | **37.8%** | 0.608 | 81.1% | **91.9%** | **10 / 24 ms** |
+| **Cross-workspace — GLOBAL + rerank (P1 slice 2)** | **86.5%** | **0.907** | **94.6%** | **97.3%** | **43 / 88 ms** |
+
+(With the reranker on, within-workspace also rises to **97.3%** P@1 / 0.986 MRR.)
 
 > Base matters: on the pre-rebase base this cross-workspace number was **21.6%**;
 > rebasing onto current main lifted it to **35.1%**, because main's #94
@@ -67,6 +70,23 @@ but the session-level `aggregateScore` (topScore + log(matchCount)·bonus) now f
 top few, not #1). That is exactly what **slice 2 (cross-encoder rerank of the top-k
 session cards)** targets: R@3 is 81%, so reranking the top 3–5 should convert most
 rank-2/3 into rank-1 and push P@1 toward the 89% ceiling.
+
+## P1 progress — slice 2: cross-encoder rerank (DONE) — gate cleared
+
+Added a `Reranker` interface + a transformers.js cross-encoder impl
+(`Xenova/ms-marco-MiniLM-L-6-v2`, swappable for bge-reranker-v2-m3). The engine
+reranks the top-8 candidate sessions by (query, evidence-snippets) when a reranker
+is present; `searchSessions({ rerank })` gates it.
+
+Effect (cross-workspace): **P@1 37.8% → 86.5%**, MRR 0.61 → 0.91, R@3 81% → 95%.
+Latency +~30 ms (43 / 88 ms p95 — the cross-encoder runs on ~8 pairs). This converts
+the 92% R@5 slice 1 delivered into precision@1, essentially reaching the
+within-workspace ceiling (which itself rose to 97.3% with rerank on).
+
+**P1 go/no-go gate: CLEARED** — cross-workspace P@1 35.1% → 86.5%, p95 < 100 ms
+(target was "toward 89%, p95 < 2 s"). The remaining P1 slices (BGE-M3 embedder
+upgrade, identifier-aware lexical, session cards) are now optional polish, not
+required to hit the gate — revisit if the number regresses as the corpus grows.
 
 > Corpus note: 16 sessions is a modest snapshot; re-run as usage grows. The
 > `memory.db` itself is **not** committed (it holds real session content) — only

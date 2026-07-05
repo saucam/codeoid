@@ -15,6 +15,7 @@ import type { Embedder } from "./embedder.js";
 import { normalize } from "./embedder.js";
 import type { SqliteEpisodeStore } from "./store.js";
 import { DEFAULT_WEIGHTS, rank, type RankerWeights } from "./ranker.js";
+import type { Reranker } from "./reranker.js";
 import type {
   Episode,
   EpisodeKind,
@@ -50,6 +51,8 @@ export interface SessionSearchHit {
 export interface MemoryEngineOptions {
   store: SqliteEpisodeStore;
   embedder: Embedder;
+  /** Optional cross-encoder for the final precision@1 rerank stage. */
+  reranker?: Reranker;
   weights?: RankerWeights;
   /** Top-K FTS hits to consider during recall. Default 24. */
   ftsCandidateK?: number;
@@ -60,6 +63,7 @@ export interface MemoryEngineOptions {
 export class MemoryEngine {
   #store: SqliteEpisodeStore;
   #embedder: Embedder;
+  #reranker: Reranker | undefined;
   #weights: RankerWeights;
   #ftsK: number;
   #vectorK: number;
@@ -72,10 +76,14 @@ export class MemoryEngine {
    * keyword recall, episode persistence and usage tracking all keep working;
    * only the vector signal is disabled. */
   #embedderReady = false;
+  /** False until the reranker loads (or none provided). When not ready the
+   * rerank stage is skipped and resolution degrades to fusion-only. */
+  #rerankerReady = false;
 
   constructor(opts: MemoryEngineOptions) {
     this.#store = opts.store;
     this.#embedder = opts.embedder;
+    this.#reranker = opts.reranker;
     this.#weights = opts.weights ?? DEFAULT_WEIGHTS;
     this.#ftsK = opts.ftsCandidateK ?? 24;
     this.#vectorK = opts.vectorCandidateK ?? 24;
@@ -95,6 +103,20 @@ export class MemoryEngine {
           err instanceof Error ? err.message : String(err)
         }`,
       );
+    }
+
+    if (this.#reranker) {
+      try {
+        await this.#reranker.init();
+        this.#rerankerReady = true;
+      } catch (err) {
+        this.#rerankerReady = false;
+        console.error(
+          `[codeoid/memory] reranker init failed — resolution runs fusion-only: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
     }
 
     // Bound the file-read dedup cache (pure cache — safe to prune, no
@@ -283,6 +305,8 @@ export class MemoryEngine {
      * boost. Purely additive; absence just means no name boost.
      */
     sessionNames?: Map<string, string>;
+    /** Cross-encoder rerank of the top-k. Defaults on when a reranker is ready. */
+    rerank?: boolean;
   }): Promise<SessionSearchHit[]> {
     const limit = opts.limit ?? 10;
     const global = opts.workspaceId === undefined;
@@ -375,11 +399,41 @@ export class MemoryEngine {
     }
 
     scored.sort((a, b) => b.aggregateScore - a.aggregateScore);
+
+    // Cross-encoder rerank of the top-k — the precision@1 stage. After fusion
+    // the right session is usually already top-k; a cross-encoder reading
+    // (query, evidence) jointly pulls it to #1. Bounded to RERANK_K pairs.
+    const doRerank = (opts.rerank ?? this.#rerankerReady) && this.#rerankerReady;
+    if (doRerank && scored.length > 1) {
+      const RERANK_K = 8;
+      const head = scored.slice(0, RERANK_K);
+      const docs = head.map((h) =>
+        h.snippets
+          .map((s) => s.summary)
+          .join(". ")
+          .slice(0, 500),
+      );
+      try {
+        const rerankScores = await this.#reranker!.rerank(opts.query, docs);
+        const reordered = head
+          .map((h, i) => ({ h, s: rerankScores[i] ?? Number.NEGATIVE_INFINITY }))
+          .sort((a, b) => b.s - a.s)
+          .map((x) => x.h);
+        return [...reordered, ...scored.slice(RERANK_K)].slice(0, limit);
+      } catch (err) {
+        console.error(
+          `[codeoid/memory] rerank failed — returning fusion order: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
     return scored.slice(0, limit);
   }
 
   async close(): Promise<void> {
     await this.#embedder.close();
+    if (this.#reranker) await this.#reranker.close();
     this.#store.close();
   }
 

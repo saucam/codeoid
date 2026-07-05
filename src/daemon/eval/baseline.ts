@@ -20,6 +20,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { SqliteEpisodeStore } from "../memory/store.js";
 import { createEmbedder } from "../memory/embedder.js";
+import { createReranker } from "../memory/reranker.js";
 import { MemoryEngine, type SessionSearchHit } from "../memory/engine.js";
 import { precisionAt1, mrr, recallAtK, percentile, type EvalCase } from "./metrics.js";
 
@@ -44,7 +45,8 @@ const evalCases: EvalCase[] = cases.map((c) => ({
 
 const store = new SqliteEpisodeStore(MEMORY_DB);
 const embedder = await createEmbedder({ cacheDir: MODEL_CACHE });
-const engine = new MemoryEngine({ store, embedder });
+const reranker = await createReranker({ cacheDir: MODEL_CACHE });
+const engine = new MemoryEngine({ store, embedder, reranker });
 await engine.init();
 
 // Enumerate workspaces + count sessions straight from the DB (read-only).
@@ -76,9 +78,15 @@ async function withinRank(query: string, ws: string): Promise<string[]> {
   return hits.map((h) => h.sessionId);
 }
 
-/** Cross-workspace GLOBAL fusion (P1) — one ranked batch, no workspace scoping. */
+/** Cross-workspace GLOBAL fusion, no rerank (P1 slice 1). */
 async function globalRank(query: string): Promise<string[]> {
-  const hits = await engine.searchSessions({ query, limit: 15 });
+  const hits = await engine.searchSessions({ query, limit: 15, rerank: false });
+  return hits.map((h) => h.sessionId);
+}
+
+/** Cross-workspace GLOBAL fusion + cross-encoder rerank (P1 slice 2). */
+async function globalRerankRank(query: string): Promise<string[]> {
+  const hits = await engine.searchSessions({ query, limit: 15, rerank: true });
   return hits.map((h) => h.sessionId);
 }
 
@@ -88,6 +96,8 @@ const withinRanked: string[][] = [];
 const withinLat: number[] = [];
 const globalRanked: string[][] = [];
 const globalLat: number[] = [];
+const rerankRanked: string[][] = [];
+const rerankLat: number[] = [];
 
 for (const c of cases) {
   let t = performance.now();
@@ -101,6 +111,10 @@ for (const c of cases) {
   t = performance.now();
   globalRanked.push(await globalRank(c.reference));
   globalLat.push(performance.now() - t);
+
+  t = performance.now();
+  rerankRanked.push(await globalRerankRank(c.reference));
+  rerankLat.push(performance.now() - t);
 }
 
 function report(label: string, ranked: string[][], lat: number[]): void {
@@ -118,15 +132,16 @@ console.log(
 console.log(`Embedder: ${embedder.modelName} (${embedder.dimensions}d)`);
 report("WITHIN-workspace (upper bound — you already know the repo):", withinRanked, withinLat);
 report("CROSS-workspace (BASELINE — naive per-ws merge):", crossRanked, crossLat);
-report("CROSS-workspace GLOBAL fusion (P1 — one ranked batch):", globalRanked, globalLat);
+report("CROSS-workspace GLOBAL fusion (P1 slice 1 — no rerank):", globalRanked, globalLat);
+report("CROSS-workspace GLOBAL + rerank (P1 slice 2):", rerankRanked, rerankLat);
 
-console.log("\nCross-workspace GLOBAL (P1) P@1 misses:");
+console.log("\nCross-workspace GLOBAL+rerank (P1) P@1 misses:");
 let misses = 0;
 cases.forEach((c, i) => {
-  const top = globalRanked[i]?.[0];
+  const top = rerankRanked[i]?.[0];
   if (top !== c.expectedSessionId) {
     misses++;
-    const r = globalRanked[i]?.indexOf(c.expectedSessionId) ?? -1;
+    const r = rerankRanked[i]?.indexOf(c.expectedSessionId) ?? -1;
     console.log(
       `  ✗ "${c.reference.slice(0, 58)}" → got ${top?.slice(0, 8) ?? "∅"}, want ${c.expectedSessionId.slice(0, 8)} (rank ${r < 0 ? "NF" : r + 1})`,
     );
