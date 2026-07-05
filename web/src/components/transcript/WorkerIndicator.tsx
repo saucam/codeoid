@@ -26,7 +26,6 @@ const WorkerIndicator: Component = () => {
 
   const status = () => focusedSession()?.status;
   const visible = () =>
-    status() === "working" ||
     status() === "thinking" ||
     status() === "tool_running";
 

@@ -253,7 +253,6 @@ const SessionRow: Component<{ session: SessionInfo }> = (props) => {
 const StatusDot: Component<{ status: SessionStatus }> = (props) => {
   const cls = () => {
     switch (props.status) {
-      case "working":
       case "thinking":
       case "tool_running":
         return "bg-warn animate-pulse";

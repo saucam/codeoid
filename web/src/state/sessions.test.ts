@@ -105,11 +105,11 @@ describe("sessions store", () => {
     // Fresh payload objects, same field values for "a", changed status for "b".
     ingestSessionList([
       s("a", "2026-05-01T08:00:00Z", { name: "alpha" }),
-      s("b", "2026-05-02T08:00:00Z", { status: "working" }),
+      s("b", "2026-05-02T08:00:00Z", { status: "thinking" }),
     ]);
     expect(getSession("a")).toBe(before!);
     expect(getSession("a")?.name).toBe("alpha");
-    expect(getSession("b")?.status).toBe("working");
+    expect(getSession("b")?.status).toBe("thinking");
   });
 
   it("ingestSessionList updates changed fields, adds new sessions, deletes missing ones", () => {

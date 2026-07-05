@@ -45,7 +45,7 @@ describe("findPendingApproval", () => {
 
   it("finds a pending approval for every active status", () => {
     const arr = [msg("u1", "user"), waiting("m1", "ap-1")];
-    const active: SessionStatus[] = ["waiting_approval", "working", "thinking", "tool_running"];
+    const active: SessionStatus[] = ["waiting_approval", "thinking", "tool_running"];
     for (const status of active) {
       expect(findPendingApproval(arr, status)?.messageId).toBe("m1");
     }
@@ -72,7 +72,7 @@ describe("findPendingApproval", () => {
 
   it("returns null when nothing is waiting", () => {
     const arr = [msg("u1", "user"), completedTool("m2"), msg("a1", "assistant")];
-    expect(findPendingApproval(arr, "working")).toBeNull();
+    expect(findPendingApproval(arr, "tool_running")).toBeNull();
     expect(findPendingApproval([], "waiting_approval")).toBeNull();
   });
 
