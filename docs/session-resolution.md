@@ -21,7 +21,7 @@ in-session memory ("what did I try earlier *here*"), but the conductor needs the
 opposite: find a session *without* knowing its workspace.
 
 The naive fix — run the per-workspace search everywhere and merge the results —
-scores only **35% precision@1**. The reason is subtle and instructive: BM25 scores
+scores only **22% precision@1**. The reason is subtle and instructive: BM25 scores
 are normalized **batch-relative, per workspace**. A workspace with few episodes
 produces inflated normalized scores, so it dominates the merged ranking regardless
 of semantic relevance. **Scores from different workspaces aren't comparable.**
@@ -48,8 +48,8 @@ and scores relevance for *this* query (`Reranker` → `searchSessions({ rerank }
 
 ## Why two stages
 
-Stage 1 alone gets the right session into the **top-5 ~92% of the time** — but only
-to **~38% precision@1**. A bi-encoder compresses each session into one
+Stage 1 alone gets the right session into the **top-5 ~86–92% of the time** — but
+only to **~35% precision@1**. A bi-encoder compresses each session into one
 query-agnostic vector, and broad-match session scoring lets big, verbose sessions
 fill the #1 slot. So the right answer is *there*, just not first.
 
@@ -65,12 +65,13 @@ the re-runnable harness in `src/daemon/eval/`:
 
 | Cross-workspace resolution | P@1 | R@5 | p95 latency |
 |---|---|---|---|
-| Naive per-workspace merge | 35.1% | 81% | 4939 ms |
-| + global fusion (stage 1) | 37.8% | 92% | 47 ms |
-| **+ cross-encoder rerank (stage 2)** | **86.5%** | **97%** | **88 ms** |
+| Naive per-workspace merge | 21.6% | 73% | 4966 ms |
+| + global fusion (stage 1) | 35.1% | 86% | 28 ms |
+| **+ cross-encoder rerank (stage 2)** | **73.0%** | **92%** | **88 ms** |
 
-86.5% precision@1 is essentially the same-workspace ceiling (97.3% when you already
-know the repo). Global fusion also made it **~200× faster** (one search + one query
+73% precision@1 on these pure-conceptual references (identifier-bearing references —
+a PR number, a branch name — resolve higher still) approaches the 97.3% same-workspace
+ceiling. Global fusion also made it **~200× faster** (one search + one query
 embed, vs eleven per-workspace searches). Everything runs **locally** — no cloud,
 no API.
 
