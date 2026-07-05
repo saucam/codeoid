@@ -69,6 +69,16 @@ jobs:
         with:
           bun-version: latest
 
+      # Web consumes @codeoid/core + @codeoid/protocol via file: deps. When
+      # bun installs those as symlinks, module resolution runs from the REAL
+      # paths (packages/*/src) and up-walks to the repo-root node_modules for
+      # core's @codeoid/protocol peer — so the root workspace must be
+      # installed too (the release workflow already does this before
+      # build:web).
+      - name: Install workspace dependencies
+        working-directory: .
+        run: bun install --frozen-lockfile
+
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
