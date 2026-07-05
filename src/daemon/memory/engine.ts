@@ -186,6 +186,68 @@ export class MemoryEngine {
     return hits.slice(0, limit);
   }
 
+  /**
+   * Cross-workspace hybrid retrieval — the conductor's path. Unlike recall()
+   * (scoped to one workspace), this unions FTS + vector candidates across ALL
+   * workspaces and ranks them in a SINGLE batch, so the ranker's BM25
+   * min-max normalization is GLOBAL and scores are comparable across
+   * workspaces. That fixes the small-workspace-domination failure a naive
+   * per-workspace merge has (a small workspace's batch-relative scores no
+   * longer inflate past a semantically better hit elsewhere).
+   */
+  async recallGlobal(q: {
+    query: string;
+    limit?: number;
+    filePaths?: string[];
+    /** Candidate pool per channel before ranking. Larger than the per-workspace
+     * default so many sessions are represented across the whole corpus. */
+    candidateK?: number;
+  }): Promise<RecallHit[]> {
+    const limit = q.limit ?? 8;
+    const candidateK = q.candidateK ?? Math.max(this.#ftsK, 100);
+    const now = Date.now();
+
+    const queryVector =
+      this.#embedderReady && q.query.trim()
+        ? normalize((await this.#embedder.embed([q.query]))[0]!)
+        : null;
+
+    // Global FTS candidates (all workspaces).
+    const ftsRows = this.#store.ftsSearchGlobal(q.query, candidateK);
+    const ftsHits = new Map<string, number>(ftsRows.map((r) => [r.id, r.bm25]));
+
+    // Global vector candidates: cosine over every workspace's (in-sync) matrix.
+    const vectorIds: string[] = [];
+    if (queryVector) {
+      const scored: Array<{ id: string; score: number }> = [];
+      for (const ws of this.#store.listWorkspaceIds()) {
+        const { ids, vectors } = this.#store.loadVectorMatrix(ws);
+        for (let i = 0; i < vectors.length; i++) {
+          const v = vectors[i]!;
+          if (v.length !== queryVector.length) continue;
+          let sum = 0;
+          for (let j = 0; j < v.length; j++) sum += v[j]! * queryVector[j]!;
+          scored.push({ id: ids[i]!, score: sum });
+        }
+      }
+      scored.sort((a, b) => b.score - a.score);
+      for (const s of scored.slice(0, candidateK)) vectorIds.push(s.id);
+    }
+
+    const candidateIds = [...new Set([...ftsHits.keys(), ...vectorIds])];
+    if (candidateIds.length === 0) return [];
+
+    const episodes = this.#store.episodesByIds(candidateIds);
+    const hits = rank(episodes, {
+      queryVector,
+      ftsHits,
+      queryFilePaths: q.filePaths ?? [],
+      now,
+      weights: this.#weights,
+    });
+    return hits.slice(0, limit);
+  }
+
   /** Fetch a single episode by id (for recall_turn-style lookup). */
   getEpisode(id: string): Episode | null {
     return this.#store.getEpisode(id);
@@ -208,7 +270,8 @@ export class MemoryEngine {
    */
   async searchSessions(opts: {
     query: string;
-    workspaceId: string;
+    /** Absent = cross-workspace (global) resolution — the conductor's path. */
+    workspaceId?: string;
     limit?: number;
     /** Episode-hit candidates to consider before grouping. */
     candidatePoolSize?: number;
@@ -222,14 +285,21 @@ export class MemoryEngine {
     sessionNames?: Map<string, string>;
   }): Promise<SessionSearchHit[]> {
     const limit = opts.limit ?? 10;
-    const pool = opts.candidatePoolSize ?? Math.max(40, limit * 5);
+    const global = opts.workspaceId === undefined;
+    // Cross-workspace needs a bigger candidate pool so many sessions across the
+    // corpus are represented (a single busy session would otherwise fill it).
+    const pool =
+      opts.candidatePoolSize ??
+      (global ? Math.max(150, limit * 15) : Math.max(40, limit * 5));
     const snippetsPerSession = opts.snippetsPerSession ?? 3;
 
-    const hits = await this.recall({
-      query: opts.query,
-      workspaceId: opts.workspaceId,
-      limit: pool,
-    });
+    const hits = global
+      ? await this.recallGlobal({ query: opts.query, limit: pool, candidateK: pool })
+      : await this.recall({
+          query: opts.query,
+          workspaceId: opts.workspaceId!,
+          limit: pool,
+        });
     if (hits.length === 0) return [];
 
     // Group by session id.

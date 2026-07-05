@@ -76,10 +76,18 @@ async function withinRank(query: string, ws: string): Promise<string[]> {
   return hits.map((h) => h.sessionId);
 }
 
+/** Cross-workspace GLOBAL fusion (P1) — one ranked batch, no workspace scoping. */
+async function globalRank(query: string): Promise<string[]> {
+  const hits = await engine.searchSessions({ query, limit: 15 });
+  return hits.map((h) => h.sessionId);
+}
+
 const crossRanked: string[][] = [];
 const crossLat: number[] = [];
 const withinRanked: string[][] = [];
 const withinLat: number[] = [];
+const globalRanked: string[][] = [];
+const globalLat: number[] = [];
 
 for (const c of cases) {
   let t = performance.now();
@@ -89,6 +97,10 @@ for (const c of cases) {
   t = performance.now();
   withinRanked.push(await withinRank(c.reference, c.expectedWorkspaceId));
   withinLat.push(performance.now() - t);
+
+  t = performance.now();
+  globalRanked.push(await globalRank(c.reference));
+  globalLat.push(performance.now() - t);
 }
 
 function report(label: string, ranked: string[][], lat: number[]): void {
@@ -105,15 +117,16 @@ console.log(
 );
 console.log(`Embedder: ${embedder.modelName} (${embedder.dimensions}d)`);
 report("WITHIN-workspace (upper bound — you already know the repo):", withinRanked, withinLat);
-report("CROSS-workspace (conductor's real need — naive per-ws merge):", crossRanked, crossLat);
+report("CROSS-workspace (BASELINE — naive per-ws merge):", crossRanked, crossLat);
+report("CROSS-workspace GLOBAL fusion (P1 — one ranked batch):", globalRanked, globalLat);
 
-console.log("\nCross-workspace P@1 misses:");
+console.log("\nCross-workspace GLOBAL (P1) P@1 misses:");
 let misses = 0;
 cases.forEach((c, i) => {
-  const top = crossRanked[i]?.[0];
+  const top = globalRanked[i]?.[0];
   if (top !== c.expectedSessionId) {
     misses++;
-    const r = crossRanked[i]?.indexOf(c.expectedSessionId) ?? -1;
+    const r = globalRanked[i]?.indexOf(c.expectedSessionId) ?? -1;
     console.log(
       `  ✗ "${c.reference.slice(0, 58)}" → got ${top?.slice(0, 8) ?? "∅"}, want ${c.expectedSessionId.slice(0, 8)} (rank ${r < 0 ? "NF" : r + 1})`,
     );

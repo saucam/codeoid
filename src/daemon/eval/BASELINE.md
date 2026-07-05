@@ -16,6 +16,7 @@ MEMORY_DB=/path/to/memory.db bun run src/daemon/eval/baseline.ts
 |---|---|---|---|---|---|
 | **Within-workspace** (you already know the repo) | 89.2% | 0.937 | 100% | 100% | 431 / 1502 ms |
 | **Cross-workspace** (conductor's real need — naive per-ws merge) | **35.1%** | 0.540 | 75.7% | 81.1% | 2140 / 4224 ms |
+| **Cross-workspace — GLOBAL fusion (P1 slice 1)** | **37.8%** | 0.608 | 81.1% | **91.9%** | **10 / 24 ms** |
 
 > Base matters: on the pre-rebase base this cross-workspace number was **21.6%**;
 > rebasing onto current main lifted it to **35.1%**, because main's #94
@@ -47,6 +48,25 @@ MEMORY_DB=/path/to/memory.db bun run src/daemon/eval/baseline.ts
 
 **Target:** lift cross-workspace P@1 from **35.1%** toward the within-workspace
 **89%** (and p95 < 2 s). That is the P1 go/no-go gate.
+
+## P1 progress — slice 1: global fusion + native cross-workspace (DONE)
+
+`engine.recallGlobal()` unions FTS + vector candidates across all workspaces and
+ranks them in ONE batch (so BM25 min-max normalization is global);
+`searchSessions()` goes global when no `workspaceId` is passed. Effect vs the
+naive-merge baseline:
+
+- **Latency 4224 → 24 ms p95** (~200×): one query embed + one global search instead
+  of 11 per-workspace searches. Comfortably under the 2 s budget.
+- **R@5 81% → 92%, R@3 76% → 81%** (better candidate pool).
+- **MRR 0.54 → 0.61**; **P@1 35.1% → 37.8%** (modest — see below).
+
+**Why P@1 only nudged:** global normalization fixed *small-workspace* domination,
+but the session-level `aggregateScore` (topScore + log(matchCount)·bonus) now favors
+*big/verbose* sessions — the misses are almost all **rank 2–3** (right session in the
+top few, not #1). That is exactly what **slice 2 (cross-encoder rerank of the top-k
+session cards)** targets: R@3 is 81%, so reranking the top 3–5 should convert most
+rank-2/3 into rank-1 and push P@1 toward the 89% ceiling.
 
 > Corpus note: 16 sessions is a modest snapshot; re-run as usage grows. The
 > `memory.db` itself is **not** committed (it holds real session content) — only
