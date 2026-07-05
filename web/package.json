@@ -12,6 +12,7 @@
     "test": "NODE_OPTIONS=\"--max-old-space-size=4096\" vitest run --pool=forks --poolOptions.forks.singleFork=true"
   },
   "dependencies": {
+    "@codeoid/protocol": "file:../packages/protocol",
     "@floating-ui/dom": "^1.7.6",
     "@tanstack/solid-virtual": "^3.13.24",
     "@types/diff": "^8.0.0",

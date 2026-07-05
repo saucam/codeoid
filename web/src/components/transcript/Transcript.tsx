@@ -70,7 +70,6 @@ const Transcript: Component = () => {
   const streamingMessageId = createMemo<string | null>(() => {
     const status = focusedSession()?.status;
     if (
-      status !== "working" &&
       status !== "thinking" &&
       status !== "tool_running"
     )

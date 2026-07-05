@@ -29,7 +29,6 @@ import type { SessionMessage, SessionStatus } from "../protocol/types";
 
 const APPROVAL_POSSIBLE: ReadonlySet<SessionStatus> = new Set<SessionStatus>([
   "waiting_approval",
-  "working",
   "thinking",
   "tool_running",
 ]);
