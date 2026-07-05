@@ -27,6 +27,7 @@ import {
   appendScrollback,
   replaceScrollback,
 } from "./messages";
+import { noteLiveSeq, noteReplayFrame } from "./resume";
 
 // Resolve the daemon WebSocket URL:
 //   1. explicit VITE_CODEOID_URL build override, else
@@ -227,14 +228,24 @@ export function disconnect(): void {
 function routeBroadcast(msg: DaemonMessage): void {
   switch (msg.type) {
     case "session.message":
+      noteLiveSeq(msg.sessionId, msg.seq);
       applyMessage(msg);
       return;
     case "session.message.delta":
+      noteLiveSeq(msg.sessionId, msg.seq);
       applyDelta(msg);
       return;
     case "scrollback.replay":
-      // Chunked replay (#84): chunk 0 (or a single-frame legacy replay, where
-      // seq is absent) resets the session; later chunks append in order.
+      noteReplayFrame(msg);
+      // Incremental resume (`replay.resume`): the daemon sent only the tail
+      // mutated since our cursor — upsert into the existing buffer, never
+      // reset (chunk 0 of an incremental replay is NOT a snapshot).
+      if (msg.mode === "incremental") {
+        appendScrollback(msg.sessionId, msg.messages);
+        return;
+      }
+      // Snapshot (chunked #84): chunk 0 (or a single-frame legacy replay,
+      // where seq is absent) resets the session; later chunks append in order.
       if (msg.seq === undefined || msg.seq === 0) {
         replaceScrollback(msg.sessionId, msg.messages);
       } else {

@@ -11,6 +11,7 @@ import { createStore, produce } from "solid-js/store";
 
 import type { SessionInfo, SessionStatus } from "../protocol/types";
 import { clearSessionMessages, setFocusedSessionAccessor } from "./messages";
+import { clearResumeCursor } from "./resume";
 
 interface SessionsState {
   byId: Record<string, SessionInfo>;
@@ -154,6 +155,7 @@ export function setSessionStatus(id: string, status: SessionStatus): void {
 export function removeSession(id: string): void {
   batch(() => {
     clearSessionMessages(id);
+    clearResumeCursor(id);
     setState(
       "byId",
       produce<Record<string, SessionInfo>>((m) => {

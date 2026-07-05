@@ -171,6 +171,21 @@ export class Session {
   #identityManager?: AgentIdentityManager;
   #agentIdentity: MessageIdentity;
   #scrollback = new ScrollbackBuffer();
+  /**
+   * Identity of this Session instance's replay buffer (`replay.resume`).
+   * A client cursor (`sinceSeq`) is only valid against the buffer that
+   * issued it; regenerating the key on every construction (incl. restart
+   * resume, where the buffer is rebuilt from the transcript with fresh
+   * seqs) forces stale cursors down the full-snapshot path.
+   */
+  #resumeKey = randomUUID();
+  /**
+   * Recently-processed `session.send.clientMsgId`s (`send.idempotency`) —
+   * insertion-ordered for FIFO eviction. Bounds the window in which an
+   * ambiguous-delivery retry is recognized as a duplicate; 256 comfortably
+   * outlives any client resend queue while staying O(1) per send.
+   */
+  #seenClientMsgIds = new Set<string>();
   #provider!: SessionProvider;
   #activeRun: TurnRun | null = null;
   #eventConsumerTask: Promise<void> | null = null;
@@ -566,25 +581,52 @@ export class Session {
 
   // ── Client management ─────────────────────────────────────────────────
 
-  attach(client: AttachedClient): void {
+  attach(client: AttachedClient, resume?: { key: string; sinceSeq: number }): void {
     this.#clients.set(client.id, client);
     this.#store.audit(client.auth.sub, "session.attach", this.id);
+
+    // Incremental resume (`replay.resume`): when the client's cursor belongs
+    // to THIS replay buffer (key match), replay only the entries mutated
+    // after it — new messages plus older ones grown by deltas / tool-state
+    // transitions — instead of the whole scrollback. Any mismatch (daemon
+    // restarted and rebuilt the buffer, unknown key) falls back to the
+    // authoritative full snapshot; the client resets on `mode: "snapshot"`.
+    const incremental = resume !== undefined && resume.key === this.#resumeKey;
 
     // Replay scrollback — full SessionMessage objects, not deltas. Partition
     // by byte budget so a large session can't emit one oversized frame that
     // trips the WS backpressure limit and force-closes the client (#84).
-    const chunks = this.#scrollback.readChunked(REPLAY_CHUNK_BYTES) as SessionMessage[][];
-    if (chunks.length === 0) return;
+    const chunks = (
+      incremental
+        ? this.#scrollback.readChunkedSince(resume.sinceSeq, REPLAY_CHUNK_BYTES)
+        : this.#scrollback.readChunked(REPLAY_CHUNK_BYTES)
+    ) as SessionMessage[][];
+    const meta = {
+      mode: incremental ? ("incremental" as const) : ("snapshot" as const),
+      resumeKey: this.#resumeKey,
+      maxSeq: this.#scrollback.maxSeq,
+    };
 
-    if (chunks.length === 1) {
-      // Common case: the whole scrollback fits one frame. Send it synchronously
-      // in the legacy single-frame shape (no seq/final) — behaviour and wire
-      // format are unchanged for every session small enough to fit.
-      client.send({ type: "scrollback.replay", sessionId: this.id, messages: chunks[0]! });
+    if (chunks.length === 0) {
+      // Nothing to replay. A client that ASKED to resume still gets an empty
+      // frame: it acks the cursor (incremental, fully caught up) or re-syncs
+      // a stale key (snapshot after a daemon restart with an empty buffer).
+      // Legacy clients keep the silent no-frame behaviour.
+      if (resume !== undefined) {
+        client.send({ type: "scrollback.replay", sessionId: this.id, messages: [], ...meta });
+      }
       return;
     }
 
-    // Large scrollback: stream chunks oldest→newest, pacing on socket drain so
+    if (chunks.length === 1) {
+      // Common case: the whole replay fits one frame. Send it synchronously
+      // in the single-frame shape (no chunk seq/final) — wire format is
+      // unchanged for legacy clients apart from the additive resume fields.
+      client.send({ type: "scrollback.replay", sessionId: this.id, messages: chunks[0]!, ...meta });
+      return;
+    }
+
+    // Large replay: stream chunks oldest→newest, pacing on socket drain so
     // frames don't accumulate past the backpressure limit. Because that pacing
     // is async, live broadcasts to this client are buffered until the replay
     // finishes — otherwise a newer live message could land ahead of older
@@ -605,7 +647,7 @@ export class Session {
     };
     this.#clients.set(raw.id, buffered);
 
-    void this.#streamReplay(raw, buffered, chunks).finally(() => {
+    void this.#streamReplay(raw, buffered, chunks, meta).finally(() => {
       // Flush live messages that arrived during replay, in order — but only if
       // this client is still the current attachment (not detached/replaced).
       if (this.#clients.get(raw.id) === buffered) {
@@ -625,6 +667,7 @@ export class Session {
     raw: AttachedClient,
     token: AttachedClient,
     chunks: SessionMessage[][],
+    meta: { mode: "snapshot" | "incremental"; resumeKey: string; maxSeq: number },
   ): Promise<void> {
     const last = chunks.length - 1;
     for (let i = 0; i <= last; i++) {
@@ -635,6 +678,7 @@ export class Session {
         messages: chunks[i]!,
         seq: i,
         final: i === last,
+        ...meta,
       });
       if (i < last) await raw.flush?.();
     }
@@ -2455,6 +2499,16 @@ export class Session {
 
   /** Broadcast any DaemonMessage to all attached clients */
   #broadcastRaw(msg: DaemonMessage): void {
+    // Stamp the session cursor (`replay.resume`) onto outbound streaming
+    // frames. Deltas mutate their target message in place, so the buffer
+    // entry's seq must advance with each one — touch() is the single point
+    // that both records the mutation and yields the frame's seq. Full
+    // messages already carry the seq assigned by scrollback.push(). O(1),
+    // no re-serialization — safe on the per-token hot path.
+    if (msg.type === "session.message.delta") {
+      const seq = this.#scrollback.touch(msg.messageId);
+      if (seq !== undefined) msg.seq = seq;
+    }
     for (const client of this.#clients.values()) {
       try {
         client.send(msg);
@@ -2462,6 +2516,22 @@ export class Session {
         this.#clients.delete(client.id);
       }
     }
+  }
+
+  /**
+   * Duplicate-send guard (`send.idempotency`). Returns true when this
+   * clientMsgId was already accepted for this session — the caller should
+   * ack without dispatching a second turn (a duplicated user prompt is a
+   * duplicated LLM turn: real token spend). Records the id on first sight.
+   */
+  markClientMsgSeen(clientMsgId: string): boolean {
+    if (this.#seenClientMsgIds.has(clientMsgId)) return true;
+    this.#seenClientMsgIds.add(clientMsgId);
+    if (this.#seenClientMsgIds.size > 256) {
+      const oldest = this.#seenClientMsgIds.values().next().value;
+      if (oldest !== undefined) this.#seenClientMsgIds.delete(oldest);
+    }
+    return false;
   }
 
   #setStatus(status: SessionStatus): void {

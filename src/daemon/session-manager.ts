@@ -920,7 +920,7 @@ export class SessionManager {
       return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
     }
 
-    session.attach(client);
+    session.attach(client, msg.resume);
     return { type: "response.ok", requestId: msg.id, data: session.toInfo() };
   }
 
@@ -948,6 +948,15 @@ export class SessionManager {
     const session = this.#getOwnedSession(msg.sessionId, auth);
     if (!session) {
       return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
+    }
+
+    // Duplicate-send suppression (`send.idempotency`): a client that
+    // couldn't observe whether its send survived a dropped socket resends
+    // with the SAME clientMsgId — acknowledging instead of dispatching
+    // prevents one prompt from becoming two billed turns. Checked after
+    // scope + ownership so a rejected send never poisons the id.
+    if (msg.clientMsgId !== undefined && session.markClientMsgSeen(msg.clientMsgId)) {
+      return { type: "response.ok", requestId: msg.id, data: { duplicate: true } };
     }
 
     // Fire and forget — output streams to attached clients. The user message

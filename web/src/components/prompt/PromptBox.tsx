@@ -246,6 +246,10 @@ const PromptBox: Component = () => {
       id: newRequestId(),
       sessionId: session.id,
       text: raw,
+      // Idempotency key (`send.idempotency`): minted once per submit, so if
+      // this send is retried after an ambiguous socket drop the daemon acks
+      // the duplicate instead of running (and billing) a second turn.
+      clientMsgId: crypto.randomUUID(),
       ...(payload.length > 0 ? { attachments: payload } : {}),
     }).catch((e) => {
       setError(`Message not delivered: ${e instanceof Error ? e.message : String(e)}`);

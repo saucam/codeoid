@@ -22,6 +22,7 @@ import {
   send,
 } from "./state/connection";
 import { focusedSession, focusedSessionId, mergeSession } from "./state/sessions";
+import { resumeFor } from "./state/resume";
 import type { SessionInfo } from "./protocol/types";
 import { resetClaudeConfig } from "./state/claude-config";
 import { installApprovalNotifications } from "./state/desktop-notifications";
@@ -88,7 +89,10 @@ const App: Component = () => {
       // duplicate attaches. On failure, remove so the next focus change retries.
       attached.add(id);
       const reqId = newRequestId();
-      request({ type: "session.attach", id: reqId, sessionId: id })
+      // Resume incrementally when we hold a cursor for this session — the
+      // daemon then replays only what changed since, not the full scrollback.
+      const resume = resumeFor(id);
+      request({ type: "session.attach", id: reqId, sessionId: id, ...(resume ? { resume } : {}) })
         .then((data) => {
           // The attach response includes the session's current SessionInfo.
           // Update local state immediately so the status dot reflects reality
