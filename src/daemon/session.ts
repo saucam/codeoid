@@ -800,14 +800,17 @@ export class Session {
     // Queuing a mid-turn push into a dead run silently swallows the message and
     // the user never gets a reply. If the active run has produced no event for
     // longer than the stall window, recover it now and start a fresh turn
-    // instead of trusting #activeRun.
+    // instead of trusting #activeRun. Skipped while the watchdog is paused
+    // (tool executing / approval pending) — sending "how's it going?" into a
+    // long-running tool must queue mid-turn, not kill the run.
     const stallMs = this.#config?.session.turnStallTimeoutMs ?? 300_000;
     if (
       wasWorking &&
       this.#activeRun &&
       stallMs > 0 &&
       this.#lastEventAt > 0 &&
-      Date.now() - this.#lastEventAt > stallMs
+      Date.now() - this.#lastEventAt > stallMs &&
+      !this.#watchdogPaused()
     ) {
       console.error(
         `[codeoid/session ${this.id}] send arrived on a stalled run (${Date.now() - this.#lastEventAt}ms since last event); recovering before starting a fresh turn`,
@@ -1736,43 +1739,78 @@ export class Session {
     };
   }
 
+  /**
+   * True while event-stream silence is EXPECTED and the stall watchdog (and
+   * the #sendInner liveness guard) must not treat it as a wedged turn:
+   *
+   *   - waiting_approval / pending approvals: the provider blocks on
+   *     canUseTool until the user responds — a slow human is not a hang.
+   *   - tool_running: a long tool execution (multi-minute Bash, Task
+   *     subagents, web research) emits NO provider events until it
+   *     completes. Recovering here kills legitimate in-flight work — the
+   *     exact failure users hit with the 300s default on long tasks.
+   *
+   * Hung-tool protection is NOT lost: MCP calls have their own finer
+   * timeout (session.mcpToolTimeoutMs), SDK built-ins carry tool-level
+   * timeouts, a dead subprocess closes the event stream (which ends the
+   * iterator and recovers the turn), and the user can always interrupt.
+   */
+  #watchdogPaused(): boolean {
+    return (
+      this.#status === "waiting_approval" ||
+      this.#status === "tool_running" ||
+      this.#pendingApprovals.size > 0
+    );
+  }
+
   async #consumeEvents(run: TurnRun, _sender: AuthContext): Promise<void> {
     // Stall watchdog: drive the iterator manually so we can race each pull
-    // against a timeout. If the provider stream goes completely silent for
-    // longer than the configured window (no events at all — long-running tools
-    // still emit tool_progress / partial events), the turn is treated as
-    // wedged and force-recovered. 0 disables the watchdog. See #recoverStalledRun.
+    // against a timeout. If the provider stream goes silent for longer than
+    // the configured window while the MODEL should be producing events
+    // (status "thinking"), the turn is treated as wedged and force-recovered.
+    // Silence during tool execution or a pending approval is legitimate and
+    // pauses the watchdog — see #watchdogPaused. 0 disables the watchdog.
+    // See #recoverStalledRun.
     const stallMs = this.#config?.session.turnStallTimeoutMs ?? 300_000;
     const iter = run.events[Symbol.asyncIterator]();
     const STALL = Symbol("stall");
     this.#lastEventAt = Date.now();
+    // The in-flight pull persists ACROSS loop iterations: when a stall timer
+    // fires but the pause re-check says silence is legitimate (see below), we
+    // loop back and re-await the SAME pull instead of issuing a concurrent
+    // iter.next() against the queue.
+    let pending: Promise<IteratorResult<ProviderEvent>> | null = null;
     try {
       while (true) {
         let next: IteratorResult<ProviderEvent> | typeof STALL;
-        // A pending manual tool approval is a legitimate indefinite silent
-        // period — the provider blocks on canUseTool until the user responds.
-        // Pause the watchdog so a slow human approval isn't mistaken for a hung
-        // stream and cancelled.
-        const waitingForApproval =
-          this.#status === "waiting_approval" || this.#pendingApprovals.size > 0;
-        if (stallMs > 0 && !waitingForApproval) {
+        pending ??= iter.next();
+        if (stallMs > 0 && !this.#watchdogPaused()) {
           let timer: ReturnType<typeof setTimeout> | undefined;
           const stall = new Promise<typeof STALL>((resolve) => {
             timer = setTimeout(() => resolve(STALL), stallMs);
           });
           try {
-            next = await Promise.race([iter.next(), stall]);
+            next = await Promise.race([pending, stall]);
           } finally {
             if (timer) clearTimeout(timer);
           }
         } else {
-          next = await iter.next();
+          next = await pending;
         }
 
         if (next === STALL) {
+          // Re-check the pause AT FIRING TIME, not just at arming time. The
+          // timer is armed while the model is thinking; if a tool_start (or
+          // approval prompt) lands right after arming, the session enters a
+          // legitimately-silent state while the old timer keeps counting —
+          // without this re-check it would kill an actively-working tool the
+          // moment the window lapses (the "timed out during a long research
+          // task" bug). Loop back and re-await the same pending pull.
+          if (this.#watchdogPaused()) continue;
           await this.#recoverStalledRun(run, stallMs);
           return; // finally still runs; #recoverStalledRun already cleared run state
         }
+        pending = null; // pull consumed — next iteration issues a fresh one
         if (next.done) break;
         // Ownership guard: a concurrent #sendInner liveness-guard recovery may
         // have torn down this run while we were awaiting iter.next(). Drop any

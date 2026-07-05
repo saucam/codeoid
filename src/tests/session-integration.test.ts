@@ -1244,6 +1244,93 @@ describe("T9 – stall watchdog recovers a wedged turn", () => {
     // Clean up the pending approval + open run.
     await session.interrupt(TEST_AUTH);
   });
+
+  it("does NOT fire while a long-running tool is executing (silence during tools is legitimate)", async () => {
+    // Regression for the 300s-timeout-kills-long-tasks bug: a Read (auto-
+    // approved in guarded mode) starts executing and the stream then goes
+    // silent — exactly what a multi-minute Bash run, Task subagent, or web
+    // research looks like (the SDK emits NOTHING until the tool completes).
+    // The watchdog must pause instead of tearing down legitimate work.
+    const provider = new MockSessionProvider(
+      "claude",
+      [
+        [
+          {
+            type: "tool_start",
+            toolId: "read-long",
+            sdkToolUseId: "sdk-read-long",
+            name: "Read",
+            input: { file_path: "/big/repo/file.ts" },
+            approvalId: "ap-read-long",
+          },
+        ],
+      ],
+      { stall: true },
+    );
+    const session = makeSession(provider, "stall-long-tool", stallConfig(80));
+    const { client, received } = makeClient();
+    session.attach(client);
+
+    await session.send("explore the codebase", TEST_AUTH);
+    await waitForStatus(session, "tool_running", 4000);
+
+    // Wait well past the 80ms stall window — no recovery, no teardown.
+    await new Promise<void>((r) => setTimeout(r, 300));
+    expect(session.status).toBe("tool_running");
+    const stalledMsg = received.find(
+      (m) => m.type === "session.message" && /timed out/i.test((m as { content?: string }).content ?? ""),
+    );
+    expect(stalledMsg).toBeUndefined();
+    expect(provider.teardownCount).toBe(0);
+
+    await session.interrupt(TEST_AUTH);
+  });
+
+  it("a send arriving mid-long-tool queues instead of killing the run (liveness guard pauses too)", async () => {
+    // Same long-silent-tool setup; the user asks "how's it going?" after the
+    // stall window has elapsed. The #sendInner liveness guard previously
+    // force-recovered here — cancelling the in-flight tool and resetting the
+    // session. It must respect the same pause conditions as the watchdog.
+    const provider = new MockSessionProvider(
+      "claude",
+      [
+        [
+          {
+            type: "tool_start",
+            toolId: "read-long-2",
+            sdkToolUseId: "sdk-read-long-2",
+            name: "Read",
+            input: { file_path: "/big/repo/other.ts" },
+            approvalId: "ap-read-long-2",
+          },
+        ],
+      ],
+      { stall: true },
+    );
+    const session = makeSession(provider, "stall-midtool-send", stallConfig(80));
+    const { client, received } = makeClient();
+    session.attach(client);
+
+    await session.send("do a long exploration", TEST_AUTH);
+    await waitForStatus(session, "tool_running", 4000);
+
+    // Let the stall window lapse, then send into the silent-but-working run.
+    await new Promise<void>((r) => setTimeout(r, 300));
+    await session.send("how's it going?", TEST_AUTH);
+
+    // The liveness guard must NOT have treated the tool-executing run as
+    // stalled: before the fix this path emitted "⚠️ Previous turn timed out …
+    // being retried in a fresh turn" and force-reaped the provider. (The mock
+    // lacks pushMidTurn, so the send legitimately starts a fresh turn — what
+    // matters is that it wasn't a STALL recovery; the real ClaudeProvider
+    // queues mid-turn and the run survives.)
+    const stalledMsg = received.find(
+      (m) => m.type === "session.message" && /timed out|stalled/i.test((m as { content?: string }).content ?? ""),
+    );
+    expect(stalledMsg).toBeUndefined();
+
+    await session.interrupt(TEST_AUTH);
+  });
 });
 
 // ── T7: status persistence — dedupe, write-through, debounce ──────────────────
