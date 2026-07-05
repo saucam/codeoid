@@ -216,11 +216,22 @@ describe("CodeoidClient", () => {
     await flush();
     ws2.recv(AUTH_OK);
     await flush();
-    const seen = { kind: "idle" as ClientStatus["kind"] };
-    c.onStatus((s) => {
-      seen.kind = s.kind;
-    });
-    expect(seen.kind).toBe("connected");
+    expect(c.status.kind).toBe("connected");
+  });
+
+  it("times out a handshake the peer never answers instead of hanging forever", async () => {
+    // Socket opens, auth frame is sent, but no auth.ok / response.error /
+    // close ever arrives (hung middlebox). The handshake deadline must fail
+    // the attempt so backoff (or, with bounded attempts, the caller) takes
+    // over — previously connect() hung indefinitely here.
+    const c = track(makeClient({ requestTimeoutMs: 30, maxAttempts: 1 }));
+    const p = c.connect();
+    await flush();
+    MockWS.last().open();
+    await flush();
+    expect(MockWS.last().parsed[0]?.type).toBe("auth"); // frame went out
+    await expect(p).rejects.toThrow(/auth handshake timed out/);
+    expect(c.status.kind).toBe("failed");
   });
 
   it("rejects in-flight requests when the socket drops (no 30s hang)", async () => {

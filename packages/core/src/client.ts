@@ -144,6 +144,11 @@ export class CodeoidClient {
     this.#requestTimeoutMs = opts.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
   }
 
+  /** Current connection status, synchronously. */
+  get status(): ClientStatus {
+    return this.#status;
+  }
+
   /** Subscribe to status changes. Returns an unsubscribe fn. */
   onStatus(handler: StatusHandler): () => void {
     this.#statusHandlers.add(handler);
@@ -420,6 +425,23 @@ export class CodeoidClient {
       this.#ws = ws;
 
       let authResolved = false;
+      // Handshake deadline: a peer (or middlebox) that accepts the socket but
+      // never answers the auth frame would otherwise hang connect() forever —
+      // the heartbeat only starts after `connected`, and request timeouts
+      // don't cover this pre-auth frame. Bounded by requestTimeoutMs; the
+      // rejection feeds the normal backoff loop.
+      const authTimer = setTimeout(() => {
+        if (authResolved) return;
+        authResolved = true;
+        this.#log("warn", "auth handshake timed out — closing socket");
+        try {
+          ws.close();
+        } catch {
+          /* ignore */
+        }
+        reject(new Error("auth handshake timed out"));
+      }, this.#requestTimeoutMs);
+
       const onOpen = async () => {
         // Refresh the token before the handshake so a reconnect after the
         // prior JWT expired mints a fresh one (the daemon now closes 4003 on
@@ -460,6 +482,7 @@ export class CodeoidClient {
         }
         if (!authResolved && msg.type === "auth.ok") {
           authResolved = true;
+          clearTimeout(authTimer);
           resolve(msg);
           // From here on, dispatch normally.
           this.#routeMessage(msg);
@@ -467,6 +490,7 @@ export class CodeoidClient {
         }
         if (!authResolved && msg.type === "response.error") {
           authResolved = true;
+          clearTimeout(authTimer);
           reject(new Error(`auth rejected: ${msg.error}`));
           return;
         }
@@ -475,9 +499,12 @@ export class CodeoidClient {
       const onClose = (ev: CloseEvent) => {
         const reason = ev.reason || `socket closed (code ${ev.code})`;
         if (!authResolved) {
+          authResolved = true;
+          clearTimeout(authTimer);
           reject(new Error(reason));
           return;
         }
+        clearTimeout(authTimer);
         if (this.#shutdown) return;
         // If this isn't the current socket, a forceReconnect/newer connect
         // already took over — don't kick a second reconnect loop.
@@ -501,7 +528,11 @@ export class CodeoidClient {
         }
       };
       const onError = (ev: Event) => {
-        if (!authResolved) reject(new Error("websocket error during connect"));
+        if (!authResolved) {
+          authResolved = true;
+          clearTimeout(authTimer);
+          reject(new Error("websocket error during connect"));
+        }
         this.#log("error", "websocket error", { ev });
       };
 
