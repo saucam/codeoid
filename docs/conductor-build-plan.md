@@ -67,13 +67,14 @@ contracts everything else consumes.
 beat, and the card/fact tables migrate cleanly (verify against a real
 `bun:sqlite`, not DDL strings).
 
-**Baseline (MEASURED)** — against the real Hetzner corpus (16 sessions / 11
-workspaces / 11,938 episodes), 37 labeled references, current resolver:
-**within-workspace P@1 = 89.2%** (primitives are sound), **cross-workspace
-P@1 = 21.6%** with **R@5 = 81%** — the right session is usually top-5, so it's a
+**Baseline (MEASURED, on current-main base)** — against the real Hetzner corpus
+(16 sessions / 11 workspaces / 11,938 episodes), 37 labeled references, current
+resolver: **within-workspace P@1 = 89.2%** (primitives are sound), **cross-workspace
+P@1 = 35.1%** with **R@5 = 81%** — the right session is usually top-5, so it's a
 *ranking/fusion* problem, not recall (a small workspace's batch-relative BM25 scores
-dominate the naive cross-workspace merge). Full write-up + repro:
-[../src/daemon/eval/BASELINE.md](../src/daemon/eval/BASELINE.md). **21.6% is the
+dominate the naive cross-workspace merge). (Pre-rebase it was 21.6%; main's #94
+vector-cache fix lifted it.) Full write-up + repro:
+[../src/daemon/eval/BASELINE.md](../src/daemon/eval/BASELINE.md). **35.1% is the
 number P1 must beat.**
 
 ---
