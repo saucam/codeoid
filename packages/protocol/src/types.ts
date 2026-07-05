@@ -577,6 +577,15 @@ export interface SessionMessage {
   /** Extensible metadata — frontends ignore unknown keys */
   metadata?: Record<string, unknown>;
   timestamp: string;
+  /**
+   * Session sequence cursor (`replay.resume` capability): the session's
+   * monotonic mutation counter at the time this frame was produced. Clients
+   * track `max(seq)` per session and pass it back on `session.attach.resume`
+   * to receive an incremental tail instead of a full scrollback replay.
+   * Absent on daemons that predate resume, and on messages the daemon no
+   * longer holds in its replay buffer.
+   */
+  seq?: number;
 }
 
 /**
@@ -603,6 +612,8 @@ export interface SessionMessageDelta {
   /** Update tool state (state machine transition) */
   toolStateUpdate?: ToolState;
   timestamp: string;
+  /** Session sequence cursor — see `SessionMessage.seq`. */
+  seq?: number;
 }
 
 // =============================================================================
@@ -701,6 +712,16 @@ export interface SessionListMsg extends BaseClientMsg {
 export interface SessionAttachMsg extends BaseClientMsg {
   type: "session.attach";
   sessionId: string;
+  /**
+   * Incremental resume (`replay.resume` capability). `key` is the
+   * `resumeKey` from a previous replay on this session; `sinceSeq` is the
+   * highest `seq` the client has applied. When the key matches the daemon's
+   * current replay buffer, the daemon replays only entries mutated after
+   * `sinceSeq` (`mode: "incremental"`); on any mismatch (daemon restarted,
+   * buffer rebuilt, key unknown) it falls back to a full snapshot. Omit for
+   * the legacy full-replay behaviour.
+   */
+  resume?: { key: string; sinceSeq: number };
 }
 
 export interface SessionDetachMsg extends BaseClientMsg {
@@ -727,6 +748,15 @@ export interface SessionSendMsg extends BaseClientMsg {
    * Frontends that don't care pass nothing; FIFO stays the default.
    */
   priority?: "now" | "next" | "later";
+  /**
+   * Idempotency key (`send.idempotency` capability). Generate ONCE per user
+   * action (not per network attempt) and reuse it on retries: a send whose
+   * `clientMsgId` the daemon has already processed for this session is
+   * acknowledged without running a second turn. This is the guard against
+   * ambiguous delivery (socket drop between send and ack) turning one prompt
+   * into two billed turns. Omit to opt out (every send processes).
+   */
+  clientMsgId?: string;
 }
 
 export interface Attachment {
@@ -1302,10 +1332,32 @@ export interface ScrollbackReplayMsg {
   type: "scrollback.replay";
   sessionId: string;
   messages: SessionMessage[];
-  /** 0-based chunk index of a chunked replay. Absent = single-frame replay. */
+  /**
+   * 0-based CHUNK index of a chunked replay (#84). Absent = single-frame
+   * replay. NOTE: unrelated to the per-message session cursor
+   * `SessionMessage.seq` — this one only orders the frames of one replay.
+   */
   seq?: number;
   /** True on the last chunk of a chunked replay. Absent = single-frame replay. */
   final?: boolean;
+  /**
+   * Replay semantics (`replay.resume` capability):
+   *   - "snapshot" (or absent — the legacy shape): the authoritative full
+   *     scrollback; clients RESET their local buffer to it.
+   *   - "incremental": only entries mutated since the client's `sinceSeq`;
+   *     clients APPEND/UPSERT by messageId — never reset. Sent when a
+   *     `session.attach.resume` key matched.
+   */
+  mode?: "snapshot" | "incremental";
+  /**
+   * Identity of the daemon's replay buffer. Store it with `maxSeq` and pass
+   * both back on `session.attach.resume`. Changes whenever the buffer is
+   * rebuilt (e.g. daemon restart) — a mismatch means cursors are invalid and
+   * the daemon answers with a snapshot.
+   */
+  resumeKey?: string;
+  /** Highest session sequence included/known — the client's next cursor. */
+  maxSeq?: number;
 }
 
 /** Result of a session.search query. */

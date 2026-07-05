@@ -672,6 +672,179 @@ describe("T5b – chunked scrollback replay (#84)", () => {
   });
 });
 
+// ── T5c: incremental resume + send idempotency (replay.resume / send.idempotency)
+
+describe("T5c – incremental resume & send idempotency", () => {
+  type ReplayFrame = Extract<DaemonMessage, { type: "scrollback.replay" }>;
+  const replays = (received: DaemonMessage[]) =>
+    received.filter((m) => m.type === "scrollback.replay") as ReplayFrame[];
+
+  function makeRestoredMsg(session: Session, id: string, content: string): DaemonMessage {
+    return {
+      type: "session.message",
+      sessionId: session.id,
+      messageId: id,
+      role: "assistant",
+      content,
+      identity: { sub: "agent:test", name: "Claude", type: "agent" },
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  it("snapshot replay carries resume meta (mode, resumeKey, maxSeq)", () => {
+    const session = makeSession(new MockSessionProvider("claude"));
+    session.restoreScrollback([makeRestoredMsg(session, "m0", "hello")]);
+
+    const { client, received } = makeClient();
+    session.attach(client);
+
+    const frames = replays(received);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]!.mode).toBe("snapshot");
+    expect(typeof frames[0]!.resumeKey).toBe("string");
+    expect(frames[0]!.maxSeq).toBeGreaterThanOrEqual(1);
+  });
+
+  it("matching-key resume replays only the tail; wrong key falls back to snapshot", () => {
+    const session = makeSession(new MockSessionProvider("claude"));
+    session.restoreScrollback([
+      makeRestoredMsg(session, "m0", "old-0"),
+      makeRestoredMsg(session, "m1", "old-1"),
+    ]);
+
+    // First attach: full snapshot; capture the cursor.
+    const a = makeClient();
+    session.attach(a.client);
+    const snap = replays(a.received)[0]!;
+    session.detach(a.client.id);
+
+    // New activity after the cursor.
+    session.restoreScrollback([makeRestoredMsg(session, "m2", "new-2")]);
+
+    // Resume with the captured cursor → incremental, only m2.
+    const b = makeClient();
+    session.attach(b.client, { key: snap.resumeKey!, sinceSeq: snap.maxSeq! });
+    const inc = replays(b.received)[0]!;
+    expect(inc.mode).toBe("incremental");
+    expect(inc.messages.map((m) => m.messageId)).toEqual(["m2"]);
+    expect(inc.maxSeq!).toBeGreaterThan(snap.maxSeq!);
+
+    // Wrong key → authoritative snapshot with everything.
+    const c = makeClient();
+    session.attach(c.client, { key: "not-this-buffer", sinceSeq: snap.maxSeq! });
+    const full = replays(c.received)[0]!;
+    expect(full.mode).toBe("snapshot");
+    expect(full.messages.map((m) => m.messageId)).toEqual(["m0", "m1", "m2"]);
+  });
+
+  it("fully-caught-up resume gets an empty incremental ack (legacy attach stays silent)", () => {
+    const session = makeSession(new MockSessionProvider("claude"));
+    session.restoreScrollback([makeRestoredMsg(session, "m0", "only")]);
+
+    const a = makeClient();
+    session.attach(a.client);
+    const snap = replays(a.received)[0]!;
+    session.detach(a.client.id);
+
+    // Caught-up resume → one empty incremental frame (cursor ack).
+    const b = makeClient();
+    session.attach(b.client, { key: snap.resumeKey!, sinceSeq: snap.maxSeq! });
+    const ack = replays(b.received)[0]!;
+    expect(ack.mode).toBe("incremental");
+    expect(ack.messages).toHaveLength(0);
+    expect(ack.maxSeq).toBe(snap.maxSeq!);
+
+    // Legacy attach (no resume) on an EMPTY session sends no frame at all.
+    const empty = makeSession(new MockSessionProvider("claude"));
+    const c = makeClient();
+    empty.attach(c.client);
+    expect(replays(c.received)).toHaveLength(0);
+  });
+
+  it("a live streamed turn advances the cursor; resuming from the pre-turn cursor returns only the turn's messages", async () => {
+    const provider = new MockSessionProvider("claude", [
+      [
+        { type: "text_delta", content: "He" },
+        { type: "text_delta", content: "llo" },
+        { type: "turn_done", result: mockResult({ providerId: "claude" }) },
+      ],
+    ]);
+    const session = makeSession(provider);
+    session.restoreScrollback([makeRestoredMsg(session, "m0", "pre-turn")]);
+
+    const a = makeClient();
+    session.attach(a.client);
+    const preTurn = replays(a.received)[0]!;
+
+    await session.send("hi there", TEST_AUTH);
+    await waitForIdle(session);
+
+    // Live frames carry the session cursor: streamed deltas are stamped via
+    // scrollback.touch, new messages via scrollback.push.
+    const deltas = a.received.filter((m) => m.type === "session.message.delta");
+    expect(deltas.length).toBeGreaterThan(0);
+    expect(deltas.every((d) => typeof (d as { seq?: number }).seq === "number")).toBe(true);
+    const liveMsgs = a.received.filter((m) => m.type === "session.message");
+    expect(liveMsgs.some((m) => typeof (m as { seq?: number }).seq === "number")).toBe(true);
+    session.detach(a.client.id);
+
+    // Resume from the PRE-turn cursor: only the turn's messages, not m0.
+    const b = makeClient();
+    session.attach(b.client, { key: preTurn.resumeKey!, sinceSeq: preTurn.maxSeq! });
+    const inc = replays(b.received)[0]!;
+    expect(inc.mode).toBe("incremental");
+    const ids = inc.messages.map((m) => m.messageId);
+    expect(ids).not.toContain("m0");
+    expect(inc.messages.some((m) => m.role === "user")).toBe(true);
+    expect(inc.messages.some((m) => m.role === "assistant" && m.content === "Hello")).toBe(true);
+  });
+
+  it("markClientMsgSeen: first sight false, duplicate true, FIFO eviction past 256", () => {
+    const session = makeSession(new MockSessionProvider("claude"));
+    expect(session.markClientMsgSeen("k1")).toBe(false);
+    expect(session.markClientMsgSeen("k1")).toBe(true);
+    expect(session.markClientMsgSeen("k2")).toBe(false);
+
+    // Evict k1 by inserting 256 more distinct ids (cap is 256).
+    for (let i = 0; i < 256; i++) session.markClientMsgSeen(`fill-${i}`);
+    expect(session.markClientMsgSeen("k1")).toBe(false); // forgotten → processes again
+  });
+
+  it("duplicate clientMsgId does not dispatch a second turn (manager guard semantics)", async () => {
+    const provider = new MockSessionProvider("claude", [
+      [
+        { type: "text_done", content: "reply one" },
+        { type: "turn_done", result: mockResult({ providerId: "claude" }) },
+      ],
+      [
+        { type: "text_done", content: "reply two" },
+        { type: "turn_done", result: mockResult({ providerId: "claude" }) },
+      ],
+    ]);
+    const session = makeSession(provider);
+
+    // Mirrors SessionManager#send exactly: check-and-record, skip dispatch on
+    // duplicate. Two "deliveries" of the same user action, one turn.
+    // (Awaited so waitForIdle observes a session that actually started —
+    // see the waitForIdle doc note.)
+    const dispatch = async (text: string, clientMsgId: string): Promise<boolean> => {
+      if (session.markClientMsgSeen(clientMsgId)) return false; // duplicate → ack only
+      await session.send(text, TEST_AUTH);
+      return true;
+    };
+
+    expect(await dispatch("do the thing", "action-1")).toBe(true);
+    expect(await dispatch("do the thing", "action-1")).toBe(false);
+    await waitForIdle(session);
+
+    const { client, received } = makeClient();
+    session.attach(client);
+    expect(replays(received)).toHaveLength(1);
+    const userMsgs = replays(received)[0]!.messages.filter((m) => m.role === "user");
+    expect(userMsgs).toHaveLength(1);
+  });
+});
+
 // ── T6: ZeroID fence timeout ──────────────────────────────────────────────────
 
 describe("T6 – ZeroID fence 5 s timeout", () => {

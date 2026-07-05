@@ -63,6 +63,12 @@ export const sessionAttachSchema = z.object({
   ...base,
   type: z.literal("session.attach"),
   sessionId: sessionIdField,
+  resume: z
+    .object({
+      key: z.string().min(1).max(LIMITS.ID_MAX),
+      sinceSeq: z.number().int().nonnegative(),
+    })
+    .optional(),
 });
 
 export const sessionDetachSchema = z.object({
@@ -79,6 +85,7 @@ export const sessionSendSchema = z.object({
   text: z.string().max(LIMITS.SEND_TEXT_MAX),
   attachments: z.array(attachmentSchema).max(LIMITS.ATTACHMENTS_MAX).optional(),
   priority: z.enum(["now", "next", "later"]).optional(),
+  clientMsgId: z.string().min(1).max(LIMITS.ID_MAX).optional(),
 });
 
 export const sessionInterruptSchema = z.object({

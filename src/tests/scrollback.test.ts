@@ -88,19 +88,17 @@ describe("ScrollbackBuffer", () => {
     expect(buf.read()).toHaveLength(0);
   });
 
-  test("readSince filters by timestamp", () => {
+  test("readChunkedSince filters by mutation seq (supersedes timestamp catch-up)", () => {
     const buf = new ScrollbackBuffer();
-    const t1 = "2026-01-01T00:00:00Z";
-    const t2 = "2026-01-01T00:00:01Z";
-    const t3 = "2026-01-01T00:00:02Z";
+    buf.push(makeMsg("old"));
+    const cursor = buf.maxSeq;
+    buf.push(makeMsg("mid"));
+    buf.push(makeMsg("new"));
 
-    buf.push({ ...makeMsg("old"), timestamp: t1 });
-    buf.push({ ...makeMsg("mid"), timestamp: t2 });
-    buf.push({ ...makeMsg("new"), timestamp: t3 });
-
-    const since = buf.readSince(t1);
+    const since = buf.readChunkedSince(cursor, 10 * 1024 * 1024).flat();
     expect(since).toHaveLength(2);
     expect((since[0] as SessionMessage).content).toBe("mid");
+    expect((since[1] as SessionMessage).content).toBe("new");
   });
 
   test("handles large number of messages", () => {
@@ -211,5 +209,74 @@ describe("ScrollbackBuffer — readChunked (#84)", () => {
     expect(chunks[1]).toHaveLength(1);
     expect((chunks[1]![0] as SessionMessage).content.startsWith("B")).toBe(true);
     expect(chunks.flat()).toEqual(buf.read());
+  });
+});
+
+describe("ScrollbackBuffer — seq & incremental resume (replay.resume)", () => {
+  test("push assigns strictly increasing seqs; maxSeq tracks; message is stamped", () => {
+    const buf = new ScrollbackBuffer();
+    expect(buf.maxSeq).toBe(0);
+    const m1 = makeMsg("one");
+    const m2 = makeMsg("two");
+    buf.push(m1);
+    buf.push(m2);
+    expect(buf.maxSeq).toBe(2);
+    // Live pushes stamp the message object so the broadcast frame (same
+    // reference) carries the cursor on the wire.
+    expect(m1.seq).toBe(1);
+    expect(m2.seq).toBe(2);
+  });
+
+  test("push with a sizeHint (restore path) does NOT stamp the message", () => {
+    const buf = new ScrollbackBuffer();
+    const m = makeMsg("restored");
+    buf.push(m, 100);
+    expect(m.seq).toBeUndefined();
+    expect(buf.maxSeq).toBe(1); // entry still gets a seq internally
+  });
+
+  test("touch bumps the counter, returns the new seq, undefined for unknown ids", () => {
+    const buf = new ScrollbackBuffer();
+    const m = makeMsg("streamed");
+    buf.push(m);
+    const seq = buf.touch(m.messageId);
+    expect(seq).toBe(2);
+    expect(buf.maxSeq).toBe(2);
+    expect(buf.touch("nope")).toBeUndefined();
+    expect(buf.maxSeq).toBe(2); // failed touch doesn't burn a seq
+  });
+
+  test("upsert push and updateMessage advance the entry past an old cursor", () => {
+    const buf = new ScrollbackBuffer();
+    const m = makeMsg("v1");
+    buf.push(m);
+    buf.push(makeMsg("other"));
+    const cursor = buf.maxSeq; // client saw both
+
+    // Mutation via updateMessage → entry must be resent to a resuming client.
+    buf.updateMessage(m.messageId, (msg) => {
+      (msg as SessionMessage).content = "v2";
+    });
+    const tail = buf.readChunkedSince(cursor, 10 * 1024 * 1024).flat();
+    expect(tail).toHaveLength(1);
+    expect((tail[0] as SessionMessage).content).toBe("v2");
+
+    // Fully caught up → empty.
+    expect(buf.readChunkedSince(buf.maxSeq, 10 * 1024 * 1024)).toEqual([]);
+  });
+
+  test("readChunkedSince preserves buffer order and respects the byte budget", () => {
+    const buf = new ScrollbackBuffer();
+    buf.push(makeMsg("before-cursor"));
+    const cursor = buf.maxSeq;
+    for (let i = 0; i < 6; i++) buf.push(makeMsg(`tail-${i}-${"x".repeat(150)}`));
+
+    const budget = 2 * Buffer.byteLength(JSON.stringify(makeMsg(`tail-0-${"x".repeat(150)}`))) + 20;
+    const chunks = buf.readChunkedSince(cursor, budget);
+    expect(chunks.length).toBeGreaterThan(1);
+    const flat = chunks.flat() as SessionMessage[];
+    expect(flat).toHaveLength(6);
+    expect(flat.map((m) => m.content.split("-")[1])).toEqual(["0", "1", "2", "3", "4", "5"]);
+    for (const chunk of chunks) expect(chunk.length).toBeGreaterThan(0);
   });
 });

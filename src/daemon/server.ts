@@ -36,7 +36,11 @@ import type { IncomingMessage, ServerResponse } from "node:http";
  * capability-gated behaviour lands; clients feature-detect on it instead of
  * version-sniffing.
  */
-const SERVER_CAPABILITIES: string[] = [CAPABILITIES.CHUNKED_REPLAY];
+const SERVER_CAPABILITIES: string[] = [
+  CAPABILITIES.CHUNKED_REPLAY,
+  CAPABILITIES.SEQ_RESUME,
+  CAPABILITIES.SEND_IDEMPOTENCY,
+];
 
 /**
  * Per-connection state carried on `ws.data`. Defined once and cast against in

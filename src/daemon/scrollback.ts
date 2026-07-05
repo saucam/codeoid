@@ -30,10 +30,15 @@ const DEFAULT_CONFIG: ScrollbackConfig = {
  * grow in place between push and finalize; eviction must subtract exactly
  * what was added, never the current (grown) serialized size — otherwise the
  * counter drifts negative and the byte cap stops evicting.
+ *
+ * `seq` is the buffer's monotonic mutation counter value at this entry's
+ * LAST mutation (push / update / touch). Incremental resume filters on it:
+ * any entry mutated after a client's cursor gets resent in merged form.
  */
 interface Entry {
   msg: DaemonMessage;
   size: number;
+  seq: number;
 }
 
 function messageIdOf(msg: DaemonMessage): string | undefined {
@@ -55,9 +60,22 @@ export class ScrollbackBuffer {
   #byId = new Map<string, Entry>();
   #bytes = 0;
   #config: ScrollbackConfig;
+  /**
+   * Monotonic mutation counter — the session sequence cursor domain for
+   * incremental resume (`replay.resume`). Bumped by every push / update /
+   * touch; NEVER reset while the buffer lives. Scoped to this buffer
+   * instance: cursors are only meaningful together with the session's
+   * `resumeKey`, which changes when the buffer is rebuilt.
+   */
+  #seq = 0;
 
   constructor(config: Partial<ScrollbackConfig> = {}) {
     this.#config = { ...DEFAULT_CONFIG, ...config };
+  }
+
+  /** Highest sequence value assigned so far (0 = nothing ever buffered). */
+  get maxSeq(): number {
+    return this.#seq;
   }
 
   /**
@@ -75,6 +93,15 @@ export class ScrollbackBuffer {
    * re-serializes every one of them purely for byte accounting.
    */
   push(msg: DaemonMessage, sizeHint?: number): void {
+    const seq = ++this.#seq;
+    // Stamp the session cursor onto the message itself so the object the
+    // session broadcasts (same reference) carries it on the wire. Skipped
+    // when the caller supplied a sizeHint (restore-from-transcript) — the
+    // hint reflects the unstamped line, and restored messages don't need a
+    // wire seq (the replay frame's maxSeq covers the client's cursor).
+    if (sizeHint === undefined && msg.type === "session.message") {
+      msg.seq = seq;
+    }
     const messageId = messageIdOf(msg);
     if (messageId !== undefined) {
       const existing = this.#byId.get(messageId);
@@ -83,15 +110,31 @@ export class ScrollbackBuffer {
         this.#bytes += size - existing.size;
         existing.msg = msg;
         existing.size = size;
+        existing.seq = seq;
         this.#evict();
         return;
       }
     }
-    const entry: Entry = { msg, size: sizeHint ?? serializedSizeOf(msg) };
+    const entry: Entry = { msg, size: sizeHint ?? serializedSizeOf(msg), seq };
     this.#entries.push(entry);
     if (messageId !== undefined) this.#byId.set(messageId, entry);
     this.#bytes += entry.size;
     this.#evict();
+  }
+
+  /**
+   * Record a mutation of a buffered message WITHOUT re-accounting its bytes —
+   * the streaming path calls this once per delta, so it must stay O(1) with
+   * no re-serialization. Bumps the buffer counter, marks the entry as
+   * mutated-at-that-seq (so incremental resume resends the merged message),
+   * and returns the new seq for stamping the outgoing delta frame.
+   * Returns undefined when the message is unknown/evicted.
+   */
+  touch(messageId: string): number | undefined {
+    const entry = this.#byId.get(messageId);
+    if (!entry) return undefined;
+    entry.seq = ++this.#seq;
+    return entry.seq;
   }
 
   /** Evict oldest entries until within both limits. */
@@ -131,12 +174,33 @@ export class ScrollbackBuffer {
    * the message. Returns [] for an empty buffer.
    */
   readChunked(maxBytes: number): DaemonMessage[][] {
+    return ScrollbackBuffer.#partition(this.#entries, maxBytes);
+  }
+
+  /**
+   * Incremental-resume read (`replay.resume`): every entry mutated after
+   * `sinceSeq` — new messages AND older messages that grew via deltas or
+   * tool-state transitions since the client's cursor — in buffer order,
+   * partitioned by the same byte budget as `readChunked`. Returns [] when
+   * the client is fully caught up.
+   */
+  readChunkedSince(sinceSeq: number, maxBytes: number): DaemonMessage[][] {
+    const stale = this.#entries.filter((e) => e.seq > sinceSeq);
+    return ScrollbackBuffer.#partition(stale, maxBytes);
+  }
+
+  /**
+   * Partition entries into ordered chunks (oldest→newest), each holding at
+   * most ~`maxBytes` of serialized payload, using the byte sizes already
+   * accounted per entry — no re-serialization. A single message larger than
+   * `maxBytes` occupies its own chunk (never split). Never emits an empty
+   * chunk; returns [] for no entries.
+   */
+  static #partition(entries: readonly Entry[], maxBytes: number): DaemonMessage[][] {
     const chunks: DaemonMessage[][] = [];
     let current: DaemonMessage[] = [];
     let currentBytes = 0;
-    for (const entry of this.#entries) {
-      // Start a new chunk when adding this entry would overflow the budget,
-      // but never emit an empty chunk (a lone oversized message stays put).
+    for (const entry of entries) {
       if (current.length > 0 && currentBytes + entry.size > maxBytes) {
         chunks.push(current);
         current = [];
@@ -150,17 +214,6 @@ export class ScrollbackBuffer {
   }
 
   /**
-   * Read messages after a given timestamp (for incremental catch-up).
-   */
-  readSince(timestamp: string): DaemonMessage[] {
-    return this.#entries
-      .map((e) => e.msg)
-      .filter(
-        (msg) => "timestamp" in msg && (msg as { timestamp: string }).timestamp > timestamp,
-      );
-  }
-
-  /**
    * Update a message in the buffer by messageId. Used to apply tool state
    * transitions so scrollback replay shows final states, not intermediate.
    */
@@ -168,6 +221,7 @@ export class ScrollbackBuffer {
     const entry = this.#byId.get(messageId);
     if (!entry) return;
     updater(entry.msg);
+    entry.seq = ++this.#seq;
     const after = serializedSizeOf(entry.msg);
     this.#bytes += after - entry.size;
     entry.size = after;

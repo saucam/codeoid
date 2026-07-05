@@ -246,6 +246,8 @@ export interface SessionMessage {
   tool?: ToolInfo;
   metadata?: Record<string, unknown>;
   timestamp: string;
+  /** Session sequence cursor (`replay.resume`) — track max(seq) per session. */
+  seq?: number;
 }
 
 export interface SessionMessageDelta {
@@ -257,6 +259,8 @@ export interface SessionMessageDelta {
   partsUpdate?: { index: number; part: ContentPart }[];
   toolStateUpdate?: ToolState;
   timestamp: string;
+  /** Session sequence cursor (`replay.resume`) — track max(seq) per session. */
+  seq?: number;
 }
 
 // -----------------------------------------------------------------------------
@@ -286,6 +290,13 @@ export interface SessionListMsg extends BaseClientMsg {
 export interface SessionAttachMsg extends BaseClientMsg {
   type: "session.attach";
   sessionId: string;
+  /**
+   * Incremental resume (`replay.resume`): pass the `resumeKey` + highest
+   * `seq` from previous frames to receive only the tail mutated since,
+   * instead of a full scrollback replay. Daemon falls back to a snapshot
+   * on any key mismatch.
+   */
+  resume?: { key: string; sinceSeq: number };
 }
 
 export interface SessionDetachMsg extends BaseClientMsg {
@@ -299,6 +310,12 @@ export interface SessionSendMsg extends BaseClientMsg {
   text: string;
   attachments?: { path: string; content?: string; mimeType?: string; data?: string }[];
   priority?: "now" | "next" | "later";
+  /**
+   * Idempotency key (`send.idempotency`): generated once per user action;
+   * the daemon acks duplicates instead of running a second turn, so an
+   * ambiguous socket drop + retry can't double-bill a prompt.
+   */
+  clientMsgId?: string;
 }
 
 export interface SessionInterruptMsg extends BaseClientMsg {
@@ -512,9 +529,20 @@ export interface ScrollbackReplayMsg {
    * large scrollback into ordered chunks (oldest→newest). Reset scrollback
    * when `seq` is absent or 0; append when `seq > 0`; the replay is complete
    * on `final` (or when `seq` is absent — a single-frame legacy replay).
+   * NOTE: this is the CHUNK index — unrelated to `SessionMessage.seq`.
    */
   seq?: number;
   final?: boolean;
+  /**
+   * Replay semantics (`replay.resume`): "snapshot" (or absent) = reset the
+   * local buffer to this replay; "incremental" = append/upsert only — the
+   * daemon sent just the tail mutated since our resume cursor.
+   */
+  mode?: "snapshot" | "incremental";
+  /** Replay-buffer identity — store with maxSeq, pass back on attach.resume. */
+  resumeKey?: string;
+  /** Highest session seq included/known — the next resume cursor. */
+  maxSeq?: number;
 }
 
 export interface SessionSearchSnippet {
