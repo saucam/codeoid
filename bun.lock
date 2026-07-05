@@ -30,6 +30,12 @@
     "packages/protocol": {
       "name": "@codeoid/protocol",
       "version": "0.1.0",
+      "peerDependencies": {
+        "zod": "^4.0.0",
+      },
+      "optionalPeers": [
+        "zod",
+      ],
     },
   },
   "packages": {

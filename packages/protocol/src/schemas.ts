@@ -1,0 +1,291 @@
+/**
+ * Runtime validation schemas for the INBOUND (client → daemon) protocol
+ * surface. The daemon validates every frame against these before acting on
+ * it; clients may use them to pre-validate.
+ *
+ * Import via the subpath export — `@codeoid/protocol/schemas` — which keeps
+ * the root package (`@codeoid/protocol`) dependency-free for type-only
+ * consumers. `zod` is an optional peer dependency: only installs that import
+ * this module need it.
+ *
+ * Forward-compat contract (mirrors the "ignore unknown" wire rule):
+ *   - Unknown FIELDS on a known message are STRIPPED, never rejected — a
+ *     newer client talking to an older daemon must not be turned away.
+ *   - Unknown MESSAGE TYPES are rejected (`invalid_request`) — the daemon
+ *     cannot act on a verb it doesn't know.
+ *   - String/array bounds come from `LIMITS` (published, so clients can
+ *     pre-validate instead of discovering limits from errors).
+ */
+
+import { z } from "zod";
+import type { AuthMsg, ClientMessage } from "./types.js";
+import { LIMITS } from "./types.js";
+
+// ── Shared field schemas ──────────────────────────────────────────────────────
+
+const idField = z.string().min(1).max(LIMITS.ID_MAX);
+const sessionIdField = z.string().min(1).max(LIMITS.ID_MAX);
+const pathField = z.string().max(LIMITS.PATH_MAX);
+const nameField = z.string().min(1).max(LIMITS.NAME_MAX);
+
+const base = { id: idField };
+
+// ── Attachments ───────────────────────────────────────────────────────────────
+
+export const attachmentSchema = z
+  .object({
+    path: pathField,
+    content: z.string().max(LIMITS.ATTACHMENT_CONTENT_MAX).optional(),
+    mimeType: z.string().max(256).optional(),
+    data: z.string().max(LIMITS.ATTACHMENT_DATA_MAX).optional(),
+  })
+  .refine((a) => !(a.data !== undefined && a.content !== undefined), {
+    message: "content and data are mutually exclusive",
+  })
+  .refine((a) => !(a.data !== undefined && a.mimeType === undefined), {
+    message: "data requires mimeType",
+  });
+
+// ── Per-message schemas (one per ClientMessage variant) ───────────────────────
+
+export const pingSchema = z.object({ ...base, type: z.literal("ping") });
+
+export const sessionCreateSchema = z.object({
+  ...base,
+  type: z.literal("session.create"),
+  name: nameField,
+  workdir: pathField,
+});
+
+export const sessionListSchema = z.object({ ...base, type: z.literal("session.list") });
+
+export const sessionAttachSchema = z.object({
+  ...base,
+  type: z.literal("session.attach"),
+  sessionId: sessionIdField,
+});
+
+export const sessionDetachSchema = z.object({
+  ...base,
+  type: z.literal("session.detach"),
+  sessionId: sessionIdField,
+});
+
+export const sessionSendSchema = z.object({
+  ...base,
+  type: z.literal("session.send"),
+  sessionId: sessionIdField,
+  // The token-bill safety net: see LIMITS.SEND_TEXT_MAX.
+  text: z.string().max(LIMITS.SEND_TEXT_MAX),
+  attachments: z.array(attachmentSchema).max(LIMITS.ATTACHMENTS_MAX).optional(),
+  priority: z.enum(["now", "next", "later"]).optional(),
+});
+
+export const sessionInterruptSchema = z.object({
+  ...base,
+  type: z.literal("session.interrupt"),
+  sessionId: sessionIdField,
+});
+
+export const sessionApproveSchema = z.object({
+  ...base,
+  type: z.literal("session.approve"),
+  sessionId: sessionIdField,
+  approvalId: z.string().min(1).max(LIMITS.ID_MAX),
+  approved: z.boolean(),
+  updatedInput: z.record(z.string(), z.unknown()).optional(),
+});
+
+export const sessionDestroySchema = z.object({
+  ...base,
+  type: z.literal("session.destroy"),
+  sessionId: sessionIdField,
+});
+
+export const sessionSetModeSchema = z.object({
+  ...base,
+  type: z.literal("session.set_mode"),
+  sessionId: sessionIdField,
+  mode: z.enum(["interactive", "guarded", "autonomous"]),
+  maxTurns: z.number().int().positive().max(10_000).optional(),
+});
+
+export const sessionPinSchema = z.object({
+  ...base,
+  type: z.literal("session.pin"),
+  sessionId: sessionIdField,
+  path: pathField,
+});
+
+export const sessionUnpinSchema = z.object({
+  ...base,
+  type: z.literal("session.unpin"),
+  sessionId: sessionIdField,
+  path: pathField,
+});
+
+export const sessionRotateSchema = z.object({
+  ...base,
+  type: z.literal("session.rotate"),
+  sessionId: sessionIdField,
+});
+
+export const sessionSearchSchema = z.object({
+  ...base,
+  type: z.literal("session.search"),
+  query: z.string().min(1).max(LIMITS.QUERY_MAX),
+  scope: z.enum(["workspace", "all"]).optional(),
+  workdir: pathField.optional(),
+  limit: z.number().int().min(1).max(100).optional(),
+});
+
+export const sessionSetModelSchema = z.object({
+  ...base,
+  type: z.literal("session.set_model"),
+  sessionId: sessionIdField,
+  model: z.string().min(1).max(LIMITS.MODEL_MAX),
+  fallbackModel: z.string().max(LIMITS.MODEL_MAX).nullable().optional(),
+});
+
+export const sessionRenameSchema = z.object({
+  ...base,
+  type: z.literal("session.rename"),
+  sessionId: sessionIdField,
+  name: nameField,
+});
+
+export const fsListSchema = z.object({
+  ...base,
+  type: z.literal("fs.list"),
+  sessionId: sessionIdField,
+  path: pathField,
+});
+
+export const fsReadSchema = z.object({
+  ...base,
+  type: z.literal("fs.read"),
+  sessionId: sessionIdField,
+  path: pathField,
+  maxBytes: z.number().int().positive().max(16 * 1024 * 1024).optional(),
+});
+
+export const fsBrowseDirSchema = z.object({
+  ...base,
+  type: z.literal("fs.browse_dir"),
+  path: pathField.optional(),
+});
+
+export const claudeConfigSchema = z.object({
+  ...base,
+  type: z.literal("claude.config"),
+  sessionId: sessionIdField,
+});
+
+export const modelsListSchema = z.object({
+  ...base,
+  type: z.literal("models.list"),
+  provider: z.string().max(64).optional(),
+});
+
+export const sessionExportSchema = z.object({
+  ...base,
+  type: z.literal("session.export"),
+  sessionId: sessionIdField,
+  includeMemory: z.boolean().optional(),
+  includePinnedFiles: z.boolean().optional(),
+  aliasOverride: z.string().max(LIMITS.NAME_MAX).optional(),
+  toFile: z.boolean().optional(),
+});
+
+export const sessionImportSchema = z.object({
+  ...base,
+  type: z.literal("session.import"),
+  source: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("inline"), bundle: z.unknown() }),
+    z.object({ kind: z.literal("file"), path: pathField }),
+  ]),
+  targetWorkdir: pathField,
+  nameOverride: nameField.optional(),
+  writePinnedFiles: z.boolean().optional(),
+});
+
+export const usageDailySchema = z.object({
+  ...base,
+  type: z.literal("usage.daily"),
+  days: z.number().int().min(1).max(365).optional(),
+});
+
+// ── The unions ────────────────────────────────────────────────────────────────
+
+export const clientMessageSchema = z.discriminatedUnion("type", [
+  pingSchema,
+  sessionCreateSchema,
+  sessionListSchema,
+  sessionAttachSchema,
+  sessionDetachSchema,
+  sessionSendSchema,
+  sessionInterruptSchema,
+  sessionApproveSchema,
+  sessionDestroySchema,
+  sessionSetModeSchema,
+  sessionPinSchema,
+  sessionUnpinSchema,
+  sessionRotateSchema,
+  sessionSearchSchema,
+  sessionSetModelSchema,
+  sessionRenameSchema,
+  fsListSchema,
+  fsReadSchema,
+  fsBrowseDirSchema,
+  claudeConfigSchema,
+  modelsListSchema,
+  sessionExportSchema,
+  sessionImportSchema,
+  usageDailySchema,
+]);
+
+/**
+ * The auth handshake frame — validated separately from `ClientMessage`
+ * because it is the only frame accepted pre-authentication and carries no
+ * request `id`.
+ */
+export const authMsgSchema = z.object({
+  type: z.literal("auth"),
+  token: z.string().min(1).max(16_384),
+  protocolVersion: z.number().int().positive().optional(),
+  capabilities: z.array(z.string().max(64)).max(64).optional(),
+  client: z.string().max(128).optional(),
+});
+
+// ── Parse helpers ─────────────────────────────────────────────────────────────
+
+export type ParseResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: string };
+
+/** Compact, single-line summary of a Zod error — safe to echo to clients. */
+function summarize(error: z.ZodError): string {
+  const issues = error.issues;
+  const first = issues[0];
+  if (!first) return "invalid message";
+  const path = first.path.length > 0 ? `${first.path.join(".")}: ` : "";
+  const head = `${path}${first.message}`.slice(0, 300);
+  return issues.length > 1 ? `${head} (+${issues.length - 1} more)` : head;
+}
+
+/**
+ * Validate an inbound post-auth frame. Returns the PARSED value (unknown
+ * fields stripped) — callers should act on `value`, not the raw input.
+ */
+export function parseClientMessage(input: unknown): ParseResult<ClientMessage> {
+  const result = clientMessageSchema.safeParse(input);
+  if (result.success) return { ok: true, value: result.data as ClientMessage };
+  return { ok: false, error: summarize(result.error) };
+}
+
+/** Validate the first (pre-auth) frame of a connection. */
+export function parseAuthMsg(input: unknown): ParseResult<AuthMsg> {
+  const result = authMsgSchema.safeParse(input);
+  if (result.success) return { ok: true, value: result.data as AuthMsg };
+  return { ok: false, error: summarize(result.error) };
+}

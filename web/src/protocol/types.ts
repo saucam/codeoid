@@ -8,6 +8,19 @@
 
 export const PROTOCOL_VERSION = 1;
 
+/**
+ * Capability identifiers exchanged during the auth handshake. The client
+ * declares what it can consume on the `auth` frame; the daemon answers with
+ * what it can produce on `auth.ok`. Unknown strings are ignored, never
+ * rejected.
+ */
+export const CAPABILITIES = {
+  PARTS: "parts",
+  CHUNKED_REPLAY: "replay.chunked",
+  SEQ_RESUME: "replay.resume",
+  SEND_IDEMPOTENCY: "send.idempotency",
+} as const;
+
 // -----------------------------------------------------------------------------
 // Identity + auth
 // -----------------------------------------------------------------------------
@@ -446,6 +459,8 @@ export interface AuthOkMsg {
   identity: MessageIdentity;
   scopes: readonly string[];
   protocolVersion?: number;
+  /** Capabilities the daemon supports — feature-detect on this. */
+  capabilities?: string[];
 }
 
 export interface ResponseOkMsg {
