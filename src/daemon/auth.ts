@@ -22,14 +22,19 @@ export interface AuthConfig {
   audience?: string;
 }
 
-// Lazily initialised ZeroID client (one per daemon).
-let _zeroidClient: ZeroIDClient | null = null;
+// Lazily initialised ZeroID clients, keyed by base URL. A daemon has a single
+// issuer in production (one entry), but keying by URL keeps each client bound
+// to its own JWKS endpoint — so two issuers (or two JWKS servers in tests)
+// never collide on a shared singleton pinned to whichever URL was seen first.
+const _zeroidClients = new Map<string, ZeroIDClient>();
 
 function getClient(config: AuthConfig): ZeroIDClient {
-  if (!_zeroidClient) {
-    _zeroidClient = new ZeroIDClient({ baseUrl: config.baseUrl });
+  let client = _zeroidClients.get(config.baseUrl);
+  if (!client) {
+    client = new ZeroIDClient({ baseUrl: config.baseUrl });
+    _zeroidClients.set(config.baseUrl, client);
   }
-  return _zeroidClient;
+  return client;
 }
 
 /**

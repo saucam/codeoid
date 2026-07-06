@@ -64,7 +64,14 @@ interface PendingApproval {
   questions?: AskQuestion[];
   /** Collected answers keyed by question text (multi-tap until complete). */
   answers: Record<string, string[]>;
+  /** Unix ms when this approval was registered — used to prune stale entries. */
+  createdAt: number;
 }
+
+/** Cap the pending-approval map so untapped prompts (interrupted turns, closed
+ * chats) can't grow it unbounded, and evict anything older than the TTL. */
+const MAX_PENDING_APPROVALS = 200;
+const APPROVAL_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 interface UserState {
   auth: AuthContext | null;
@@ -850,6 +857,7 @@ export class TelegramFrontend implements Frontend {
         options: q.options.filter((o) => o && typeof o.label === "string"),
       }));
 
+    this.#pruneApprovals();
     this.#approvals.set(short, {
       approvalId,
       sessionId,
@@ -857,6 +865,7 @@ export class TelegramFrontend implements Frontend {
       chatId,
       questions,
       answers: {},
+      createdAt: Date.now(),
     });
 
     if (questions && questions.length > 0) {
@@ -905,6 +914,11 @@ export class TelegramFrontend implements Frontend {
         await ctx.answerCallbackQuery({ text: "Nothing to stop." }).catch(() => {});
         return;
       }
+      if (this.#authExpired(state)) {
+        this.#expireAuth(state);
+        await ctx.answerCallbackQuery({ text: "Session expired — re-run /auth." }).catch(() => {});
+        return;
+      }
       const client: AttachedClient = {
         id: state.clientId,
         auth: state.auth,
@@ -927,9 +941,24 @@ export class TelegramFrontend implements Frontend {
       await ctx.answerCallbackQuery({ text: "This prompt expired." }).catch(() => {});
       return;
     }
+    // Only the user the approval was queued for may resolve it — a different
+    // (allowlisted) user tapping a forwarded button must not act under the
+    // owner's identity (GHSA-4g69 hardening).
+    if (ctx.from?.id !== pending.userId) {
+      await ctx.answerCallbackQuery({ text: "Not your approval." }).catch(() => {});
+      return;
+    }
     const state = this.#users.get(pending.userId);
     if (!state?.auth) {
       await ctx.answerCallbackQuery({ text: "Not authenticated." }).catch(() => {});
+      return;
+    }
+    // A tool approval runs a shell command under the caller's identity — so an
+    // expired token must not be honored here either.
+    if (this.#authExpired(state)) {
+      this.#expireAuth(state);
+      this.#approvals.delete(short);
+      await ctx.answerCallbackQuery({ text: "Session expired — re-run /auth." }).catch(() => {});
       return;
     }
     const client: AttachedClient = {
@@ -996,6 +1025,24 @@ export class TelegramFrontend implements Frontend {
 
   // ── Helpers ───────────────────────────────────────────────────────────
 
+  /** Evict approvals older than the TTL, then oldest-first down to the cap.
+   * Untapped prompts (interrupted turns, closed chats) are otherwise only ever
+   * removed by a tap, so the map would grow unbounded on a long-lived daemon. */
+  #pruneApprovals(): void {
+    const now = Date.now();
+    for (const [key, p] of this.#approvals) {
+      if (now - p.createdAt > APPROVAL_TTL_MS) this.#approvals.delete(key);
+    }
+    if (this.#approvals.size < MAX_PENDING_APPROVALS) return;
+    const byAge = [...this.#approvals.entries()].sort(
+      (a, b) => a[1].createdAt - b[1].createdAt,
+    );
+    for (const [key] of byAge) {
+      if (this.#approvals.size < MAX_PENDING_APPROVALS) break;
+      this.#approvals.delete(key);
+    }
+  }
+
   #getOrCreate(userId: number): UserState {
     let state = this.#users.get(userId);
     if (!state) {
@@ -1018,7 +1065,33 @@ export class TelegramFrontend implements Frontend {
       ctx.reply("Not authenticated. Use /auth <api_key>.").catch(() => {});
       return null;
     }
+    // Re-check token expiry on every command. The Telegram surface is a full
+    // remote-control channel (it can approve tool executions), so it must not
+    // honor a revoked/expired key until the daemon restarts — mirror the WS
+    // per-message `exp` enforcement (GHSA-4g69).
+    if (this.#authExpired(state)) {
+      this.#expireAuth(state);
+      ctx.reply("Session expired. Re-authenticate with /auth <api_key>.").catch(() => {});
+      return null;
+    }
     return state;
+  }
+
+  /** True when the cached auth carries a token whose `exp` has passed. No skew
+   * — matches the daemon's WS check (server.ts) exactly. */
+  #authExpired(state: UserState): boolean {
+    const exp = state.auth?.exp;
+    return typeof exp === "number" && exp > 0 && exp <= Math.floor(Date.now() / 1000);
+  }
+
+  /** Drop a stale cached auth: clear it and tear down any live attachment so
+   * streaming under the expired identity stops immediately. The user must
+   * re-run /auth to get a fresh token. */
+  #expireAuth(state: UserState): void {
+    state.auth = null;
+    try { this.#manager.disconnectClient(state.clientId); } catch { /* not attached */ }
+    state.attachedSessionId = null;
+    state.attachedSessionName = null;
   }
 
   #makeClient(state: UserState, ctx: Context): AttachedClient {
