@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { safeLinkUri, safeImageUri } from "./sanitize-url";
+import { describe, it, expect } from "bun:test";
+import { safeLinkUri, safeImageUri } from "./sanitize-url.js";
 
 describe("safeLinkUri", () => {
   it("allows http(s), mailto, tel", () => {

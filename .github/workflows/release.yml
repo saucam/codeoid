@@ -64,6 +64,20 @@ jobs:
             npm publish --provenance --access public
           fi
 
+      # @codeoid/core (client transport + store semantics — consumed by the
+      # mobile app from the registry; web uses the in-repo copy). Publishes
+      # after protocol (its peer dep) and needs its own Trusted Publisher +
+      # one-time manual bootstrap publish, same as protocol.
+      - name: Publish @codeoid/core (OIDC) — only if version is new
+        run: |
+          cd packages/core
+          VER="$(node -p "require('./package.json').version")"
+          if npm view "@codeoid/core@$VER" version >/dev/null 2>&1; then
+            echo "@codeoid/core@$VER already published — skipping"
+          else
+            npm publish --provenance --access public
+          fi
+
       # No NODE_AUTH_TOKEN: auth comes from the GitHub OIDC id-token via npm's
       # Trusted Publisher (configured on the package at npmjs.com). Provenance
       # is generated automatically from the same OIDC identity.

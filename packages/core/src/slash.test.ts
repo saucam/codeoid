@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from "vitest";
-import { dispatchSlash, parseSlash, type SlashContext } from "./slash";
+import { describe, expect, it, mock } from "bun:test";
+import { dispatchSlash, parseSlash, type SlashContext } from "./slash.js";
 
 function ctx(): SlashContext & { sent: unknown[] } {
   const sent: unknown[] = [];
@@ -8,7 +8,7 @@ function ctx(): SlashContext & { sent: unknown[] } {
     sessionId: "s1",
     send: (m) => void sent.push(m),
     newRequestId: () => "req-1",
-    removeSession: vi.fn(),
+    removeSession: mock(),
   };
 }
 
@@ -149,7 +149,7 @@ describe("dispatchSlash", () => {
   });
 
   it("/who invokes the identity hook and emits nothing", () => {
-    const showIdentity = vi.fn();
+    const showIdentity = mock();
     const c = { ...ctx(), showIdentity };
     dispatchSlash({ kind: "who" }, c);
     expect(showIdentity).toHaveBeenCalledTimes(1);
@@ -174,8 +174,8 @@ describe("dispatchSlash", () => {
   });
 
   it("dispatchSlash routes /export and /import to UI hooks", () => {
-    const showExport = vi.fn();
-    const showImport = vi.fn();
+    const showExport = mock();
+    const showImport = mock();
     const c = { ...ctx(), showExport, showImport };
     dispatchSlash({ kind: "export" }, c);
     dispatchSlash({ kind: "import" }, c);
@@ -186,7 +186,7 @@ describe("dispatchSlash", () => {
   });
 
   it("dispatchSlash routes /agents /skills /mcp /hooks to showCapabilities", () => {
-    const showCapabilities = vi.fn();
+    const showCapabilities = mock();
     const c = { ...ctx(), showCapabilities };
     dispatchSlash({ kind: "capabilities", tab: "agents" }, c);
     dispatchSlash({ kind: "capabilities", tab: "skills" }, c);

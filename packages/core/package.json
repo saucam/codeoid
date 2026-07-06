@@ -1,13 +1,13 @@
 {
-  "name": "@codeoid/protocol",
+  "name": "@codeoid/core",
   "version": "0.1.0",
-  "description": "Codeoid client↔daemon wire protocol — message/event types + permission scopes. Shared by the daemon, web UI, and mobile client.",
+  "description": "Framework-agnostic Codeoid client core — WebSocket transport (auth handshake, reconnect, heartbeat), message store semantics, resume cursors, and display helpers. Shared by the web UI and the mobile client.",
   "license": "MIT",
   "type": "module",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/saucam/codeoid.git",
-    "directory": "packages/protocol"
+    "directory": "packages/core"
   },
   "main": "./src/index.ts",
   "types": "./src/index.ts",
@@ -15,10 +15,6 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
-    },
-    "./schemas": {
-      "types": "./src/schemas.ts",
-      "default": "./src/schemas.ts"
     }
   },
   "sideEffects": false,
@@ -27,11 +23,6 @@
     "access": "public"
   },
   "peerDependencies": {
-    "zod": "^4.0.0"
-  },
-  "peerDependenciesMeta": {
-    "zod": {
-      "optional": true
-    }
+    "@codeoid/protocol": "^0.1.0"
   }
 }

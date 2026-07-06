@@ -1,6 +1,6 @@
-import { describe, it, expect } from "vitest";
-import { findPendingApproval } from "./approvals";
-import type { SessionMessage, SessionStatus, ToolState } from "../protocol/types";
+import { describe, it, expect } from "bun:test";
+import { findPendingApproval } from "./approvals.js";
+import type { SessionMessage, SessionStatus, ToolState } from "@codeoid/protocol";
 
 const identity = { sub: "spiffe://x/agent/a", name: "you", type: "human" as const };
 
