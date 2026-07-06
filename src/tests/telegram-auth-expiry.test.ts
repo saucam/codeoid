@@ -253,7 +253,7 @@ describe("Telegram token expiry (GHSA-4g69)", () => {
     // disconnectClient is recorded only because #expireAuth calls it always.
     await drive("/attach alpha");
     await until(() => manager.attachClients.has("sess-a"));
-    await new Promise((r) => setTimeout(r, 2200));
+    await new Promise((r) => setTimeout(r, 3000));
     await drive("/ls");
     await until(() => texts().some((t) => t.startsWith("Session expired")));
     expect(manager.handled.some((m) => m.type === "session.list")).toBe(false);
@@ -263,7 +263,7 @@ describe("Telegram token expiry (GHSA-4g69)", () => {
 
   it("refuses the ⏹ Stop callback when the cached token has expired", async () => {
     const { driveCallback, manager, answers } = await boot(nowSec() + 2);
-    await new Promise((r) => setTimeout(r, 2200));
+    await new Promise((r) => setTimeout(r, 3000));
     await driveCallback("stop:sess-a");
     await until(() => answers().some((t) => t.includes("Session expired")));
     expect(manager.handled.some((m) => m.type === "session.interrupt")).toBe(false);
@@ -308,7 +308,7 @@ describe("Telegram token expiry (GHSA-4g69)", () => {
     await until(() => calls.some((c) => c.method === "sendMessage" && String(c.payload.text).startsWith("⚠️ Permission needed")));
 
     // Let the token lapse, then tap.
-    await new Promise((r) => setTimeout(r, 2200));
+    await new Promise((r) => setTimeout(r, 3000));
     await driveCallback("a:cafef00d:y", USER_A);
     await until(() => answers().some((t) => t.includes("Session expired")));
     expect(manager.handled.some((m) => m.type === "session.approve")).toBe(false);
@@ -330,7 +330,7 @@ describe("Telegram token expiry (GHSA-4g69)", () => {
     );
     await until(() => calls.some((c) => c.method === "sendMessage" && String(c.payload.text).startsWith("⚠️ Permission needed")));
 
-    await new Promise((r) => setTimeout(r, 2200));
+    await new Promise((r) => setTimeout(r, 3000));
     await drive("/ls"); // triggers #expireAuth → drops this user's approvals
     await until(() => calls.some((c) => c.method === "sendMessage" && String(c.payload.text).startsWith("Session expired")));
 
@@ -357,7 +357,7 @@ describe("Telegram token expiry (GHSA-4g69)", () => {
     await until(() => calls.some((c) => c.method === "sendMessage" && String(c.payload.text).startsWith("⚠️ Permission needed")));
 
     // Auth is still valid; only the approval's own TTL lapses.
-    await new Promise((r) => setTimeout(r, 80));
+    await new Promise((r) => setTimeout(r, 300));
     await driveCallback("a:0ddba11:y", USER_A);
     await until(() => answers().some((t) => t.includes("This prompt expired")));
     expect(manager.handled.some((m) => m.type === "session.approve")).toBe(false);
