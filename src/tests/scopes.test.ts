@@ -15,8 +15,8 @@ import {
 } from "../protocol/scopes.js";
 
 describe("SCOPES constants", () => {
-  test("all 9 scopes are defined", () => {
-    expect(Object.keys(SCOPES)).toHaveLength(9);
+  test("all 11 scopes are defined", () => {
+    expect(Object.keys(SCOPES)).toHaveLength(11);
     expect(SCOPES.SESSION_CREATE).toBe("session:create");
     expect(SCOPES.SESSION_ATTACH).toBe("session:attach");
     expect(SCOPES.SESSION_WATCH).toBe("session:watch");
@@ -25,11 +25,13 @@ describe("SCOPES constants", () => {
     expect(SCOPES.SESSION_APPROVE).toBe("session:approve");
     expect(SCOPES.SESSION_DESTROY).toBe("session:destroy");
     expect(SCOPES.SESSION_LIST).toBe("session:list");
+    expect(SCOPES.SESSION_READ).toBe("session:read");
+    expect(SCOPES.SESSION_DISPATCH).toBe("session:dispatch");
     expect(SCOPES.FS_READ).toBe("fs:read");
   });
 
-  test("ALL_SCOPES contains all 9", () => {
-    expect(ALL_SCOPES).toHaveLength(9);
+  test("ALL_SCOPES contains all 11", () => {
+    expect(ALL_SCOPES).toHaveLength(11);
     for (const scope of Object.values(SCOPES)) {
       expect(ALL_SCOPES).toContain(scope);
     }
@@ -37,7 +39,7 @@ describe("SCOPES constants", () => {
 
   test("ALL_SCOPES_STRING is space-delimited", () => {
     const parts = ALL_SCOPES_STRING.split(" ");
-    expect(parts).toHaveLength(9);
+    expect(parts).toHaveLength(11);
     for (const scope of ALL_SCOPES) {
       expect(parts).toContain(scope);
     }
@@ -80,6 +82,15 @@ describe("OPERATOR_SCOPES", () => {
     expect(OPERATOR_SCOPES).toContain(SCOPES.SESSION_SEND);
     expect(OPERATOR_SCOPES).toContain(SCOPES.SESSION_APPROVE);
     expect(OPERATOR_SCOPES).not.toContain(SCOPES.SESSION_DESTROY);
+  });
+});
+
+describe("conductor scopes stay conductor-only", () => {
+  test("watcher and operator profiles do not gain fleet scopes", () => {
+    for (const profile of [WATCHER_SCOPES, OPERATOR_SCOPES]) {
+      expect(profile).not.toContain(SCOPES.SESSION_READ);
+      expect(profile).not.toContain(SCOPES.SESSION_DISPATCH);
+    }
   });
 });
 
