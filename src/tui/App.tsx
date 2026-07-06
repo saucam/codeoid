@@ -48,8 +48,18 @@ export function App({ config }: Props) {
   // Auto-attach to all sessions so unread counters and status changes flow
   // even when the user isn't actively viewing that session.
   const attachedRef = useRef<Set<string>>(new Set());
+  const prevConnectionRef = useRef(state.connection);
   useEffect(() => {
     const client = wsRef.current;
+    // The daemon drops all attachments when the socket closes (they're keyed
+    // by per-connection clientId), so every fresh `connected` transition
+    // starts with zero server-side attachments. Clear the local mirror so all
+    // sessions re-attach — otherwise no broadcast ever arrives again after a
+    // reconnect and every session appears frozen (#83).
+    if (state.connection === "connected" && prevConnectionRef.current !== "connected") {
+      attachedRef.current.clear();
+    }
+    prevConnectionRef.current = state.connection;
     if (!client || state.connection !== "connected") return;
     for (const id of state.order) {
       if (attachedRef.current.has(id)) continue;
