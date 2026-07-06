@@ -154,6 +154,69 @@ describe("CanonicalHistoryAccumulator", () => {
     acc.reset();
     expect(acc.history).toHaveLength(0);
   });
+
+  it("concatenates every text_done of a turn — interleaved text → tool → text (#82)", async () => {
+    // A real agentic turn fires one text_done per assistant message:
+    // commentary → tool call → final answer. All blocks must survive; the old
+    // assign-behavior kept only the last one.
+    const acc = new CanonicalHistoryAccumulator();
+    const provider = new MockProvider("claude", [[
+      { type: "text_done", content: "Let me check the file." },
+      { type: "tool_start", toolId: "t1", sdkToolUseId: "sdk-t1", name: "Read", input: { file_path: "a.ts" }, approvalId: "a1" },
+      { type: "tool_complete", sdkToolUseId: "sdk-t1", output: "export {}", success: true },
+      { type: "text_done", content: "It is empty — done." },
+      { type: "turn_done", result: mockResult({ providerId: "claude", model: "claude-opus-4-5" }) },
+    ]]);
+
+    await runTurn(provider, acc, "Check a.ts");
+
+    const turn = acc.history[1];
+    expect(turn.role).toBe("assistant");
+    if (turn.role === "assistant") {
+      expect(turn.content).toBe("Let me check the file.\n\nIt is empty — done.");
+    }
+  });
+
+  it("drops subagent text and thinking from the canonical history (#82)", async () => {
+    const acc = new CanonicalHistoryAccumulator();
+    const provider = new MockProvider("claude", [[
+      { type: "text_done", content: "Spawning a subagent.", parentToolUseId: null },
+      { type: "thinking_delta", content: "sub thinking", parentToolUseId: "tu-task" },
+      { type: "text_done", content: "SUBAGENT COMMENTARY", parentToolUseId: "tu-task" },
+      { type: "text_done", content: "The subagent finished." },
+      { type: "turn_done", result: mockResult({ providerId: "claude", model: "claude-opus-4-5" }) },
+    ]]);
+
+    await runTurn(provider, acc, "Delegate this");
+
+    const turn = acc.history[1];
+    expect(turn.role).toBe("assistant");
+    if (turn.role === "assistant") {
+      expect(turn.content).toBe("Spawning a subagent.\n\nThe subagent finished.");
+      expect(turn.content).not.toContain("SUBAGENT COMMENTARY");
+      expect(turn.thinking).toBeUndefined();
+    }
+  });
+
+  it("text_done accumulation resets across turns", async () => {
+    const acc = new CanonicalHistoryAccumulator();
+    const provider = new MockProvider("claude", [
+      [
+        { type: "text_done", content: "First turn." },
+        { type: "turn_done", result: mockResult({ providerId: "claude", model: "claude-opus-4-5" }) },
+      ],
+      [
+        { type: "text_done", content: "Second turn." },
+        { type: "turn_done", result: mockResult({ providerId: "claude", model: "claude-opus-4-5" }) },
+      ],
+    ]);
+
+    await runTurn(provider, acc, "One");
+    await runTurn(provider, acc, "Two");
+
+    expect(acc.history[1]).toMatchObject({ role: "assistant", content: "First turn." });
+    expect(acc.history[3]).toMatchObject({ role: "assistant", content: "Second turn." });
+  });
 });
 
 describe("Provider-switch: history forwarding", () => {

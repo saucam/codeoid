@@ -266,10 +266,20 @@ export class CanonicalHistoryAccumulator {
   handleEvent(event: ProviderEvent): void {
     switch (event.type) {
       case "text_done":
-        this.#currentText = event.content;
+        // Subagent text (parentToolUseId set) is not primary conversation
+        // content — recording it would corrupt cross-provider history (#82).
+        if (event.parentToolUseId != null) break;
+        // A turn can span several assistant messages (text → tool → text →
+        // final text); each fires its own text_done. Append every block —
+        // assigning would keep only the last one and drop all interleaved
+        // reasoning from the canonical history (#82).
+        this.#currentText = this.#currentText
+          ? `${this.#currentText}\n\n${event.content}`
+          : event.content;
         break;
 
       case "thinking_delta":
+        if (event.parentToolUseId != null) break;
         this.#currentThinking += event.content;
         break;
 

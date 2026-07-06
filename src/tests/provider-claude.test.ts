@@ -26,6 +26,9 @@ let sdkMessages: SDKMsg[] = [];
 let sdkThrowError: Error | null = null;
 /** Captures the options passed to query() so tests can invoke callbacks. */
 let capturedQueryOpts: Record<string, unknown> | null = null;
+/** When set, the mock loop blocks before finishing so tests can invoke captured
+ *  callbacks (canUseTool, hooks) while the turn queue is still open. */
+let sdkGate: Promise<void> | null = null;
 
 function makeMockQuery() {
   const err = sdkThrowError;
@@ -35,7 +38,10 @@ function makeMockQuery() {
       return {
         async next(): Promise<{ done: boolean; value: SDKMsg | undefined }> {
           if (err) throw err;
-          if (i >= sdkMessages.length) return { done: true, value: undefined };
+          if (i >= sdkMessages.length) {
+            if (sdkGate) await sdkGate;
+            return { done: true, value: undefined };
+          }
           return { done: false, value: sdkMessages[i++] };
         },
       };
@@ -138,6 +144,30 @@ describe("translateSDKMessage – assistant", () => {
     });
     expect(events.find((e) => e.type === "text_done")).toMatchObject({ content: "AB" });
   });
+
+  it("tags text_done with parentToolUseId null for primary messages (#82)", () => {
+    const events = collectEmits({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "primary" }] },
+      parent_tool_use_id: null,
+    });
+    expect(events.find((e) => e.type === "text_done")).toMatchObject({
+      content: "primary",
+      parentToolUseId: null,
+    });
+  });
+
+  it("tags text_done with the spawning tool id for subagent messages (#82)", () => {
+    const events = collectEmits({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "subagent commentary" }] },
+      parent_tool_use_id: "tu-task-1",
+    });
+    expect(events.find((e) => e.type === "text_done")).toMatchObject({
+      content: "subagent commentary",
+      parentToolUseId: "tu-task-1",
+    });
+  });
 });
 
 describe("translateSDKMessage – stream_event", () => {
@@ -177,6 +207,38 @@ describe("translateSDKMessage – stream_event", () => {
   it("emits nothing for null event", () => {
     const events = collectEmits({ type: "stream_event", event: null });
     expect(events).toHaveLength(0);
+  });
+
+  it("tags text_delta and thinking events with parentToolUseId for subagent streams (#82)", () => {
+    const textEvents = collectEmits({
+      type: "stream_event",
+      event: { type: "content_block_delta", delta: { type: "text_delta", text: "sub chunk" } },
+      parent_tool_use_id: "tu-task-2",
+    });
+    expect(textEvents[0]).toMatchObject({ type: "text_delta", content: "sub chunk", parentToolUseId: "tu-task-2" });
+
+    const thinkEvents = collectEmits({
+      type: "stream_event",
+      event: { type: "content_block_delta", index: 1, delta: { type: "thinking_delta", thinking: "sub hmm" } },
+      parent_tool_use_id: "tu-task-2",
+    });
+    expect(thinkEvents[0]).toMatchObject({ type: "thinking_delta", content: "sub hmm", parentToolUseId: "tu-task-2" });
+
+    const stopEvents = collectEmits({
+      type: "stream_event",
+      event: { type: "content_block_stop", index: 1 },
+      parent_tool_use_id: "tu-task-2",
+    });
+    expect(stopEvents[0]).toMatchObject({ type: "thinking_done", blockIndex: 1, parentToolUseId: "tu-task-2" });
+  });
+
+  it("tags primary stream events with parentToolUseId null", () => {
+    const events = collectEmits({
+      type: "stream_event",
+      event: { type: "content_block_delta", delta: { type: "text_delta", text: "chunk" } },
+      parent_tool_use_id: null,
+    });
+    expect(events[0]).toMatchObject({ type: "text_delta", content: "chunk", parentToolUseId: null });
   });
 });
 
@@ -379,7 +441,7 @@ describe("extractToolResultText", () => {
 // ── ClaudeProvider lifecycle (mocked SDK) ─────────────────────────────────────
 
 describe("ClaudeProvider – runTurn with mocked SDK", () => {
-  beforeEach(() => { sdkMessages = []; sdkThrowError = null; capturedQueryOpts = null; });
+  beforeEach(() => { sdkMessages = []; sdkThrowError = null; capturedQueryOpts = null; sdkGate = null; });
 
   it("emits text_done + turn_done from mocked assistant + result messages", async () => {
     sdkMessages = [
@@ -489,32 +551,91 @@ describe("ClaudeProvider – runTurn with mocked SDK", () => {
     for await (const _ of run.events) { /* drain */ }
   });
 
-  it("canUseTool callback emits tool_start and returns allow", async () => {
-    // The SDK fires PreToolUse *before* canUseTool — we must simulate that order
-    // so #pendingToolUse has the tool_use_id before canUseTool tries to pop it.
+  it("canUseTool emits tool_start correlated by the SDK's own toolUseID (#81)", async () => {
     sdkMessages = [{ type: "result", modelUsage: {} }];
     capturedQueryOpts = null;
+    let release!: () => void;
+    sdkGate = new Promise<void>((r) => { release = r; });
     const provider = makeProvider();
-    provider.runTurn({ history: [], userMessage: "hi", workdir: "/tmp", canUseTool: async () => ({ behavior: "allow" as const }) });
+    const run = provider.runTurn({ history: [], userMessage: "hi", workdir: "/tmp", canUseTool: async () => ({ behavior: "allow" as const }) });
+    await Promise.resolve();
+    const opts = capturedQueryOpts as {
+      options: {
+        canUseTool: (name: string, input: unknown, o: { toolUseID: string; agentID?: string; signal: AbortSignal }) => Promise<unknown>;
+      };
+    } | null;
+    expect(opts?.options?.canUseTool).toBeDefined();
+    const result = await opts!.options.canUseTool("Read", { file_path: "/tmp/x.ts" }, {
+      toolUseID: "tu-real-1", agentID: "agent-7", signal: new AbortController().signal,
+    });
+    expect((result as { behavior: string }).behavior).toBe("allow");
+    release();
+    const events: ProviderEvent[] = [];
+    for await (const e of run.events) events.push(e);
+    const toolStart = events.find((e) => e.type === "tool_start") as Extract<ProviderEvent, { type: "tool_start" }> | undefined;
+    expect(toolStart).toBeDefined();
+    expect(toolStart!.sdkToolUseId).toBe("tu-real-1");
+    expect(toolStart!.sdkAgentId).toBe("agent-7");
+    expect(toolStart!.name).toBe("Read");
+    expect(toolStart!.input).toEqual({ file_path: "/tmp/x.ts" });
+  });
+
+  it("auto-allowed tools do not desync later correlation (#81 regression)", async () => {
+    // Repro from the issue: an auto-allowed tool fires PreToolUse but the SDK
+    // skips canUseTool for it. The next GATED tool must still correlate to its
+    // own tool_use_id — with the old name-keyed FIFO it popped the stale
+    // auto-allowed entry instead.
+    sdkMessages = [{ type: "result", modelUsage: {} }];
+    capturedQueryOpts = null;
+    let release!: () => void;
+    sdkGate = new Promise<void>((r) => { release = r; });
+    const provider = makeProvider();
+    const run = provider.runTurn({ history: [], userMessage: "hi", workdir: "/tmp", canUseTool: async () => ({ behavior: "allow" as const }) });
     await Promise.resolve();
     const opts = capturedQueryOpts as {
       options: {
         hooks: { PreToolUse: Array<{ hooks: Array<(input: unknown) => Promise<unknown>> }> };
-        canUseTool: (name: string, input: unknown) => Promise<unknown>;
+        canUseTool: (name: string, input: unknown, o: { toolUseID: string; agentID?: string; signal: AbortSignal }) => Promise<unknown>;
       };
     } | null;
-    if (opts?.options?.hooks?.PreToolUse?.[0]?.hooks?.[0] && opts.options.canUseTool) {
-      // 1. Fire PreToolUse so the provider registers "Read" → "tu-abc"
-      await opts.options.hooks.PreToolUse[0].hooks[0]({
-        tool_name: "Read", tool_use_id: "tu-abc", tool_input: {}, agent_id: undefined,
-      });
-      // 2. Now canUseTool can pop the pending entry and emit tool_start
-      const result = await opts.options.canUseTool("Read", { file_path: "/tmp/x.ts" });
-      expect((result as { behavior: string }).behavior).toBe("allow");
-    }
+    expect(opts?.options?.hooks?.PreToolUse?.[0]?.hooks?.[0]).toBeDefined();
+    // 1. Auto-allowed call: PreToolUse fires, canUseTool never does.
+    await opts!.options.hooks.PreToolUse[0]!.hooks[0]!({
+      tool_name: "Bash", tool_use_id: "tu-auto-allowed", tool_input: { command: "git status" },
+    });
+    // 2. Gated call of the SAME tool name.
+    await opts!.options.canUseTool("Bash", { command: "rm -rf build" }, {
+      toolUseID: "tu-gated", signal: new AbortController().signal,
+    });
+    release();
+    const events: ProviderEvent[] = [];
+    for await (const e of run.events) events.push(e);
+    const toolStarts = events.filter((e) => e.type === "tool_start") as Array<Extract<ProviderEvent, { type: "tool_start" }>>;
+    expect(toolStarts).toHaveLength(1);
+    expect(toolStarts[0]!.sdkToolUseId).toBe("tu-gated");
+    expect(toolStarts[0]!.input).toEqual({ command: "rm -rf build" });
   });
 
-  it("PreToolUse hook captures tool_use_id", async () => {
+  it("canUseTool denies when the SDK provides no toolUseID", async () => {
+    sdkMessages = [{ type: "result", modelUsage: {} }];
+    capturedQueryOpts = null;
+    let release!: () => void;
+    sdkGate = new Promise<void>((r) => { release = r; });
+    const provider = makeProvider();
+    const run = provider.runTurn({ history: [], userMessage: "hi", workdir: "/tmp", canUseTool: async () => ({ behavior: "allow" as const }) });
+    await Promise.resolve();
+    const opts = capturedQueryOpts as {
+      options: { canUseTool: (name: string, input: unknown, o?: unknown) => Promise<unknown> };
+    } | null;
+    const result = await opts!.options.canUseTool("Read", {}, { signal: new AbortController().signal });
+    expect(result).toMatchObject({ behavior: "deny" });
+    release();
+    const events: ProviderEvent[] = [];
+    for await (const e of run.events) events.push(e);
+    expect(events.find((e) => e.type === "tool_start")).toBeUndefined();
+  });
+
+  it("PreToolUse hook runs (audit + compression) and returns a hook result", async () => {
     sdkMessages = [{ type: "result", modelUsage: {} }];
     capturedQueryOpts = null;
     const provider = makeProvider();

@@ -201,6 +201,42 @@ describe("C1 – text_delta → text_done commits exactly one scrollback entry",
   });
 });
 
+// ── C8: subagent text stays out of the primary stream (#82) ──────────────────
+
+describe("C8 – subagent text/thinking (parentToolUseId set) never reaches the primary stream", () => {
+  it("subagent text_done cannot clobber the streaming primary message", async () => {
+    const provider = new MockSessionProvider("claude", [
+      [
+        { type: "text_delta", content: "Primary " },
+        // Subagent output interleaves mid-stream — must be ignored entirely.
+        { type: "text_delta", content: "SUB DELTA", parentToolUseId: "tu-task" },
+        { type: "text_done", content: "SUBAGENT FINAL", parentToolUseId: "tu-task" },
+        { type: "thinking_delta", content: "sub think", blockIndex: 0, parentToolUseId: "tu-task" },
+        { type: "thinking_done", blockIndex: 0, parentToolUseId: "tu-task" },
+        { type: "text_delta", content: "answer" },
+        { type: "text_done", content: "Primary answer" },
+        turnDone,
+      ],
+    ]);
+    const session = makeSession(provider);
+
+    await session.send("delegate", TEST_AUTH);
+    await waitForIdle(session);
+
+    const replay = replayFor(session);
+    assertNoDuplicates(replay);
+    const assistant = replay.filter((m) => m.role === "assistant");
+    expect(assistant).toHaveLength(1);
+    expect(assistant[0]!.content).toBe("Primary answer");
+    const thinking = replay.filter((m) => m.role === "thinking");
+    expect(thinking).toHaveLength(0);
+    for (const m of replay) {
+      expect(m.content).not.toContain("SUB DELTA");
+      expect(m.content).not.toContain("SUBAGENT FINAL");
+    }
+  });
+});
+
 // ── C2: thinking blocks ───────────────────────────────────────────────────────
 
 describe("C2 – thinking stream commits exactly one scrollback entry", () => {

@@ -2000,6 +2000,19 @@ export class Session {
   }
 
   async #handleProviderEvent(event: ProviderEvent): Promise<void> {
+    // Subagent text/thinking (parentToolUseId set) is not part of the primary
+    // conversation: streaming it into the primary assistant message corrupts
+    // both the visible transcript and the canonical history, and a subagent
+    // text_done would clobber the primary message mid-stream (#82). The
+    // subagent's work still surfaces via its tool_call messages and the
+    // spawning tool's result.
+    if (
+      (event.type === "text_delta" || event.type === "text_done" ||
+        event.type === "thinking_delta" || event.type === "thinking_done") &&
+      event.parentToolUseId != null
+    ) {
+      return;
+    }
     switch (event.type) {
       case "text_delta": {
         if (!this.#activeAssistantMsg) {
