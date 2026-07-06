@@ -124,6 +124,23 @@ export type ProviderEvent =
   | { type: "turn_done"; result: NormalizedTurnResult }
   | { type: "error"; message: string };
 
+/**
+ * True when a text/thinking ProviderEvent was produced by a subagent
+ * (`parentToolUseId` set). Such events must never be recorded as primary
+ * conversation content — see issue #82. Centralised so the canonical
+ * accumulator and Session's event consumer can't drift as new subagent-aware
+ * event types are added.
+ */
+export function isSubagentEvent(event: ProviderEvent): boolean {
+  return (
+    (event.type === "text_delta" ||
+      event.type === "text_done" ||
+      event.type === "thinking_delta" ||
+      event.type === "thinking_done") &&
+    event.parentToolUseId != null
+  );
+}
+
 // ── TurnRun ───────────────────────────────────────────────────────────────────
 
 export interface TurnRun {

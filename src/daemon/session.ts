@@ -11,7 +11,7 @@
 
 import { ClaudeProvider } from "./providers/claude/index.js";
 import { CanonicalHistoryAccumulator } from "./providers/canonical.js";
-import type { ProviderEvent, NormalizedTurnResult, TurnRun, ToolApprovalFn, SessionProvider } from "./providers/interface.js";
+import { type ProviderEvent, type NormalizedTurnResult, type TurnRun, type ToolApprovalFn, type SessionProvider, isSubagentEvent } from "./providers/interface.js";
 import { randomUUID } from "node:crypto";
 import type {
   AuthContext,
@@ -2005,14 +2005,8 @@ export class Session {
     // both the visible transcript and the canonical history, and a subagent
     // text_done would clobber the primary message mid-stream (#82). The
     // subagent's work still surfaces via its tool_call messages and the
-    // spawning tool's result.
-    if (
-      (event.type === "text_delta" || event.type === "text_done" ||
-        event.type === "thinking_delta" || event.type === "thinking_done") &&
-      event.parentToolUseId != null
-    ) {
-      return;
-    }
+    // spawning tool's result. Shared with the canonical accumulator's guard.
+    if (isSubagentEvent(event)) return;
     switch (event.type) {
       case "text_delta": {
         if (!this.#activeAssistantMsg) {
