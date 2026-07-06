@@ -31,6 +31,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Send idempotency (`send.idempotency`)** — `session.send.clientMsgId`
   dedupes ambiguous-delivery retries so one prompt can't become two billed
   turns. (#103)
+- **Live model catalog persistence** — the daemon persists the model catalog
+  each backend reports (designed provider-agnostic), so restarts and the
+  `/model` picker serve current models instead of a hardcoded list that goes
+  stale. (#78, #79)
+
+### Security
+
+- **Untrusted-content sinks sanitized**: terminal output and markdown
+  link/image URLs from model/tool output are now sanitized before reaching
+  dangerous sinks — a `javascript:` link or remote-image exfiltration channel
+  in rendered output is dropped. (#91)
+- **Cross-tenant memory disclosure fixed**: memory workspace ids were derived
+  from the working directory alone, so co-located accounts sharing a path
+  could cross-read each other's episodes via `recall`/`timeline`/search.
+  Workspace ids are now tenant-scoped. (#93)
 
 ### Fixed
 
@@ -56,6 +71,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   message/status dispatch for other subscribers. (#115)
 - **Web**: retired the hand-maintained protocol mirror (and with it, dead
   handling for a `"working"` status no released daemon ever emitted). (#105)
+- **Web**: stale fallback model names in the model picker refreshed to the
+  current Claude lineup. (#78)
+
+### Performance
+
+- **Daemon event loop unblocked**: status flips, workspace-id probes, and
+  `fs.list` did synchronous/redundant work on the single-threaded event loop,
+  stalling token streaming for every session in the process. (#95)
+- **Transcripts bounded**: rotation + streaming tail load + output caps — a
+  months-old session with a multi-hundred-MB transcript could previously
+  block daemon startup past its deadline or OOM it on resume. (#96)
+- **Memory recall**: the per-workspace vector cache is appended on embed
+  instead of cleared (recall was re-reading and re-decoding every embedding
+  BLOB per query during active work), and clustering is single-flight per
+  workspace with lean hydration and a yielding k-means. (#94, #97)
+- **Web streaming**: markdown is no longer re-parsed from scratch on every
+  streaming delta, and the message reducers use O(1) positional lookups
+  instead of per-delta scans (O(N²) over a long session). (#98, #99)
 
 ## [0.1.3] - 2026-07-03
 
