@@ -230,16 +230,20 @@ export class TuiWsClient {
     try {
       token = await this.#getToken();
     } catch (err) {
-      this.#dispatch({
-        type: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
       // Only a definitively non-retryable failure (missing key, key rejected
       // by ZeroID) dead-ends. Anything else — ECONNREFUSED while Wi-Fi comes
       // up after a laptop wake, DNS hiccup, ZeroID restarting — is transient
       // and gets the same unbounded reconnect-with-backoff as a dropped
       // socket (#83). Stopping here used to kill the reconnect loop for good.
       if (err instanceof TokenExchangeError && !err.transient) {
+        // Surface the error ONLY on the terminal path. Dispatching it for a
+        // transient blip would leave a stale error in the StatusBar even after
+        // the reconnect succeeds (the store clears lastError only on `error`
+        // actions, never on connection.change).
+        this.#dispatch({
+          type: "error",
+          message: err instanceof Error ? err.message : String(err),
+        });
         this.#dispatch({ type: "connection.change", state: "error" });
         return;
       }

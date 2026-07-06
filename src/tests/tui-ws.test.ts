@@ -296,6 +296,47 @@ describe("TuiWsClient", () => {
     expect(lastConnState(actions)).toBe("connected");
   });
 
+  it("429 from the token endpoint is transient — reconnects (#83)", async () => {
+    const actions: TuiAction[] = [];
+    let calls = 0;
+    (globalThis as { fetch: unknown }).fetch = async () => {
+      calls++;
+      if (calls === 1) return { ok: false, status: 429, json: async () => ({}) };
+      return { ok: true, json: async () => ({ access_token: `fresh-${++tokenSeq}` }) };
+    };
+    const client = makeClient(actions, { heartbeatMs: 0, reconnectDelayMs: 5 });
+
+    await client.start();
+    await flush();
+    expect(lastConnState(actions)).toBe("reconnecting");
+
+    await sleep(20);
+    const ws = MockWS.last();
+    ws.open();
+    ws.recv(AUTH_OK);
+    await flush();
+    expect(lastConnState(actions)).toBe("connected");
+  });
+
+  it("a transient token failure surfaces no user-facing error (StatusBar stays clean)", async () => {
+    // Regression: the error dispatch used to fire before the transient check,
+    // leaving a stale error in the store after a successful reconnect.
+    const actions: TuiAction[] = [];
+    let calls = 0;
+    (globalThis as { fetch: unknown }).fetch = async () => {
+      calls++;
+      if (calls === 1) throw new Error("connect ECONNREFUSED");
+      return { ok: true, json: async () => ({ access_token: `fresh-${++tokenSeq}` }) };
+    };
+    const client = makeClient(actions, { heartbeatMs: 0, reconnectDelayMs: 5 });
+
+    await client.start();
+    await flush();
+    // No `error` action for the transient blip — only the reconnect transition.
+    expect(actions.some((a) => a.type === "error")).toBe(false);
+    expect(lastConnState(actions)).toBe("reconnecting");
+  });
+
   it("a key the token endpoint rejects (4xx) stays terminal — no reconnect", async () => {
     const actions: TuiAction[] = [];
     (globalThis as { fetch: unknown }).fetch = async () => ({
