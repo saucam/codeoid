@@ -11,7 +11,7 @@
  *   CanonicalToolCall type already captures everything needed.
  */
 
-import type { ProviderEvent } from "./interface.js";
+import { type ProviderEvent, isSubagentEvent } from "./interface.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -264,9 +264,19 @@ export class CanonicalHistoryAccumulator {
    * On turn_done, the completed assistant turn is appended to history.
    */
   handleEvent(event: ProviderEvent): void {
+    // Subagent text/thinking is not primary conversation content — recording
+    // it would corrupt cross-provider history (#82). Session already filters
+    // these before feeding the accumulator; this guards standalone callers.
+    if (isSubagentEvent(event)) return;
     switch (event.type) {
       case "text_done":
-        this.#currentText = event.content;
+        // A turn can span several assistant messages (text → tool → text →
+        // final text); each fires its own text_done. Append every block —
+        // assigning would keep only the last one and drop all interleaved
+        // reasoning from the canonical history (#82).
+        this.#currentText = this.#currentText
+          ? `${this.#currentText}\n\n${event.content}`
+          : event.content;
         break;
 
       case "thinking_delta":

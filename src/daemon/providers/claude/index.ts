@@ -97,10 +97,6 @@ export class ClaudeProvider implements SessionProvider {
   #currentCanUseTool: TurnOpts["canUseTool"] | null = null;
   #currentSender: AuthContext | null = null;
 
-  // PreToolUse hook data — queued by hook, consumed by canUseTool
-  // Maps tool_name → queue of { toolUseId, agentId } for FIFO matching
-  #pendingToolUse: Map<string, Array<{ toolUseId: string; agentId?: string }>> = new Map();
-
   #init: ClaudeProviderInit;
 
   constructor(init: ClaudeProviderInit) {
@@ -127,7 +123,6 @@ export class ClaudeProvider implements SessionProvider {
     this.#hasQueried = false;
     this.#backingRecoveryAttempted = false;
     this.#lastPushedContent = null;
-    this.#pendingToolUse.clear();
   }
 
   // ── AgentProvider interface ───────────────────────────────────────────────
@@ -190,7 +185,6 @@ export class ClaudeProvider implements SessionProvider {
   }
 
   async teardown(): Promise<void> {
-    this.#pendingToolUse.clear();  // clear before closing so stale entries don't survive a model switch
     this.#inputQueue?.close();
     this.#abortController?.abort();
     if (this.#consumerTask) {
@@ -290,20 +284,13 @@ export class ClaudeProvider implements SessionProvider {
         hooks: {
           PreToolUse: [{
             hooks: [async (rawInput) => {
-              const input = rawInput as PreToolUseHookInput & { agent_id?: string };
+              const input = rawInput as PreToolUseHookInput;
               init.store.audit(
                 this.#currentSender?.sub ?? "unknown",
                 "session.tool_call",
                 sessionId,
                 `tool=${input.tool_name}`,
               );
-              // Capture tool_use_id + agent_id so canUseTool can correlate them.
-              if (input.tool_use_id) {
-                const entry = { toolUseId: input.tool_use_id, agentId: input.agent_id };
-                const queue = this.#pendingToolUse.get(input.tool_name) ?? [];
-                queue.push(entry);
-                this.#pendingToolUse.set(input.tool_name, queue);
-              }
               // Compression rewrite.
               if (init.config && init.compressionRegistry) {
                 const rewritten = rewriteBashToolInput({
@@ -345,21 +332,22 @@ export class ClaudeProvider implements SessionProvider {
           }],
         },
 
-        canUseTool: async (toolName, input) => {
+        canUseTool: async (toolName, input, options) => {
           const toolId = randomUUID();
           const approvalId = randomUUID();
           const inputObj = input as Record<string, unknown>;
 
-          // Pop the PreToolUse-captured data for this tool (FIFO by name).
-          const pending = this.#pendingToolUse.get(toolName);
-          const captured = pending?.shift();
-          if (pending && pending.length === 0) this.#pendingToolUse.delete(toolName);
-
-          if (!captured?.toolUseId) {
+          // Correlate by the SDK's own tool_use_id, passed directly to this
+          // callback. Never reconstruct it from a PreToolUse-fed name-keyed
+          // FIFO: the SDK skips canUseTool for auto-allowed tools
+          // (allowedTools / project permissions.allow), so any allow rule
+          // desyncs such a queue and mis-correlates every later tool call
+          // in the session (issue #81).
+          const sdkToolUseId = options?.toolUseID;
+          if (!sdkToolUseId) {
             return { behavior: "deny" as const, message: "Unable to correlate tool use id" };
           }
-          const sdkToolUseId = captured.toolUseId;
-          const sdkAgentId = captured.agentId;
+          const sdkAgentId = options?.agentID;
 
           // Emit tool_start — Session creates the SessionMessage.
           this.#emit({
@@ -495,6 +483,8 @@ export function translateSDKMessage(
         }
 
         // Text content (tool_use blocks are handled via canUseTool → tool_start).
+        // Tag with parent_tool_use_id so subagent text is never mistaken for
+        // primary assistant output downstream (issue #82).
         const content = msg.message.content as unknown as Array<Record<string, unknown>>;
         const textParts: string[] = [];
         for (const block of content) {
@@ -503,39 +493,49 @@ export function translateSDKMessage(
           }
         }
         if (textParts.length > 0) {
-          emit({ type: "text_done", content: textParts.join("") });
+          emit({
+            type: "text_done",
+            content: textParts.join(""),
+            parentToolUseId: assistantMsg.parent_tool_use_id ?? null,
+          });
         }
         break;
       }
 
       case "stream_event": {
-        const event = (msg as {
+        const streamMsg = msg as {
           event?: {
             type?: string;
             index?: number;
             content_block?: { type?: string };
             delta?: { type?: string; text?: string; thinking?: string };
           };
-        }).event;
+          parent_tool_use_id?: string | null;
+        };
+        const event = streamMsg.event;
         if (!event) break;
+        // Subagent stream events carry the spawning tool call's id — tag every
+        // text/thinking emission so consumers can keep them out of the primary
+        // conversation (issue #82).
+        const parentToolUseId = streamMsg.parent_tool_use_id ?? null;
 
         if (event.type === "content_block_start" && event.content_block?.type === "thinking") {
           // Signal a new thinking block — Session creates the message.
-          emit({ type: "thinking_delta", content: "", blockIndex: event.index });
+          emit({ type: "thinking_delta", content: "", blockIndex: event.index, parentToolUseId });
           break;
         }
 
         if (event.type === "content_block_delta" && event.delta) {
           if (event.delta.type === "text_delta" && event.delta.text) {
-            emit({ type: "text_delta", content: event.delta.text });
+            emit({ type: "text_delta", content: event.delta.text, parentToolUseId });
           } else if (event.delta.type === "thinking_delta" && event.delta.thinking) {
-            emit({ type: "thinking_delta", content: event.delta.thinking, blockIndex: event.index });
+            emit({ type: "thinking_delta", content: event.delta.thinking, blockIndex: event.index, parentToolUseId });
           }
           break;
         }
 
         if (event.type === "content_block_stop") {
-          emit({ type: "thinking_done", blockIndex: event.index });
+          emit({ type: "thinking_done", blockIndex: event.index, parentToolUseId });
         }
         break;
       }

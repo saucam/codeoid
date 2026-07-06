@@ -90,12 +90,17 @@ export interface NormalizedTurnResult {
 
 // ── Provider event stream ─────────────────────────────────────────────────────
 
-/** Normalized event emitted by any provider. Session maps these to SessionMessages. */
+/** Normalized event emitted by any provider. Session maps these to SessionMessages.
+ *
+ *  Text/thinking events carry `parentToolUseId` when they were produced by a
+ *  subagent (the id of the tool call that spawned it). `null`/absent = primary
+ *  agent. Consumers must not record non-primary text as primary conversation
+ *  content — see issue #82. */
 export type ProviderEvent =
-  | { type: "text_delta"; content: string }
-  | { type: "text_done"; content: string }
-  | { type: "thinking_delta"; content: string; blockIndex?: number }
-  | { type: "thinking_done"; blockIndex?: number }
+  | { type: "text_delta"; content: string; parentToolUseId?: string | null }
+  | { type: "text_done"; content: string; parentToolUseId?: string | null }
+  | { type: "thinking_delta"; content: string; blockIndex?: number; parentToolUseId?: string | null }
+  | { type: "thinking_done"; blockIndex?: number; parentToolUseId?: string | null }
   /** Fired when a tool call starts (from the provider's canUseTool gate).
    *  Carries the provider-internal tool_use_id so Session can correlate messages. */
   | {
@@ -118,6 +123,23 @@ export type ProviderEvent =
   | { type: "tool_progress"; toolName?: string; elapsedSeconds?: number }
   | { type: "turn_done"; result: NormalizedTurnResult }
   | { type: "error"; message: string };
+
+/**
+ * True when a text/thinking ProviderEvent was produced by a subagent
+ * (`parentToolUseId` set). Such events must never be recorded as primary
+ * conversation content — see issue #82. Centralised so the canonical
+ * accumulator and Session's event consumer can't drift as new subagent-aware
+ * event types are added.
+ */
+export function isSubagentEvent(event: ProviderEvent): boolean {
+  return (
+    (event.type === "text_delta" ||
+      event.type === "text_done" ||
+      event.type === "thinking_delta" ||
+      event.type === "thinking_done") &&
+    event.parentToolUseId != null
+  );
+}
 
 // ── TurnRun ───────────────────────────────────────────────────────────────────
 
