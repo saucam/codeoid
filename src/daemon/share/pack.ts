@@ -20,6 +20,7 @@ import type {
   TurnUsage,
 } from "../../protocol/types.js";
 
+import { resolveSafe } from "../fs.js";
 import { resolveWorkdirAlias } from "./git-alias.js";
 import {
   SHARE_FORMAT_VERSION,
@@ -115,7 +116,20 @@ export async function packSession(
     pinnedFiles = {};
     const cap = input.pinnedFileMaxBytes ?? 1 * 1024 * 1024;
     for (const p of input.session.pinnedFiles ?? []) {
-      const abs = path.isAbsolute(p) ? p : path.resolve(workdir, p);
+      // SECURITY (GHSA-38vh vector 1): bound the captured path to the session
+      // workdir with the SAME containment turn-time pins get via
+      // attachments.resolveOne. Without this, `session.pin` stores any path
+      // unvalidated and export embeds arbitrary host files (e.g.
+      // ~/.codeoid/config.json — the root ZeroID key) into a shareable bundle.
+      // resolveSafe canonicalises the workdir, realpaths the pin, and refuses
+      // anything that escapes the workdir or lands in a protected dir; on
+      // escape/missing it throws and we skip the pin entirely.
+      let abs: string;
+      try {
+        ({ absolute: abs } = await resolveSafe(workdir, p));
+      } catch {
+        continue;
+      }
       const snap = await capturePinnedFile(abs, cap);
       if (snap) {
         const key = encodePath(abs, workdir, alias);

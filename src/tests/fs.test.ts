@@ -8,9 +8,10 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { FsAccessError, handleFsList, resolveSafe } from "../daemon/fs.js";
+import { FsAccessError, handleFsList, handleFsRead, isProtectedPath, resolveSafe } from "../daemon/fs.js";
+import { getConfigDir } from "../config.js";
 
 let tmp: string;
 
@@ -40,6 +41,53 @@ describe("resolveSafe", () => {
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
+  });
+});
+
+// ── Protected directories (GHSA-38vh vector 2) ────────────────────────────────
+
+describe("protected directories", () => {
+  let savedXdg: string | undefined;
+
+  beforeEach(() => {
+    savedXdg = process.env.XDG_CONFIG_HOME;
+  });
+  afterEach(() => {
+    if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = savedXdg;
+  });
+
+  it("isProtectedPath flags the daemon config dir and host credential dirs", () => {
+    process.env.XDG_CONFIG_HOME = join(tmp, "xdg");
+    const configDir = getConfigDir(); // <tmp>/xdg/codeoid
+    expect(isProtectedPath(join(configDir, "config.json"))).toBe(true);
+    expect(isProtectedPath(configDir)).toBe(true);
+    expect(isProtectedPath(join(homedir(), ".ssh", "id_rsa"))).toBe(true);
+    expect(isProtectedPath(join(homedir(), ".aws", "credentials"))).toBe(true);
+    expect(isProtectedPath(join(tmp, "project", "src", "index.ts"))).toBe(false);
+  });
+
+  it("resolveSafe refuses a path inside the daemon config dir even from an ancestor workdir", async () => {
+    // Point the config dir under our tmp so the test is hermetic, then root a
+    // session AT that config home — the exploit's `workdir: "~"` shape.
+    const configHome = join(tmp, "xdg");
+    process.env.XDG_CONFIG_HOME = configHome;
+    const configDir = getConfigDir(); // <configHome>/codeoid
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, "config.json"), '{"apiKey":"zid_sk_ROOT"}');
+
+    await expect(resolveSafe(configHome, "codeoid/config.json")).rejects.toThrow(
+      FsAccessError,
+    );
+    // fs.read through the same chokepoint is refused too.
+    await expect(
+      handleFsRead({ id: "r", path: "codeoid/config.json" }, configHome),
+    ).rejects.toThrow(FsAccessError);
+
+    // A non-protected sibling under the same workdir still resolves fine.
+    writeFileSync(join(configHome, "notes.txt"), "hello");
+    const r = await resolveSafe(configHome, "notes.txt");
+    expect(r.relative).toBe("notes.txt");
   });
 });
 

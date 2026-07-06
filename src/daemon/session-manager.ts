@@ -8,9 +8,9 @@
  *   - Graceful drain on shutdown
  */
 
-import { existsSync, statSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { resolve, sep } from "node:path";
 import { Session, type AttachedClient } from "./session.js";
 import type { Store } from "./store.js";
 import { hasScope, SCOPES } from "../protocol/scopes.js";
@@ -21,6 +21,7 @@ import {
   handleFsBrowseDir,
   handleFsList,
   handleFsRead,
+  isProtectedPath,
 } from "./fs.js";
 import { readClaudeConfig } from "./claude-config.js";
 import { fallbackModelInfos, resolveAgainstList } from "./models.js";
@@ -45,9 +46,33 @@ import type {
 import type { DailyUsageBucket, LifetimeUsageTotals } from "./memory/store.js";
 
 /**
+ * Optional safe-root for session workdirs. When `CODEOID_FS_BROWSE_ROOT` is set
+ * (the same knob `fs.browse_dir` uses), a session's workdir must resolve inside
+ * it — so a scoped token can't create a session rooted anywhere on the host.
+ * Unset = no root constraint (workdirs are still barred from protected dirs).
+ */
+function workdirSafeRoot(): string | null {
+  const override = process.env.CODEOID_FS_BROWSE_ROOT;
+  if (!override || override.trim().length === 0) return null;
+  try {
+    return realpathSync(override.trim());
+  } catch {
+    return resolve(override.trim());
+  }
+}
+
+/**
  * Resolve a user-supplied workdir to an absolute, existing directory.
  * Expands a leading `~`, resolves relative paths against the daemon cwd, and
- * returns null if the path doesn't exist or isn't a directory.
+ * returns null if the path doesn't exist, isn't a directory, lands inside a
+ * protected directory (the daemon's own secret store / host credential dirs),
+ * or escapes the configured safe-root.
+ *
+ * The containment check is the session-creation half of GHSA-38vh vector 2:
+ * `fs.read` is already bounded to the session workdir, so refusing a workdir
+ * that IS (or is an ancestor of) the daemon config dir stops a scoped token
+ * from rooting a session at `~` and reading `~/.codeoid/config.json` — the root
+ * ZeroID key. `fs.resolveSafe` enforces the same deny-list as defence in depth.
  */
 function normalizeWorkdir(input: string): string | null {
   const raw = (input ?? "").trim();
@@ -57,7 +82,16 @@ function normalizeWorkdir(input: string): string | null {
   else if (raw.startsWith("~/")) p = resolve(homedir(), raw.slice(2));
   else p = resolve(raw);
   try {
-    return existsSync(p) && statSync(p).isDirectory() ? p : null;
+    if (!existsSync(p) || !statSync(p).isDirectory()) return null;
+    // Canonicalise so a symlinked workdir can't smuggle the resolved path
+    // into a protected dir or outside the safe-root.
+    const canonical = realpathSync(p);
+    if (isProtectedPath(canonical)) return null;
+    const root = workdirSafeRoot();
+    if (root && canonical !== root && !canonical.startsWith(root + sep)) {
+      return null;
+    }
+    return canonical;
   } catch {
     return null;
   }
