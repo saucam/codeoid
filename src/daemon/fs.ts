@@ -77,25 +77,38 @@ export class FsAccessError extends Error {
  * (GHSA-38vh vector 2) — this deny-list is the single chokepoint that closes it
  * for both fs verbs regardless of the (attacker-chosen) workdir.
  */
-function protectedRoots(): string[] {
+/** Canonicalise a candidate root; fall back to the lexical absolute path when
+ *  the dir doesn't exist (so the prefix check still works before first use). */
+function canonicalRoot(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+/** Home-directory credential stores — fixed for the daemon's lifetime, so
+ *  canonicalise them once. The config dir is deliberately NOT cached: it keys
+ *  off `XDG_CONFIG_HOME`, which tests flip between cases. */
+let _homeRootsCache: string[] | null = null;
+function homeProtectedRoots(): string[] {
+  if (_homeRootsCache) return _homeRootsCache;
   const home = os.homedir();
-  const candidates = [
-    getConfigDir(), // ~/.codeoid (config.json = root key, .env, exports/, db)
+  _homeRootsCache = [
     path.join(home, ".claude"), // Claude Code credentials
     path.join(home, ".aws"),
     path.join(home, ".ssh"),
     path.join(home, ".gnupg"),
     path.join(home, ".config", "gcloud"),
-  ];
-  // Canonicalise so a symlinked config dir can't be used to dodge the prefix
-  // check. Fall back to the lexical absolute path when the dir doesn't exist.
-  return candidates.map((c) => {
-    try {
-      return realpathSync(c);
-    } catch {
-      return path.resolve(c);
-    }
-  });
+  ].map(canonicalRoot);
+  return _homeRootsCache;
+}
+
+function protectedRoots(): string[] {
+  // getConfigDir() (~/.codeoid — config.json = root key, .env, exports/, db) is
+  // resolved per call so an XDG_CONFIG_HOME change is always honored; the home
+  // credential dirs are cached.
+  return [canonicalRoot(getConfigDir()), ...homeProtectedRoots()];
 }
 
 /**
