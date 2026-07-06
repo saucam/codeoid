@@ -186,8 +186,10 @@ async function until(cond: () => boolean, ms = 2000): Promise<void> {
   }
 }
 
-/** Boot a frontend + authenticate `USER_A` with a token carrying `expClaim`. */
-async function boot(expClaim: number, allowed = [USER_A]) {
+/** Boot a frontend + authenticate `USER_A` with a token carrying `expClaim`.
+ * `approvalTtlMs` overrides the pending-approval TTL so expiry-on-tap is
+ * reachable without sleeping the production hour. */
+async function boot(expClaim: number, allowed = [USER_A], approvalTtlMs?: number) {
   const bot = new Bot("44:TEST_TOKEN", { botInfo });
   const calls: ApiCall[] = [];
   let nextMessageId = 1;
@@ -207,7 +209,7 @@ async function boot(expClaim: number, allowed = [USER_A]) {
   });
 
   const manager = makeFakeManager();
-  const fe = new TelegramFrontend("44:TEST_TOKEN", allowed, bot);
+  const fe = new TelegramFrontend("44:TEST_TOKEN", allowed, bot, approvalTtlMs !== undefined ? { approvalTtlMs } : {});
   const ctx: FrontendContext = {
     manager: manager as never,
     store: { audit() {} } as never,
@@ -245,13 +247,17 @@ describe("Telegram token expiry (GHSA-4g69)", () => {
   });
 
   it("refuses a command when the cached token has expired, and never reaches the manager", async () => {
-    // exp ~2s out: valid at /auth, then lapses before the command.
+    // exp ~2s out: valid at /auth + /attach, then lapses before the command.
     const { drive, manager, texts } = await boot(nowSec() + 2);
+    // Attach first so the teardown assertion below is meaningful — otherwise
+    // disconnectClient is recorded only because #expireAuth calls it always.
+    await drive("/attach alpha");
+    await until(() => manager.attachClients.has("sess-a"));
     await new Promise((r) => setTimeout(r, 2200));
     await drive("/ls");
     await until(() => texts().some((t) => t.startsWith("Session expired")));
     expect(manager.handled.some((m) => m.type === "session.list")).toBe(false);
-    // The stale attachment is torn down.
+    // The live attachment is torn down on expiry.
     expect(manager.disconnected).toContain(`telegram:${USER_A}`);
   });
 
@@ -305,6 +311,55 @@ describe("Telegram token expiry (GHSA-4g69)", () => {
     await new Promise((r) => setTimeout(r, 2200));
     await driveCallback("a:cafef00d:y", USER_A);
     await until(() => answers().some((t) => t.includes("Session expired")));
+    expect(manager.handled.some((m) => m.type === "session.approve")).toBe(false);
+  });
+
+  it("drops the user's pending approvals on expiry so a re-auth can't reuse them", async () => {
+    // Register an approval while valid, let the token lapse, trigger expiry via
+    // a command, then tap the old approval — it must be gone, not merely denied.
+    const { drive, driveCallback, manager, calls, answers } = await boot(nowSec() + 2);
+    await drive("/attach alpha");
+    await until(() => manager.attachClients.has("sess-a"));
+    manager.attachClients.get("sess-a")!.send(
+      toolCallMsg("sess-a", "tc3", "Write", {
+        phase: "waiting_confirmation",
+        input: {},
+        description: "Write(/tmp/f)",
+        approvalId: "beadfeed-rest",
+      } as ToolState),
+    );
+    await until(() => calls.some((c) => c.method === "sendMessage" && String(c.payload.text).startsWith("⚠️ Permission needed")));
+
+    await new Promise((r) => setTimeout(r, 2200));
+    await drive("/ls"); // triggers #expireAuth → drops this user's approvals
+    await until(() => calls.some((c) => c.method === "sendMessage" && String(c.payload.text).startsWith("Session expired")));
+
+    // The old approval is gone: tapping it reports "This prompt expired", not
+    // "Session expired" (which would mean it was still present).
+    await driveCallback("a:beadfeed:y", USER_A);
+    await until(() => answers().some((t) => t.includes("This prompt expired")));
+    expect(manager.handled.some((m) => m.type === "session.approve")).toBe(false);
+  });
+
+  it("enforces the approval TTL when the button is tapped (no later prompt needed)", async () => {
+    // Tiny TTL so a stale approval lapses without a prune-triggering insert.
+    const { drive, driveCallback, manager, calls, answers } = await boot(nowSec() + 3600, [USER_A], 40);
+    await drive("/attach alpha");
+    await until(() => manager.attachClients.has("sess-a"));
+    manager.attachClients.get("sess-a")!.send(
+      toolCallMsg("sess-a", "tc4", "Write", {
+        phase: "waiting_confirmation",
+        input: {},
+        description: "Write(/tmp/f)",
+        approvalId: "0ddba11-rest",
+      } as ToolState),
+    );
+    await until(() => calls.some((c) => c.method === "sendMessage" && String(c.payload.text).startsWith("⚠️ Permission needed")));
+
+    // Auth is still valid; only the approval's own TTL lapses.
+    await new Promise((r) => setTimeout(r, 80));
+    await driveCallback("a:0ddba11:y", USER_A);
+    await until(() => answers().some((t) => t.includes("This prompt expired")));
     expect(manager.handled.some((m) => m.type === "session.approve")).toBe(false);
   });
 });

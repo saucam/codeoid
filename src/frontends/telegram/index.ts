@@ -103,19 +103,27 @@ export class TelegramFrontend implements Frontend {
   #users = new Map<number, UserState>();
   /** Short-token → pending approval, for inline-keyboard tool approvals. */
   #approvals = new Map<string, PendingApproval>();
+  /** Approval time-to-live (ms); overridable so tests can exercise expiry. */
+  #approvalTtlMs: number;
   /** Send surface handed to each user's StreamRelay. */
   #relayApi: RelayApi = {
     sendMessage: (chatId, text, opts) =>
       this.#bot.api.sendMessage(chatId, text, opts as never),
   };
 
-  constructor(botToken: string, allowedUserIds: number[], bot?: Bot) {
+  constructor(
+    botToken: string,
+    allowedUserIds: number[],
+    bot?: Bot,
+    opts: { approvalTtlMs?: number } = {},
+  ) {
     // `bot` is injectable for tests (a Bot with a stubbed API transformer).
     this.#bot = bot ?? new Bot(botToken);
     // Honor Telegram 429s: wait for retry_after and retry instead of letting
     // the flood error be swallowed by the `.catch(() => {})` on each send.
     this.#bot.api.config.use(autoRetry());
     this.#allowedUserIds = new Set(allowedUserIds);
+    this.#approvalTtlMs = opts.approvalTtlMs ?? APPROVAL_TTL_MS;
   }
 
   async start(ctx: FrontendContext): Promise<void> {
@@ -915,7 +923,7 @@ export class TelegramFrontend implements Frontend {
         return;
       }
       if (this.#authExpired(state)) {
-        this.#expireAuth(state);
+        this.#expireAuth(userId!, state);
         await ctx.answerCallbackQuery({ text: "Session expired — re-run /auth." }).catch(() => {});
         return;
       }
@@ -941,6 +949,14 @@ export class TelegramFrontend implements Frontend {
       await ctx.answerCallbackQuery({ text: "This prompt expired." }).catch(() => {});
       return;
     }
+    // Enforce the approval TTL on tap, not just when a later prompt triggers
+    // #pruneApprovals — otherwise an approval older than the TTL stays
+    // actionable indefinitely if no new prompt ever arrives.
+    if (Date.now() - pending.createdAt > this.#approvalTtlMs) {
+      this.#approvals.delete(short);
+      await ctx.answerCallbackQuery({ text: "This prompt expired." }).catch(() => {});
+      return;
+    }
     // Only the user the approval was queued for may resolve it — a different
     // (allowlisted) user tapping a forwarded button must not act under the
     // owner's identity (GHSA-4g69 hardening).
@@ -954,10 +970,10 @@ export class TelegramFrontend implements Frontend {
       return;
     }
     // A tool approval runs a shell command under the caller's identity — so an
-    // expired token must not be honored here either.
+    // expired token must not be honored here either. #expireAuth drops this
+    // user's remaining approvals, including this one.
     if (this.#authExpired(state)) {
-      this.#expireAuth(state);
-      this.#approvals.delete(short);
+      this.#expireAuth(pending.userId, state);
       await ctx.answerCallbackQuery({ text: "Session expired — re-run /auth." }).catch(() => {});
       return;
     }
@@ -1031,7 +1047,7 @@ export class TelegramFrontend implements Frontend {
   #pruneApprovals(): void {
     const now = Date.now();
     for (const [key, p] of this.#approvals) {
-      if (now - p.createdAt > APPROVAL_TTL_MS) this.#approvals.delete(key);
+      if (now - p.createdAt > this.#approvalTtlMs) this.#approvals.delete(key);
     }
     if (this.#approvals.size < MAX_PENDING_APPROVALS) return;
     const byAge = [...this.#approvals.entries()].sort(
@@ -1070,7 +1086,7 @@ export class TelegramFrontend implements Frontend {
     // honor a revoked/expired key until the daemon restarts — mirror the WS
     // per-message `exp` enforcement (GHSA-4g69).
     if (this.#authExpired(state)) {
-      this.#expireAuth(state);
+      this.#expireAuth(ctx.from!.id, state);
       ctx.reply("Session expired. Re-authenticate with /auth <api_key>.").catch(() => {});
       return null;
     }
@@ -1084,14 +1100,19 @@ export class TelegramFrontend implements Frontend {
     return typeof exp === "number" && exp > 0 && exp <= Math.floor(Date.now() / 1000);
   }
 
-  /** Drop a stale cached auth: clear it and tear down any live attachment so
-   * streaming under the expired identity stops immediately. The user must
-   * re-run /auth to get a fresh token. */
-  #expireAuth(state: UserState): void {
+  /** Drop a stale cached auth: clear it, tear down any live attachment so
+   * streaming under the expired identity stops immediately, and discard this
+   * user's pending approvals. Without dropping the approvals, the user could
+   * re-authenticate and tap an old prompt — which would then run under the
+   * fresh token. The user must re-run /auth to get a fresh token. */
+  #expireAuth(userId: number, state: UserState): void {
     state.auth = null;
     try { this.#manager.disconnectClient(state.clientId); } catch { /* not attached */ }
     state.attachedSessionId = null;
     state.attachedSessionName = null;
+    for (const [key, approval] of this.#approvals) {
+      if (approval.userId === userId) this.#approvals.delete(key);
+    }
   }
 
   #makeClient(state: UserState, ctx: Context): AttachedClient {
