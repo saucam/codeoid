@@ -245,4 +245,89 @@ describe("TuiWsClient", () => {
     await sleep(20);
     expect(MockWS.instances.length).toBe(1); // no reconnect attempted
   });
+
+  // ── #83: transient token-exchange failures must not kill the reconnect loop ──
+
+  it("unreachable token endpoint schedules a reconnect and recovers (#83)", async () => {
+    // Laptop wakes before Wi-Fi is up: fetch rejects with ECONNREFUSED. The
+    // old code pinned the client to `error` with no reconnect — forever.
+    const actions: TuiAction[] = [];
+    let calls = 0;
+    (globalThis as { fetch: unknown }).fetch = async () => {
+      calls++;
+      if (calls === 1) throw new Error("connect ECONNREFUSED 127.0.0.1:8899");
+      return { ok: true, json: async () => ({ access_token: `fresh-${++tokenSeq}` }) };
+    };
+    const client = makeClient(actions, { heartbeatMs: 0, reconnectDelayMs: 5 });
+
+    await client.start();
+    await flush();
+    expect(lastConnState(actions)).toBe("reconnecting"); // not terminal `error`
+    expect(MockWS.instances.length).toBe(0); // no socket was ever created
+
+    await sleep(20); // scheduled reconnect runs; second token exchange succeeds
+    expect(MockWS.instances.length).toBe(1);
+    const ws = MockWS.last();
+    ws.open();
+    ws.recv(AUTH_OK);
+    await flush();
+    expect(lastConnState(actions)).toBe("connected");
+  });
+
+  it("5xx from the token endpoint is transient — reconnects (#83)", async () => {
+    const actions: TuiAction[] = [];
+    let calls = 0;
+    (globalThis as { fetch: unknown }).fetch = async () => {
+      calls++;
+      if (calls === 1) return { ok: false, status: 503, json: async () => ({}) };
+      return { ok: true, json: async () => ({ access_token: `fresh-${++tokenSeq}` }) };
+    };
+    const client = makeClient(actions, { heartbeatMs: 0, reconnectDelayMs: 5 });
+
+    await client.start();
+    await flush();
+    expect(lastConnState(actions)).toBe("reconnecting");
+
+    await sleep(20);
+    const ws = MockWS.last();
+    ws.open();
+    ws.recv(AUTH_OK);
+    await flush();
+    expect(lastConnState(actions)).toBe("connected");
+  });
+
+  it("a key the token endpoint rejects (4xx) stays terminal — no reconnect", async () => {
+    const actions: TuiAction[] = [];
+    (globalThis as { fetch: unknown }).fetch = async () => ({
+      ok: false,
+      status: 401,
+      json: async () => ({ error: "invalid_key" }),
+    });
+    const client = makeClient(actions, { heartbeatMs: 0, reconnectDelayMs: 5 });
+
+    await client.start();
+    await flush();
+    expect(lastConnState(actions)).toBe("error");
+    expect(actions.some((a) => a.type === "error")).toBe(true);
+
+    await sleep(20);
+    expect(MockWS.instances.length).toBe(0); // no reconnect, no socket
+  });
+
+  it("missing API key stays terminal — no reconnect", async () => {
+    const actions: TuiAction[] = [];
+    const config = { ...CONFIG, apiKey: undefined } as unknown as CodeoidConfig;
+    const client = new TuiWsClient(config, (a) => actions.push(a), {
+      heartbeatMs: 0,
+      reconnectDelayMs: 5,
+    });
+    clients.push(client);
+
+    await client.start();
+    await flush();
+    expect(lastConnState(actions)).toBe("error");
+
+    await sleep(20);
+    expect(MockWS.instances.length).toBe(0);
+  });
 });

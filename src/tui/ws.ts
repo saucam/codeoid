@@ -47,6 +47,21 @@ interface PendingRequest {
   fail: (err: Error) => void;
 }
 
+/**
+ * Token-exchange failure with a retryability verdict. `transient` failures
+ * (endpoint unreachable, 5xx, 429) get the same unbounded reconnect-with-
+ * backoff as a dropped socket; non-transient ones (missing key, key rejected)
+ * dead-end with a visible error — re-minting can't fix them (#83).
+ */
+export class TokenExchangeError extends Error {
+  readonly transient: boolean;
+  constructor(message: string, transient: boolean) {
+    super(message);
+    this.name = "TokenExchangeError";
+    this.transient = transient;
+  }
+}
+
 export class TuiWsClient {
   #config: CodeoidConfig;
   #dispatch: Dispatch<TuiAction>;
@@ -210,9 +225,7 @@ export class TuiWsClient {
     this.#dispatch({ type: "connection.change", state: "connecting" });
 
     // Re-exchange the stored API key for a fresh JWT on every (re)connect. This
-    // is what lets a reconnect recover from an expired token — a bad/unreachable
-    // key throws here, and re-minting wouldn't help, so we surface and stop
-    // rather than spin.
+    // is what lets a reconnect recover from an expired token.
     let token: string;
     try {
       token = await this.#getToken();
@@ -221,7 +234,16 @@ export class TuiWsClient {
         type: "error",
         message: err instanceof Error ? err.message : String(err),
       });
-      this.#dispatch({ type: "connection.change", state: "error" });
+      // Only a definitively non-retryable failure (missing key, key rejected
+      // by ZeroID) dead-ends. Anything else — ECONNREFUSED while Wi-Fi comes
+      // up after a laptop wake, DNS hiccup, ZeroID restarting — is transient
+      // and gets the same unbounded reconnect-with-backoff as a dropped
+      // socket (#83). Stopping here used to kill the reconnect loop for good.
+      if (err instanceof TokenExchangeError && !err.transient) {
+        this.#dispatch({ type: "connection.change", state: "error" });
+        return;
+      }
+      this.#scheduleReconnect();
       return;
     }
     if (this.#stopped) return;
@@ -480,28 +502,42 @@ export class TuiWsClient {
   async #getToken(): Promise<string> {
     const token = this.#config.apiKey;
     if (!token) {
-      throw new Error(
+      throw new TokenExchangeError(
         "No API key configured. Set CODEOID_API_KEY or add apiKey to ~/.codeoid/config.json.",
+        false,
       );
     }
     if (!token.startsWith("zid_sk_")) return token;
 
-    const resp = await fetch(`${this.#config.zeroidUrl}/oauth2/token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        grant_type: "api_key",
-        api_key: token,
-        scope: ALL_SCOPES_STRING,
-      }),
-    });
+    let resp: Response;
+    try {
+      resp = await fetch(`${this.#config.zeroidUrl}/oauth2/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          grant_type: "api_key",
+          api_key: token,
+          scope: ALL_SCOPES_STRING,
+        }),
+      });
+    } catch (err) {
+      // fetch() rejects only on network-level failures (endpoint unreachable,
+      // DNS, connection reset) — retryable by definition.
+      throw new TokenExchangeError(
+        `Token endpoint unreachable: ${err instanceof Error ? err.message : String(err)}`,
+        true,
+      );
+    }
     if (!resp.ok) {
       const body = (await resp.json().catch(() => ({}))) as {
         error?: string;
         error_description?: string;
       };
-      throw new Error(
+      // 5xx/429 = ZeroID having a moment — retry. Anything else means the key
+      // itself was rejected, and re-minting with the same key won't help.
+      throw new TokenExchangeError(
         `Token exchange failed (${resp.status}): ${body.error_description ?? body.error ?? "unknown"}`,
+        resp.status >= 500 || resp.status === 429,
       );
     }
     const data = (await resp.json()) as { access_token: string };
