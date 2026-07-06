@@ -66,6 +66,7 @@ import {
   parseMcpServerConfig,
   extractToolResultText,
   withMcpToolTimeout,
+  buildAgentEnv,
 } from "../daemon/providers/claude/index.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -407,6 +408,63 @@ describe("withMcpToolTimeout", () => {
     expect(withMcpToolTimeout(servers, 0)).toBe(servers);
     const out = withMcpToolTimeout(servers, 0);
     expect((out.slack as { timeout?: number }).timeout).toBeUndefined();
+  });
+});
+
+// ── buildAgentEnv (GHSA-38vh vector 3) ────────────────────────────────────────
+
+describe("buildAgentEnv", () => {
+  it("passes system + Anthropic/Claude vars through but drops daemon secrets", () => {
+    const env = buildAgentEnv({
+      PATH: "/usr/bin",
+      HOME: "/home/deploy",
+      LANG: "en_US.UTF-8",
+      LC_ALL: "C",
+      HTTPS_PROXY: "http://proxy:8080",
+      NODE_EXTRA_CA_CERTS: "/etc/ca.pem",
+      ANTHROPIC_API_KEY: "sk-ant-keep",
+      CLAUDE_CODE_USE_BEDROCK: "1",
+      // Daemon secrets that must NOT reach the agent shell:
+      TELEGRAM_BOT_TOKEN: "bot-secret",
+      CODEOID_API_KEY: "zid_sk_root",
+      GOOGLE_CLIENT_SECRET: "goog-secret",
+      OPENAI_API_KEY: "sk-openai",
+      SOME_RANDOM_SECRET: "nope",
+    });
+    // Allowed
+    expect(env.PATH).toBe("/usr/bin");
+    expect(env.HOME).toBe("/home/deploy");
+    expect(env.LANG).toBe("en_US.UTF-8");
+    expect(env.LC_ALL).toBe("C");
+    expect(env.HTTPS_PROXY).toBe("http://proxy:8080");
+    expect(env.NODE_EXTRA_CA_CERTS).toBe("/etc/ca.pem");
+    expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-keep");
+    expect(env.CLAUDE_CODE_USE_BEDROCK).toBe("1");
+    // Denied
+    expect(env.TELEGRAM_BOT_TOKEN).toBeUndefined();
+    expect(env.CODEOID_API_KEY).toBeUndefined();
+    expect(env.GOOGLE_CLIENT_SECRET).toBeUndefined();
+    expect(env.OPENAI_API_KEY).toBeUndefined();
+    expect(env.SOME_RANDOM_SECRET).toBeUndefined();
+  });
+
+  it("honors CODEOID_AGENT_ENV_ALLOW as an extension point (Bedrock/Vertex)", () => {
+    const env = buildAgentEnv({
+      CODEOID_AGENT_ENV_ALLOW: "AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY",
+      AWS_ACCESS_KEY_ID: "AKIA...",
+      AWS_SECRET_ACCESS_KEY: "secret",
+      AWS_SESSION_TOKEN: "not-listed",
+    });
+    expect(env.AWS_ACCESS_KEY_ID).toBe("AKIA...");
+    expect(env.AWS_SECRET_ACCESS_KEY).toBe("secret");
+    // Only the explicitly listed names pass — a sibling AWS var stays out.
+    expect(env.AWS_SESSION_TOKEN).toBeUndefined();
+  });
+
+  it("skips undefined values", () => {
+    const env = buildAgentEnv({ PATH: "/bin", HOME: undefined });
+    expect(env.PATH).toBe("/bin");
+    expect("HOME" in env).toBe(false);
   });
 });
 

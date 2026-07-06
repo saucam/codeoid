@@ -20,10 +20,11 @@
  * router; this module assumes scope was already enforced.
  */
 
-import { promises as fs, type Dirent } from "node:fs";
+import { promises as fs, realpathSync, type Dirent } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { getConfigDir } from "../config.js";
 import type {
   FsBrowseDirMsg,
   FsBrowseDirResultMsg,
@@ -64,6 +65,62 @@ export class FsAccessError extends Error {
     super(message);
     this.name = "FsAccessError";
   }
+}
+
+/**
+ * Directories that must NEVER be reachable through a session's `fs:read` /
+ * `fs:list`, no matter what workdir the session was created with. The daemon's
+ * own config dir holds `config.json` (the root ZeroID key that mints
+ * ALL_SCOPES tokens), `.env` (bot token, provider keys), and `exports/` (other
+ * users' shared sessions); the rest are host credential stores a code agent
+ * has no business reading. A session rooted at `~` used to reach all of these
+ * (GHSA-38vh vector 2) — this deny-list is the single chokepoint that closes it
+ * for both fs verbs regardless of the (attacker-chosen) workdir.
+ */
+/** Canonicalise a candidate root; fall back to the lexical absolute path when
+ *  the dir doesn't exist (so the prefix check still works before first use). */
+function canonicalRoot(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+/** Home-directory credential stores — fixed for the daemon's lifetime, so
+ *  canonicalise them once. The config dir is deliberately NOT cached: it keys
+ *  off `XDG_CONFIG_HOME`, which tests flip between cases. */
+let _homeRootsCache: string[] | null = null;
+function homeProtectedRoots(): string[] {
+  if (_homeRootsCache) return _homeRootsCache;
+  const home = os.homedir();
+  _homeRootsCache = [
+    path.join(home, ".claude"), // Claude Code credentials
+    path.join(home, ".aws"),
+    path.join(home, ".ssh"),
+    path.join(home, ".gnupg"),
+    path.join(home, ".config", "gcloud"),
+  ].map(canonicalRoot);
+  return _homeRootsCache;
+}
+
+function protectedRoots(): string[] {
+  // getConfigDir() (~/.codeoid — config.json = root key, .env, exports/, db) is
+  // resolved per call so an XDG_CONFIG_HOME change is always honored; the home
+  // credential dirs are cached.
+  return [canonicalRoot(getConfigDir()), ...homeProtectedRoots()];
+}
+
+/**
+ * True when `resolved` (an already-canonicalised absolute path) is at or inside
+ * any protected root. Exported so session creation can reject a workdir that
+ * would root a session inside the daemon's secret store.
+ */
+export function isProtectedPath(resolved: string): boolean {
+  for (const root of protectedRoots()) {
+    if (resolved === root || resolved.startsWith(root + path.sep)) return true;
+  }
+  return false;
 }
 
 /**
@@ -116,6 +173,16 @@ export async function resolveSafe(
   ) {
     throw new FsAccessError(
       `path escapes session workdir: ${cleaned}`,
+      "forbidden",
+    );
+  }
+
+  // Even a path that stays inside the workdir is refused if it lands in a
+  // protected directory — the case where the workdir itself is an ancestor of
+  // the daemon's secret store (e.g. a session rooted at `~`). See protectedRoots.
+  if (isProtectedPath(resolved)) {
+    throw new FsAccessError(
+      `path is within a protected directory: ${cleaned}`,
       "forbidden",
     );
   }

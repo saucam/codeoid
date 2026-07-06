@@ -256,6 +256,10 @@ export class ClaudeProvider implements SessionProvider {
       options: {
         cwd: opts.workdir,
         abortController: this.#abortController,
+        // Explicit env allowlist — never inherit the daemon's full process.env
+        // (which holds the root ZeroID key + control-channel secrets). See
+        // buildAgentEnv (GHSA-38vh vector 3).
+        env: buildAgentEnv(),
         allowedTools: init.memory
           ? ["mcp__codeoid_memory__recall", "mcp__codeoid_memory__recall_file", "mcp__codeoid_memory__timeline"]
           : [],
@@ -697,6 +701,54 @@ export function parseMcpServerConfig(value: unknown): McpServerConfig | null {
     if (!Object.values(obj.env as Record<string, unknown>).every((v) => typeof v === "string")) return null;
   }
   return obj as unknown as McpServerConfig;
+}
+
+/**
+ * Build the environment handed to the spawned Claude Code subprocess.
+ *
+ * SECURITY (GHSA-38vh vector 3): the SDK `query()` is otherwise spawned with no
+ * `env`, so the CLI — and its Bash tool, hooks, and stdio MCP servers — inherit
+ * the daemon's FULL `process.env`, including secrets `loadDotEnv` writes there
+ * (`TELEGRAM_BOT_TOKEN`, `CODEOID_API_KEY` = the root ZeroID key, provider keys,
+ * `GOOGLE_CLIENT_SECRET`). Any attached user or prompt-injected agent could
+ * `env` its way to the control-channel token. We pass an explicit ALLOWLIST
+ * instead: only the vars the CLI legitimately needs to run and authenticate.
+ *
+ * Allowlisted: system/runtime essentials (PATH, HOME, locale, TMPDIR, proxy +
+ * TLS trust), plus every `ANTHROPIC_*` / `CLAUDE_*` var (the CLI's own auth +
+ * config namespace). Deployments on a non-Anthropic model backend (Bedrock /
+ * Vertex) can extend the allowlist via `CODEOID_AGENT_ENV_ALLOW` (comma-
+ * separated names) without reopening the hole for unrelated secrets.
+ *
+ * Pure + exported for unit testing.
+ */
+export function buildAgentEnv(base: Record<string, string | undefined> = process.env): Record<string, string> {
+  const EXACT = new Set<string>([
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD", "LANG", "LANGUAGE",
+    "TZ", "TERM", "TMPDIR", "TEMP", "TMP", "COLORTERM",
+    // Proxy + TLS trust — needed for the CLI to reach the API through a
+    // corporate proxy / custom CA. Not secrets.
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+  ]);
+  // The CLI's own namespaces (auth token, base url, model, feature flags) plus
+  // POSIX locale categories (LC_ALL, LC_CTYPE, …).
+  const PREFIXES = ["ANTHROPIC_", "CLAUDE_", "LC_"];
+  const extra = (base.CODEOID_AGENT_ENV_ALLOW ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  const extraSet = new Set(extra);
+
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(base)) {
+    if (v === undefined) continue;
+    if (EXACT.has(k) || extraSet.has(k) || PREFIXES.some((p) => k.startsWith(p))) {
+      out[k] = v;
+    }
+  }
+  return out;
 }
 
 export function extractToolResultText(content: unknown): string {
