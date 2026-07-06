@@ -1058,6 +1058,59 @@ export class SqliteEpisodeStore {
     return ordered;
   }
 
+  // ── Cross-workspace (global) retrieval primitives ─────────────────────────
+  // The conductor resolves a fuzzy reference to the right session across ALL
+  // workspaces on the machine, not within one. These are the unscoped twins of
+  // ftsSearch / loadVectorMatrix / filter. Ranking a single GLOBAL candidate set
+  // (rather than merging per-workspace results) is what makes BM25 scores
+  // comparable across workspaces — see engine.recallGlobal().
+  //
+  // NOTE: "global" here means the whole store, which is single-tenant per user
+  // (workspace ids already fold in account+project). When the conductor grows a
+  // multi-tenant surface, scope these to the caller's tenant workspace set.
+
+  /** Distinct workspace ids present in the store. */
+  listWorkspaceIds(): string[] {
+    return (
+      this.#db
+        .prepare("SELECT DISTINCT workspace_id AS w FROM episodes")
+        .all() as Array<{ w: string }>
+    ).map((r) => r.w);
+  }
+
+  /** FTS5 keyword search across ALL workspaces. */
+  ftsSearchGlobal(query: string, limit: number): Array<{ id: string; bm25: number }> {
+    if (!query.trim()) return [];
+    const sanitized = sanitizeFtsQuery(query);
+    if (!sanitized) return [];
+    return this.#db
+      .prepare(
+        `SELECT e.id AS id, bm25(episodes_fts) AS bm25
+         FROM episodes_fts
+         JOIN episodes e ON e.rowid = episodes_fts.rowid
+         WHERE episodes_fts MATCH ?
+         ORDER BY bm25
+         LIMIT ?`,
+      )
+      .all(sanitized, limit) as Array<{ id: string; bm25: number }>;
+  }
+
+  /** Fetch episodes by id (no workspace scoping), preserving input order. */
+  episodesByIds(ids: string[]): Episode[] {
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => "?").join(",");
+    const rows = this.#db
+      .prepare(`SELECT * FROM episodes WHERE id IN (${placeholders})`)
+      .all(...ids) as EpisodeRow[];
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const ordered: Episode[] = [];
+    for (const id of ids) {
+      const row = byId.get(id);
+      if (row) ordered.push(this.#rowToEpisode(row));
+    }
+    return ordered;
+  }
+
   close(): void {
     this.#db.close();
   }

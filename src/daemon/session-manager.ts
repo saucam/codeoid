@@ -123,6 +123,18 @@ export class SessionManager {
    * Rebuilds in-memory session objects and scrollback buffers.
    */
   async resumeSessions(): Promise<number> {
+    // Reload the durable conductor identity first (design R2): the persisted
+    // {identityId, wimseUri, apiKey} row is reused instead of re-registering,
+    // so the conductor keeps ONE stable WIMSE URI across daemon restarts.
+    // Best-effort and null-safe — a missing or stale row just means the next
+    // registerConductor() starts fresh.
+    const conductor = await this.#identityManager?.resumeConductor();
+    if (conductor) {
+      console.log(
+        `[codeoid] resumed conductor identity ${conductor.wimseUri}`,
+      );
+    }
+
     const allMetas = await this.#transcriptStore.loadAllMeta();
     // Newest-first by last activity so the cap keeps the most relevant
     // sessions when there are more than RESUME_MAX_SESSIONS on disk.

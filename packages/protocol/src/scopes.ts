@@ -22,6 +22,16 @@ export const SCOPES = {
   SESSION_DESTROY: "session:destroy",
   /** List sessions and their status */
   SESSION_LIST: "session:list",
+  /**
+   * Read-class fleet visibility for the conductor — list, find, and
+   * summarize sessions across the fleet without the ability to act in them.
+   */
+  SESSION_READ: "session:read",
+  /**
+   * Send-class fleet routing for the conductor — direct an existing session,
+   * interrupt it, or spawn a disposable worker on the owner's behalf.
+   */
+  SESSION_DISPATCH: "session:dispatch",
   /** Read files and list directories under a session's workdir */
   FS_READ: "fs:read",
 } as const;

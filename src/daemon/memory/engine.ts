@@ -15,6 +15,7 @@ import type { Embedder } from "./embedder.js";
 import { normalize } from "./embedder.js";
 import type { SqliteEpisodeStore } from "./store.js";
 import { DEFAULT_WEIGHTS, rank, type RankerWeights } from "./ranker.js";
+import type { Reranker } from "./reranker.js";
 import type {
   Episode,
   EpisodeKind,
@@ -47,9 +48,15 @@ export interface SessionSearchHit {
   }>;
 }
 
+/** Ceiling on the reranker's first-run model download + load. Past this the
+ * engine degrades to fusion-only rather than holding up daemon startup. */
+const RERANKER_INIT_TIMEOUT_MS = 120_000;
+
 export interface MemoryEngineOptions {
   store: SqliteEpisodeStore;
   embedder: Embedder;
+  /** Optional cross-encoder for the final precision@1 rerank stage. */
+  reranker?: Reranker;
   weights?: RankerWeights;
   /** Top-K FTS hits to consider during recall. Default 24. */
   ftsCandidateK?: number;
@@ -60,6 +67,7 @@ export interface MemoryEngineOptions {
 export class MemoryEngine {
   #store: SqliteEpisodeStore;
   #embedder: Embedder;
+  #reranker: Reranker | undefined;
   #weights: RankerWeights;
   #ftsK: number;
   #vectorK: number;
@@ -72,10 +80,14 @@ export class MemoryEngine {
    * keyword recall, episode persistence and usage tracking all keep working;
    * only the vector signal is disabled. */
   #embedderReady = false;
+  /** False until the reranker loads (or none provided). When not ready the
+   * rerank stage is skipped and resolution degrades to fusion-only. */
+  #rerankerReady = false;
 
   constructor(opts: MemoryEngineOptions) {
     this.#store = opts.store;
     this.#embedder = opts.embedder;
+    this.#reranker = opts.reranker;
     this.#weights = opts.weights ?? DEFAULT_WEIGHTS;
     this.#ftsK = opts.ftsCandidateK ?? 24;
     this.#vectorK = opts.vectorCandidateK ?? 24;
@@ -95,6 +107,39 @@ export class MemoryEngine {
           err instanceof Error ? err.message : String(err)
         }`,
       );
+    }
+
+    if (this.#reranker) {
+      // Bounded: init downloads model weights on first run, and a stalled
+      // download must degrade to fusion-only instead of wedging daemon
+      // startup (memory boots before session resume and the listen socket).
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          this.#reranker.init(),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    `init timed out after ${RERANKER_INIT_TIMEOUT_MS}ms`,
+                  ),
+                ),
+              RERANKER_INIT_TIMEOUT_MS,
+            );
+          }),
+        ]);
+        this.#rerankerReady = true;
+      } catch (err) {
+        this.#rerankerReady = false;
+        console.error(
+          `[codeoid/memory] reranker init failed — resolution runs fusion-only: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      } finally {
+        clearTimeout(timer);
+      }
     }
 
     // Bound the file-read dedup cache (pure cache — safe to prune, no
@@ -186,6 +231,68 @@ export class MemoryEngine {
     return hits.slice(0, limit);
   }
 
+  /**
+   * Cross-workspace hybrid retrieval — the conductor's path. Unlike recall()
+   * (scoped to one workspace), this unions FTS + vector candidates across ALL
+   * workspaces and ranks them in a SINGLE batch, so the ranker's BM25
+   * min-max normalization is GLOBAL and scores are comparable across
+   * workspaces. That fixes the small-workspace-domination failure a naive
+   * per-workspace merge has (a small workspace's batch-relative scores no
+   * longer inflate past a semantically better hit elsewhere).
+   */
+  async recallGlobal(q: {
+    query: string;
+    limit?: number;
+    filePaths?: string[];
+    /** Candidate pool per channel before ranking. Larger than the per-workspace
+     * default so many sessions are represented across the whole corpus. */
+    candidateK?: number;
+  }): Promise<RecallHit[]> {
+    const limit = q.limit ?? 8;
+    const candidateK = q.candidateK ?? Math.max(this.#ftsK, 100);
+    const now = Date.now();
+
+    const queryVector =
+      this.#embedderReady && q.query.trim()
+        ? normalize((await this.#embedder.embed([q.query]))[0]!)
+        : null;
+
+    // Global FTS candidates (all workspaces).
+    const ftsRows = this.#store.ftsSearchGlobal(q.query, candidateK);
+    const ftsHits = new Map<string, number>(ftsRows.map((r) => [r.id, r.bm25]));
+
+    // Global vector candidates: cosine over every workspace's (in-sync) matrix.
+    const vectorIds: string[] = [];
+    if (queryVector) {
+      const scored: Array<{ id: string; score: number }> = [];
+      for (const ws of this.#store.listWorkspaceIds()) {
+        const { ids, vectors } = this.#store.loadVectorMatrix(ws);
+        for (let i = 0; i < vectors.length; i++) {
+          const v = vectors[i]!;
+          if (v.length !== queryVector.length) continue;
+          let sum = 0;
+          for (let j = 0; j < v.length; j++) sum += v[j]! * queryVector[j]!;
+          scored.push({ id: ids[i]!, score: sum });
+        }
+      }
+      scored.sort((a, b) => b.score - a.score);
+      for (const s of scored.slice(0, candidateK)) vectorIds.push(s.id);
+    }
+
+    const candidateIds = [...new Set([...ftsHits.keys(), ...vectorIds])];
+    if (candidateIds.length === 0) return [];
+
+    const episodes = this.#store.episodesByIds(candidateIds);
+    const hits = rank(episodes, {
+      queryVector,
+      ftsHits,
+      queryFilePaths: q.filePaths ?? [],
+      now,
+      weights: this.#weights,
+    });
+    return hits.slice(0, limit);
+  }
+
   /** Fetch a single episode by id (for recall_turn-style lookup). */
   getEpisode(id: string): Episode | null {
     return this.#store.getEpisode(id);
@@ -208,7 +315,8 @@ export class MemoryEngine {
    */
   async searchSessions(opts: {
     query: string;
-    workspaceId: string;
+    /** Absent = cross-workspace (global) resolution — the conductor's path. */
+    workspaceId?: string;
     limit?: number;
     /** Episode-hit candidates to consider before grouping. */
     candidatePoolSize?: number;
@@ -220,16 +328,25 @@ export class MemoryEngine {
      * boost. Purely additive; absence just means no name boost.
      */
     sessionNames?: Map<string, string>;
+    /** Cross-encoder rerank of the top-k. Defaults on when a reranker is ready. */
+    rerank?: boolean;
   }): Promise<SessionSearchHit[]> {
     const limit = opts.limit ?? 10;
-    const pool = opts.candidatePoolSize ?? Math.max(40, limit * 5);
+    const global = opts.workspaceId === undefined;
+    // Cross-workspace needs a bigger candidate pool so many sessions across the
+    // corpus are represented (a single busy session would otherwise fill it).
+    const pool =
+      opts.candidatePoolSize ??
+      (global ? Math.max(150, limit * 15) : Math.max(40, limit * 5));
     const snippetsPerSession = opts.snippetsPerSession ?? 3;
 
-    const hits = await this.recall({
-      query: opts.query,
-      workspaceId: opts.workspaceId,
-      limit: pool,
-    });
+    const hits = global
+      ? await this.recallGlobal({ query: opts.query, limit: pool, candidateK: pool })
+      : await this.recall({
+          query: opts.query,
+          workspaceId: opts.workspaceId!,
+          limit: pool,
+        });
     if (hits.length === 0) return [];
 
     // Group by session id.
@@ -305,11 +422,41 @@ export class MemoryEngine {
     }
 
     scored.sort((a, b) => b.aggregateScore - a.aggregateScore);
+
+    // Cross-encoder rerank of the top-k — the precision@1 stage. After fusion
+    // the right session is usually already top-k; a cross-encoder reading
+    // (query, evidence) jointly pulls it to #1. Bounded to RERANK_K pairs.
+    const doRerank = (opts.rerank ?? this.#rerankerReady) && this.#rerankerReady;
+    if (doRerank && scored.length > 1) {
+      const RERANK_K = 8;
+      const head = scored.slice(0, RERANK_K);
+      const docs = head.map((h) =>
+        h.snippets
+          .map((s) => s.summary)
+          .join(". ")
+          .slice(0, 500),
+      );
+      try {
+        const rerankScores = await this.#reranker!.rerank(opts.query, docs);
+        const reordered = head
+          .map((h, i) => ({ h, s: rerankScores[i] ?? Number.NEGATIVE_INFINITY }))
+          .sort((a, b) => b.s - a.s)
+          .map((x) => x.h);
+        return [...reordered, ...scored.slice(RERANK_K)].slice(0, limit);
+      } catch (err) {
+        console.error(
+          `[codeoid/memory] rerank failed — returning fusion order: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
     return scored.slice(0, limit);
   }
 
   async close(): Promise<void> {
     await this.#embedder.close();
+    if (this.#reranker) await this.#reranker.close();
     this.#store.close();
   }
 

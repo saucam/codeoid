@@ -1,0 +1,53 @@
+[
+  {"reference": "the work to run multiple model providers behind one interface", "expectedSessionId": "2ad22a46-2bcc-4dcb-9d48-0441558f8c12", "expectedWorkspaceId": "ws_1a7cf3ca10b7c8ad"},
+  {"reference": "making the harness support codex and gemini as pluggable backends", "expectedSessionId": "2ad22a46-2bcc-4dcb-9d48-0441558f8c12", "expectedWorkspaceId": "ws_1a7cf3ca10b7c8ad"},
+  {"reference": "the common provider-interface feature for multi-provider support", "expectedSessionId": "2ad22a46-2bcc-4dcb-9d48-0441558f8c12", "expectedWorkspaceId": "ws_1a7cf3ca10b7c8ad"},
+
+  {"reference": "the telegram bug where switching sessions did not change the view", "expectedSessionId": "65f645ce-6095-4b6b-a22b-f4fd9cb794b0", "expectedWorkspaceId": "ws_1a7cf3ca10b7c8ad"},
+  {"reference": "the session-switch fix with unit and integration tests", "expectedSessionId": "65f645ce-6095-4b6b-a22b-f4fd9cb794b0", "expectedWorkspaceId": "ws_1a7cf3ca10b7c8ad"},
+  {"reference": "fixing the telegram UI not updating when I switch sessions", "expectedSessionId": "65f645ce-6095-4b6b-a22b-f4fd9cb794b0", "expectedWorkspaceId": "ws_1a7cf3ca10b7c8ad"},
+
+  {"reference": "the bug where sending a message mid-turn cancelled the whole conversation", "expectedSessionId": "96e93b8c-82a0-4375-b5ea-18cb7f9e0da4", "expectedWorkspaceId": "ws_1a7cf3ca10b7c8ad"},
+  {"reference": "the harness ending the conversation when I send another message during a reply", "expectedSessionId": "96e93b8c-82a0-4375-b5ea-18cb7f9e0da4", "expectedWorkspaceId": "ws_1a7cf3ca10b7c8ad"},
+  {"reference": "the mid-turn interruption and cancelled tool call issue", "expectedSessionId": "96e93b8c-82a0-4375-b5ea-18cb7f9e0da4", "expectedWorkspaceId": "ws_1a7cf3ca10b7c8ad"},
+
+  {"reference": "the deep comparison against the swarmclaw project", "expectedSessionId": "c94d2cdb-1e16-47f9-8d5c-c457d4c70cdf", "expectedWorkspaceId": "ws_1a7cf3ca10b7c8ad"},
+  {"reference": "comparing our session recall to how txtai does it", "expectedSessionId": "c94d2cdb-1e16-47f9-8d5c-c457d4c70cdf", "expectedWorkspaceId": "ws_1a7cf3ca10b7c8ad"},
+  {"reference": "the swarmclaw analysis where we filed issues for high-value features", "expectedSessionId": "c94d2cdb-1e16-47f9-8d5c-c457d4c70cdf", "expectedWorkspaceId": "ws_1a7cf3ca10b7c8ad"},
+
+  {"reference": "the research on high-leverage AI agents to adopt", "expectedSessionId": "1f32d975-4533-4615-97fc-62853a6b9a43", "expectedWorkspaceId": "ws_7863bab6bc25eb7a"},
+  {"reference": "the epic ticket planning agent work in build order", "expectedSessionId": "1f32d975-4533-4615-97fc-62853a6b9a43", "expectedWorkspaceId": "ws_7863bab6bc25eb7a"},
+  {"reference": "what changed yesterday and the agents-strategy planning", "expectedSessionId": "1f32d975-4533-4615-97fc-62853a6b9a43", "expectedWorkspaceId": "ws_7863bab6bc25eb7a"},
+
+  {"reference": "implementing the unified policy configuration screen", "expectedSessionId": "6ebcf4d5-6bbb-41c7-babb-f62464a168aa", "expectedWorkspaceId": "ws_7863bab6bc25eb7a"},
+  {"reference": "the policy-unification work in the architecture docs", "expectedSessionId": "6ebcf4d5-6bbb-41c7-babb-f62464a168aa", "expectedWorkspaceId": "ws_7863bab6bc25eb7a"},
+  {"reference": "the unified policy screen implementation from the design doc", "expectedSessionId": "6ebcf4d5-6bbb-41c7-babb-f62464a168aa", "expectedWorkspaceId": "ws_7863bab6bc25eb7a"},
+
+  {"reference": "prioritizing the simplest bugs on my sprint board", "expectedSessionId": "8ddeafbd-fb9c-42ee-8670-d6fcc1f71a6d", "expectedWorkspaceId": "ws_7863bab6bc25eb7a"},
+  {"reference": "the sprint-board bug triage for the week", "expectedSessionId": "8ddeafbd-fb9c-42ee-8670-d6fcc1f71a6d", "expectedWorkspaceId": "ws_7863bab6bc25eb7a"},
+  {"reference": "triaging the bugs assigned to me this sprint", "expectedSessionId": "8ddeafbd-fb9c-42ee-8670-d6fcc1f71a6d", "expectedWorkspaceId": "ws_7863bab6bc25eb7a"},
+
+  {"reference": "changing a service's model provider to a GLM model", "expectedSessionId": "c7557f9f-9600-4063-be9b-382038d7627a", "expectedWorkspaceId": "ws_6c0a43399afe4436"},
+  {"reference": "the provider switch that reads its API key from an env var", "expectedSessionId": "c7557f9f-9600-4063-be9b-382038d7627a", "expectedWorkspaceId": "ws_6c0a43399afe4436"},
+
+  {"reference": "comparing the Hermes agent's sandboxing against Claude Code", "expectedSessionId": "591fc609-8904-4773-a763-6c32fe60093c", "expectedWorkspaceId": "ws_4e1e0ef9653e8b21"},
+  {"reference": "the agent sandboxing-feature comparison notes", "expectedSessionId": "591fc609-8904-4773-a763-6c32fe60093c", "expectedWorkspaceId": "ws_4e1e0ef9653e8b21"},
+
+  {"reference": "the SDK audit of what's broken after the new agent-registration APIs", "expectedSessionId": "a5ecf55a-5b4d-4b21-bdc4-958f392edd87", "expectedWorkspaceId": "ws_5fc1444e46534d62"},
+  {"reference": "auditing the SDK for required changes", "expectedSessionId": "a5ecf55a-5b4d-4b21-bdc4-958f392edd87", "expectedWorkspaceId": "ws_5fc1444e46534d62"},
+
+  {"reference": "learning about a WIMSE agent-identity project and its mission-intent linking", "expectedSessionId": "b6b56014-ad0d-4a85-b621-b56fbc007bd0", "expectedWorkspaceId": "ws_17b4e88098eca64c"},
+  {"reference": "the agent-identity mission-intent work", "expectedSessionId": "b6b56014-ad0d-4a85-b621-b56fbc007bd0", "expectedWorkspaceId": "ws_17b4e88098eca64c"},
+
+  {"reference": "the vulnerability agentic harness we cloned to evaluate", "expectedSessionId": "8f3bfa46-b21d-4842-84e8-e2a2575c9805", "expectedWorkspaceId": "ws_e7e44be431f8b89a"},
+  {"reference": "evaluating an agentic vulnerability harness for the regression suite", "expectedSessionId": "8f3bfa46-b21d-4842-84e8-e2a2575c9805", "expectedWorkspaceId": "ws_e7e44be431f8b89a"},
+
+  {"reference": "the viral post announcing open-sourcing a project", "expectedSessionId": "1f31f357-7fe3-4380-ae2b-251c4d09ccb2", "expectedWorkspaceId": "ws_edaab3bb0114ef1c"},
+  {"reference": "the linkedin post about open sourcing, fixing the hook line", "expectedSessionId": "1f31f357-7fe3-4380-ae2b-251c4d09ccb2", "expectedWorkspaceId": "ws_edaab3bb0114ef1c"},
+
+  {"reference": "the remote part-time software dev job search", "expectedSessionId": "9dce1005-6cff-4ba9-82bf-817926cbbeae", "expectedWorkspaceId": "ws_a3cd85f9be85b73d"},
+  {"reference": "finding a part-time developer role to supplement income", "expectedSessionId": "9dce1005-6cff-4ba9-82bf-817926cbbeae", "expectedWorkspaceId": "ws_a3cd85f9be85b73d"},
+
+  {"reference": "alternatives to the IDE-hooks approach for capturing agent events", "expectedSessionId": "4e2614f7-b251-4d65-9d71-feef414102b1", "expectedWorkspaceId": "ws_d478dd6869244b16"},
+  {"reference": "the code-agents feature as an alternative to installing IDE hooks", "expectedSessionId": "4e2614f7-b251-4d65-9d71-feef414102b1", "expectedWorkspaceId": "ws_d478dd6869244b16"}
+]

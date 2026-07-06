@@ -84,6 +84,22 @@ export class Store {
         models_json TEXT NOT NULL,
         cached_at   TEXT NOT NULL DEFAULT (datetime('now'))
       );
+
+      -- Durable conductor identity (design R2): one row per tenant, reloaded
+      -- on daemon restart so the conductor keeps a stable WIMSE URI across
+      -- process lifetimes. api_key is the ONE credential at rest — the
+      -- conductor's working token is re-minted per boot by owner delegation,
+      -- and its actor keypair never touches disk.
+      CREATE TABLE IF NOT EXISTS conductor_identity (
+        account_id  TEXT NOT NULL,
+        project_id  TEXT NOT NULL,
+        identity_id TEXT NOT NULL,
+        wimse_uri   TEXT NOT NULL,
+        api_key     TEXT NOT NULL,
+        created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (account_id, project_id)
+      );
     `);
     // Pre-release single-row predecessor of provider_model_catalogs — never
     // shipped in a tagged version; drop from dev databases that ran the branch.
@@ -310,6 +326,51 @@ export class Store {
 
   deleteSession(id: string): void {
     this.#db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
+  }
+
+  // ── Conductor identity ────────────────────────────────────────────────
+
+  saveConductorIdentity(row: {
+    accountId: string;
+    projectId: string;
+    identityId: string;
+    wimseUri: string;
+    apiKey: string;
+  }): void {
+    this.#db
+      .prepare(
+        `INSERT INTO conductor_identity (account_id, project_id, identity_id, wimse_uri, api_key)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(account_id, project_id) DO UPDATE SET
+           identity_id = excluded.identity_id,
+           wimse_uri = excluded.wimse_uri,
+           api_key = excluded.api_key,
+           updated_at = datetime('now')`,
+      )
+      .run(row.accountId, row.projectId, row.identityId, row.wimseUri, row.apiKey);
+  }
+
+  getConductorIdentity(
+    accountId: string,
+    projectId: string,
+  ): { identityId: string; wimseUri: string; apiKey: string } | null {
+    const row = this.#db
+      .prepare(
+        `SELECT identity_id AS identityId, wimse_uri AS wimseUri, api_key AS apiKey
+         FROM conductor_identity WHERE account_id = ? AND project_id = ?`,
+      )
+      .get(accountId, projectId) as
+      | { identityId: string; wimseUri: string; apiKey: string }
+      | null;
+    return row ?? null;
+  }
+
+  deleteConductorIdentity(accountId: string, projectId: string): void {
+    this.#db
+      .prepare(
+        "DELETE FROM conductor_identity WHERE account_id = ? AND project_id = ?",
+      )
+      .run(accountId, projectId);
   }
 
   // ── Model catalog cache ───────────────────────────────────────────────
