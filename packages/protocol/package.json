@@ -21,6 +21,7 @@
       "default": "./src/schemas.ts"
     }
   },
+  "sideEffects": false,
   "files": ["src", "!src/**/*.test.ts", "README.md"],
   "publishConfig": {
     "access": "public"

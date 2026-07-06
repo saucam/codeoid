@@ -298,6 +298,53 @@ describe("CodeoidClient", () => {
     expect(ws3.parsed[0]).toMatchObject({ token: "static-fallback" });
   });
 
+  it("concurrent connect() calls join one attempt instead of racing (or throwing)", async () => {
+    const c = track(makeClient());
+    const p1 = c.connect();
+    const p2 = c.connect(); // previously: threw "connect already in progress"
+    await flush();
+    expect(MockWS.instances.length).toBe(1); // one socket, not two
+    const ws = MockWS.last();
+    ws.open();
+    await flush();
+    ws.recv(AUTH_OK);
+    const [a1, a2] = await Promise.all([p1, p2]);
+    expect(a1.type).toBe("auth.ok");
+    expect(a2.type).toBe("auth.ok");
+  });
+
+  it("connect() after shutdown() fails with a clear terminal-instance error", async () => {
+    const c = track(makeClient());
+    await connectClient(c);
+    c.shutdown();
+    await expect(c.connect()).rejects.toThrow(/shut down/);
+  });
+
+  it("rejects a duplicate request id instead of clobbering the pending entry", async () => {
+    const c = track(makeClient());
+    const ws = await connectClient(c);
+    const first = c.request({ type: "ping", id: "dup-1" });
+    await expect(c.request({ type: "ping", id: "dup-1" })).rejects.toThrow(
+      /duplicate request id/,
+    );
+    // The FIRST request is unharmed and still resolves.
+    ws.recv({ type: "response.ok", requestId: "dup-1" });
+    await expect(first).resolves.toMatchObject({ requestId: "dup-1" });
+  });
+
+  it("a throwing message handler doesn't break dispatch to later handlers", async () => {
+    const c = track(makeClient());
+    const ws = await connectClient(c);
+    const seen: string[] = [];
+    c.onMessage(() => {
+      throw new Error("bad consumer");
+    });
+    c.onMessage((m) => seen.push(m.type));
+    ws.recv({ type: "session.status_change", sessionId: "s", status: "idle", timestamp: "t" });
+    ws.recv({ type: "session.status_change", sessionId: "s", status: "thinking", timestamp: "t" });
+    expect(seen).toHaveLength(2); // both frames reached the second handler
+  });
+
   it("shutdown() closes, rejects pending requests, and stops reconnecting", async () => {
     const c = track(makeClient());
     const ws = await connectClient(c);

@@ -131,6 +131,14 @@ export class CodeoidClient {
   #wake: (() => void) | null = null;
   /** True while a connect loop is running (prevents concurrent loops). */
   #connecting = false;
+  /**
+   * The in-flight connect loop, shared by every entry point (connect(),
+   * reconnectNow(), close-triggered and heartbeat-triggered reconnects) so a
+   * caller landing mid-reconnect JOINS the attempt instead of racing it —
+   * previously a connect() during a background reconnect threw
+   * "connect already in progress".
+   */
+  #loopPromise: Promise<AuthOkMsg> | null = null;
   #resumeWired = false;
   #onResume: (() => void) | null = null;
 
@@ -152,7 +160,11 @@ export class CodeoidClient {
   /** Subscribe to status changes. Returns an unsubscribe fn. */
   onStatus(handler: StatusHandler): () => void {
     this.#statusHandlers.add(handler);
-    handler(this.#status);
+    try {
+      handler(this.#status);
+    } catch (err) {
+      this.#log("error", "status handler threw", { err });
+    }
     return () => this.#statusHandlers.delete(handler);
   }
 
@@ -162,27 +174,41 @@ export class CodeoidClient {
     return () => this.#messageHandlers.delete(handler);
   }
 
-  /** Connect and complete the auth handshake. Resolves on `auth.ok`. */
+  /**
+   * Connect and complete the auth handshake. Resolves on `auth.ok`. Safe to
+   * call at any time: already connected → resolves immediately; a reconnect
+   * loop already running → joins it. Throws only after `shutdown()` — a
+   * client instance is terminal once shut down; construct a fresh one.
+   */
   async connect(): Promise<AuthOkMsg> {
+    if (this.#shutdown) throw new Error("client is shut down — construct a new CodeoidClient");
     this.#wireResumeListeners();
     if (this.#status.kind === "connected") return this.#status.auth;
-    return this.#connectWithBackoff(1);
+    return this.#joinLoop();
+  }
+
+  /** Start the connect loop, or join the one already in flight. */
+  #joinLoop(): Promise<AuthOkMsg> {
+    if (!this.#loopPromise) {
+      this.#loopPromise = this.#connectWithBackoff(1).finally(() => {
+        this.#loopPromise = null;
+      });
+    }
+    return this.#loopPromise;
   }
 
   /**
    * Reconnect immediately — used on resume (tab focus / network online /
-   * webview unsuspend). If a backoff sleep is in progress, wake it so we
-   * retry now instead of waiting out the timer; if no loop is running and
-   * we're not connected, start one.
+   * webview unsuspend / React Native AppState). If a backoff sleep is in
+   * progress, wake it so we retry now instead of waiting out the timer; if
+   * no loop is running and we're not connected, start one.
    */
   reconnectNow(): void {
     if (this.#shutdown || this.#status.kind === "connected") return;
     if (this.#wake) {
       this.#wake();
     } else if (!this.#connecting) {
-      void this.#connectWithBackoff(1).catch((e) =>
-        this.#log("error", "reconnect failed", { e }),
-      );
+      void this.#joinLoop().catch((e) => this.#log("error", "reconnect failed", { e }));
     }
   }
 
@@ -210,6 +236,13 @@ export class CodeoidClient {
         return;
       }
       const id = msg.id;
+      // A duplicate id would silently clobber the earlier pending entry,
+      // leaving its caller to hang until the timeout with a misleading
+      // "timed out" — surface the programmer error immediately instead.
+      if (this.#pending.has(id)) {
+        reject(new Error(`duplicate request id: ${id}`));
+        return;
+      }
       const timer = setTimeout(() => {
         this.#pending.delete(id);
         reject(new Error(`request ${id} timed out`));
@@ -257,7 +290,15 @@ export class CodeoidClient {
 
   #setStatus(next: ClientStatus): void {
     this.#status = next;
-    for (const h of this.#statusHandlers) h(next);
+    // Isolate subscriber faults: one throwing handler must not break the
+    // fan-out for later handlers (or unwind transport internals).
+    for (const h of this.#statusHandlers) {
+      try {
+        h(next);
+      } catch (err) {
+        this.#log("error", "status handler threw", { err });
+      }
+    }
   }
 
   #log(level: "debug" | "info" | "warn" | "error", msg: string, ctx?: unknown): void {
@@ -373,9 +414,7 @@ export class CodeoidClient {
     }
     this.#pending.clear();
     if (!this.#connecting) {
-      void this.#connectWithBackoff(1).catch((e) =>
-        this.#log("error", "reconnect failed", { e }),
-      );
+      void this.#joinLoop().catch((e) => this.#log("error", "reconnect failed", { e }));
     }
   }
 
@@ -522,7 +561,7 @@ export class CodeoidClient {
         this.#log("warn", "connection dropped, attempting reconnect", { code: ev.code });
         // Asynchronously kick off reconnect — caller already moved on.
         if (!this.#connecting) {
-          void this.#connectWithBackoff(1).catch((e) => {
+          void this.#joinLoop().catch((e) => {
             this.#log("error", "reconnect exhausted", { e });
           });
         }
@@ -574,6 +613,14 @@ export class CodeoidClient {
         }
       }
     }
-    for (const h of this.#messageHandlers) h(msg);
+    // Isolate subscriber faults: a throwing UI handler must not break the
+    // fan-out for later handlers or propagate into the WS event callback.
+    for (const h of this.#messageHandlers) {
+      try {
+        h(msg);
+      } catch (err) {
+        this.#log("error", "message handler threw", { err });
+      }
+    }
   }
 }

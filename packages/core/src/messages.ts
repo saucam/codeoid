@@ -103,6 +103,10 @@ export function dedupeReplay(messages: readonly SessionMessage[]): {
 /** Change notification. `messageId` is null for whole-session changes (replay/clear). */
 export type MessageStoreListener = (sessionId: string, messageId: string | null) => void;
 
+/** Stable empty slice — avoids an allocation per miss and gives callers a
+ * consistent identity for "no messages". */
+const EMPTY: readonly SessionMessage[] = Object.freeze([]);
+
 export class MessageStore {
   #bySession = new Map<string, SessionMessage[]>();
   #indexBySession = new Map<string, Map<string, number>>();
@@ -119,7 +123,7 @@ export class MessageStore {
   /** Messages for a session, in arrival order. The returned array is live —
    * treat as read-only and re-read on change notifications / epoch bumps. */
   messagesFor(sessionId: string): readonly SessionMessage[] {
-    return this.#bySession.get(sessionId) ?? [];
+    return this.#bySession.get(sessionId) ?? EMPTY;
   }
 
   /** O(1) existence check. */
@@ -287,6 +291,14 @@ export class MessageStore {
   }
 
   #notify(sessionId: string, messageId: string | null): void {
-    for (const l of this.#listeners) l(sessionId, messageId);
+    // Isolate subscriber faults: one throwing listener must not break the
+    // fan-out for later listeners or unwind the mutation that notified.
+    for (const l of this.#listeners) {
+      try {
+        l(sessionId, messageId);
+      } catch (err) {
+        console.error("[codeoid/core] MessageStore listener threw:", err);
+      }
+    }
   }
 }

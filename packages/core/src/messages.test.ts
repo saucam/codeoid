@@ -184,6 +184,22 @@ describe("MessageStore", () => {
       ["s1", null],
     ]);
   });
+
+  it("a throwing listener doesn't break later listeners or the mutation", () => {
+    const seen: string[] = [];
+    store.onChange(() => {
+      throw new Error("bad listener");
+    });
+    store.onChange((sid) => seen.push(sid));
+    store.applyMessage(makeMsg({ messageId: "m1" }));
+    expect(seen).toEqual(["s1"]); // second listener still ran
+    expect(store.hasMessage("s1", "m1")).toBe(true); // mutation landed
+  });
+
+  it("messagesFor returns a stable empty slice for unknown sessions", () => {
+    expect(store.messagesFor("nope")).toBe(store.messagesFor("also-nope"));
+    expect(store.messagesFor("nope")).toHaveLength(0);
+  });
 });
 
 // ── ingest() — the broadcast routing table ────────────────────────────────────
