@@ -9,6 +9,118 @@ import { createInterface } from "node:readline";
 import type { CodeoidConfig } from "../config.js";
 import type { ClientMessage, DaemonMessage, SessionInfo } from "../protocol/types.js";
 import { ALL_SCOPES_STRING } from "../protocol/scopes.js";
+import { sanitizeTerminalOutput } from "../tui/ansi/codes.js";
+
+// ── Stream rendering (pure, exported for tests) ───────────────────────────────
+
+/** SGR framing codes the client emits around content. These are trusted
+ *  constants; only the interpolated (untrusted) values are sanitized. */
+const CYAN = "\x1b[36m";
+const DIM = "\x1b[2m";
+const YELLOW = "\x1b[33m";
+const RED = "\x1b[31m";
+const RESET = "\x1b[0m";
+
+/** Strip terminal-control escapes from an untrusted field before it reaches
+ *  the TTY (OSC 52 clipboard, cursor moves, DCS, etc. — see #91/#92). */
+const S = (s: string | undefined): string => sanitizeTerminalOutput(s ?? "");
+
+/** Streaming/approval bookkeeping carried across messages by the attach loop. */
+export interface StreamRenderState {
+  /** messageId last seen via a delta, so the committed assistant message that
+   *  follows doesn't double-print content already streamed chunk-by-chunk. */
+  streamingAssistantMsgId: string | null;
+  /** approvalId of the most recent waiting_confirmation tool call, so a typed
+   *  yes/no can be routed to it. */
+  latestApprovalId: string | null;
+}
+
+export function newStreamRenderState(): StreamRenderState {
+  return { streamingAssistantMsgId: null, latestApprovalId: null };
+}
+
+/**
+ * Render one daemon stream message to the exact bytes the legacy readline
+ * client writes to stdout, with every untrusted field (`content`,
+ * `identity.name`, `tool.name`, `tool.state.description`, `contentAppend`)
+ * run through `sanitizeTerminalOutput`. Mutates `state` for the streaming /
+ * approval bookkeeping the caller carries between messages. Pure otherwise —
+ * no I/O — so a test can drive it and assert escapes are stripped.
+ *
+ * A prior `console.log(x)` becomes `x + "\n"`; a prior `process.stdout.write(x)`
+ * becomes `x` — byte-for-byte identical to the previous inline rendering.
+ */
+export function renderStreamMessage(msg: DaemonMessage, state: StreamRenderState): string {
+  switch (msg.type) {
+    case "scrollback.replay": {
+      const m = msg as { messages?: Array<{ type: string; role?: string; content?: string; tool?: { name?: string }; identity?: { name?: string } }> };
+      const list = m.messages ?? [];
+      let out = `\n--- scrollback (${list.length} messages) ---\n`;
+      for (const e of list) {
+        if (e.type !== "session.message") continue;
+        const id = e.identity?.name ? `${DIM}${S(e.identity.name)}${RESET} ` : "";
+        switch (e.role) {
+          case "user": out += `\n${id}${CYAN}> ${S(e.content)}${RESET}\n`; break;
+          case "assistant": if (e.content) out += `${S(e.content)}\n`; break;
+          case "tool_call": out += `\n${id}${YELLOW}⚡ ${S(e.tool?.name ?? e.content)}${RESET}\n`; break;
+          case "system": out += `${RED}${S(e.content)}${RESET}\n`; break;
+          case "info": out += `${DIM}${S(e.content)}${RESET}\n`; break;
+        }
+      }
+      out += "\n--- end scrollback ---\n\n";
+      return out;
+    }
+
+    case "session.message": {
+      const sm = msg as { role?: string; content?: string; messageId?: string; tool?: { name?: string; state?: { phase?: string; approvalId?: string; description?: string } }; identity?: { name?: string; type?: string } };
+      const id = sm.identity?.name ? `${DIM}${S(sm.identity.name)}${RESET} ` : "";
+      switch (sm.role) {
+        case "user":
+          return `\n${id}${CYAN}> ${S(sm.content)}${RESET}\n`;
+        case "assistant": {
+          const msgId = sm.messageId;
+          if (msgId && msgId === state.streamingAssistantMsgId) {
+            state.streamingAssistantMsgId = null;
+            return "\n";
+          }
+          if (sm.content) return `${S(sm.content)}\n`;
+          return "";
+        }
+        case "thinking":
+          return `${DIM}${S(sm.content)}${RESET}`;
+        case "tool_call": {
+          const phase = sm.tool?.state?.phase ?? "executing";
+          const name = S(sm.tool?.name ?? sm.content);
+          if (phase === "waiting_confirmation") {
+            state.latestApprovalId = sm.tool?.state?.approvalId ?? null;
+            return `\n${id}${RED}⚡ ${name}: ${S(sm.tool?.state?.description)}${RESET}\n  Type 'yes' to approve, 'no' to deny\n`;
+          }
+          return `\n${id}${YELLOW}⚡ ${name} [${phase}]${RESET}\n`;
+        }
+        case "system":
+          return `\n${RED}${S(sm.content)}${RESET}\n`;
+        case "info":
+          return `${DIM}${S(sm.content)}${RESET}\n`;
+      }
+      return "";
+    }
+
+    case "session.message.delta": {
+      const delta = msg as { contentAppend?: string; messageId?: string; toolStateUpdate?: { phase?: string } };
+      if (delta.messageId) state.streamingAssistantMsgId = delta.messageId;
+      let out = "";
+      if (delta.contentAppend) out += S(delta.contentAppend);
+      if (delta.toolStateUpdate) out += `${YELLOW}  → ${delta.toolStateUpdate.phase}${RESET}\n`;
+      return out;
+    }
+
+    case "session.status_change": {
+      const sc = msg as { status?: string };
+      return `\n[status] ${sc.status}\n`;
+    }
+  }
+  return "";
+}
 
 export class TerminalClient {
   #config: CodeoidConfig;
@@ -130,97 +242,15 @@ export class TerminalClient {
 
     console.log("\nAttached to session. Type messages below. Ctrl+C to detach.\n");
 
-    let latestApprovalId: string | null = null;
-    // Track the messageId of any assistant message that arrived via streaming
-    // deltas (session.message.delta). When the final committed session.message
-    // arrives for that same ID (text_done broadcast), skip re-printing the
-    // content — it was already output chunk-by-chunk via the deltas.
-    let streamingAssistantMsgId: string | null = null;
+    // Streaming/approval bookkeeping, carried across messages. `latestApprovalId`
+    // is read below to route a typed yes/no; both fields are mutated by
+    // renderStreamMessage, which also sanitizes every untrusted field before it
+    // reaches the TTY (OSC/CSI/DCS escapes — see #91/#92).
+    const renderState = newStreamRenderState();
 
     this.#streamHandler = (msg) => {
-      switch (msg.type) {
-        case "scrollback.replay":
-          console.log(`\n--- scrollback (${(msg as { messages?: unknown[] }).messages?.length ?? 0} messages) ---`);
-          for (const m of (msg as { messages: Array<{ type: string; role?: string; content?: string; tool?: { name?: string }; identity?: { name?: string } }> }).messages) {
-            if (m.type === "session.message") {
-              const id = m.identity?.name ? `\x1b[2m${m.identity.name}\x1b[0m ` : "";
-              switch (m.role) {
-                case "user": console.log(`\n${id}\x1b[36m> ${m.content}\x1b[0m`); break;
-                case "assistant": if (m.content) { process.stdout.write(m.content); process.stdout.write("\n"); } break;
-                case "tool_call": console.log(`\n${id}\x1b[33m⚡ ${m.tool?.name ?? m.content}\x1b[0m`); break;
-                case "system": console.log(`\x1b[31m${m.content}\x1b[0m`); break;
-                case "info": console.log(`\x1b[2m${m.content}\x1b[0m`); break;
-              }
-            }
-          }
-          console.log("\n--- end scrollback ---\n");
-          break;
-
-        case "session.message": {
-          const sm = msg as { role?: string; content?: string; messageId?: string; tool?: { name?: string; state?: { phase?: string; approvalId?: string; description?: string } }; identity?: { name?: string; type?: string } };
-          const id = sm.identity?.name ? `\x1b[2m${sm.identity.name}\x1b[0m ` : "";
-
-          switch (sm.role) {
-            case "user":
-              console.log(`\n${id}\x1b[36m> ${sm.content}\x1b[0m`);
-              break;
-            case "assistant": {
-              const msgId = sm.messageId;
-              if (msgId && msgId === streamingAssistantMsgId) {
-                // Content already printed via deltas — just end the streaming line.
-                process.stdout.write("\n");
-                streamingAssistantMsgId = null;
-              } else if (sm.content) {
-                process.stdout.write(sm.content);
-                process.stdout.write("\n");
-              }
-              break;
-            }
-            case "thinking":
-              process.stdout.write(`\x1b[2m${sm.content}\x1b[0m`);
-              break;
-            case "tool_call": {
-              const phase = sm.tool?.state?.phase ?? "executing";
-              const name = sm.tool?.name ?? sm.content;
-              if (phase === "waiting_confirmation") {
-                latestApprovalId = sm.tool?.state?.approvalId ?? null;
-                console.log(`\n${id}\x1b[31m⚡ ${name}: ${sm.tool?.state?.description ?? ""}\x1b[0m`);
-                console.log(`  Type 'yes' to approve, 'no' to deny`);
-              } else {
-                console.log(`\n${id}\x1b[33m⚡ ${name} [${phase}]\x1b[0m`);
-              }
-              break;
-            }
-            case "system":
-              console.log(`\n\x1b[31m${sm.content}\x1b[0m`);
-              break;
-            case "info":
-              console.log(`\x1b[2m${sm.content}\x1b[0m`);
-              break;
-          }
-          break;
-        }
-
-        case "session.message.delta": {
-          const delta = msg as { contentAppend?: string; messageId?: string; toolStateUpdate?: { phase?: string } };
-          // Mark this messageId as "streamed via deltas" so the final
-          // committed session.message doesn't double-print the content.
-          if (delta.messageId) streamingAssistantMsgId = delta.messageId;
-          if (delta.contentAppend) {
-            process.stdout.write(delta.contentAppend);
-          }
-          if (delta.toolStateUpdate) {
-            console.log(`\x1b[33m  → ${delta.toolStateUpdate.phase}\x1b[0m`);
-          }
-          break;
-        }
-
-        case "session.status_change": {
-          const sc = msg as { status?: string };
-          console.log(`\n[status] ${sc.status}`);
-          break;
-        }
-      }
+      const out = renderStreamMessage(msg, renderState);
+      if (out) process.stdout.write(out);
     };
 
     const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -250,15 +280,15 @@ export class TerminalClient {
         continue;
       }
 
-      if ((trimmed === "yes" || trimmed === "no") && latestApprovalId) {
+      if ((trimmed === "yes" || trimmed === "no") && renderState.latestApprovalId) {
         await this.#request({
           type: "session.approve",
           id: randomUUID(),
           sessionId,
-          approvalId: latestApprovalId,
+          approvalId: renderState.latestApprovalId,
           approved: trimmed === "yes",
         });
-        latestApprovalId = null;
+        renderState.latestApprovalId = null;
         continue;
       }
 
