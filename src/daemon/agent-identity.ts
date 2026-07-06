@@ -436,13 +436,9 @@ export class AgentIdentityManager {
         registerReq as RegisterAgentRequest,
       );
 
-      this.#conductor = {
-        identityId: resp.identity.id,
-        wimseUri: resp.identity.wimse_uri,
-        apiKey: resp.api_key,
-        client: this.#clientForAgent(resp.api_key),
-        privateKey: keypair.privateKey,
-      };
+      // Persist BEFORE exposing the in-memory identity: if the Store write
+      // fails, callers must see the registration as failed rather than a
+      // "durable" conductor that would vanish on the next restart.
       this.#store.saveConductorIdentity({
         accountId: this.#config.accountId,
         projectId: this.#config.projectId,
@@ -450,6 +446,13 @@ export class AgentIdentityManager {
         wimseUri: resp.identity.wimse_uri,
         apiKey: resp.api_key,
       });
+      this.#conductor = {
+        identityId: resp.identity.id,
+        wimseUri: resp.identity.wimse_uri,
+        apiKey: resp.api_key,
+        client: this.#clientForAgent(resp.api_key),
+        privateKey: keypair.privateKey,
+      };
 
       this.#store.audit(
         resp.identity.wimse_uri,
@@ -592,8 +595,10 @@ export class AgentIdentityManager {
    * Deactivate the conductor identity. ZeroID cascade-revokes every active
    * credential in its delegation subtree (owner-delegated conductor token,
    * child-worker tokens, their sub-agent tokens) via the parent_jti chain —
-   * one call kills the whole tree. Clears the persisted row so the next
-   * registerConductor starts a fresh identity.
+   * one call kills the whole tree. On success the persisted row is cleared
+   * so the next registerConductor starts a fresh identity; on failure the
+   * row is KEPT — it's the only durable record of an identity that is still
+   * live in ZeroID, and a later deactivateConductor() retries against it.
    */
   async deactivateConductor(): Promise<void> {
     const conductor = this.#conductor;
@@ -605,24 +610,28 @@ export class AgentIdentityManager {
       );
     if (!row) return;
 
+    // Stop using the identity locally regardless of the remote outcome —
+    // the caller's intent is deactivation.
+    this.#conductor = undefined;
+
     try {
       await this.#client.agents.deactivate(row.identityId);
-      this.#store.audit(
-        row.wimseUri,
-        "conductor.identity.deactivated",
-        undefined,
-        `identity_id=${row.identityId}`,
-      );
     } catch (err) {
       console.error(
-        "[codeoid] failed to deactivate conductor identity:",
+        "[codeoid] failed to deactivate conductor identity (row kept for retry):",
         err instanceof Error ? err.message : err,
       );
+      return;
     }
+    this.#store.audit(
+      row.wimseUri,
+      "conductor.identity.deactivated",
+      undefined,
+      `identity_id=${row.identityId}`,
+    );
     this.#store.deleteConductorIdentity(
       this.#config.accountId,
       this.#config.projectId,
     );
-    this.#conductor = undefined;
   }
 }

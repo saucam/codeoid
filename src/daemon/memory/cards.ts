@@ -165,48 +165,53 @@ export class SessionCardStore {
         )
       : null;
 
-    this.#db
-      .prepare(
-        `INSERT INTO session_cards (
-           session_id, workspace_id, repo, branch, task, state, last_action,
-           open_threads, entities, embedding, embedding_model, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(session_id) DO UPDATE SET
-           workspace_id = excluded.workspace_id,
-           repo = excluded.repo,
-           branch = excluded.branch,
-           task = excluded.task,
-           state = excluded.state,
-           last_action = excluded.last_action,
-           open_threads = excluded.open_threads,
-           entities = excluded.entities,
-           embedding = excluded.embedding,
-           embedding_model = excluded.embedding_model,
-           updated_at = excluded.updated_at`,
-      )
-      .run(
-        card.sessionId,
-        card.workspaceId,
-        card.repo ?? null,
-        card.branch ?? null,
-        card.task ?? null,
-        card.state ?? null,
-        card.lastAction ?? null,
-        JSON.stringify(card.openThreads ?? []),
-        JSON.stringify(card.entities ?? []),
-        embeddingBuf,
-        card.embeddingModel ?? null,
-        createdAt,
-        now,
-      );
+    // One transaction for the card row + its FTS mirror: a crash between the
+    // two statements must not leave session_cards_fts drifted from
+    // session_cards.
+    this.#db.transaction(() => {
+      this.#db
+        .prepare(
+          `INSERT INTO session_cards (
+             session_id, workspace_id, repo, branch, task, state, last_action,
+             open_threads, entities, embedding, embedding_model, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(session_id) DO UPDATE SET
+             workspace_id = excluded.workspace_id,
+             repo = excluded.repo,
+             branch = excluded.branch,
+             task = excluded.task,
+             state = excluded.state,
+             last_action = excluded.last_action,
+             open_threads = excluded.open_threads,
+             entities = excluded.entities,
+             embedding = excluded.embedding,
+             embedding_model = excluded.embedding_model,
+             updated_at = excluded.updated_at`,
+        )
+        .run(
+          card.sessionId,
+          card.workspaceId,
+          card.repo ?? null,
+          card.branch ?? null,
+          card.task ?? null,
+          card.state ?? null,
+          card.lastAction ?? null,
+          JSON.stringify(card.openThreads ?? []),
+          JSON.stringify(card.entities ?? []),
+          embeddingBuf,
+          card.embeddingModel ?? null,
+          createdAt,
+          now,
+        );
 
-    // Refresh the FTS mirror: delete any prior row for this session, re-insert.
-    this.#db
-      .prepare("DELETE FROM session_cards_fts WHERE session_id = ?")
-      .run(card.sessionId);
-    this.#db
-      .prepare("INSERT INTO session_cards_fts (session_id, text) VALUES (?, ?)")
-      .run(card.sessionId, cardFtsText(card));
+      // Refresh the FTS mirror: delete any prior row for this session, re-insert.
+      this.#db
+        .prepare("DELETE FROM session_cards_fts WHERE session_id = ?")
+        .run(card.sessionId);
+      this.#db
+        .prepare("INSERT INTO session_cards_fts (session_id, text) VALUES (?, ?)")
+        .run(card.sessionId, cardFtsText(card));
+    })();
 
     return this.getCard(card.sessionId)!;
   }
@@ -272,53 +277,67 @@ export class SessionCardStore {
     const now = input.now ?? Date.now();
     const validAt = input.validAt ?? now;
 
-    const open = this.#db
-      .prepare(
-        `SELECT * FROM facts
-         WHERE subject = ? AND predicate = ? AND invalid_at IS NULL AND expired_at IS NULL
-         ORDER BY valid_at DESC LIMIT 1`,
-      )
-      .get(input.subject, input.predicate) as FactRow | null;
+    // Lookup + supersede + insert commit atomically: a crash between the
+    // close-out UPDATE and the INSERT must never leave (subject, predicate)
+    // with no open fact.
+    return this.#db.transaction((): Fact => {
+      const open = this.#db
+        .prepare(
+          `SELECT * FROM facts
+           WHERE subject = ? AND predicate = ? AND invalid_at IS NULL AND expired_at IS NULL
+           ORDER BY valid_at DESC LIMIT 1`,
+        )
+        .get(input.subject, input.predicate) as FactRow | null;
 
-    if (open && open.object === input.object) {
-      return rowToFact(open); // unchanged — no new version
-    }
+      if (open && open.object === input.object) {
+        return rowToFact(open); // unchanged — no new version
+      }
 
-    if (open) {
-      // Supersede: close the prior belief in both time axes.
+      if (open) {
+        // Closing the open fact with invalid_at < valid_at would make that
+        // row unsatisfiable for every factsAsOf() query — the fact would
+        // silently vanish from all time-travel reads. Reject out-of-order
+        // assertions instead of corrupting the bi-temporal history.
+        if (validAt < open.valid_at) {
+          throw new Error(
+            `assertFact: out-of-order validAt (${validAt}) precedes open fact's validAt (${open.valid_at}) for ${input.subject}/${input.predicate}`,
+          );
+        }
+        // Supersede: close the prior belief in both time axes.
+        this.#db
+          .prepare("UPDATE facts SET invalid_at = ?, expired_at = ? WHERE id = ?")
+          .run(validAt, now, open.id);
+      }
+
+      const id = randomUUID();
       this.#db
-        .prepare("UPDATE facts SET invalid_at = ?, expired_at = ? WHERE id = ?")
-        .run(validAt, now, open.id);
-    }
+        .prepare(
+          `INSERT INTO facts
+             (id, session_id, subject, predicate, object, valid_at, invalid_at, created_at, expired_at)
+           VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL)`,
+        )
+        .run(
+          id,
+          input.sessionId,
+          input.subject,
+          input.predicate,
+          input.object,
+          validAt,
+          now,
+        );
 
-    const id = randomUUID();
-    this.#db
-      .prepare(
-        `INSERT INTO facts
-           (id, session_id, subject, predicate, object, valid_at, invalid_at, created_at, expired_at)
-         VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL)`,
-      )
-      .run(
+      return {
         id,
-        input.sessionId,
-        input.subject,
-        input.predicate,
-        input.object,
+        sessionId: input.sessionId,
+        subject: input.subject,
+        predicate: input.predicate,
+        object: input.object,
         validAt,
-        now,
-      );
-
-    return {
-      id,
-      sessionId: input.sessionId,
-      subject: input.subject,
-      predicate: input.predicate,
-      object: input.object,
-      validAt,
-      invalidAt: null,
-      createdAt: now,
-      expiredAt: null,
-    };
+        invalidAt: null,
+        createdAt: now,
+        expiredAt: null,
+      };
+    })();
   }
 
   /** Facts currently believed true for a subject (invalidAt + expiredAt null). */

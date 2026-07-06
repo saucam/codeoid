@@ -48,6 +48,10 @@ export interface SessionSearchHit {
   }>;
 }
 
+/** Ceiling on the reranker's first-run model download + load. Past this the
+ * engine degrades to fusion-only rather than holding up daemon startup. */
+const RERANKER_INIT_TIMEOUT_MS = 120_000;
+
 export interface MemoryEngineOptions {
   store: SqliteEpisodeStore;
   embedder: Embedder;
@@ -106,8 +110,25 @@ export class MemoryEngine {
     }
 
     if (this.#reranker) {
+      // Bounded: init downloads model weights on first run, and a stalled
+      // download must degrade to fusion-only instead of wedging daemon
+      // startup (memory boots before session resume and the listen socket).
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        await this.#reranker.init();
+        await Promise.race([
+          this.#reranker.init(),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    `init timed out after ${RERANKER_INIT_TIMEOUT_MS}ms`,
+                  ),
+                ),
+              RERANKER_INIT_TIMEOUT_MS,
+            );
+          }),
+        ]);
         this.#rerankerReady = true;
       } catch (err) {
         this.#rerankerReady = false;
@@ -116,6 +137,8 @@ export class MemoryEngine {
             err instanceof Error ? err.message : String(err)
           }`,
         );
+      } finally {
+        clearTimeout(timer);
       }
     }
 

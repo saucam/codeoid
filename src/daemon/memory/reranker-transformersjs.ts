@@ -78,6 +78,14 @@ export class TransformersJsReranker implements Reranker {
   }
 
   async close(): Promise<void> {
+    // Release the ONNX sessions' WASM memory — dropping the JS reference
+    // alone doesn't free it. Best-effort: a "cannot release session" from
+    // the runtime must not fail close(). (AutoTokenizer has no dispose().)
+    try {
+      await this.#model?.dispose?.();
+    } catch {
+      // Best-effort.
+    }
     this.#tokenizer = null;
     this.#model = null;
     this.#initPromise = null;

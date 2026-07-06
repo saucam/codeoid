@@ -38,6 +38,8 @@ class FakeZeroID {
   deactivateCalls: string[] = [];
   /** When true, POST /api/v1/agents/register returns 422. */
   failRegister = false;
+  /** When true, the deactivate endpoint returns 422. */
+  failDeactivate = false;
 
   #nextId = 0;
   #identities = new Map<string, { wimseUri: string; active: boolean }>();
@@ -122,6 +124,9 @@ class FakeZeroID {
       if (deactivateMatch) {
         const id = deactivateMatch[1]!;
         this.deactivateCalls.push(id);
+        if (this.failDeactivate) {
+          return Response.json({ detail: "deactivate failed" }, { status: 422 });
+        }
         this.killIdentity(id);
         return Response.json({ id, status: "deactivated" });
       }
@@ -319,6 +324,29 @@ describe("AgentIdentityManager conductor lifecycle", () => {
     const manager = new AgentIdentityManager(config, store);
     await manager.deactivateConductor();
     expect(zeroid.deactivateCalls).toHaveLength(0);
+  });
+
+  test("a failed remote deactivation keeps the persisted row for retry", async () => {
+    const manager = new AgentIdentityManager(config, store);
+    const conductor = await manager.registerConductor("user:owner@test");
+
+    zeroid.failDeactivate = true;
+    await manager.deactivateConductor();
+
+    // Locally stopped, but the durable record of the still-live identity
+    // survives so a later call can retry against it.
+    expect(manager.conductorUri).toBeUndefined();
+    expect(store.getConductorIdentity(ACCOUNT, PROJECT)!.identityId).toBe(
+      conductor!.identityId,
+    );
+
+    zeroid.failDeactivate = false;
+    await manager.deactivateConductor();
+    expect(zeroid.deactivateCalls).toEqual([
+      conductor!.identityId,
+      conductor!.identityId,
+    ]);
+    expect(store.getConductorIdentity(ACCOUNT, PROJECT)).toBeNull();
   });
 });
 

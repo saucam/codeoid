@@ -109,7 +109,11 @@ Three additions, no architectural change:
 
 Injection point is already there: `session.ts:810` merges `codeoid_memory` into the
 `mcpServers` passed to `query()`. The conductor adds `codeoid_fleet` the same way,
-gated on `role === "conductor"`.
+gated on `role === "conductor"`. One P3 gotcha: the Claude provider's
+`allowedTools` currently allowlists only `mcp__codeoid_memory__*`
+(`providers/claude/index.ts`) — it must be widened to admit
+`mcp__codeoid_fleet__*` for the conductor session, or the mounted server's tools
+stay unreachable.
 
 ---
 
@@ -140,9 +144,13 @@ human owner (ZeroID sub, IdP-verified)
 ```
 
 Concretely:
-- Extend `AGENT_TOOL_SCOPES` with a conductor profile that includes the
-  `session:*` scopes the fleet tools need. The conductor's token is minted by
-  delegation from the owner, not handed the owner's own token.
+- The conductor gets its own identity scope profile (`CONDUCTOR_SCOPES` in
+  `agent-identity.ts`: `session:read` + `session:dispatch`, both protocol
+  scopes) — deliberately **separate from** `AGENT_TOOL_SCOPES`, keeping the two
+  namespaces disjoint, and deliberately excluding `tools:write`/`tools:execute`
+  so the conductor's whole delegation subtree is read-only on targets. The
+  conductor's token is minted by delegation from the owner, not handed the
+  owner's own token. *(Implemented in P2.)*
 - When the conductor spawns a child, the child's `created_by` is the
   **conductor's WIMSE URI**, and the child's token is `tokens.delegate`-d from the
   conductor — so `delegation_depth` increments (human=0 → conductor=1 → child=2 →
@@ -267,9 +275,11 @@ resolves against the owner's tenancy, so no ownership hack is needed.
 
 - **Per-identity Cedar policy**: what may the conductor do vs. a child vs. a
   sub-agent? Policy keyed on the WIMSE URI / `delegation_depth`.
-- **Shield on egress**: route `email.send` / shell / external HTTP through Shield
-  so a prompt-injected child can't exfiltrate. Codeoid is already a `@highflame/sdk`
-  consumer — this is a natural extension, not a new dependency.
+- **Shield on egress** *(later phase — NOT v1)*: v1 egress is gated by owner
+  approval only, per the R4 decision above. Once the assistant no longer needs
+  to work with the local stack down, route `email.send` / shell / external HTTP
+  through Shield so a prompt-injected child can't exfiltrate. Codeoid is already
+  a `@highflame/sdk` consumer — a natural extension, not a new dependency.
 - **Fail-closed defaults**: `fleet_destroy` and any send-class egress off unless
   explicitly granted; approvals surface to the owner via the existing
   permission-correlation (`approvalId`) flow.

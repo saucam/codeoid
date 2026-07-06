@@ -136,4 +136,21 @@ describe("SessionCardStore — bi-temporal facts", () => {
     expect(s.currentFacts(subject)).toHaveLength(2);
     s.close();
   });
+
+  test("out-of-order validAt is rejected — never corrupts the open fact", () => {
+    const s = freshStore();
+    const subject = "session:sess-1";
+    s.assertFact({ sessionId: "sess-1", subject, predicate: "status", object: "merged", validAt: 200, now: 200 });
+
+    // Closing the open fact at validAt=100 would set invalid_at < valid_at,
+    // making it unsatisfiable for every factsAsOf() — reject instead.
+    expect(() =>
+      s.assertFact({ sessionId: "sess-1", subject, predicate: "status", object: "WIP", validAt: 100, now: 300 }),
+    ).toThrow(/out-of-order validAt/);
+
+    // The open fact survived untouched, both live and in time-travel reads.
+    expect(s.currentFacts(subject).map((f) => f.object)).toEqual(["merged"]);
+    expect(s.factsAsOf(subject, 250).map((f) => f.object)).toEqual(["merged"]);
+    s.close();
+  });
 });
