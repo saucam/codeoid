@@ -302,6 +302,26 @@ const AgentIdentitySchema = z
   })
   .default({ accountId: "personal", projectId: "dev" });
 
+/**
+ * Conductor session — the per-tenant fleet supervisor (docs/conductor-design.md).
+ * `provider` selects which backend drives it (any registered provider id, so an
+ * open-weight backend can run the conductor once its provider exists); `model`
+ * overrides the provider's default. Note: fleet MCP tools currently surface
+ * only under the "claude" provider (the one provider with MCP support) — a
+ * conductor on another provider still chats but cannot see the fleet yet.
+ */
+const ConductorSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    /** Display name of the conductor session (also what `codeoid attach conductor` resolves). */
+    name: z.string().default("conductor"),
+    /** Provider id driving the conductor ("claude" | "gemini" | "openai" | future). */
+    provider: z.string().default("claude"),
+    /** Model override for the conductor (alias or full id). Empty = provider default. */
+    model: z.string().optional(),
+  })
+  .default({ enabled: true, name: "conductor", provider: "claude" });
+
 const AuthSchemaFields = z
   .object({
     issuer: z.string().optional(),
@@ -334,6 +354,7 @@ const RootSchema = z.object({
   telemetry: TelemetrySchema,
   autoRotate: AutoRotateSchema,
   session: SessionSchema,
+  conductor: ConductorSchema,
 });
 
 type ParsedConfig = z.infer<typeof RootSchema>;
@@ -412,6 +433,17 @@ export interface CodeoidConfig {
     turnStallTimeoutMs?: number;
     /** Per-call timeout (ms) for external MCP servers, surfaced as the SDK's per-server `timeout`. 0 = use SDK default. Defaults to 120000 when omitted. */
     mcpToolTimeoutMs?: number;
+  };
+  /**
+   * The per-tenant conductor session (fleet supervisor). Optional in the
+   * type so hand-built test configs stay minimal; loadConfig always
+   * populates it (schema defaults). Absent = enabled with defaults.
+   */
+  conductor?: {
+    enabled: boolean;
+    name: string;
+    provider: string;
+    model?: string;
   };
 }
 
@@ -636,6 +668,7 @@ export function loadConfig(opts: LoadOptions = {}): CodeoidConfig {
     telemetry: { osc8: osc8Mode },
     autoRotate: parsed.autoRotate,
     session: parsed.session,
+    conductor: parsed.conductor,
   };
 }
 

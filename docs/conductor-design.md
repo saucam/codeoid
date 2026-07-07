@@ -107,13 +107,26 @@ Three additions, no architectural change:
 | **`codeoid_fleet` MCP server** | In-process Agent-SDK MCP server exposing fleet tools (list / spawn / send / watch / summarize / interrupt sessions, recall across threads). Bound to the conductor session only. | `buildMemoryMcpServer` at `session.ts:810` |
 | **Conductor identity grant** | The conductor's ZeroID agent identity additionally holds `session:*` scopes, so it can drive the fleet *as a first-class delegated authority* (see §4). | `AgentIdentityManager.registerSessionAgent` |
 
-Injection point is already there: `session.ts:810` merges `codeoid_memory` into the
+Injection point is already there: the Claude provider merges `codeoid_memory` into the
 `mcpServers` passed to `query()`. The conductor adds `codeoid_fleet` the same way,
-gated on `role === "conductor"`. One P3 gotcha: the Claude provider's
-`allowedTools` currently allowlists only `mcp__codeoid_memory__*`
-(`providers/claude/index.ts`) — it must be widened to admit
-`mcp__codeoid_fleet__*` for the conductor session, or the mounted server's tools
-stay unreachable.
+gated on `role === "conductor"`. *(Implemented in P3:* the manager builds the
+fleet server — its tools close over the live, tenant-scoped session population —
+and passes it to the conductor's `Session`; the Claude provider's `allowedTools`
+is widened with `mcp__codeoid_fleet__*` when a fleet server is present, and the
+system-prompt append path no longer gates on memory so the conductor contract
+rides the `claude_code` preset.*)*
+
+**Read-only over targets, by construction (P3 scope).** The P3 fleet surface is
+`fleet_list` / `fleet_find` / `fleet_summary` / `fleet_recall` / `machine_map` —
+observation only. No send/spawn/interrupt tool exists yet (those are P4), and the
+conductor identity (P2) carries only `session:read`/`session:dispatch`, never
+`tools:write`/`tools:execute`, so nothing it delegates can mutate a target.
+
+**Provider-agnostic conductor.** Which backend drives the conductor is
+`config.conductor.provider` — any registered provider id, so an open-weight
+backend can run it once its provider exists. Caveat: MCP tools are only surfaced
+by the Claude provider today, so a conductor on another provider chats but can't
+see the fleet until that provider grows MCP support (the daemon logs this).
 
 ---
 

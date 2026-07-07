@@ -120,6 +120,13 @@ export interface SessionInfo {
   createdBy: string;
   createdAt: string;
   attachedClients: number;
+  /**
+   * Session role. "conductor" marks the per-tenant conductor session (the
+   * fleet supervisor — one per account/project). Absent = normal session.
+   */
+  role?: "conductor";
+  /** Id of the provider backing this session (e.g. "claude", "gemini"). */
+  providerId?: string;
   /** Current execution mode (default "interactive"). */
   mode?: SessionMode;
   /** Remaining turns budget for autonomous mode (undefined = unbounded, 0 = exhausted). */
@@ -690,6 +697,15 @@ export interface SessionCreateMsg extends BaseClientMsg {
   type: "session.create";
   name: string;
   workdir: string;
+  /**
+   * Session role. "conductor" requests THE per-tenant conductor session —
+   * the daemon chooses its name/workdir itself, creates it on first request,
+   * and returns the existing one afterwards (idempotent). Absent = a normal
+   * coding session. Typed as an open string (not the `"conductor"` literal)
+   * so a future role from a newer client still type-checks on the wire; the
+   * daemon rejects roles it doesn't implement.
+   */
+  role?: string;
 }
 
 /**

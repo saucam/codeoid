@@ -10,7 +10,12 @@
  */
 
 import { ClaudeProvider } from "./providers/claude/index.js";
+import { GeminiProvider } from "./providers/gemini/index.js";
+import { OpenAIProvider } from "./providers/openai/index.js";
+import { StatelessSessionProvider } from "./providers/stateless.js";
 import { CanonicalHistoryAccumulator } from "./providers/canonical.js";
+import { CONDUCTOR_SYSTEM_PROMPT_APPEND } from "./fleet.js";
+import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import { type ProviderEvent, type NormalizedTurnResult, type TurnRun, type ToolApprovalFn, type SessionProvider, isSubagentEvent } from "./providers/interface.js";
 import { randomUUID } from "node:crypto";
 import type {
@@ -131,6 +136,31 @@ export interface SessionCreateOptions {
    */
   compressionRegistry?: CompressionRegistry;
   /**
+   * Session role. "conductor" = the per-tenant fleet supervisor: it gets the
+   * conductor system prompt and the codeoid_fleet MCP server (when `fleet`
+   * is provided), and shows up in SessionInfo.role for clients.
+   */
+  role?: "conductor";
+  /**
+   * Provider id backing this session ("claude" | "gemini" | "openai").
+   * Absent = claude. Every session carries its own selection so any session
+   * — the conductor included — can run on a different backend (e.g. an
+   * open-weight provider once one is registered).
+   */
+  providerId?: string;
+  /**
+   * Pre-built codeoid_fleet MCP server (conductor sessions only). Built by
+   * the SessionManager because its tools close over the manager's tenant-
+   * scoped session view; the Session just hands it to the provider.
+   */
+  fleet?: McpSdkServerConfigWithInstance;
+  /**
+   * Model default that outranks config.session.defaultModel for THIS
+   * session (still loses to a persisted per-session choice). Used by the
+   * conductor's config.conductor.model override.
+   */
+  defaultModel?: string;
+  /**
    * Provider override for testing. When present, replaces ClaudeProvider so
    * integration tests run without the Claude Agent SDK subprocess.
    * Name prefix signals this is test-only infrastructure — do not use in production.
@@ -147,6 +177,8 @@ export class Session {
    */
   name: string;
   readonly workdir: string;
+  /** "conductor" marks the per-tenant fleet supervisor; undefined = normal. */
+  readonly role?: "conductor";
   readonly createdBy: string;
   readonly createdAt: string;
   /**
@@ -369,6 +401,7 @@ export class Session {
     this.id = opts.existingId ?? randomUUID();
     this.name = opts.name;
     this.workdir = opts.workdir;
+    this.role = opts.role;
     this.createdBy = opts.auth.sub;
     this.createdAt = new Date().toISOString();
     this.accountId = opts.auth.accountId;
@@ -386,36 +419,21 @@ export class Session {
     this.#rotationCount = stats.count;
     this.#lastRotatedAt = stats.lastRotatedAt;
 
-    // Model selection — prefer persisted session choice, fall back to
-    // config default, else leave null (SDK default). Always resolve to
-    // full id so downstream code doesn't see aliases.
+    // Model selection — prefer persisted session choice, then a per-session
+    // default (conductor's config.conductor.model), then the config default,
+    // else leave null (provider default). Always resolve to full id so
+    // downstream code doesn't see aliases.
     const persistedModel = this.#store.getSessionModel(this.id);
     this.#model =
       persistedModel.model ??
-      resolveModelId(opts.config?.session.defaultModel ?? "") ??
+      resolveModelId(opts.defaultModel ?? opts.config?.session.defaultModel ?? "") ??
       null;
     this.#fallbackModel =
       persistedModel.fallbackModel ??
       resolveModelId(opts.config?.session.fallbackModel ?? "") ??
       null;
 
-    this.#provider = opts._testProvider ?? new ClaudeProvider({
-      sessionId: this.id,
-      initialBackingId: this.#store.getClaudeCodeSessionId(this.id) ?? this.id,
-      // Pass the tenant-scoped workspace id in rather than have the provider
-      // re-derive it (which would drop the tenant and desync the memory MCP
-      // binding from where episodes are actually stored).
-      workspaceId: this.#workspaceId,
-      store: opts.store,
-      identityManager: opts.identityManager,
-      memory: opts.memory,
-      config: opts.config,
-      compressionRegistry: opts.compressionRegistry,
-      // Tag model reports with the provider's own id — the arrow runs only
-      // after construction (models arrive async on first query), so
-      // this.#provider is set by then. Works unchanged for any provider.
-      onModels: (m) => opts.onModels?.(this.#provider.id, m),
-    });
+    this.#provider = opts._testProvider ?? this.#createProvider(opts);
 
     // Restore any pinned files the user had on this session before.
     try {
@@ -489,13 +507,64 @@ export class Session {
         lastActivityAt: this.createdAt,
         accountId: opts.auth.accountId,
         projectId: opts.auth.projectId,
+        role: this.role,
+        providerId: this.#provider.id,
       });
+    }
+  }
+
+  /**
+   * Construct the backing provider for this session from `opts.providerId`.
+   * Every session carries its own selection (the conductor takes its from
+   * config.conductor.provider), so any session can run on a different
+   * backend. Unknown ids warn and fall back to claude rather than throw —
+   * resume must survive a meta written by a newer codeoid.
+   */
+  #createProvider(opts: SessionCreateOptions): SessionProvider {
+    const providerId = opts.providerId ?? "claude";
+    switch (providerId) {
+      case "gemini":
+        return new StatelessSessionProvider(
+          new GeminiProvider({ defaultModel: this.#model ?? undefined }),
+          this.id,
+        );
+      case "openai":
+        return new StatelessSessionProvider(
+          new OpenAIProvider({ defaultModel: this.#model ?? undefined }),
+          this.id,
+        );
+      default:
+        if (providerId !== "claude") {
+          console.error(
+            `[codeoid/session ${this.id}] unknown provider "${providerId}" — falling back to claude`,
+          );
+        }
+        return new ClaudeProvider({
+          sessionId: this.id,
+          initialBackingId: this.#store.getClaudeCodeSessionId(this.id) ?? this.id,
+          // Pass the tenant-scoped workspace id in rather than have the provider
+          // re-derive it (which would drop the tenant and desync the memory MCP
+          // binding from where episodes are actually stored).
+          workspaceId: this.#workspaceId,
+          store: opts.store,
+          identityManager: opts.identityManager,
+          memory: opts.memory,
+          fleet: opts.fleet,
+          config: opts.config,
+          compressionRegistry: opts.compressionRegistry,
+          // Tag model reports with the provider's own id — the arrow runs only
+          // after construction (models arrive async on first query), so
+          // this.#provider is set by then. Works unchanged for any provider.
+          onModels: (m) => opts.onModels?.(this.#provider.id, m),
+        });
     }
   }
 
   get status(): SessionStatus { return this.#status; }
   /** Id of the provider backing this session (e.g. "claude"). */
   get providerId(): string { return this.#provider.id; }
+  /** Tenant-scoped memory workspace id (for fleet views / cross-session search). */
+  get workspaceId(): string { return this.#workspaceId; }
   get attachedClientCount(): number { return this.#clients.size; }
 
   /**
@@ -918,7 +987,7 @@ export class Session {
           model: this.#model ?? undefined,
           fallbackModel: this.#fallbackModel ?? undefined,
           workdir: this.workdir,
-          systemPromptAppend: this.#memory ? this.#buildMemoryPromptAppend() : undefined,
+          systemPromptAppend: this.#buildPromptAppend(),
           canUseTool: this.#makeCanUseToolFn(recoverySender),
           sender: recoverySender,
         });
@@ -935,7 +1004,7 @@ export class Session {
       model: this.#model ?? undefined,
       fallbackModel: this.#fallbackModel ?? undefined,
       workdir: this.workdir,
-      systemPromptAppend: this.#memory ? this.#buildMemoryPromptAppend() : undefined,
+      systemPromptAppend: this.#buildPromptAppend(),
       canUseTool: this.#makeCanUseToolFn(sender),
       sender,
     });
@@ -1130,6 +1199,8 @@ export class Session {
       createdBy: this.createdBy,
       createdAt: this.createdAt,
       attachedClients: this.#clients.size,
+      role: this.role,
+      providerId: this.#provider.id,
       mode: this.#mode,
       turnsRemaining: this.#turnsRemaining,
       pinnedFiles: [...this.#pinnedFiles],
@@ -1610,6 +1681,18 @@ export class Session {
    * omitted on cold sessions (no episodes yet) so the append stays identical
    * to the pre-index version — prompt cache stays warm for first turns.
    */
+  /**
+   * Compose the per-turn system-prompt append: the conductor contract (for
+   * role:"conductor" sessions) plus the memory recall guidance (when memory
+   * is enabled). Stable per session so it stays in the cached prompt prefix.
+   */
+  #buildPromptAppend(): string | undefined {
+    const parts: string[] = [];
+    if (this.role === "conductor") parts.push(CONDUCTOR_SYSTEM_PROMPT_APPEND);
+    if (this.#memory) parts.push(this.#buildMemoryPromptAppend());
+    return parts.length > 0 ? parts.join("\n\n") : undefined;
+  }
+
   #buildMemoryPromptAppend(): string {
     const index = this.#indexScheduler?.get() ?? "";
     if (!index) return MEMORY_SYSTEM_PROMPT_APPEND;
@@ -2605,6 +2688,8 @@ export class Session {
       lastActivityAt: new Date().toISOString(),
       accountId: this.accountId,
       projectId: this.projectId,
+      role: this.role,
+      providerId: this.#provider.id,
     }).catch(() => {});
   }
 }

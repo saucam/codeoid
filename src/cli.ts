@@ -116,6 +116,11 @@ const CODEOID_LOGIN_SCOPES = [
   "session:interrupt",
   "session:approve",
   "session:destroy",
+  // Conductor scopes — the owner delegates these to its conductor identity
+  // (owner → conductor RFC 8693 exchange). Without them in the owner's token
+  // the delegation's scope intersection is empty and the conductor can't act.
+  "session:read",
+  "session:dispatch",
   "fs:read",
   "tools:read",
   "tools:write",
@@ -315,7 +320,9 @@ program
 
 program
   .command("attach <session>")
-  .description("Attach to a session (interactive streaming)")
+  .description(
+    "Attach to a session by id or name (interactive streaming). Use 'conductor' to open the fleet supervisor (created on first use).",
+  )
   .action(async (session: string) => {
     const config = loadConfig();
     const client = new TerminalClient(config);
