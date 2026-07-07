@@ -81,6 +81,10 @@ export interface TranscriptMeta {
   lastActivityAt: string;
   accountId: string;
   projectId: string;
+  /** "conductor" for the per-tenant conductor session; absent = normal. */
+  role?: "conductor";
+  /** Provider id backing the session; absent = claude (pre-upgrade metas). */
+  providerId?: string;
 }
 
 /** Types we persist. Skip ephemeral events like heartbeats. */

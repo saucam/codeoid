@@ -48,6 +48,11 @@ export class Store {
     // Model selection — persisted so /model choice survives daemon restart.
     this.#addColumnIfMissing("sessions", "model", "TEXT");
     this.#addColumnIfMissing("sessions", "fallback_model", "TEXT");
+    // Session role ("conductor") + backing provider id — persisted so the
+    // conductor keeps its role and every session keeps its provider across
+    // daemon restarts. NULL = normal session / claude (pre-upgrade rows).
+    this.#addColumnIfMissing("sessions", "role", "TEXT");
+    this.#addColumnIfMissing("sessions", "provider", "TEXT");
 
     this.#db.exec(`
 
@@ -149,8 +154,8 @@ export class Store {
   createSession(session: SessionInfo & { accountId: string; projectId: string }): void {
     this.#db
       .prepare(
-        `INSERT OR REPLACE INTO sessions (id, name, workdir, status, created_by, account_id, project_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR REPLACE INTO sessions (id, name, workdir, status, created_by, account_id, project_id, created_at, role, provider)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         session.id,
@@ -161,6 +166,8 @@ export class Store {
         session.accountId,
         session.projectId,
         session.createdAt,
+        session.role ?? null,
+        session.providerId ?? null,
       );
   }
 

@@ -55,6 +55,20 @@ export const sessionCreateSchema = z.object({
   type: z.literal("session.create"),
   name: nameField,
   workdir: pathField,
+  /**
+   * Session role. "conductor" requests THE per-tenant conductor session —
+   * the daemon chooses its name/workdir itself, creates it on first request,
+   * and returns the existing one afterwards (idempotent). Absent = a normal
+   * coding session.
+   *
+   * Validated as a bounded string, not a literal, on purpose: the frame must
+   * PARSE even for a role this daemon doesn't implement (a newer client, a
+   * future P4 worker role) — the daemon then fail-closes with a clear
+   * "unsupported role" error rather than the schema opaquely rejecting the
+   * whole create. Matches the "accept the frame, act on what you understand"
+   * wire contract.
+   */
+  role: z.string().max(LIMITS.NAME_MAX).optional(),
 });
 
 export const sessionListSchema = z.object({ ...base, type: z.literal("session.list") });

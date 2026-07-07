@@ -8,9 +8,9 @@
  *   - Graceful drain on shutdown
  */
 
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { Session, type AttachedClient } from "./session.js";
 import type { Store } from "./store.js";
 import { hasScope, SCOPES } from "../protocol/scopes.js";
@@ -33,6 +33,7 @@ import {
   type ImportedSessionInit,
 } from "./share/index.js";
 import type { AgentIdentityManager } from "./agent-identity.js";
+import { buildFleetMcpServer, type FleetSessionView } from "./fleet.js";
 import { type MemoryEngine, workspaceIdFromPath } from "./memory/index.js";
 import type { CodeoidConfig } from "../config.js";
 import type { CompressionRegistry } from "./compress/index.js";
@@ -210,6 +211,16 @@ export class SessionManager {
           memory: this.#memory,
           config: this.#config,
           compressionRegistry: this.#compressionRegistry,
+          // The conductor self-persists (design R2): its role, provider
+          // selection, and fleet tools all come back across a restart.
+          role: meta.role,
+          providerId: meta.providerId,
+          defaultModel:
+            meta.role === "conductor" ? this.#config?.conductor?.model : undefined,
+          fleet:
+            meta.role === "conductor"
+              ? this.#buildFleetServer(meta.accountId, meta.projectId)
+              : undefined,
           onModels: (providerId, m) => this._cacheModels(providerId, m),
         });
 
@@ -283,6 +294,15 @@ export class SessionManager {
     msg: ClientMessage,
     auth: AuthContext,
     client: AttachedClient,
+    opts?: {
+      /**
+       * The caller's raw bearer token, retained by the transport for flows
+       * that need the owner as an RFC 8693 delegation SUBJECT — today only
+       * conductor creation (owner → conductor token exchange). Never logged,
+       * never persisted.
+       */
+      rawToken?: string;
+    },
   ): Promise<DaemonMessage> {
     switch (msg.type) {
       case "ping":
@@ -291,6 +311,21 @@ export class SessionManager {
         // event, by noticing the pong never arrives.
         return { type: "response.ok", requestId: msg.id, data: { pong: true } };
       case "session.create":
+        if (msg.role === "conductor") {
+          return this.#createConductor(msg, auth, opts?.rawToken);
+        }
+        if (msg.role) {
+          // A role this daemon doesn't implement (newer client / future
+          // worker role). Fail closed rather than silently downgrading to a
+          // normal session — a caller asking for a constrained role must not
+          // get an unconstrained one.
+          return {
+            type: "response.error",
+            requestId: msg.id,
+            error: `Unsupported session role: "${msg.role}"`,
+            code: "invalid_request",
+          };
+        }
         return this.#create(msg, auth);
       case "session.list":
         return this.#list(msg, auth);
@@ -874,12 +909,29 @@ export class SessionManager {
 
   // ── Handlers ──────────────────────────────────────────────────────────
 
+  /** The configured display name of the conductor session (default "conductor"). */
+  #conductorName(): string {
+    return this.#config?.conductor?.name ?? "conductor";
+  }
+
   #create(
     msg: Extract<ClientMessage, { type: "session.create" }>,
     auth: AuthContext,
   ): DaemonMessage {
     if (!hasScope(auth.scopes as string[], SCOPES.SESSION_CREATE)) {
       return { type: "response.error", requestId: msg.id, error: "Missing scope: session:create", code: "forbidden" };
+    }
+
+    // Reserve the conductor's display name for the singleton — a normal
+    // session named "conductor" would shadow it in session.list and confuse
+    // any name-based lookup. Point the caller at the role instead.
+    if (msg.name === this.#conductorName()) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: `"${msg.name}" is reserved for the conductor session — create it with role:"conductor" instead`,
+        code: "invalid_request",
+      };
     }
 
     // Rate limit check
@@ -923,6 +975,159 @@ export class SessionManager {
       requestId: msg.id,
       data: session.toInfo(),
     };
+  }
+
+  /**
+   * Create — or return — THE conductor session for the caller's tenant
+   * (design §3, build plan P3). Idempotent: one conductor per
+   * (account, project); a second create request answers with the existing
+   * one so `codeoid attach conductor` works from any client without
+   * coordination. The daemon chooses name/workdir/provider itself (from
+   * config.conductor) — the request's name/workdir are ignored.
+   */
+  async #createConductor(
+    msg: Extract<ClientMessage, { type: "session.create" }>,
+    auth: AuthContext,
+    rawToken?: string,
+  ): Promise<DaemonMessage> {
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_CREATE)) {
+      return { type: "response.error", requestId: msg.id, error: "Missing scope: session:create", code: "forbidden" };
+    }
+    if (this.#config?.conductor?.enabled === false) {
+      return { type: "response.error", requestId: msg.id, error: "Conductor is disabled (config.conductor.enabled)", code: "invalid_request" };
+    }
+
+    const existing = this.#conductorFor(auth.accountId, auth.projectId);
+    if (existing) {
+      return { type: "response.ok", requestId: msg.id, data: existing.toInfo() };
+    }
+
+    const rateCheck = this.#rateLimiter.check(auth.sub);
+    if (!rateCheck.allowed) {
+      return { type: "response.error", requestId: msg.id, error: rateCheck.reason, code: "rate_limited" };
+    }
+
+    // Durable identity (P2): reuse-or-register the conductor's ZeroID
+    // identity, then mint its working token by OWNER delegation — the
+    // caller's own bearer token is the RFC 8693 subject. Best-effort like
+    // the rest of the identity layer: the conductor still runs without it.
+    if (this.#identityManager) {
+      const identity = await this.#identityManager.registerConductor(auth.sub);
+      if (identity && rawToken) {
+        const token = await this.#identityManager.mintConductorToken(rawToken);
+        if (!token) {
+          console.error(
+            "[codeoid] owner->conductor delegation failed — conductor runs with metadata-only attribution (is session:read/session:dispatch in your token's scopes?)",
+          );
+        }
+      }
+    }
+
+    // Re-check the singleton after the awaits above: two near-simultaneous
+    // conductor creates for the same tenant both pass the first #conductorFor
+    // check (neither has a session registered yet), then both await identity
+    // work. Re-check now — the re-check → new Session → #sessions.set below
+    // runs with no `await` between, so this closes the TOCTOU window and only
+    // one conductor is ever registered per (account, project).
+    const raced = this.#conductorFor(auth.accountId, auth.projectId);
+    if (raced) {
+      return { type: "response.ok", requestId: msg.id, data: raced.toInfo() };
+    }
+
+    // The conductor is global (cross-workspace), so it gets a dedicated,
+    // daemon-owned empty workdir — NOT a repo, NOT ~ (protected-ancestor),
+    // and crucially not a directory with a user .mcp.json to auto-load.
+    const workdir = join(homedir(), ".codeoid-conductor");
+    mkdirSync(workdir, { recursive: true });
+
+    const conductorConfig = this.#config?.conductor;
+    const providerId = conductorConfig?.provider ?? DEFAULT_PROVIDER_ID;
+    if (providerId !== "claude") {
+      console.warn(
+        `[codeoid] conductor provider is "${providerId}" — MCP fleet tools are only surfaced by the claude provider today; the conductor will chat but cannot see the fleet`,
+      );
+    }
+
+    const session = new Session({
+      name: this.#conductorName(),
+      workdir,
+      role: "conductor",
+      providerId,
+      defaultModel: conductorConfig?.model,
+      fleet: this.#buildFleetServer(auth.accountId, auth.projectId),
+      auth,
+      store: this.#store,
+      transcriptStore: this.#transcriptStore,
+      identityManager: this.#identityManager,
+      memory: this.#memory,
+      config: this.#config,
+      compressionRegistry: this.#compressionRegistry,
+      onModels: (providerId, m) => this._cacheModels(providerId, m),
+    });
+
+    this.#sessions.set(session.id, session);
+    this.#rateLimiter.recordCreation(auth.sub);
+    this.#store.audit(
+      this.#identityManager?.conductorUri ?? auth.sub,
+      "conductor.session.created",
+      session.id,
+      `provider=${providerId}`,
+    );
+
+    return { type: "response.ok", requestId: msg.id, data: session.toInfo() };
+  }
+
+  /** The tenant's conductor session, if one is live. */
+  #conductorFor(accountId: string, projectId: string): Session | undefined {
+    for (const session of this.#sessions.values()) {
+      if (
+        session.role === "conductor" &&
+        session.accountId === accountId &&
+        session.projectId === projectId
+      ) {
+        return session;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Build the codeoid_fleet MCP server for a tenant's conductor. Tools close
+   * over the manager, so the conductor always sees the LIVE session
+   * population — tenant-scoped exactly like session.list.
+   */
+  #buildFleetServer(accountId: string, projectId: string) {
+    return buildFleetMcpServer({
+      listSessions: (): FleetSessionView[] => {
+        const views: FleetSessionView[] = [];
+        for (const s of this.#sessions.values()) {
+          if (s.accountId !== accountId || s.projectId !== projectId) continue;
+          views.push({
+            id: s.id,
+            name: s.name,
+            workdir: s.workdir,
+            workspaceId: s.workspaceId,
+            status: s.status,
+            role: s.role,
+            providerId: s.providerId,
+            model: s.toInfo().model,
+            attachedClients: s.attachedClientCount,
+            createdAt: s.createdAt,
+          });
+        }
+        return views;
+      },
+      memory: this.#memory,
+      audit: (action, detail) =>
+        this.#store.audit(
+          this.#identityManager?.conductorUri ?? `conductor:${accountId}/${projectId}`,
+          action,
+          undefined,
+          detail,
+        ),
+      conductorSessionId: () =>
+        this.#conductorFor(accountId, projectId)?.id ?? "",
+    });
   }
 
   #list(

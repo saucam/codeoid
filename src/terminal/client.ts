@@ -375,13 +375,34 @@ export class TerminalClient {
   // ── Internals ─────────────────────────────────────────────────────────
 
   async #resolveSession(nameOrId: string): Promise<string | null> {
+    // `attach conductor` create-or-gets THE conductor session (idempotent on
+    // the daemon), so you can reach it from any client without knowing its id
+    // or creating it first. Match by role too — the conductor's display name
+    // is configurable.
+    if (nameOrId === "conductor") {
+      const created = await this.#request({
+        type: "session.create",
+        id: randomUUID(),
+        name: "conductor",
+        workdir: ".",
+        role: "conductor",
+      });
+      if (created.type === "response.ok") {
+        return (created.data as SessionInfo).id;
+      }
+      this.#printError(created);
+      return null;
+    }
+
     if (nameOrId.includes("-") && nameOrId.length > 30) {
       return nameOrId;
     }
 
     const resp = await this.#request({ type: "session.list", id: randomUUID() });
     if (resp.type === "session.list.result") {
-      const match = resp.sessions.find((s) => s.name === nameOrId);
+      const match =
+        resp.sessions.find((s) => s.name === nameOrId) ??
+        resp.sessions.find((s) => s.role === nameOrId);
       if (match) return match.id;
       console.error(`Session not found: ${nameOrId}`);
     } else {

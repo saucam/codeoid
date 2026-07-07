@@ -51,6 +51,13 @@ type SocketData = {
   clientId: string;
   authenticated: boolean;
   auth: AuthContext | null;
+  /**
+   * The verified bearer token, kept for the connection's lifetime so flows
+   * that need the caller as an RFC 8693 delegation SUBJECT (owner →
+   * conductor token exchange) can present it. In-memory only — never
+   * logged, never persisted, dies with the socket.
+   */
+  rawToken?: string;
   authTimer?: ReturnType<typeof setTimeout>;
   drainWaiters?: Array<() => void>;
   /** Protocol version the client declared on its auth frame (absent = legacy client). */
@@ -440,6 +447,7 @@ export class DaemonServer {
             }
 
             data.authenticated = true;
+            data.rawToken = authMsg.token;
             // Record what the client declared so capability-gated behaviour
             // (parts-only streaming, seq resume, …) can branch per connection.
             data.protocolVersion = authMsg.protocolVersion;
@@ -522,7 +530,9 @@ export class DaemonServer {
           };
 
           try {
-            const response = await self.#manager.handle(msg, data.auth!, client);
+            const response = await self.#manager.handle(msg, data.auth!, client, {
+              rawToken: data.rawToken,
+            });
             ws.send(JSON.stringify(response));
           } catch (err) {
             ws.send(JSON.stringify({

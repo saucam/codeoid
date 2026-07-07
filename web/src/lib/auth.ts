@@ -43,6 +43,10 @@ export const DEFAULT_WEB_SCOPES = [
   "session:interrupt",
   "session:approve",
   "session:destroy",
+  // Conductor scopes — delegated owner → conductor when the web UI opens the
+  // conductor session. Harmless on non-conductor use.
+  "session:read",
+  "session:dispatch",
   "fs:read",
 ].join(" ");
 

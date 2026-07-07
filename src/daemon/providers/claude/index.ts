@@ -19,6 +19,7 @@ import {
   type SubagentStartHookInput,
   type SubagentStopHookInput,
   type McpServerConfig,
+  type McpSdkServerConfigWithInstance,
 } from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -32,6 +33,7 @@ import {
   type MemoryEngine,
 } from "../../memory/index.js";
 import type { CompressionRegistry } from "../../compress/index.js";
+import { FLEET_TOOL_NAMES } from "../../fleet.js";
 import { rewriteBashToolInput } from "../../compress/index.js";
 import type { CodeoidConfig } from "../../../config.js";
 import type { AuthContext } from "../../../protocol/types.js";
@@ -53,6 +55,8 @@ export interface ClaudeProviderInit {
   identityManager?: AgentIdentityManager;
   /** Codeoid memory engine — injected as an MCP server. */
   memory?: MemoryEngine;
+  /** codeoid_fleet MCP server — conductor sessions only (read-only fleet view). */
+  fleet?: McpSdkServerConfigWithInstance;
   config?: CodeoidConfig;
   compressionRegistry?: CompressionRegistry;
   /** Called once per session with the live model catalog. */
@@ -248,6 +252,9 @@ export class ClaudeProvider implements SessionProvider {
             }),
           }
         : {}),
+      // Conductor sessions only — the read-only fleet view (P3). In-process,
+      // so the external-server timeout doesn't apply.
+      ...(init.fleet ? { codeoid_fleet: init.fleet } : {}),
     };
     const mcpServers = Object.keys(merged).length > 0 ? merged : undefined;
 
@@ -260,9 +267,16 @@ export class ClaudeProvider implements SessionProvider {
         // (which holds the root ZeroID key + control-channel secrets). See
         // buildAgentEnv (GHSA-38vh vector 3).
         env: buildAgentEnv(),
-        allowedTools: init.memory
-          ? ["mcp__codeoid_memory__recall", "mcp__codeoid_memory__recall_file", "mcp__codeoid_memory__timeline"]
-          : [],
+        allowedTools: [
+          ...(init.memory
+            ? ["mcp__codeoid_memory__recall", "mcp__codeoid_memory__recall_file", "mcp__codeoid_memory__timeline"]
+            : []),
+          // Widened for the conductor's fleet server — without these entries
+          // the mounted server's tools stay unreachable (design §3 gotcha).
+          ...(init.fleet
+            ? FLEET_TOOL_NAMES.map((t) => `mcp__codeoid_fleet__${t}`)
+            : []),
+        ],
         permissionMode: "default",
         includePartialMessages: true,
         persistSession: true,
@@ -273,7 +287,10 @@ export class ClaudeProvider implements SessionProvider {
           process.stderr.write(`[claude-subprocess ${sessionId.slice(0, 8)}] ${data}`);
         },
         ...(mcpServers ? { mcpServers } : {}),
-        ...(init.memory
+        // Any non-empty append (memory guidance, conductor contract) rides on
+        // the claude_code preset — previously gated on memory alone, which
+        // silently dropped non-memory appends.
+        ...(init.memory || opts.systemPromptAppend
           ? {
               systemPrompt: {
                 type: "preset" as const,
