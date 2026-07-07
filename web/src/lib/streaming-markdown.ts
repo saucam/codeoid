@@ -62,6 +62,10 @@ export interface StreamingBlocks {
   blocks: string[];
   /** Everything after the last safe boundary — the live, re-parsed tail. */
   tail: string;
+  /** True when `tail` is an OPEN (unclosed) fenced code block. The caller can
+   * then render it as a plain `<pre>` while streaming instead of re-parsing the
+   * whole growing block as markdown every frame (O(L²) on large code output). */
+  tailOpenFence: boolean;
 }
 
 /** A fence line (``` or ~~~, up to three leading spaces per CommonMark).
@@ -131,5 +135,5 @@ export function splitStreamingBlocks(text: string): StreamingBlocks {
     lineStart = i + 1;
   }
 
-  return { blocks, tail: text.slice(start) };
+  return { blocks, tail: text.slice(start), tailOpenFence: fence !== null };
 }

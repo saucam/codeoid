@@ -21,7 +21,7 @@
  *     fall through to the generic ToolStateBody.
  */
 
-import { Component, For, createMemo, createResource } from "solid-js";
+import { Component, For, Show, createMemo, createResource } from "solid-js";
 import * as Diff from "diff";
 
 import { ensureLang, langForFilename } from "../../lib/shiki";
@@ -328,12 +328,29 @@ function extractRows(html: string): string[] {
   return matches;
 }
 
+// The transcript virtualizer virtualizes MESSAGES, not the interior of one
+// message, so a Write of a huge file would otherwise mount one DOM row per line
+// and shiki-highlight the whole file — freezing layout and the pin loop. Cap
+// both: preview the first N lines, and skip highlighting past a byte budget.
+const WRITE_PREVIEW_LINES = 400;
+const WRITE_HIGHLIGHT_MAX_BYTES = 100_000;
+
 const WriteFile: Component<{ input: WriteInput }> = (props) => {
   const lang = createMemo(() => langForFilename(props.input.file_path));
   const lines = createMemo(() => props.input.content.split("\n"));
+  const shown = createMemo(() => lines().slice(0, WRITE_PREVIEW_LINES));
+  const hiddenCount = createMemo(() => lines().length - shown().length);
   const [rendered] = createResource(
     () => ({ content: props.input.content, lang: lang() }),
     async ({ content, lang }) => {
+      // Large writes render as plain text (the fallback below) — highlighting a
+      // multi-thousand-line file blocks the main thread for no real benefit.
+      if (
+        content.length > WRITE_HIGHLIGHT_MAX_BYTES ||
+        lines().length > WRITE_PREVIEW_LINES
+      ) {
+        return null;
+      }
       const hl = await ensureLang(lang);
       const safeLang = hl.getLoadedLanguages().includes(lang) ? lang : "text";
       try {
@@ -359,7 +376,7 @@ const WriteFile: Component<{ input: WriteInput }> = (props) => {
         </span>
       </header>
       <div class="flex flex-col">
-        <For each={lines()}>
+        <For each={shown()}>
           {(text, i) => (
             <div class="flex border-l-2 border-l-success/60 bg-success/10">
               <span class="w-10 select-none border-r border-border/40 px-1 py-0.5 text-right text-[10px] text-fg-faint">
@@ -377,6 +394,11 @@ const WriteFile: Component<{ input: WriteInput }> = (props) => {
             </div>
           )}
         </For>
+        <Show when={hiddenCount() > 0}>
+          <div class="border-l-2 border-l-success/60 bg-success/5 px-3 py-1 text-[11px] text-fg-faint">
+            + {hiddenCount()} more line{hiddenCount() === 1 ? "" : "s"} — preview truncated
+          </div>
+        </Show>
       </div>
     </div>
   );

@@ -130,18 +130,41 @@ const MarkdownBlock: Component<{ text: string; streaming?: boolean }> = (props) 
     () => props.streaming === true,
   );
   const segments = createMemo(() =>
-    props.streaming ? splitStreamingBlocks(throttled()) : { blocks: [], tail: "" },
+    props.streaming
+      ? splitStreamingBlocks(throttled())
+      : { blocks: [], tail: "", tailOpenFence: false },
   );
   return (
     <div class="md-prose">
       <Show when={props.streaming} fallback={<Md text={props.text} />}>
         <Index each={segments().blocks}>{(block) => <Md text={block()} />}</Index>
-        <Md text={segments().tail} reconcile />
+        {/* An open code fence mid-stream is the common coding-agent payload; a
+            large one re-parsed as markdown every frame is O(L²). Render it as a
+            plain <pre> while streaming — it becomes a styled/highlighted code
+            block the instant the fence closes (or the message finalizes). */}
+        <Show when={segments().tailOpenFence} fallback={<Md text={segments().tail} reconcile />}>
+          <StreamingCodeTail text={segments().tail} />
+        </Show>
       </Show>
       <Show when={props.streaming}>
         <span class="md-streaming-caret" aria-label="streaming" />
       </Show>
     </div>
+  );
+};
+
+/** An in-progress fenced code block during streaming — rendered as plain text
+ * (no markdown parse) so a large block doesn't re-parse every frame. Strips the
+ * opening ```lang line so only the code shows. */
+const StreamingCodeTail: Component<{ text: string }> = (props) => {
+  const code = () => {
+    const nl = props.text.indexOf("\n");
+    return nl >= 0 ? props.text.slice(nl + 1) : "";
+  };
+  return (
+    <pre class="overflow-x-auto whitespace-pre rounded bg-bg-elev/60 px-3 py-2 text-[13px] leading-relaxed">
+      <code>{code()}</code>
+    </pre>
   );
 };
 
