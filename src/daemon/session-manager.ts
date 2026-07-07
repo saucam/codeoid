@@ -909,12 +909,29 @@ export class SessionManager {
 
   // ── Handlers ──────────────────────────────────────────────────────────
 
+  /** The configured display name of the conductor session (default "conductor"). */
+  #conductorName(): string {
+    return this.#config?.conductor?.name ?? "conductor";
+  }
+
   #create(
     msg: Extract<ClientMessage, { type: "session.create" }>,
     auth: AuthContext,
   ): DaemonMessage {
     if (!hasScope(auth.scopes as string[], SCOPES.SESSION_CREATE)) {
       return { type: "response.error", requestId: msg.id, error: "Missing scope: session:create", code: "forbidden" };
+    }
+
+    // Reserve the conductor's display name for the singleton — a normal
+    // session named "conductor" would shadow it in session.list and confuse
+    // any name-based lookup. Point the caller at the role instead.
+    if (msg.name === this.#conductorName()) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: `"${msg.name}" is reserved for the conductor session — create it with role:"conductor" instead`,
+        code: "invalid_request",
+      };
     }
 
     // Rate limit check
@@ -1006,6 +1023,17 @@ export class SessionManager {
       }
     }
 
+    // Re-check the singleton after the awaits above: two near-simultaneous
+    // conductor creates for the same tenant both pass the first #conductorFor
+    // check (neither has a session registered yet), then both await identity
+    // work. Re-check now — the re-check → new Session → #sessions.set below
+    // runs with no `await` between, so this closes the TOCTOU window and only
+    // one conductor is ever registered per (account, project).
+    const raced = this.#conductorFor(auth.accountId, auth.projectId);
+    if (raced) {
+      return { type: "response.ok", requestId: msg.id, data: raced.toInfo() };
+    }
+
     // The conductor is global (cross-workspace), so it gets a dedicated,
     // daemon-owned empty workdir — NOT a repo, NOT ~ (protected-ancestor),
     // and crucially not a directory with a user .mcp.json to auto-load.
@@ -1021,7 +1049,7 @@ export class SessionManager {
     }
 
     const session = new Session({
-      name: conductorConfig?.name ?? "conductor",
+      name: this.#conductorName(),
       workdir,
       role: "conductor",
       providerId,

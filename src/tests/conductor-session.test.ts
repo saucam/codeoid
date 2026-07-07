@@ -12,9 +12,38 @@ import { join } from "node:path";
 import { Store } from "../daemon/store.js";
 import { TranscriptStore } from "../daemon/transcript.js";
 import { SessionManager } from "../daemon/session-manager.js";
+import type { AgentIdentityManager } from "../daemon/agent-identity.js";
 import type { CodeoidConfig } from "../config.js";
 import type { AuthContext, SessionInfo } from "../protocol/types.js";
 import { ALL_SCOPES } from "../protocol/scopes.js";
+
+/**
+ * Identity manager stub whose async methods actually YIELD (await a
+ * microtask), so two concurrent conductor creates interleave at the await
+ * point — the exact window the TOCTOU re-check must close. Counts how many
+ * times a conductor was registered.
+ */
+function yieldingIdentityStub(): { mgr: AgentIdentityManager; registers: () => number } {
+  let registers = 0;
+  const stub = {
+    get conductorUri() {
+      return "wimse://test/conductor";
+    },
+    async registerConductor(sub: string) {
+      await Promise.resolve(); // force a yield so concurrent creates interleave
+      registers++;
+      return { identityId: "cond-id", wimseUri: "wimse://test/conductor", ownerSub: sub };
+    },
+    async mintConductorToken() {
+      await Promise.resolve();
+      return "delegated-token";
+    },
+    async resumeConductor() {
+      return null;
+    },
+  };
+  return { mgr: stub as unknown as AgentIdentityManager, registers: () => registers };
+}
 
 function auth(tenant: string): AuthContext {
   return {
@@ -51,8 +80,8 @@ let tmp: string;
 let store: Store;
 let transcript: TranscriptStore;
 
-function newManager(config?: CodeoidConfig): SessionManager {
-  return new SessionManager(store, transcript, undefined, undefined, undefined, { config });
+function newManager(config?: CodeoidConfig, identity?: AgentIdentityManager): SessionManager {
+  return new SessionManager(store, transcript, identity, undefined, undefined, { config });
 }
 
 async function createConductor(mgr: SessionManager, a = AUTH_A): Promise<SessionInfo> {
@@ -155,6 +184,41 @@ describe("conductor session", () => {
     const info = (resp as { data: SessionInfo }).data;
     expect(info.role).toBeUndefined();
     expect(info.name).toBe("normal");
+  });
+
+  test("the conductor's display name is reserved from normal session creation", async () => {
+    // A normal session named "conductor" would shadow the singleton in
+    // session.list — refuse it and point at the role.
+    const resp = await newManager(mkConfig()).handle(
+      { type: "session.create", id: "req", name: "conductor", workdir: tmp },
+      AUTH_A,
+      client(AUTH_A),
+    );
+    expect(resp.type).toBe("response.error");
+    expect((resp as { error: string }).error).toContain("reserved");
+  });
+
+  test("concurrent conductor creates converge on ONE session (no TOCTOU dup)", async () => {
+    // The yielding identity stub forces an await between the first singleton
+    // check and Session construction — the exact race window. Both creates
+    // pass the first check; only the re-check must let one through.
+    const { mgr: identity, registers } = yieldingIdentityStub();
+    const mgr = newManager(mkConfig(), identity);
+    const [a, b] = await Promise.all([
+      createConductor(mgr),
+      createConductor(mgr),
+    ]);
+    expect(a.id).toBe(b.id);
+    const list = await mgr.handle({ type: "session.list", id: "req" }, AUTH_A, client(AUTH_A));
+    const conductors = (list as { sessions: SessionInfo[] }).sessions.filter(
+      (s) => s.role === "conductor",
+    );
+    expect(conductors).toHaveLength(1);
+    // The loser re-checks and returns the winner WITHOUT constructing a second
+    // Session — but both may have registered identity before the re-check
+    // (best-effort, idempotent on the ZeroID side), so we only assert the
+    // session singleton, which is the invariant attach relies on.
+    expect(registers()).toBeGreaterThanOrEqual(1);
   });
 
   test("the conductor self-persists: resume rebuilds it with role + provider", async () => {
