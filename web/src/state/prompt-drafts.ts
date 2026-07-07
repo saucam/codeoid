@@ -62,16 +62,45 @@ function loadDrafts(): Record<string, string> {
   return {};
 }
 
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingPersist: Record<string, string> | null = null;
+
+/** Debounced write. `setDraft` fires on every keystroke and previously did a
+ * `JSON.stringify` of the whole map + a synchronous `localStorage.setItem` each
+ * time, blocking the main thread per keypress. Coalesce to a trailing write;
+ * flush on pagehide so a draft typed right before the tab closes isn't lost. */
 function persist(next: Record<string, string>): void {
   if (typeof localStorage === "undefined") return;
+  pendingPersist = next;
+  if (persistTimer !== null) return;
+  persistTimer = setTimeout(flushPersist, 400);
+}
+
+function flushPersist(): void {
+  if (persistTimer !== null) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  const toWrite = pendingPersist;
+  pendingPersist = null;
+  if (!toWrite || typeof localStorage === "undefined") return;
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(toWrite));
   } catch {
     // Quota exceeded or storage unavailable — drafts become memory-only.
   }
 }
 
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", flushPersist);
+}
+
 export function _resetDraftsForTest(): void {
+  if (persistTimer !== null) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  pendingPersist = null;
   if (typeof localStorage !== "undefined") localStorage.removeItem(STORAGE_KEY);
   setDrafts({});
 }

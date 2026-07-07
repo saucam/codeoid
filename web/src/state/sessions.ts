@@ -12,6 +12,7 @@ import { createStore, produce } from "solid-js/store";
 import type { SessionInfo, SessionStatus } from "../protocol/types";
 import { clearSessionMessages, setFocusedSessionAccessor } from "./messages";
 import { clearResumeCursor } from "./resume";
+import { clearDraft } from "./prompt-drafts";
 
 interface SessionsState {
   byId: Record<string, SessionInfo>;
@@ -76,6 +77,7 @@ function jsonEqual(a: unknown, b: unknown): boolean {
  */
 export function ingestSessionList(items: readonly SessionInfo[]): void {
   batch(() => {
+    const removedIds: string[] = [];
     setState(
       produce<SessionsState>((s) => {
         const seen = new Set<string>();
@@ -110,10 +112,22 @@ export function ingestSessionList(items: readonly SessionInfo[]): void {
         }
         // Delete sessions missing from the authoritative list.
         for (const id of Object.keys(s.byId)) {
-          if (!seen.has(id)) delete s.byId[id];
+          if (!seen.has(id)) {
+            delete s.byId[id];
+            removedIds.push(id);
+          }
         }
       }),
     );
+    // Prune the per-session state that hangs off a session id — message
+    // buffer, resume cursor, drafts — exactly as removeSession() does. A remote
+    // removal (destroyed by another client → dropped from this list) otherwise
+    // leaked all of it, growing without bound across reconnects.
+    for (const id of removedIds) {
+      clearSessionMessages(id);
+      clearResumeCursor(id);
+      clearDraft(id);
+    }
     // Auto-focus the most recently-created session if nothing is focused.
     const cur = focusedId();
     if (!cur || !state.byId[cur]) {
@@ -156,6 +170,7 @@ export function removeSession(id: string): void {
   batch(() => {
     clearSessionMessages(id);
     clearResumeCursor(id);
+    clearDraft(id);
     setState(
       "byId",
       produce<Record<string, SessionInfo>>((m) => {

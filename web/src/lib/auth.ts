@@ -7,8 +7,14 @@
  *   3. Else throw a structured error so the caller can surface a "sign in"
  *      affordance instead of crashing.
  *
- * The web UI persists the API key in localStorage so reloads stay signed
- * in — the JWT itself is held only in memory (short-lived).
+ * The web UI persists credentials in localStorage so reloads stay signed in:
+ * the API key (`codeoid.apiKey`, a long-lived `zid_sk_` secret) for the key
+ * flow, and the JWT (`codeoid.token`) for the OAuth flow. SECURITY: both are
+ * therefore readable by any same-origin script — an XSS would exfiltrate a
+ * durable credential, not just a session. This is a known tradeoff for
+ * reload-persistence; hardening (httpOnly cookie / non-persistent key) is
+ * tracked separately. The markdown render path is XSS-sanitized (see
+ * lib/sanitize-url) precisely because these live here.
  */
 
 const STORAGE_KEY_API_KEY = "codeoid.apiKey";
