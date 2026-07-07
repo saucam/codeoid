@@ -22,7 +22,7 @@
  *     `answers: {}` and Claude reports "user answered nothing".
  */
 
-import { Component, For, Show, createMemo, createSignal } from "solid-js";
+import { Component, For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
 import { newRequestId, send } from "../../state/connection";
 import { epochOf, focusedSessionMessages } from "../../state/messages";
@@ -112,6 +112,26 @@ const ApprovalBar: Component = () => {
       toolName: m.tool.name,
     };
   });
+
+  // Alt+Y / Alt+D keyboard shortcuts — advertised in the button tooltips but
+  // previously never implemented. Binary approve/deny only (AskUserQuestion
+  // needs a real answer), and never while typing in an input/textarea.
+  onMount(() => {
+    const onKey = (ev: KeyboardEvent) => {
+      if (!ev.altKey) return;
+      const k = ev.key.toLowerCase();
+      if (k !== "y" && k !== "d") return;
+      const cur = snapshot();
+      if (!cur || isAskUserQuestion(cur.toolName)) return;
+      const el = document.activeElement;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA")) return;
+      ev.preventDefault();
+      approve(cur.sessionId, cur.approvalId, k === "y");
+    };
+    window.addEventListener("keydown", onKey);
+    onCleanup(() => window.removeEventListener("keydown", onKey));
+  });
+
   return (
     <Show when={snapshot()}>
       {(snap) => {

@@ -133,15 +133,20 @@ export function ingestSessionList(items: readonly SessionInfo[]): void {
  * `next` may be a full SessionInfo or a partial with at least `id`.
  */
 export function mergeSession(next: Partial<SessionInfo> & { id: string }): void {
+  // `produce()` never runs its callback on an `undefined` leaf, so the old
+  // "materialises lazily" assumption silently dropped `session.info_update` for
+  // a session we hadn't seen yet (e.g. one created by another client) — with no
+  // periodic list poll, it never appeared until reconnect. Upsert directly when
+  // absent; merge in place when present (info_update carries a full SessionInfo).
+  if (!state.byId[next.id]) {
+    setState("byId", next.id, next as SessionInfo);
+    return;
+  }
   setState(
     "byId",
     next.id,
     produce<SessionInfo>((s) => {
-      // If the entry doesn't exist, create it from `next` (caller must
-      // have provided enough fields). Solid's produce requires `s` to be
-      // an object even on first write — we're inside the byId proxy
-      // path, so `s` materialises lazily.
-      Object.assign(s ?? ({} as SessionInfo), next);
+      Object.assign(s, next);
     }),
   );
 }

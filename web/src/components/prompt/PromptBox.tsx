@@ -236,6 +236,9 @@ const PromptBox: Component = () => {
       ...(a.data !== undefined ? { data: a.data } : {}),
     }));
     const key = draftKey();
+    // Snapshot the dragged attachments so a rejected send can restore them
+    // (they're cleared optimistically below and were previously lost on failure).
+    const sentAttachments = attachments();
     // Use request() (not fire-and-forget send) so a rejected send — missing
     // scope, session gone — surfaces instead of vanishing silently. The daemon
     // acks immediately; a *post-ack* failure arrives separately as a visible
@@ -255,6 +258,7 @@ const PromptBox: Component = () => {
       setError(`Message not delivered: ${e instanceof Error ? e.message : String(e)}`);
       setText(raw);
       setDraft(key, raw);
+      if (sentAttachments.length > 0) setAttachments(sentAttachments);
       autosize();
     });
     clearDraft(key);
@@ -265,6 +269,10 @@ const PromptBox: Component = () => {
   }
 
   function onKeyDown(ev: KeyboardEvent): void {
+    // Never submit while an IME composition is active — for CJK input Enter
+    // confirms the candidate, not "send". `keyCode === 229` covers browsers
+    // that don't set `isComposing` on the confirming keydown.
+    if (ev.isComposing || ev.keyCode === 229) return;
     if (ev.key === "Enter" && !ev.shiftKey) {
       ev.preventDefault();
       submit();

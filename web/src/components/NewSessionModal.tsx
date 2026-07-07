@@ -21,8 +21,9 @@ import {
   onMount,
 } from "solid-js";
 
-import { newRequestId, refreshSessions, send } from "../state/connection";
-import { focusSession, sessionList } from "../state/sessions";
+import { newRequestId, refreshSessions, request } from "../state/connection";
+import { focusSession, mergeSession, sessionList } from "../state/sessions";
+import type { SessionInfo } from "../protocol/types";
 import DirectoryPicker from "./files/DirectoryPicker";
 
 const [openSignal, setOpenSignal] = createSignal(false);
@@ -62,7 +63,9 @@ const NewSessionModal: Component = () => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n") {
         e.preventDefault();
         setOpenSignal(true);
-      } else if (e.key === "Escape" && openSignal()) {
+      } else if (e.key === "Escape" && openSignal() && !pickerOpen()) {
+        // When the directory picker is open, let ITS Esc handler close only the
+        // picker — don't also tear down the modal and lose the typed name/workdir.
         e.preventDefault();
         setOpenSignal(false);
       }
@@ -94,23 +97,29 @@ const NewSessionModal: Component = () => {
     setBusy(true);
     setError(null);
     try {
-      send({
+      // request() (not fire-and-forget send + a 450ms guess): the daemon acks
+      // with the created SessionInfo, so a rejection (bad scope/workdir) surfaces
+      // as an error instead of silently "succeeding", and we focus the exact new
+      // id rather than name-matching (which picked the wrong one on duplicates).
+      const data = (await request({
         type: "session.create",
         id: newRequestId(),
         name: n,
         workdir: wd,
-      });
-      // Give the daemon a beat to spin up the agent identity, then
-      // refresh the list to capture the new id.
-      setTimeout(async () => {
+      })) as SessionInfo | undefined;
+      if (data && typeof data === "object" && "id" in data) {
+        mergeSession(data);
+        focusSession(data.id);
+      } else {
+        // Older daemon without a data payload — fall back to a list refresh.
         const list = await refreshSessions().catch(() => []);
         const created = list.find((s) => s.name === n);
         if (created) focusSession(created.id);
-        setBusy(false);
-        setOpenSignal(false);
-        setName("");
-        setWorkdir("");
-      }, 450);
+      }
+      setBusy(false);
+      setOpenSignal(false);
+      setName("");
+      setWorkdir("");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setBusy(false);

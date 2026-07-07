@@ -73,6 +73,13 @@ describe("sessions store", () => {
     expect(getSession("a")?.model).toBe("claude-opus-4-7");
   });
 
+  it("mergeSession upserts a session it hasn't seen yet (info_update from another client)", () => {
+    // Regression: produce() never runs on an undefined leaf, so the old
+    // "materialises lazily" path silently dropped info_update for an unknown id.
+    mergeSession(s("remote-1", "2026-05-02T08:00:00Z", { name: "remote" }));
+    expect(getSession("remote-1")?.name).toBe("remote");
+  });
+
   it("setSessionStatus is a noop for unknown sessions", () => {
     setSessionStatus("ghost", "thinking");
     expect(getSession("ghost")).toBeUndefined();
