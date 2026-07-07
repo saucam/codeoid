@@ -9,9 +9,9 @@
  * cycle a few status verbs so the spinner feels alive.
  */
 
-import { Component, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { Component, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
-import { epochOf, focusedSessionMessages } from "../../state/messages";
+import { epochOf, focusedSessionMessages, lastActivityAt } from "../../state/messages";
 import { focusedSession, focusedSessionId } from "../../state/sessions";
 
 const VERBS = ["thinking", "drafting", "considering", "researching", "weighing"];
@@ -33,23 +33,19 @@ const WorkerIndicator: Component = () => {
 
   const status = () => focusedSession()?.status;
 
-  // Freshness clock: bump on every focused-session message/delta (epoch) and on
-  // any status change. A truly-finished turn produces neither, so a wrongly
-  // stranded "thinking" (e.g. a missed idle) goes stale and clears.
-  const [lastActiveAt, setLastActiveAt] = createSignal(Date.now());
-  createEffect(() => {
-    epochOf(focusedSessionId());
-    status();
-    setLastActiveAt(Date.now());
-  });
-
   const statusBusy = () =>
     status() === "thinking" || status() === "tool_running";
   const visible = () => {
     if (!statusBusy()) return false;
     if (liveTool()) return true; // a tool is actively executing — always show
     tick(); // re-evaluate the staleness window on each tick
-    return Date.now() - lastActiveAt() < STALL_MS;
+    epochOf(focusedSessionId()); // re-run when new activity lands
+    // Store-derived last-activity time (NOT a component-local clock, which would
+    // reset on refocus and make a stale session look fresh for another 90s).
+    const last = lastActivityAt(focusedSessionId());
+    // No activity recorded this session lifetime → trust the daemon's status.
+    if (last === 0) return true;
+    return Date.now() - last < STALL_MS;
   };
 
   // Latest in-flight tool call (executing / streaming).

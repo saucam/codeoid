@@ -113,6 +113,18 @@ export function epochOf(sessionId: string | null | undefined): number {
   return state.epochBySession[sessionId] ?? 0;
 }
 
+/**
+ * Wall-clock time of the last live message/delta for a session (0 if none this
+ * lifetime). A non-reactive side map keyed by session id — read via a tick, not
+ * a subscription. Used as the store-derived freshness source for the busy
+ * indicator's staleness guard, so it reflects REAL last activity and survives
+ * refocus (unlike a component-local clock, which would reset the window).
+ */
+const activityAtBySession = new Map<string, number>();
+export function lastActivityAt(sessionId: string | null | undefined): number {
+  return sessionId ? activityAtBySession.get(sessionId) ?? 0 : 0;
+}
+
 const EMPTY: SessionMessage[] = [];
 
 // ---------- broadcast ingest ----------
@@ -128,6 +140,7 @@ export function applyMessage(msg: SessionMessage): void {
   }
   const at = index.get(msg.messageId);
 
+  activityAtBySession.set(msg.sessionId, Date.now());
   batch(() => {
     setState(
       produce<MessagesState>((s) => {
@@ -152,6 +165,7 @@ export function applyDelta(delta: SessionMessageDelta): void {
   // the daemon's replay will resync us on attach.
   const idx = indexBySession.get(delta.sessionId)?.get(delta.messageId);
   if (idx === undefined) return;
+  activityAtBySession.set(delta.sessionId, Date.now());
   batch(() => {
     setState(
       produce<MessagesState>((s) => {
@@ -263,6 +277,7 @@ export function registerSessionCachePruner(fn: SessionCachePruner): () => void {
 export function clearSessionMessages(sessionId: string): void {
   const ids = indexBySession.get(sessionId);
   indexBySession.delete(sessionId);
+  activityAtBySession.delete(sessionId);
   batch(() => {
     setState(
       produce<MessagesState>((s) => {
