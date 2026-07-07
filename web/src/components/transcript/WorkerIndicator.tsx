@@ -9,12 +9,19 @@
  * cycle a few status verbs so the spinner feels alive.
  */
 
-import { Component, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { Component, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
-import { focusedSessionMessages } from "../../state/messages";
-import { focusedSession } from "../../state/sessions";
+import { epochOf, focusedSessionMessages } from "../../state/messages";
+import { focusedSession, focusedSessionId } from "../../state/sessions";
 
 const VERBS = ["thinking", "drafting", "considering", "researching", "weighing"];
+
+// Defensive cap: if the session claims to be "thinking" but produces no activity
+// (no message/delta, no status change) for this long, treat the status as stale
+// and hide the indicator rather than loop forever. Generous so a genuinely long
+// reasoning gap never hides it; the daemon is the real source of truth. A
+// live-executing tool bypasses this entirely (see `visible`).
+const STALL_MS = 90_000;
 
 const WorkerIndicator: Component = () => {
   const [tick, setTick] = createSignal(0);
@@ -25,9 +32,25 @@ const WorkerIndicator: Component = () => {
   });
 
   const status = () => focusedSession()?.status;
-  const visible = () =>
-    status() === "thinking" ||
-    status() === "tool_running";
+
+  // Freshness clock: bump on every focused-session message/delta (epoch) and on
+  // any status change. A truly-finished turn produces neither, so a wrongly
+  // stranded "thinking" (e.g. a missed idle) goes stale and clears.
+  const [lastActiveAt, setLastActiveAt] = createSignal(Date.now());
+  createEffect(() => {
+    epochOf(focusedSessionId());
+    status();
+    setLastActiveAt(Date.now());
+  });
+
+  const statusBusy = () =>
+    status() === "thinking" || status() === "tool_running";
+  const visible = () => {
+    if (!statusBusy()) return false;
+    if (liveTool()) return true; // a tool is actively executing — always show
+    tick(); // re-evaluate the staleness window on each tick
+    return Date.now() - lastActiveAt() < STALL_MS;
+  };
 
   // Latest in-flight tool call (executing / streaming).
   const liveTool = createMemo(() => {

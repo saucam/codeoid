@@ -1569,3 +1569,43 @@ describe("T7 – status persistence", () => {
     expect(store.getSession(session.id)?.status).toBe("idle");
   });
 });
+
+describe("mid-turn provider teardown emits idle", () => {
+  it("broadcasts status_change idle when setModel tears down an in-flight turn", async () => {
+    // A tool that needs approval keeps the turn genuinely in flight (the mock
+    // blocks in canUseTool, no tool_complete), so we can tear it down mid-turn.
+    const provider = new MockSessionProvider("claude", [
+      [
+        {
+          type: "tool_start",
+          toolId: "mid-t1",
+          sdkToolUseId: "sdk-mid-1",
+          name: "Bash",
+          input: { command: "sleep 60" },
+          approvalId: "ap-mid-1",
+        },
+        // No tool_complete — the turn stays in flight.
+      ],
+    ]);
+    const session = makeSession(provider);
+    const { client, received } = makeClient();
+    session.attach(client);
+
+    await session.send("start a long turn", TEST_AUTH);
+    // Let the consumer process tool_start; the turn is now in flight (busy).
+    await new Promise<void>((r) => setTimeout(r, 50));
+    expect(session.status).not.toBe("idle");
+
+    // Switch model mid-turn — this tears the provider down. Before the fix the
+    // drained consumer skipped its idle reset (run already nulled) and no
+    // status_change:idle was ever broadcast, stranding clients on "thinking".
+    await session.setModel("sonnet", undefined, TEST_AUTH);
+    await waitForIdle(session);
+
+    expect(session.status).toBe("idle");
+    const idleBroadcasts = received.filter(
+      (m) => m.type === "session.status_change" && m.status === "idle",
+    );
+    expect(idleBroadcasts.length).toBeGreaterThanOrEqual(1);
+  });
+});
