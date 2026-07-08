@@ -106,6 +106,35 @@ describe("sessions store", () => {
     expect(getSession("a")?.workdir).toBe("/tmp");
   });
 
+  it("mergeSession ignores prototype-polluting keys from a network payload", () => {
+    ingestSessionList([s("a", "2026-05-01T08:00:00Z")]);
+    const evil = JSON.parse(
+      '{"id":"a","name":"renamed","__proto__":{"polluted":true}}',
+    ) as Partial<SessionInfo> & { id: string };
+    mergeSession(evil);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect(getSession("a")?.name).toBe("renamed"); // legit fields still merge
+    // Upsert path (unknown id) is guarded too.
+    const evilNew = JSON.parse(
+      '{"id":"b","name":"b","workdir":"/tmp","status":"idle","createdBy":"you","createdAt":"2026-05-02T08:00:00Z","attachedClients":0,"__proto__":{"polluted2":true}}',
+    ) as SessionInfo;
+    mergeSession(evilNew);
+    expect(({} as Record<string, unknown>).polluted2).toBeUndefined();
+    expect(getSession("b")?.name).toBe("b");
+  });
+
+  it("ingestSessionList keeps a live status_change that's newer than the list snapshot", () => {
+    ingestSessionList([s("a", "2026-05-01T08:00:00Z", { status: "thinking" })]);
+    const requestedAt = Date.now() - 1000; // list was requested a second ago
+    setSessionStatus("a", "idle"); // a live idle lands "now" (after the request)
+    // A stale snapshot still saying "thinking" must NOT clobber the live idle.
+    ingestSessionList([s("a", "2026-05-01T08:00:00Z", { status: "thinking" })], requestedAt);
+    expect(getSession("a")?.status).toBe("idle");
+    // With no `since` (non-reconnect ingest) the snapshot still applies normally.
+    ingestSessionList([s("a", "2026-05-01T08:00:00Z", { status: "thinking" })]);
+    expect(getSession("a")?.status).toBe("thinking");
+  });
+
   it("removeSession refocuses the next remaining session", () => {
     ingestSessionList([
       s("a", "2026-05-01T08:00:00Z"),

@@ -166,6 +166,13 @@ export function forgetApiKey(): void {
   localStorage.removeItem(STORAGE_KEY_TOKEN);
 }
 
+/** Forget only the stored OAuth JWT (not the API key). Used when the daemon
+ * rejects the token: the OAuth flow has no refresh path, so keeping the dead
+ * JWT would just re-loop on the next reload — but a valid API key should stay. */
+export function forgetOAuthToken(): void {
+  localStorage.removeItem(STORAGE_KEY_TOKEN);
+}
+
 export function rememberedApiKey(): string | null {
   return localStorage.getItem(STORAGE_KEY_API_KEY);
 }

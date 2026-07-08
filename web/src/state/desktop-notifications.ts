@@ -25,8 +25,8 @@
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
 
 import { findPendingApproval } from "../lib/approvals";
-import { epochOf, focusedSessionMessages } from "./messages";
-import { focusedSession, focusedSessionId } from "./sessions";
+import { epochOf, messagesFor } from "./messages";
+import { sessionList } from "./sessions";
 
 export type NotifyState = "default" | "granted" | "denied" | "unsupported";
 
@@ -81,58 +81,60 @@ export function installApprovalNotifications(): void {
     });
   });
 
-  // Use the shared focused-messages memo. Reading both the messages
-  // accessor AND the per-session epoch inside the effect makes Solid
-  // re-fire on mutations even when the array reference is stable
-  // (deltas mutate in place).
+  // Watch EVERY session, not just the focused one — an approval on a
+  // BACKGROUND session, while the user is away, is exactly when a desktop
+  // notification matters most. Stays cheap: the per-session status gate skips
+  // the message scan (and the epoch subscription) for anything not already in
+  // `waiting_approval`, so a streaming session's deltas don't re-run this.
   createEffect(() => {
-    permission(); // track
-    const sid = focusedSessionId();
-    epochOf(sid); // track in-place mutations
-    if (!sid) return;
-    const session = focusedSession();
-    if (!session) return;
-    // Status-gated, turn-bounded scan — see lib/approvals.ts. Previously
-    // this walked the ENTIRE array from index 0 on every streaming delta.
-    const match = findPendingApproval(focusedSessionMessages(), session.status);
-    if (!match || !match.tool || match.tool.state.phase !== "waiting_confirmation") return;
-    const pending = {
-      approvalId: match.tool.state.approvalId,
-      toolName: match.tool.name,
-      description: match.tool.state.description ?? match.tool.name,
-    };
-    if (fired.has(pending.approvalId)) return;
     if (permission() !== "granted") return;
-    // Only fire when the user isn't actively looking at the page.
-    // `document.hidden` covers both backgrounded tabs and minimised
-    // windows on most browsers.
+    // Don't fire while the user is actively looking at the page.
     if (typeof document !== "undefined" && !document.hidden) return;
-    // Bound the dedupe set — one entry per approvalId, forever, otherwise grows
-    // without limit over a long-lived tab. Drop the oldest half at the cap;
-    // resolved approvals never re-notify, so evicting old ids is harmless.
-    if (fired.size >= FIRED_CAP) {
-      let drop = fired.size - FIRED_CAP / 2;
-      for (const id of fired) {
-        if (drop-- <= 0) break;
-        fired.delete(id);
+    for (const session of sessionList()) {
+      if (session.status !== "waiting_approval") continue;
+      epochOf(session.id); // track in-place tool-state mutations for THIS session
+      const match = findPendingApproval(messagesFor(session.id), session.status);
+      if (!match || !match.tool || match.tool.state.phase !== "waiting_confirmation") continue;
+      const approvalId = match.tool.state.approvalId;
+      if (fired.has(approvalId)) continue;
+      // Bound the dedupe set — one entry per approvalId, forever, otherwise
+      // grows without limit over a long-lived tab. Drop the oldest half at the
+      // cap; resolved approvals never re-notify, so evicting old ids is harmless.
+      if (fired.size >= FIRED_CAP) {
+        let drop = fired.size - FIRED_CAP / 2;
+        for (const id of fired) {
+          if (drop-- <= 0) break;
+          fired.delete(id);
+        }
       }
-    }
-    fired.add(pending.approvalId);
-    try {
-      const n = new Notification(
-        `codeoid · ${pending.toolName} needs approval`,
-        {
-          body: `${session.name}: ${pending.description}`,
-          tag: `codeoid-approval-${pending.approvalId}`,
-          requireInteraction: true,
-        },
+      fired.add(approvalId);
+      fireApprovalNotification(
+        session.name,
+        match.tool.name,
+        match.tool.state.description ?? match.tool.name,
+        approvalId,
       );
-      n.onclick = () => {
-        window.focus();
-        n.close();
-      };
-    } catch (err) {
-      console.warn("[codeoid] notification failed:", err);
     }
   });
+}
+
+function fireApprovalNotification(
+  sessionName: string,
+  toolName: string,
+  description: string,
+  approvalId: string,
+): void {
+  try {
+    const n = new Notification(`codeoid · ${toolName} needs approval`, {
+      body: `${sessionName}: ${description}`,
+      tag: `codeoid-approval-${approvalId}`,
+      requireInteraction: true,
+    });
+    n.onclick = () => {
+      window.focus();
+      n.close();
+    };
+  } catch (err) {
+    console.warn("[codeoid] notification failed:", err);
+  }
 }
