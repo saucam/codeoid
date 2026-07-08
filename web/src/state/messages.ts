@@ -14,7 +14,7 @@
  * module wires broadcasts in.
  */
 
-import { batch, createMemo } from "solid-js";
+import { batch, createMemo, createRoot } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import { dedupeReplay, mergeDeltaInto } from "@codeoid/core";
 
@@ -91,9 +91,16 @@ export function setFocusedSessionAccessor(fn: () => string | null): void {
 export function focusedSessionMessages(): SessionMessage[] {
   if (!focusedSessionIdAccessor) return EMPTY;
   if (!focusedMessagesMemo) {
-    focusedMessagesMemo = createMessages(focusedSessionIdAccessor);
+    // Create the shared memo under a dedicated root so it isn't owned by
+    // whichever component/computation calls first — that owner disposing (e.g.
+    // ApprovalBar's `pending` memo re-running on the next delta) would tear this
+    // down and never recreate it, freezing the transcript for every consumer.
+    // It's an app-lifetime singleton, so we intentionally never dispose the root.
+    createRoot(() => {
+      focusedMessagesMemo = createMessages(focusedSessionIdAccessor!);
+    });
   }
-  return focusedMessagesMemo();
+  return focusedMessagesMemo!();
 }
 
 /** Monotonic version for a message (cache key). 0 = never seen. */

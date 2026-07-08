@@ -135,11 +135,14 @@ const App: Component = () => {
     }
 
     function onKey(ev: KeyboardEvent): void {
-      // Esc — interrupt when busy. Defer to any open modal/drawer (they
-      // share a `backdrop-blur` root and own their Esc-to-close handler),
-      // so the first Esc closes the overlay and a later Esc interrupts.
+      // Esc — interrupt when busy. Defer to any open modal/drawer (they own
+      // their Esc-to-close handler), so the first Esc closes the overlay and a
+      // later Esc interrupts. Detect the overlay by its `fixed inset-0` root —
+      // NOT a `backdrop-blur` substring, which also matches the always-present
+      // sticky Sessions/Files headers (that made Esc-to-interrupt permanently
+      // dead on desktop).
       if (ev.key === "Escape") {
-        if (document.querySelector('[class*="backdrop-blur"]')) return;
+        if (document.querySelector(".fixed.inset-0")) return;
         const s = focusedSession();
         if (!s || !isBusy(s.status)) return;
         ev.preventDefault();

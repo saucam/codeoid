@@ -10,7 +10,7 @@
  * broadcast for state to reflect — no optimistic updates here.
  */
 
-import { Component, For, Show, createSignal } from "solid-js";
+import { Component, For, Show, createEffect, createSignal, onCleanup } from "solid-js";
 
 import {
   newRequestId,
@@ -104,13 +104,41 @@ const RotateButton: Component<{ sessionId: string }> = (props) => (
   </button>
 );
 
+/** Dismiss a dropdown on Escape or a pointer-down outside its root — the menus
+ * previously closed only on `onMouseLeave`, which a keyboard/touch user can't
+ * trigger, so the menu stayed open over the content. Call inside a component. */
+function useDismissable(
+  rootRef: () => HTMLElement | undefined,
+  isOpen: () => boolean,
+  close: () => void,
+): void {
+  createEffect(() => {
+    if (!isOpen()) return;
+    const onDown = (e: PointerEvent) => {
+      const el = rootRef();
+      if (el && !el.contains(e.target as Node)) close();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("keydown", onKey);
+    onCleanup(() => {
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("keydown", onKey);
+    });
+  });
+}
+
 const ModePicker: Component<{
   sessionId: string;
   current: SessionMode;
 }> = (props) => {
   const [open, setOpen] = createSignal(false);
+  let rootEl: HTMLDivElement | undefined;
+  useDismissable(() => rootEl, open, () => setOpen(false));
   return (
-    <div class="relative">
+    <div class="relative" ref={rootEl}>
       <button
         type="button"
         onClick={() => setOpen(!open())}
@@ -167,8 +195,10 @@ const ModelPicker: Component<{
   const open = modelPickerOpen;
   const setOpen = setModelPickerOpen;
   const [custom, setCustom] = createSignal("");
+  let rootEl: HTMLDivElement | undefined;
+  useDismissable(() => rootEl, open, () => setOpen(false));
   return (
-    <div class="relative">
+    <div class="relative" ref={rootEl}>
       <button
         type="button"
         onClick={() => {
