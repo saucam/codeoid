@@ -27,6 +27,7 @@ import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { findPendingApproval } from "../lib/approvals";
 import { epochOf, messagesFor } from "./messages";
 import { sessionList } from "./sessions";
+import type { SessionInfo, SessionMessage } from "../protocol/types";
 
 export type NotifyState = "default" | "granted" | "denied" | "unsupported";
 
@@ -102,32 +103,58 @@ export function installApprovalNotifications(): void {
     const sessions = sessionList();
     // Only fire while the user isn't actively looking at the page.
     if (!granted || !hidden) return;
-    for (const session of sessions) {
-      if (session.status !== "waiting_approval") continue;
-      epochOf(session.id); // track in-place tool-state mutations for THIS session
-      const match = findPendingApproval(messagesFor(session.id), session.status);
-      if (!match || !match.tool || match.tool.state.phase !== "waiting_confirmation") continue;
-      const approvalId = match.tool.state.approvalId;
-      if (fired.has(approvalId)) continue;
-      // Bound the dedupe set — one entry per approvalId, forever, otherwise
-      // grows without limit over a long-lived tab. Drop the oldest half at the
-      // cap; resolved approvals never re-notify, so evicting old ids is harmless.
-      if (fired.size >= FIRED_CAP) {
-        let drop = fired.size - FIRED_CAP / 2;
-        for (const id of fired) {
-          if (drop-- <= 0) break;
-          fired.delete(id);
-        }
-      }
-      fired.add(approvalId);
-      fireApprovalNotification(
-        session.name,
-        match.tool.name,
-        match.tool.state.description ?? match.tool.name,
-        approvalId,
-      );
+    // Subscribe to in-place tool-state mutations of the waiting sessions so a
+    // second parallel approval (delta, no status change) still retriggers us.
+    for (const s of sessions) {
+      if (s.status === "waiting_approval") epochOf(s.id);
+    }
+    for (const p of pendingApprovalsToNotify(sessions, messagesFor)) {
+      if (fired.has(p.approvalId)) continue;
+      evictToCap(fired, FIRED_CAP);
+      fired.add(p.approvalId);
+      fireApprovalNotification(p.sessionName, p.toolName, p.description, p.approvalId);
     }
   });
+}
+
+export interface ApprovalNotice {
+  sessionName: string;
+  toolName: string;
+  description: string;
+  approvalId: string;
+}
+
+/** Pure selection: every session in `waiting_approval` with a tool in
+ * `waiting_confirmation`, across ALL sessions. Status-gated so it never scans a
+ * non-waiting session's messages. */
+export function pendingApprovalsToNotify(
+  sessions: readonly SessionInfo[],
+  messagesOf: (id: string) => readonly SessionMessage[],
+): ApprovalNotice[] {
+  const out: ApprovalNotice[] = [];
+  for (const session of sessions) {
+    if (session.status !== "waiting_approval") continue;
+    const match = findPendingApproval(messagesOf(session.id), session.status);
+    if (!match || !match.tool || match.tool.state.phase !== "waiting_confirmation") continue;
+    out.push({
+      sessionName: session.name,
+      toolName: match.tool.name,
+      description: match.tool.state.description ?? match.tool.name,
+      approvalId: match.tool.state.approvalId,
+    });
+  }
+  return out;
+}
+
+/** Bound a dedupe set — at the cap, drop the oldest half (Sets keep insertion
+ * order). Resolved approvals never re-notify, so evicting old ids is harmless. */
+export function evictToCap(set: Set<string>, cap: number): void {
+  if (set.size < cap) return;
+  let drop = set.size - Math.floor(cap / 2);
+  for (const id of set) {
+    if (drop-- <= 0) break;
+    set.delete(id);
+  }
 }
 
 function fireApprovalNotification(
