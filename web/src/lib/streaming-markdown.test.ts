@@ -36,6 +36,15 @@ describe("splitStreamingBlocks", () => {
     expect(tail).toContain("```bash");
   });
 
+  it("flags an open fence in the tail so callers can plain-render it", () => {
+    expect(
+      splitStreamingBlocks("intro\n\n```ts\nconst x = 1\nconst y =").tailOpenFence,
+    ).toBe(true);
+    // Closed fence or a plain paragraph tail is not flagged.
+    expect(splitStreamingBlocks("```ts\nx\n```\n\nafter").tailOpenFence).toBe(false);
+    expect(splitStreamingBlocks("just a paragraph tail").tailOpenFence).toBe(false);
+  });
+
   it("handles ~~~ fences and leading indentation", () => {
     const { tail } = splitStreamingBlocks("  ~~~\nraw\n\nstill raw\n");
     expect(tail).toContain("still raw");
@@ -66,7 +75,7 @@ describe("splitStreamingBlocks", () => {
   });
 
   it("handles empty input", () => {
-    expect(splitStreamingBlocks("")).toEqual({ blocks: [], tail: "" });
+    expect(splitStreamingBlocks("")).toEqual({ blocks: [], tail: "", tailOpenFence: false });
   });
 });
 
