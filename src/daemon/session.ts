@@ -1021,10 +1021,22 @@ export class Session {
     // the old consumer; we intentionally don't null the field again afterward
     // so the recovery task is not orphaned.
     const taskToAwait = this.#eventConsumerTask;
+    const hadActiveRun = this.#activeRun !== null;
     this.#activeRun = null;
     this.#eventConsumerTask = null;
     await this.#provider.teardown();
     try { await taskToAwait; } catch { /* consumer handles its own errors */ }
+    // The drained consumer's `finally` skips its own idle reset here: we nulled
+    // #activeRun above, so its run-ownership guard (`#activeRun === run`) is
+    // false. Without this, tearing a provider down mid-turn (setModel / rotate)
+    // strands #status at thinking/tool_running forever — no `status_change:
+    // idle` is ever broadcast and clients loop the "thinking…" indicator. Emit
+    // the transition ourselves, but only if nothing took over the run in the
+    // meantime (provider.teardown() can trigger onRecoveryNeeded, which installs
+    // a fresh run we must not clobber) and we aren't in a terminal error state.
+    if (hadActiveRun && this.#activeRun === null && this.#status !== "error") {
+      this.#setStatus("idle");
+    }
   }
 
   /**

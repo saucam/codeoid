@@ -11,10 +11,17 @@
 
 import { Component, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
-import { focusedSessionMessages } from "../../state/messages";
-import { focusedSession } from "../../state/sessions";
+import { epochOf, focusedSessionMessages, lastActivityAt } from "../../state/messages";
+import { focusedSession, focusedSessionId } from "../../state/sessions";
 
 const VERBS = ["thinking", "drafting", "considering", "researching", "weighing"];
+
+// Defensive cap: if the session claims to be "thinking" but produces no activity
+// (no message/delta, no status change) for this long, treat the status as stale
+// and hide the indicator rather than loop forever. Generous so a genuinely long
+// reasoning gap never hides it; the daemon is the real source of truth. A
+// live-executing tool bypasses this entirely (see `visible`).
+const STALL_MS = 90_000;
 
 const WorkerIndicator: Component = () => {
   const [tick, setTick] = createSignal(0);
@@ -25,9 +32,21 @@ const WorkerIndicator: Component = () => {
   });
 
   const status = () => focusedSession()?.status;
-  const visible = () =>
-    status() === "thinking" ||
-    status() === "tool_running";
+
+  const statusBusy = () =>
+    status() === "thinking" || status() === "tool_running";
+  const visible = () => {
+    if (!statusBusy()) return false;
+    if (liveTool()) return true; // a tool is actively executing — always show
+    tick(); // re-evaluate the staleness window on each tick
+    epochOf(focusedSessionId()); // re-run when new activity lands
+    // Store-derived last-activity time (NOT a component-local clock, which would
+    // reset on refocus and make a stale session look fresh for another 90s).
+    const last = lastActivityAt(focusedSessionId());
+    // No activity recorded this session lifetime → trust the daemon's status.
+    if (last === 0) return true;
+    return Date.now() - last < STALL_MS;
+  };
 
   // Latest in-flight tool call (executing / streaming).
   const liveTool = createMemo(() => {
