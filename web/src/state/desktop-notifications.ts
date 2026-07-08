@@ -31,6 +31,11 @@ import { sessionList } from "./sessions";
 export type NotifyState = "default" | "granted" | "denied" | "unsupported";
 
 const [permission, setPermission] = createSignal<NotifyState>(detect());
+// Reactive mirror of document.hidden — so the watcher re-fires when the tab is
+// backgrounded (document.hidden isn't a signal; reading it wouldn't subscribe).
+const [docHidden, setDocHidden] = createSignal(
+  typeof document !== "undefined" ? document.hidden : true,
+);
 const fired = new Set<string>();
 const FIRED_CAP = 1000;
 
@@ -71,6 +76,7 @@ export function installApprovalNotifications(): void {
   // browser settings between sessions.
   function refresh(): void {
     setPermission(detect());
+    if (typeof document !== "undefined") setDocHidden(document.hidden);
   }
   onMount(() => {
     window.addEventListener("focus", refresh);
@@ -87,10 +93,16 @@ export function installApprovalNotifications(): void {
   // the message scan (and the epoch subscription) for anything not already in
   // `waiting_approval`, so a streaming session's deltas don't re-run this.
   createEffect(() => {
-    if (permission() !== "granted") return;
-    // Don't fire while the user is actively looking at the page.
-    if (typeof document !== "undefined" && !document.hidden) return;
-    for (const session of sessionList()) {
+    // Read every reactive dependency up front. A bare early return would leave
+    // this effect depending only on permission(), so becoming-hidden (which
+    // re-sets the same granted permission) wouldn't retrigger the scan and a
+    // background approval would be missed.
+    const granted = permission() === "granted";
+    const hidden = docHidden();
+    const sessions = sessionList();
+    // Only fire while the user isn't actively looking at the page.
+    if (!granted || !hidden) return;
+    for (const session of sessions) {
       if (session.status !== "waiting_approval") continue;
       epochOf(session.id); // track in-place tool-state mutations for THIS session
       const match = findPendingApproval(messagesFor(session.id), session.status);
