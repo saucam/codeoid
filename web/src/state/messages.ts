@@ -312,4 +312,5 @@ export function clearSessionMessages(sessionId: string): void {
 export function _resetMessagesForTest(): void {
   setState({ bySession: {}, versions: {}, epochBySession: {} });
   indexBySession.clear();
+  activityAtBySession.clear();
 }

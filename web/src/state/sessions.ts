@@ -21,6 +21,11 @@ interface SessionsState {
 const [state, setState] = createStore<SessionsState>({ byId: {} });
 const [focusedId, setFocusedId] = createSignal<string | null>(null);
 
+/** Local wall-clock time each session's status was last set from a live
+ * `status_change` — used to defend a fresh status against a stale list snapshot
+ * arriving out of order on reconnect. Non-reactive side map. */
+const statusUpdatedAt = new Map<string, number>();
+
 /** Sorted list — most recent activity first. */
 export const sessionList = createMemo<SessionInfo[]>(() => {
   const items = Object.values(state.byId);
@@ -75,7 +80,13 @@ function jsonEqual(a: unknown, b: unknown): boolean {
  * doesn't tear down and re-create every SessionRow on each periodic
  * refresh — only fields that actually changed trigger updates.
  */
-export function ingestSessionList(items: readonly SessionInfo[]): void {
+export function ingestSessionList(
+  items: readonly SessionInfo[],
+  /** Wall-clock time the list was requested. When set, a session's `status` is
+   * NOT overwritten if a live `status_change` for it landed AFTER this — the
+   * snapshot is then stale for that field (the reconnect "stuck thinking" race). */
+  since?: number,
+): void {
   batch(() => {
     const removedIds: string[] = [];
     setState(
@@ -96,6 +107,14 @@ export function ingestSessionList(items: readonly SessionInfo[]): void {
           const source = it as unknown as Record<string, unknown>;
           for (const k of Object.keys(source)) {
             if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
+            // Keep a live status_change that's newer than this snapshot.
+            if (
+              k === "status" &&
+              since !== undefined &&
+              (statusUpdatedAt.get(it.id) ?? 0) > since
+            ) {
+              continue;
+            }
             // Object-valued fields (usage, subagents, pinnedFiles) arrive as
             // fresh references on every list refresh; reassigning them when
             // deep-equal would notify their subscribers for nothing.
@@ -127,6 +146,7 @@ export function ingestSessionList(items: readonly SessionInfo[]): void {
       clearSessionMessages(id);
       clearResumeCursor(id);
       clearDraft(id);
+      statusUpdatedAt.delete(id);
     }
     // Auto-focus the most recently-created session if nothing is focused.
     const cur = focusedId();
@@ -152,22 +172,40 @@ export function mergeSession(next: Partial<SessionInfo> & { id: string }): void 
   // a session we hadn't seen yet (e.g. one created by another client) — with no
   // periodic list poll, it never appeared until reconnect. Upsert directly when
   // absent; merge in place when present (info_update carries a full SessionInfo).
+  // The payload is network-sourced (JSON.parse yields "__proto__" as a plain
+  // own key), so skip prototype-polluting keys on both paths — the same guard
+  // ingestSessionList already applies.
   if (!state.byId[next.id]) {
-    setState("byId", next.id, next as SessionInfo);
+    setState("byId", next.id, withoutProtoKeys(next) as SessionInfo);
     return;
   }
   setState(
     "byId",
     next.id,
     produce<SessionInfo>((s) => {
-      Object.assign(s, next);
+      const target = s as unknown as Record<string, unknown>;
+      const source = next as unknown as Record<string, unknown>;
+      for (const k of Object.keys(source)) {
+        if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
+        target[k] = source[k];
+      }
     }),
   );
+}
+
+function withoutProtoKeys<T extends object>(obj: T): T {
+  const clean: Record<string, unknown> = {};
+  for (const k of Object.keys(obj)) {
+    if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
+    clean[k] = (obj as Record<string, unknown>)[k];
+  }
+  return clean as T;
 }
 
 /** Apply a status-only update from `session.status_change`. */
 export function setSessionStatus(id: string, status: SessionStatus): void {
   if (!state.byId[id]) return;
+  statusUpdatedAt.set(id, Date.now());
   setState("byId", id, "status", status);
 }
 
@@ -176,6 +214,7 @@ export function removeSession(id: string): void {
     clearSessionMessages(id);
     clearResumeCursor(id);
     clearDraft(id);
+    statusUpdatedAt.delete(id);
     setState(
       "byId",
       produce<Record<string, SessionInfo>>((m) => {

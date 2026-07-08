@@ -234,6 +234,58 @@ describe("CodeoidClient", () => {
     expect(c.status.kind).toBe("failed");
   });
 
+  it("goes terminal (failed, no retry loop) when auth is rejected via a 4003 close", async () => {
+    // Default maxAttempts=0 means "retry network drops forever" — an expired
+    // OAuth JWT would otherwise loop on the dead token. Auth rejection is terminal.
+    const c = track(makeClient());
+    const statuses: string[] = [];
+    c.onStatus((s) => statuses.push(s.kind));
+    const p = c.connect();
+    await flush();
+    MockWS.last().open();
+    await flush();
+    MockWS.last().close(4003, "token expired");
+    await expect(p).rejects.toThrow();
+    await flush();
+    expect(c.status.kind).toBe("failed");
+    expect(MockWS.instances.length).toBe(1); // did NOT spin up another socket
+    expect(statuses).not.toContain("reconnecting");
+  });
+
+  it("goes terminal (failed) when auth is rejected via response.error", async () => {
+    const c = track(makeClient());
+    const p = c.connect();
+    await flush();
+    MockWS.last().open();
+    await flush();
+    MockWS.last().recv({ type: "response.error", error: "invalid token" });
+    await expect(p).rejects.toThrow(/auth rejected/);
+    await flush();
+    expect(c.status.kind).toBe("failed");
+    expect(MockWS.instances.length).toBe(1);
+  });
+
+  it("still RETRIES a non-auth drop before auth completes (not terminal)", async () => {
+    // A 1006 abnormal-closure before auth is a transient network drop, not an
+    // auth rejection — it must back off and retry, not go to failed.
+    const c = track(makeClient({ maxAttempts: 2 }));
+    const p = c.connect();
+    await flush();
+    MockWS.last().open();
+    await flush();
+    MockWS.last().close(1006, "");
+    // Let the backoff timer fire so the retry socket is created.
+    await sleep(30);
+    // A second socket was created (retry), and we never went terminal on the drop.
+    expect(MockWS.instances.length).toBeGreaterThan(1);
+    // Land the retry so the test doesn't leak a pending connect.
+    MockWS.last().open();
+    await flush();
+    MockWS.last().recv(AUTH_OK);
+    await p;
+    expect(c.status.kind).toBe("connected");
+  });
+
   it("rejects in-flight requests when the socket drops (no 30s hang)", async () => {
     const c = track(makeClient());
     const ws = await connectClient(c);

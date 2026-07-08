@@ -7,6 +7,7 @@ import {
   clearSessionMessages,
   epochOf,
   hasMessage,
+  lastActivityAt,
   messagesFor,
   registerSessionCachePruner,
   replaceScrollback,
@@ -35,6 +36,24 @@ function makeMsg(overrides: Partial<SessionMessage> = {}): SessionMessage {
 
 describe("messages store", () => {
   beforeEach(() => _resetMessagesForTest());
+
+  it("tracks lastActivityAt on message/delta, and clears it with the session", () => {
+    expect(lastActivityAt("s1")).toBe(0); // nothing yet
+    const before = Date.now();
+    applyMessage(makeMsg({ messageId: "m1", content: "hi" }));
+    const afterMsg = lastActivityAt("s1");
+    expect(afterMsg).toBeGreaterThanOrEqual(before);
+    applyDelta({
+      type: "session.message.delta",
+      sessionId: "s1",
+      messageId: "m1",
+      contentAppend: " there",
+    } as SessionMessageDelta);
+    expect(lastActivityAt("s1")).toBeGreaterThanOrEqual(afterMsg);
+    clearSessionMessages("s1");
+    expect(lastActivityAt("s1")).toBe(0); // pruned with the session
+    expect(lastActivityAt(null)).toBe(0);
+  });
 
   it("appends messages on applyMessage", () => {
     applyMessage(makeMsg({ messageId: "m1", content: "first" }));

@@ -25,12 +25,18 @@
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
 
 import { findPendingApproval } from "../lib/approvals";
-import { epochOf, focusedSessionMessages } from "./messages";
-import { focusedSession, focusedSessionId } from "./sessions";
+import { epochOf, messagesFor } from "./messages";
+import { sessionList } from "./sessions";
+import type { SessionInfo, SessionMessage } from "../protocol/types";
 
 export type NotifyState = "default" | "granted" | "denied" | "unsupported";
 
 const [permission, setPermission] = createSignal<NotifyState>(detect());
+// Reactive mirror of document.hidden — so the watcher re-fires when the tab is
+// backgrounded (document.hidden isn't a signal; reading it wouldn't subscribe).
+const [docHidden, setDocHidden] = createSignal(
+  typeof document !== "undefined" ? document.hidden : true,
+);
 const fired = new Set<string>();
 const FIRED_CAP = 1000;
 
@@ -71,6 +77,7 @@ export function installApprovalNotifications(): void {
   // browser settings between sessions.
   function refresh(): void {
     setPermission(detect());
+    if (typeof document !== "undefined") setDocHidden(document.hidden);
   }
   onMount(() => {
     window.addEventListener("focus", refresh);
@@ -81,58 +88,92 @@ export function installApprovalNotifications(): void {
     });
   });
 
-  // Use the shared focused-messages memo. Reading both the messages
-  // accessor AND the per-session epoch inside the effect makes Solid
-  // re-fire on mutations even when the array reference is stable
-  // (deltas mutate in place).
+  // Watch EVERY session, not just the focused one — an approval on a
+  // BACKGROUND session, while the user is away, is exactly when a desktop
+  // notification matters most. Stays cheap: the per-session status gate skips
+  // the message scan (and the epoch subscription) for anything not already in
+  // `waiting_approval`, so a streaming session's deltas don't re-run this.
   createEffect(() => {
-    permission(); // track
-    const sid = focusedSessionId();
-    epochOf(sid); // track in-place mutations
-    if (!sid) return;
-    const session = focusedSession();
-    if (!session) return;
-    // Status-gated, turn-bounded scan — see lib/approvals.ts. Previously
-    // this walked the ENTIRE array from index 0 on every streaming delta.
-    const match = findPendingApproval(focusedSessionMessages(), session.status);
-    if (!match || !match.tool || match.tool.state.phase !== "waiting_confirmation") return;
-    const pending = {
-      approvalId: match.tool.state.approvalId,
-      toolName: match.tool.name,
-      description: match.tool.state.description ?? match.tool.name,
-    };
-    if (fired.has(pending.approvalId)) return;
-    if (permission() !== "granted") return;
-    // Only fire when the user isn't actively looking at the page.
-    // `document.hidden` covers both backgrounded tabs and minimised
-    // windows on most browsers.
-    if (typeof document !== "undefined" && !document.hidden) return;
-    // Bound the dedupe set — one entry per approvalId, forever, otherwise grows
-    // without limit over a long-lived tab. Drop the oldest half at the cap;
-    // resolved approvals never re-notify, so evicting old ids is harmless.
-    if (fired.size >= FIRED_CAP) {
-      let drop = fired.size - FIRED_CAP / 2;
-      for (const id of fired) {
-        if (drop-- <= 0) break;
-        fired.delete(id);
-      }
+    // Read every reactive dependency up front. A bare early return would leave
+    // this effect depending only on permission(), so becoming-hidden (which
+    // re-sets the same granted permission) wouldn't retrigger the scan and a
+    // background approval would be missed.
+    const granted = permission() === "granted";
+    const hidden = docHidden();
+    const sessions = sessionList();
+    // Only fire while the user isn't actively looking at the page.
+    if (!granted || !hidden) return;
+    // Subscribe to in-place tool-state mutations of the waiting sessions so a
+    // second parallel approval (delta, no status change) still retriggers us.
+    for (const s of sessions) {
+      if (s.status === "waiting_approval") epochOf(s.id);
     }
-    fired.add(pending.approvalId);
-    try {
-      const n = new Notification(
-        `codeoid · ${pending.toolName} needs approval`,
-        {
-          body: `${session.name}: ${pending.description}`,
-          tag: `codeoid-approval-${pending.approvalId}`,
-          requireInteraction: true,
-        },
-      );
-      n.onclick = () => {
-        window.focus();
-        n.close();
-      };
-    } catch (err) {
-      console.warn("[codeoid] notification failed:", err);
+    for (const p of pendingApprovalsToNotify(sessions, messagesFor)) {
+      if (fired.has(p.approvalId)) continue;
+      evictToCap(fired, FIRED_CAP);
+      fired.add(p.approvalId);
+      fireApprovalNotification(p.sessionName, p.toolName, p.description, p.approvalId);
     }
   });
+}
+
+export interface ApprovalNotice {
+  sessionName: string;
+  toolName: string;
+  description: string;
+  approvalId: string;
+}
+
+/** Pure selection: every session in `waiting_approval` with a tool in
+ * `waiting_confirmation`, across ALL sessions. Status-gated so it never scans a
+ * non-waiting session's messages. */
+export function pendingApprovalsToNotify(
+  sessions: readonly SessionInfo[],
+  messagesOf: (id: string) => readonly SessionMessage[],
+): ApprovalNotice[] {
+  const out: ApprovalNotice[] = [];
+  for (const session of sessions) {
+    if (session.status !== "waiting_approval") continue;
+    const match = findPendingApproval(messagesOf(session.id), session.status);
+    if (!match || !match.tool || match.tool.state.phase !== "waiting_confirmation") continue;
+    out.push({
+      sessionName: session.name,
+      toolName: match.tool.name,
+      description: match.tool.state.description ?? match.tool.name,
+      approvalId: match.tool.state.approvalId,
+    });
+  }
+  return out;
+}
+
+/** Bound a dedupe set — at the cap, drop the oldest half (Sets keep insertion
+ * order). Resolved approvals never re-notify, so evicting old ids is harmless. */
+export function evictToCap(set: Set<string>, cap: number): void {
+  if (set.size < cap) return;
+  let drop = set.size - Math.floor(cap / 2);
+  for (const id of set) {
+    if (drop-- <= 0) break;
+    set.delete(id);
+  }
+}
+
+function fireApprovalNotification(
+  sessionName: string,
+  toolName: string,
+  description: string,
+  approvalId: string,
+): void {
+  try {
+    const n = new Notification(`codeoid · ${toolName} needs approval`, {
+      body: `${sessionName}: ${description}`,
+      tag: `codeoid-approval-${approvalId}`,
+      requireInteraction: true,
+    });
+    n.onclick = () => {
+      window.focus();
+      n.close();
+    };
+  } catch (err) {
+    console.warn("[codeoid] notification failed:", err);
+  }
 }

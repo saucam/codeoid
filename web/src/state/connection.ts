@@ -10,7 +10,7 @@
 
 import { createSignal } from "solid-js";
 
-import { resolveToken } from "../lib/auth";
+import { forgetOAuthToken, resolveToken } from "../lib/auth";
 import { CodeoidClient, type ClientStatus } from "../lib/ws";
 import { CAPABILITIES } from "../protocol/types";
 import type {
@@ -127,6 +127,9 @@ export function request(msg: ClientMessage, timeoutMs?: number): Promise<unknown
 export async function refreshSessions(): Promise<SessionInfo[]> {
   const c = getClient();
   const id = c.nextId();
+  // Stamp the request time so ingest can keep any live status_change that lands
+  // AFTER this while the list is in flight (reconnect ordering race).
+  const since = Date.now();
   const result = await c.request<SessionListResultMsg>(
     { type: "session.list", id },
     {
@@ -134,7 +137,7 @@ export async function refreshSessions(): Promise<SessionInfo[]> {
         m.type === "session.list.result" && m.requestId === id ? m : undefined,
     },
   );
-  ingestSessionList(result.sessions);
+  ingestSessionList(result.sessions, since);
   return result.sessions;
 }
 
@@ -198,6 +201,15 @@ export async function bootstrap(opts: { apiKey?: string; token?: string } = {}):
         // stuck showing "thinking". (The attach effect re-attaches in parallel
         // and replays scrollback.)
         void refreshSessions().catch(() => {});
+      } else if (s.kind === "failed") {
+        // The client only reaches `failed` on a terminal auth rejection (it
+        // retries network drops forever). An expired OAuth JWT has no refresh
+        // path, so drop the identity to fall back to <SignIn> instead of
+        // showing "reconnecting…" forever, and forget the stale token so a
+        // reload doesn't immediately re-enter the same dead loop.
+        forgetOAuthToken();
+        setAuth(null);
+        setBootError(`Session expired — please sign in again. (${s.reason})`);
       }
     });
     client.onMessage(routeBroadcast);

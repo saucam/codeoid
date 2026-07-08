@@ -34,6 +34,22 @@ export type ClientStatus =
   | { kind: "reconnecting"; attempt: number; nextInMs: number; reason: string }
   | { kind: "failed"; reason: string };
 
+/**
+ * The daemon actively REJECTED the presented token (auth `response.error`, or a
+ * close with the auth codes 4001/4003) — as opposed to a transient network
+ * drop. Retrying won't help: there's no refresh path for an OAuth JWT, and a
+ * key that fails re-exchange won't recover. The reconnect loop treats this as
+ * terminal (→ `failed`) so the host can fall back to sign-in instead of
+ * looping forever on a dead token.
+ */
+export class AuthRejectedError extends Error {
+  readonly authRejected = true as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "AuthRejectedError";
+  }
+}
+
 export interface ConnectOptions {
   url: string; // ws://host:port — daemon's WS endpoint
   /** Initial access token used for the first handshake (and the fallback
@@ -331,7 +347,10 @@ export class CodeoidClient {
           return auth;
         } catch (err) {
           const reason = err instanceof Error ? err.message : String(err);
-          if (isBounded && attempt >= max) {
+          // Terminal auth rejection (bad/expired token, no refresh path — e.g.
+          // an OAuth JWT that expired) never self-heals by retrying; fail so the
+          // host falls back to sign-in instead of looping forever on it.
+          if (err instanceof AuthRejectedError || (isBounded && attempt >= max)) {
             this.#setStatus({ kind: "failed", reason });
             throw err;
           }
@@ -530,7 +549,7 @@ export class CodeoidClient {
         if (!authResolved && msg.type === "response.error") {
           authResolved = true;
           clearTimeout(authTimer);
-          reject(new Error(`auth rejected: ${msg.error}`));
+          reject(new AuthRejectedError(`auth rejected: ${msg.error}`));
           return;
         }
         this.#routeMessage(msg);
@@ -540,7 +559,13 @@ export class CodeoidClient {
         if (!authResolved) {
           authResolved = true;
           clearTimeout(authTimer);
-          reject(new Error(reason));
+          // 4001 (auth handshake timeout) / 4003 (auth rejected) are the
+          // daemon's auth-failure close codes — terminal, not a retryable drop.
+          reject(
+            ev.code === 4001 || ev.code === 4003
+              ? new AuthRejectedError(reason)
+              : new Error(reason),
+          );
           return;
         }
         clearTimeout(authTimer);
