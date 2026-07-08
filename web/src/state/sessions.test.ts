@@ -13,6 +13,7 @@ import {
   sessionList,
   setSessionStatus,
 } from "./sessions";
+import { _resetDraftsForTest, getDraft, setDraft } from "./prompt-drafts";
 import type { SessionInfo } from "../protocol/types";
 
 function s(id: string, createdAt: string, overrides: Partial<SessionInfo> = {}): SessionInfo {
@@ -29,7 +30,20 @@ function s(id: string, createdAt: string, overrides: Partial<SessionInfo> = {}):
 }
 
 describe("sessions store", () => {
-  beforeEach(() => _resetSessionsForTest());
+  beforeEach(() => {
+    _resetSessionsForTest();
+    _resetDraftsForTest();
+  });
+
+  it("ingestSessionList prunes per-session state (draft) of a removed session", () => {
+    // Regression: a remote removal (session dropped from the authoritative list)
+    // used to delete only byId, leaking the message buffer / resume cursor / draft.
+    ingestSessionList([s("a", "2026-05-01T08:00:00Z"), s("b", "2026-05-02T08:00:00Z")]);
+    setDraft("b", "half-typed message");
+    expect(getDraft("b")).toBe("half-typed message");
+    ingestSessionList([s("a", "2026-05-01T08:00:00Z")]); // "b" gone
+    expect(getDraft("b")).toBe("");
+  });
 
   it("ingests a list and sorts newest-first", () => {
     ingestSessionList([

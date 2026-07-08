@@ -32,6 +32,7 @@ export type NotifyState = "default" | "granted" | "denied" | "unsupported";
 
 const [permission, setPermission] = createSignal<NotifyState>(detect());
 const fired = new Set<string>();
+const FIRED_CAP = 1000;
 
 function detect(): NotifyState {
   if (typeof Notification === "undefined") return "unsupported";
@@ -106,6 +107,16 @@ export function installApprovalNotifications(): void {
     // `document.hidden` covers both backgrounded tabs and minimised
     // windows on most browsers.
     if (typeof document !== "undefined" && !document.hidden) return;
+    // Bound the dedupe set — one entry per approvalId, forever, otherwise grows
+    // without limit over a long-lived tab. Drop the oldest half at the cap;
+    // resolved approvals never re-notify, so evicting old ids is harmless.
+    if (fired.size >= FIRED_CAP) {
+      let drop = fired.size - FIRED_CAP / 2;
+      for (const id of fired) {
+        if (drop-- <= 0) break;
+        fired.delete(id);
+      }
+    }
     fired.add(pending.approvalId);
     try {
       const n = new Notification(
