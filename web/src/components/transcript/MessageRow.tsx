@@ -25,6 +25,7 @@ import type {
   ToolState,
 } from "../../protocol/types";
 import { EditDiff, WriteFile, isEditInput, isWriteInput } from "./EditDiff";
+import PartsView, { hasRichParts } from "./PartsView";
 
 const ROLE_LABEL: Record<MessageRole, string> = {
   user: "you",
@@ -90,6 +91,13 @@ const Body: Component<{ msg: SessionMessage; streaming?: boolean }> = (props) =>
       </Match>
       <Match when={m().role === "tool_result"}>
         <ToolResult msg={m()} />
+      </Match>
+      {/* Rich provider content (custom_message parts). Ordered after the
+          tool arms (tool chrome wins) and before the role arms: a message
+          whose parts carry more than the mirrored text block renders the
+          parts; plain messages keep the streaming-optimized legacy paths. */}
+      <Match when={hasRichParts(m().parts)}>
+        <PartsView parts={m().parts!} sessionId={m().sessionId} messageId={m().messageId} />
       </Match>
       <Match when={m().role === "thinking"}>
         <ThinkingBlock text={m().content} streaming={props.streaming} />

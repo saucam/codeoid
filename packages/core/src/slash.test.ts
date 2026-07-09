@@ -200,3 +200,26 @@ describe("dispatchSlash", () => {
     expect(c.sent).toEqual([]);
   });
 });
+
+describe("provider-command passthrough", () => {
+  it("unknown verbs still throw without a passthrough predicate", () => {
+    expect(() => parseSlash("/review the diff")).toThrow(/unknown slash command/);
+  });
+
+  it("returns null (plain prompt text) when the predicate matches", () => {
+    const isProviderCommand = (name: string) => name === "review";
+    expect(parseSlash("/review the diff", { isProviderCommand })).toBeNull();
+    // Case-insensitive: the verb is lowercased before the predicate runs.
+    expect(parseSlash("/REVIEW now", { isProviderCommand })).toBeNull();
+    // Non-matching verbs still throw.
+    expect(() => parseSlash("/nonsense", { isProviderCommand })).toThrow(
+      /unknown slash command/,
+    );
+  });
+
+  it("built-ins always win over provider commands of the same name", () => {
+    // A provider exposing "/help" must not shadow the client's help modal.
+    const isProviderCommand = () => true;
+    expect(parseSlash("/help", { isProviderCommand })).toEqual({ kind: "help" });
+  });
+});

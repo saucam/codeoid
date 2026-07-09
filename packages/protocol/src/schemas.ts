@@ -117,6 +117,31 @@ export const sessionApproveSchema = z.object({
   updatedInput: z.record(z.string(), z.unknown()).optional(),
 });
 
+export const sessionUiResponseSchema = z.object({
+  ...base,
+  type: z.literal("session.ui_response"),
+  sessionId: sessionIdField,
+  requestId: z.string().min(1).max(LIMITS.ID_MAX),
+  value: z.string().max(LIMITS.UI_TEXT_MAX).optional(),
+  confirmed: z.boolean().optional(),
+  cancelled: z.boolean().optional(),
+});
+
+export const sessionPartActionSchema = z.object({
+  ...base,
+  type: z.literal("session.part_action"),
+  sessionId: sessionIdField,
+  messageId: z.string().min(1).max(LIMITS.ID_MAX),
+  action: z.string().min(1).max(256),
+  data: z.record(z.string(), z.unknown()).optional(),
+});
+
+export const sessionCommandsSchema = z.object({
+  ...base,
+  type: z.literal("session.commands"),
+  sessionId: sessionIdField,
+});
+
 export const sessionDestroySchema = z.object({
   ...base,
   type: z.literal("session.destroy"),
@@ -247,6 +272,9 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
   sessionSendSchema,
   sessionInterruptSchema,
   sessionApproveSchema,
+  sessionUiResponseSchema,
+  sessionPartActionSchema,
+  sessionCommandsSchema,
   sessionDestroySchema,
   sessionSetModeSchema,
   sessionPinSchema,

@@ -17,6 +17,7 @@ import {
   onMount,
 } from "solid-js";
 
+import { ensureCommands, isProviderCommand } from "../../state/commands";
 import { newRequestId, request, send } from "../../state/connection";
 import {
   clearDraft,
@@ -165,6 +166,14 @@ const PromptBox: Component = () => {
   // Re-hydrate from localStorage when the focused session id changes.
   createEffect(on(focusedSessionId, () => hydrate()));
 
+  // Prefetch the provider-command catalog for the focused session so the
+  // slash parser can pass provider commands (pi extensions, prompt
+  // templates, skills) through as prompt text instead of erroring.
+  createEffect(() => {
+    const id = focusedSessionId();
+    if (id) ensureCommands(id);
+  });
+
   function autosize(): void {
     const el = textareaRef;
     if (!el) return;
@@ -197,8 +206,11 @@ const PromptBox: Component = () => {
       return;
     }
 
-    // Slash commands intercepted client-side.
-    const slash = parseSlash(raw);
+    // Slash commands intercepted client-side. Provider commands (from the
+    // session.commands catalog) pass through as null → sent as prompt text.
+    const slash = parseSlash(raw, {
+      isProviderCommand: (name) => isProviderCommand(session.id, name),
+    });
     if (slash) {
       try {
         dispatchSlash(slash, {

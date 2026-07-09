@@ -222,6 +222,15 @@ export class ScrollbackBuffer {
   }
 
   /**
+   * Read one buffered message by id. Returns the LIVE object (callers must
+   * not mutate — use `updateMessage` for that); undefined when the message
+   * was evicted or never buffered.
+   */
+  getMessage(messageId: string): DaemonMessage | undefined {
+    return this.#byId.get(messageId)?.msg;
+  }
+
+  /**
    * Update a message in the buffer by messageId. Used to apply tool state
    * transitions so scrollback replay shows final states, not intermediate.
    */

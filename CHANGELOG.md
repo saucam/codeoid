@@ -6,6 +6,39 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Provider extension surface** — the wire-additive groundwork for
+  non-Claude backends (pi harness next) to expose their full feature set
+  through codeoid:
+  - **Provider-initiated dialogs** — new `session.ui_request` /
+    `session.ui_response` / `session.ui_resolved` messages let a provider (or
+    its extensions) ask the user something that is not a tool approval
+    (confirm gates, pick-one lists, free text, editors). Daemon-enforced
+    timeouts, attach re-delivery, first-answer-wins across clients, interrupt
+    cancellation, and stall-watchdog integration. Gated on the new
+    `ui.dialogs` capability; the web UI renders them in a new `UiRequestBar`.
+  - **Dynamic provider commands** — `session.commands` returns the backing
+    provider's slash-command catalog (extension commands, prompt templates,
+    skills). Clients pass unknown-but-catalogued verbs through as prompt
+    text (`parseSlash` `isProviderCommand` option); the provider expands
+    them. Gated on the `commands.dynamic` capability.
+  - **Rich parts, actually rendered** — providers can emit standalone
+    `custom_message` events with `ContentPart[]`; the web UI now renders
+    parts (code, diff, table, tree, progress, image, anchor, button) via a
+    new `PartsView`, and `ButtonPart` gets its missing return path: the new
+    `session.part_action` verb validates the button against the real message
+    and forwards it to the provider's `handlePartAction`.
+  - **Provider-declared approval forms** — `tool_start.patchableKeys` lets
+    any backend declare which input keys a client may patch on approval,
+    generalizing the hardcoded AskUserQuestion whitelist (which remains the
+    fallback).
+  - **ProviderRegistry wired in** — session backends now come from a
+    factory registry built once at daemon startup (previously dead code next
+    to a hardcoded `switch`); adding a backend is one `register()` call.
+    Unknown provider ids still fall back to the default so resume survives
+    metas written by newer codeoids.
+
 ## [0.2.0] - 2026-07-06
 
 ### Added

@@ -44,6 +44,17 @@ export const CAPABILITIES = {
   SEQ_RESUME: "replay.resume",
   /** Duplicate-send suppression via `session.send.clientMsgId`. */
   SEND_IDEMPOTENCY: "send.idempotency",
+  /**
+   * Provider-initiated dialogs (`session.ui_request` / `session.ui_response`).
+   * Declared by clients that can render the request methods; the daemon only
+   * targets `ui_request` frames at connections that declared it.
+   */
+  UI_DIALOGS: "ui.dialogs",
+  /**
+   * Session-scoped provider command discovery (`session.commands`). Declared
+   * by the daemon; clients feature-detect before fetching.
+   */
+  DYNAMIC_COMMANDS: "commands.dynamic",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -79,6 +90,10 @@ export const LIMITS = {
   ID_MAX: 128,
   /** Max model id / alias length (`session.set_model`). */
   MODEL_MAX: 256,
+  /** Max free-text length on a `session.ui_response` (`value`). */
+  UI_TEXT_MAX: 65_536,
+  /** Max number of options on a `session.ui_request` select. */
+  UI_OPTIONS_MAX: 64,
 } as const;
 
 // =============================================================================
@@ -672,6 +687,9 @@ export type ClientMessage =
   | SessionSendMsg
   | SessionInterruptMsg
   | SessionApproveMsg
+  | SessionUiResponseMsg
+  | SessionPartActionMsg
+  | SessionCommandsMsg
   | SessionDestroyMsg
   | SessionSetModeMsg
   | SessionPinMsg
@@ -824,6 +842,70 @@ export interface SessionApproveMsg extends BaseClientMsg {
    * returning `{ behavior: "allow", updatedInput: ... }` to the SDK.
    */
   updatedInput?: Record<string, unknown>;
+}
+
+/**
+ * Answer a provider-initiated dialog (`session.ui_request`). Exactly one of
+ * the payload fields applies per method:
+ *   - select / input / editor → `value` (the chosen option / entered text)
+ *   - confirm                 → `confirmed`
+ *   - any method             → `cancelled: true` to dismiss
+ * The first response for a `requestId` wins; the daemon broadcasts
+ * `session.ui_resolved` so every other attached client dismisses its copy.
+ * A response for a request that is no longer pending gets `not_found`.
+ */
+export interface SessionUiResponseMsg extends BaseClientMsg {
+  type: "session.ui_response";
+  sessionId: string;
+  /** Echoes `SessionUiRequestMsg.requestId`. */
+  requestId: string;
+  value?: string;
+  confirmed?: boolean;
+  cancelled?: boolean;
+}
+
+/**
+ * Activate a `ButtonPart` the daemon previously sent in a message's
+ * `parts[]`. The daemon validates that `messageId` really carries a button
+ * with this `action` (clients can't mint arbitrary provider calls) and
+ * forwards it to the session's provider. Providers that don't handle
+ * actions reject with `invalid_request`.
+ */
+export interface SessionPartActionMsg extends BaseClientMsg {
+  type: "session.part_action";
+  sessionId: string;
+  /** The message whose `parts[]` contains the button. */
+  messageId: string;
+  /** `ButtonPart.action`, verbatim. */
+  action: string;
+  /** `ButtonPart.data`, verbatim (optional). */
+  data?: Record<string, unknown>;
+}
+
+/**
+ * Fetch the session's provider-defined command catalog — slash commands
+ * contributed by the backing provider (e.g. pi extension commands, prompt
+ * templates, skills). Invocation needs no dedicated verb: send the command
+ * as plain `session.send` text (`"/name args"`); the provider expands it.
+ * Gated on the daemon capability `commands.dynamic`.
+ */
+export interface SessionCommandsMsg extends BaseClientMsg {
+  type: "session.commands";
+  sessionId: string;
+}
+
+/** One provider-defined slash command (see `SessionCommandsMsg`). */
+export interface ProviderCommand {
+  /** Invokable name without the leading slash. */
+  name: string;
+  description?: string;
+  /**
+   * Provider-specific origin taxonomy (e.g. "extension" | "prompt" |
+   * "skill"). Open string — clients display it verbatim, never switch on it.
+   */
+  source?: string;
+  /** Optional argument hint for palette display (e.g. "<env>"). */
+  argumentHint?: string;
 }
 
 export interface SessionDestroyMsg extends BaseClientMsg {
@@ -1241,6 +1323,65 @@ export interface SessionImportResultMsg {
 }
 
 // =============================================================================
+// Provider-initiated UI — generic dialogs any backend can raise.
+//
+// A provider (or one of its extensions) may need an answer from the human
+// mid-session: a confirmation gate, a pick-one list, a line of text. These
+// are NOT tool approvals — they carry no tool input to audit — so they get
+// their own request/response pair instead of piggybacking on
+// `waiting_confirmation`.
+//
+// Lifecycle: daemon broadcasts `session.ui_request` to attached clients that
+// declared the `ui.dialogs` capability (and re-sends pending requests on
+// attach). The first `session.ui_response` wins; the daemon then broadcasts
+// `session.ui_resolved` so every client dismisses its copy. `timeoutMs`
+// requests auto-resolve as cancelled on expiry — the daemon enforces the
+// deadline, clients only display the countdown.
+// =============================================================================
+
+export type UiRequestMethod = "select" | "confirm" | "input" | "editor";
+
+export interface SessionUiRequestMsg {
+  type: "session.ui_request";
+  sessionId: string;
+  /** Unique id — clients echo it on `session.ui_response`. */
+  requestId: string;
+  method: UiRequestMethod;
+  /** Short prompt title (always present). */
+  title: string;
+  /** Longer body text (confirm dialogs; optional elsewhere). */
+  message?: string;
+  /** Choices for `method: "select"`. */
+  options?: string[];
+  /** Input placeholder for `method: "input"`. */
+  placeholder?: string;
+  /** Prefilled text for `method: "editor"` (and optionally "input"). */
+  prefill?: string;
+  /** Auto-cancel deadline in ms from `timestamp`. Absent = waits for a user. */
+  timeoutMs?: number;
+  timestamp: string;
+}
+
+export interface SessionUiResolvedMsg {
+  type: "session.ui_resolved";
+  sessionId: string;
+  requestId: string;
+  /** Why it settled. Open string — clients treat unknown values as "dismiss". */
+  reason: "answered" | "cancelled" | "timeout" | "interrupted";
+  timestamp: string;
+}
+
+/** Reply to `session.commands` — the provider's current command catalog. */
+export interface SessionCommandsResultMsg {
+  type: "session.commands.result";
+  requestId: string;
+  sessionId: string;
+  /** Provider these commands belong to (e.g. "pi"). */
+  providerId: string;
+  commands: ProviderCommand[];
+}
+
+// =============================================================================
 // Daemon → Client messages
 // =============================================================================
 
@@ -1253,6 +1394,9 @@ export type DaemonMessage =
   | SessionMessageDelta
   | SessionStatusChangeMsg
   | SessionInfoUpdateMsg
+  | SessionUiRequestMsg
+  | SessionUiResolvedMsg
+  | SessionCommandsResultMsg
   | ScrollbackReplayMsg
   | SessionSearchResultMsg
   | FsListResultMsg

@@ -421,6 +421,9 @@ describe("DaemonMessage routing", () => {
         case "session.message.delta": return "delta";
         case "session.status_change": return `status:${msg.status}`;
         case "session.info_update": return `info:${msg.session.id}`;
+        case "session.ui_request": return `ui:${msg.method}`;
+        case "session.ui_resolved": return `ui_resolved:${msg.reason}`;
+        case "session.commands.result": return `commands:${msg.commands.length}`;
         case "scrollback.replay": return `replay:${msg.messages.length}`;
         case "session.search.result": return `search:${msg.sessions.length}`;
         case "fs.list.result": return `fs.list:${msg.entries.length}`;

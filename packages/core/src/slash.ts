@@ -36,7 +36,17 @@ export type SlashCommand =
   | { kind: "import" }
   | { kind: "fork" };
 
-export function parseSlash(raw: string): SlashCommand | null {
+export interface ParseSlashOptions {
+  /**
+   * Provider-command passthrough (`session.commands` catalogs). When the
+   * verb is not a built-in and this predicate matches it, `parseSlash`
+   * returns null — "not a client command" — so the caller sends the raw
+   * text as a normal prompt and the session's provider expands it.
+   */
+  isProviderCommand?: (name: string) => boolean;
+}
+
+export function parseSlash(raw: string, opts?: ParseSlashOptions): SlashCommand | null {
   const trimmed = raw.trim();
   if (!trimmed.startsWith("/")) return null;
   const head = trimmed.slice(1);
@@ -122,6 +132,9 @@ export function parseSlash(raw: string): SlashCommand | null {
     case "fork":
       return { kind: "fork" };
     default:
+      // Not a built-in. Provider commands (pi extensions, prompt templates,
+      // skills) pass through as plain prompt text — the provider expands them.
+      if (opts?.isProviderCommand?.(verb.toLowerCase())) return null;
       throw new Error(`unknown slash command: /${verb}`);
   }
 }
