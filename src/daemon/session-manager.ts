@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { Session, type AttachedClient } from "./session.js";
+import type { SessionProvider } from "./providers/interface.js";
 import type { Store } from "./store.js";
 import { hasScope, SCOPES } from "../protocol/scopes.js";
 import { RateLimiter } from "./rate-limit.js";
@@ -33,7 +34,7 @@ import {
   type ImportedSessionInit,
 } from "./share/index.js";
 import type { AgentIdentityManager } from "./agent-identity.js";
-import { buildFleetMcpServer, type FleetSessionView, type FleetTaskView } from "./fleet.js";
+import { buildFleetMcpServer, type FleetDispatchDeps, type FleetSessionView, type FleetTaskView } from "./fleet.js";
 import {
   Dispatcher,
   NonRetryableDispatchError,
@@ -142,6 +143,7 @@ export class SessionManager {
   #config?: CodeoidConfig;
   #compressionRegistry?: CompressionRegistry;
   #dispatcher: Dispatcher;
+  #testProviderFactory?: () => SessionProvider;
   /** Stable observer identity — every Session reports status transitions here. */
   #statusObserver = (sessionId: string, status: SessionInfo["status"]): void => {
     this.#dispatcher.onSessionStatus(sessionId, status);
@@ -153,7 +155,17 @@ export class SessionManager {
     identityManager?: AgentIdentityManager,
     rateLimiter?: RateLimiter,
     memory?: MemoryEngine,
-    opts?: { config?: CodeoidConfig; compressionRegistry?: CompressionRegistry },
+    opts?: {
+      config?: CodeoidConfig;
+      compressionRegistry?: CompressionRegistry;
+      /**
+       * Test-only: provider factory injected into every Session this manager
+       * constructs, so manager-level integration tests (conductor injection,
+       * worker spawn, dispatch host) run without the Claude Agent SDK
+       * subprocess. Mirrors SessionCreateOptions._testProvider.
+       */
+      _testProviderFactory?: () => SessionProvider;
+    },
   ) {
     this.#store = store;
     this.#transcriptStore = transcriptStore;
@@ -162,6 +174,7 @@ export class SessionManager {
     this.#memory = memory;
     this.#config = opts?.config;
     this.#compressionRegistry = opts?.compressionRegistry;
+    this.#testProviderFactory = opts?._testProviderFactory;
     this.#dispatcher = new Dispatcher(
       store,
       this.#makeDispatcherHost(),
@@ -252,6 +265,7 @@ export class SessionManager {
             meta.role === "conductor"
               ? this.#buildFleetServer(meta.accountId, meta.projectId)
               : undefined,
+          _testProvider: this.#testProviderFactory?.(),
           onStatusChange: this.#statusObserver,
           onModels: (providerId, m) => this._cacheModels(providerId, m),
         });
@@ -619,7 +633,8 @@ export class SessionManager {
               ...(this.#memory ? { memory: this.#memory } : {}),
               config: this.#config,
               compressionRegistry: this.#compressionRegistry,
-              onStatusChange: this.#statusObserver,
+              _testProvider: this.#testProviderFactory?.(),
+          onStatusChange: this.#statusObserver,
               onModels: (providerId, m) => this._cacheModels(providerId, m),
             });
             this.#sessions.set(session.id, session);
@@ -997,6 +1012,7 @@ export class SessionManager {
       memory: this.#memory,
       config: this.#config,
       compressionRegistry: this.#compressionRegistry,
+      _testProvider: this.#testProviderFactory?.(),
       onStatusChange: this.#statusObserver,
       onModels: (providerId, m) => this._cacheModels(providerId, m),
     });
@@ -1096,6 +1112,7 @@ export class SessionManager {
       memory: this.#memory,
       config: this.#config,
       compressionRegistry: this.#compressionRegistry,
+      _testProvider: this.#testProviderFactory?.(),
       onStatusChange: this.#statusObserver,
       onModels: (providerId, m) => this._cacheModels(providerId, m),
     });
@@ -1220,6 +1237,7 @@ export class SessionManager {
           memory: this.#memory,
           config: this.#config,
           compressionRegistry: this.#compressionRegistry,
+          _testProvider: this.#testProviderFactory?.(),
           onStatusChange: this.#statusObserver,
           onModels: (providerId, m) => this._cacheModels(providerId, m),
         });
@@ -1370,46 +1388,53 @@ export class SessionManager {
       dispatch:
         this.#config?.dispatch?.enabled === false
           ? undefined
-          : {
-              enqueue: (input) =>
-                this.#dispatcher.enqueue({
-                  ...input,
-                  accountId,
-                  projectId,
-                  createdBy:
-                    this.#identityManager?.conductorUri ??
-                    `conductor:${accountId}/${projectId}`,
-                }),
-              interrupt: async (sessionId: string) => {
-                const session = this.#sessions.get(sessionId);
-                if (
-                  !session ||
-                  session.accountId !== accountId ||
-                  session.projectId !== projectId
-                ) {
-                  throw new Error("target session no longer exists");
-                }
-                await session.interrupt(
-                  this.#dispatchSystemAuth(accountId, projectId),
-                );
-              },
-              checkWorkdir: (path: string) => normalizeWorkdir(path),
-              listTasks: (limit: number): FleetTaskView[] =>
-                this.#store
-                  .dispatchListForTenant(accountId, projectId, limit)
-                  .map((t) => ({
-                    id: t.id,
-                    kind: t.kind,
-                    shape: t.shape,
-                    status: t.status,
-                    attempts: t.attempts,
-                    target: t.targetSession ?? t.workdir,
-                    createdAt: t.createdAt,
-                    error: t.error,
-                    resultDigest: t.resultDigest,
-                  })),
-            },
+          : this._fleetDispatchDeps(accountId, projectId),
     });
+  }
+
+  /**
+   * The send-class capability surface handed to the conductor's fleet tools.
+   * Underscore-public so tests can exercise the real closures without an MCP
+   * transport (the tool wiring itself is covered in fleet.test.ts).
+   */
+  _fleetDispatchDeps(accountId: string, projectId: string): FleetDispatchDeps {
+    return {
+      enqueue: (input) =>
+        this.#dispatcher.enqueue({
+          ...input,
+          accountId,
+          projectId,
+          createdBy:
+            this.#identityManager?.conductorUri ??
+            `conductor:${accountId}/${projectId}`,
+        }),
+      interrupt: async (sessionId: string) => {
+        const session = this.#sessions.get(sessionId);
+        if (
+          !session ||
+          session.accountId !== accountId ||
+          session.projectId !== projectId
+        ) {
+          throw new Error("target session no longer exists");
+        }
+        await session.interrupt(this.#dispatchSystemAuth(accountId, projectId));
+      },
+      checkWorkdir: (path: string) => normalizeWorkdir(path),
+      listTasks: (limit: number): FleetTaskView[] =>
+        this.#store
+          .dispatchListForTenant(accountId, projectId, limit)
+          .map((t) => ({
+            id: t.id,
+            kind: t.kind,
+            shape: t.shape,
+            status: t.status,
+            attempts: t.attempts,
+            target: t.targetSession ?? t.workdir,
+            createdAt: t.createdAt,
+            error: t.error,
+            resultDigest: t.resultDigest,
+          })),
+    };
   }
 
   #list(
