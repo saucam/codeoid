@@ -20,6 +20,7 @@ import { homedir } from "node:os";
 import { z } from "zod";
 import type { AuthConfig } from "./daemon/auth.js";
 import type { OAuthConfig } from "./daemon/oauth.js";
+import { HOOK_EVENTS, type HookEntryConfig } from "./daemon/hooks/types.js";
 
 // ── Paths ────────────────────────────────────────────────────────────────
 
@@ -367,6 +368,51 @@ const DispatchSchema = z
     retryBaseMs: 15_000,
   });
 
+/**
+ * Daemon-native hooks (docs/hooks.md) — config-declared commands/webhooks
+ * dispatched at Session's seams (tool_call, tool_result, before_turn,
+ * after_turn, lifecycle) uniformly across every backend. Matcher regexes
+ * are validated here so a typo fails loudly at load, not silently at
+ * dispatch.
+ */
+const HookEntrySchema = z
+  .object({
+    event: z.enum(HOOK_EVENTS),
+    matcher: z.string().optional(),
+    type: z.enum(["command", "webhook"]),
+    command: z.string().optional(),
+    url: z.string().optional(),
+    timeoutMs: z.number().int().positive().max(60_000).optional(),
+    name: z.string().optional(),
+  })
+  .refine((e) => e.type !== "command" || (e.command !== undefined && e.command.length > 0), {
+    message: 'hooks of type "command" require a non-empty `command`',
+    path: ["command"],
+  })
+  .refine((e) => e.type !== "webhook" || (e.url !== undefined && e.url.length > 0), {
+    message: 'hooks of type "webhook" require a non-empty `url`',
+    path: ["url"],
+  })
+  .refine(
+    (e) => {
+      if (e.matcher === undefined) return true;
+      try {
+        new RegExp(e.matcher);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    { message: "`matcher` must be a valid regular expression", path: ["matcher"] },
+  );
+
+const HooksSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    entries: z.array(HookEntrySchema).default([]),
+  })
+  .default({ enabled: true, entries: [] });
+
 /** Per-backend provider settings. Append-only — one optional block per provider. */
 const ProvidersSchema = z
   .object({
@@ -404,6 +450,7 @@ const RootSchema = z.object({
   conductor: ConductorSchema,
   dispatch: DispatchSchema,
   providers: ProvidersSchema,
+  hooks: HooksSchema,
 });
 
 type ParsedConfig = z.infer<typeof RootSchema>;
@@ -518,6 +565,15 @@ export interface CodeoidConfig {
       command: string;
     };
   };
+  /**
+   * Daemon-native hooks — dispatched at Session's seams for every backend.
+   * Optional in the type so hand-built test configs stay minimal;
+   * loadConfig always populates it (schema defaults: enabled, no entries).
+   */
+  hooks?: {
+    enabled: boolean;
+    entries: HookEntryConfig[];
+  };
 }
 
 // ── Env-var override map ─────────────────────────────────────────────────
@@ -573,6 +629,9 @@ const ENV_OVERRIDES: readonly EnvOverride[] = [
   // matching the conductor block's convention.
   { env: "CODEOID_DISPATCH_ENABLED", path: "dispatch.enabled", kind: "boolean" },
   { env: "CODEOID_FALLBACK_MODEL", path: "session.fallbackModel", kind: "string" },
+  // Hooks kill switch — disable every configured hook per-invocation without
+  // touching config.json. Entries themselves are file-config only.
+  { env: "CODEOID_HOOKS_ENABLED", path: "hooks.enabled", kind: "boolean" },
   { env: "CODEOID_TURN_STALL_TIMEOUT_MS", path: "session.turnStallTimeoutMs", kind: "int" },
   { env: "CODEOID_MCP_TOOL_TIMEOUT_MS", path: "session.mcpToolTimeoutMs", kind: "int" },
 ];
@@ -748,6 +807,7 @@ export function loadConfig(opts: LoadOptions = {}): CodeoidConfig {
     conductor: parsed.conductor,
     dispatch: parsed.dispatch,
     providers: parsed.providers,
+    hooks: parsed.hooks,
   };
 }
 

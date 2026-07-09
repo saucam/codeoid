@@ -1,0 +1,374 @@
+/**
+ * Session ↔ HookBus integration tests — MockSessionProvider harness, offline.
+ *
+ * Exercises the daemon-native hook seams end-to-end through Session:
+ *
+ *   H1  tool_call block — the hook denies the tool BEFORE the approval gate:
+ *       the provider sees behavior "deny", the tool message resolves to
+ *       cancelled, an info message explains which hook blocked and why,
+ *       and (in autonomous mode) the turn budget is NOT decremented.
+ *
+ *   H2  tool_call block wins even for auto-approved safe tools.
+ *
+ *   H3  tool_call mutation — the provider receives the hook's updatedInput
+ *       and an info message records the mutation.
+ *
+ *   H4  before_turn — the hook's systemPromptAppend reaches the provider's
+ *       TurnOpts, appended after the session's base append.
+ *
+ *   H5  tool_result patch — the completed tool message carries the patched
+ *       output (redaction), and the canonical history records it.
+ *
+ *   H6  Lifecycle observe hooks — session_start and after_turn fire with
+ *       the session context.
+ *
+ *   H7  No hooks configured — zero behavioral change (guarded dispatch).
+ */
+
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { Store } from "../daemon/store.js";
+import { TranscriptStore } from "../daemon/transcript.js";
+import { Session, type AttachedClient } from "../daemon/session.js";
+import { MockSessionProvider } from "../daemon/providers/mock/session-provider.js";
+import { mockResult } from "../daemon/providers/mock/index.js";
+import { HookBus } from "../daemon/hooks/bus.js";
+import type { HookEntryConfig } from "../daemon/hooks/types.js";
+import type { DaemonMessage, AuthContext } from "../protocol/types.js";
+import type { ProviderEvent } from "../daemon/providers/interface.js";
+
+const TEST_AUTH: AuthContext = {
+  sub: "user:test-hooks",
+  scopes: [],
+  delegationDepth: 0,
+  accountId: "acc-hooks",
+  projectId: "proj-hooks",
+};
+
+let tmp: string;
+let store: Store;
+let transcriptStore: TranscriptStore;
+
+beforeEach(() => {
+  tmp = mkdtempSync(join(tmpdir(), "codeoid-session-hooks-"));
+  store = new Store(join(tmp, "codeoid.db"));
+  transcriptStore = new TranscriptStore(join(tmp, "transcripts"));
+});
+
+afterEach(async () => {
+  await new Promise<void>((r) => setTimeout(r, 100));
+  try {
+    await transcriptStore.flush();
+  } catch {}
+  try {
+    store.close();
+  } catch {}
+  try {
+    rmSync(tmp, { recursive: true, force: true });
+  } catch {}
+});
+
+function commandEntry(
+  command: string,
+  overrides: Partial<HookEntryConfig> = {},
+): HookEntryConfig {
+  return { event: "tool_call", type: "command", command, ...overrides };
+}
+
+function makeSession(
+  provider: MockSessionProvider,
+  hooks?: HookBus,
+  initialMode?: { mode: "guarded" | "autonomous" | "interactive"; maxTurns?: number },
+): Session {
+  const id = randomUUID();
+  store.createSession({
+    id,
+    name: "hooks-integ",
+    workdir: tmp,
+    status: "idle",
+    createdBy: TEST_AUTH.sub,
+    createdAt: new Date().toISOString(),
+    attachedClients: 0,
+    accountId: TEST_AUTH.accountId!,
+    projectId: TEST_AUTH.projectId!,
+  });
+  return new Session({
+    name: "hooks-integ",
+    workdir: tmp,
+    auth: TEST_AUTH,
+    store,
+    transcriptStore,
+    existingId: id,
+    _testProvider: provider,
+    hooks,
+    ...(initialMode ? { initialMode } : {}),
+  });
+}
+
+function makeClient(): { client: AttachedClient; received: DaemonMessage[] } {
+  const received: DaemonMessage[] = [];
+  return {
+    client: { id: randomUUID(), auth: TEST_AUTH, send: (msg) => received.push(msg) },
+    received,
+  };
+}
+
+function waitForIdle(session: Session, timeoutMs = 8000): Promise<void> {
+  if (session.status === "idle" || session.status === "error") return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const watcherId = randomUUID();
+    const timer = setTimeout(() => {
+      session.detach(watcherId);
+      reject(new Error(`session did not reach idle within ${timeoutMs}ms — status=${session.status}`));
+    }, timeoutMs);
+    const watcher: AttachedClient = {
+      id: watcherId,
+      auth: TEST_AUTH,
+      send(msg) {
+        if (
+          msg.type === "session.status_change" &&
+          (msg.status === "idle" || msg.status === "error")
+        ) {
+          clearTimeout(timer);
+          session.detach(watcherId);
+          resolve();
+        }
+      },
+    };
+    session.attach(watcher);
+  });
+}
+
+/** One scripted turn: a single Bash tool call, then a text reply. */
+function bashToolTurn(): ProviderEvent[] {
+  return [
+    {
+      type: "tool_start",
+      toolId: "t1",
+      sdkToolUseId: "sdk-t1",
+      name: "Bash",
+      input: { command: "rm -rf /tmp/x" },
+      approvalId: "a1",
+    },
+    { type: "text_done", content: "done" },
+    { type: "turn_done", result: mockResult({ providerId: "mock-session" }) },
+  ];
+}
+
+describe("Session hook integration", () => {
+  it("H1: tool_call hook blocks before the approval gate (no budget burn)", async () => {
+    const hooks = new HookBus([
+      commandEntry(`printf '{"decision":"block","reason":"env files are off-limits"}'`, {
+        name: "env-guard",
+        matcher: "^Bash$",
+      }),
+    ]);
+    const provider = new MockSessionProvider("mock-session", [bashToolTurn()]);
+    // Autonomous with a budget: a hook block must not decrement it.
+    const session = makeSession(provider, hooks, { mode: "autonomous", maxTurns: 5 });
+    const { client, received } = makeClient();
+    session.attach(client);
+
+    await session.send("run it", TEST_AUTH);
+    await waitForIdle(session);
+
+    expect(provider.canUseToolResults).toHaveLength(1);
+    expect(provider.canUseToolResults[0]).toMatchObject({
+      behavior: "deny",
+      message: 'Blocked by hook "env-guard": env files are off-limits',
+    });
+    // Budget untouched — the hook gate runs before #shouldAutoApprove.
+    expect(session.turnsRemaining).toBe(5);
+
+    // The user sees WHY: an info message tagged hook.blocked.
+    const info = received.find(
+      (m) =>
+        m.type === "session.message" &&
+        m.metadata?.event === "hook.blocked",
+    );
+    expect(info).toBeDefined();
+    if (info?.type === "session.message") {
+      expect(info.content).toContain("env-guard");
+      expect(info.content).toContain("env files are off-limits");
+      expect(info.metadata?.tool).toBe("Bash");
+    }
+
+    // The tool message resolved to cancelled with the hook's explanation.
+    const cancelled = received.find(
+      (m) =>
+        m.type === "session.message.delta" &&
+        m.toolStateUpdate?.phase === "cancelled",
+    );
+    expect(cancelled).toBeDefined();
+    if (cancelled?.type === "session.message.delta" && cancelled.toolStateUpdate?.phase === "cancelled") {
+      expect(cancelled.toolStateUpdate.message).toContain("env-guard");
+    }
+  });
+
+  it("H2: a hook block wins even for auto-approved safe tools", async () => {
+    const hooks = new HookBus([
+      commandEntry(`printf '{"decision":"block","reason":"no reads today"}'`, {
+        matcher: "^Read$",
+      }),
+    ]);
+    const provider = new MockSessionProvider("mock-session", [
+      [
+        {
+          type: "tool_start",
+          toolId: "t1",
+          sdkToolUseId: "sdk-t1",
+          name: "Read",
+          input: { file_path: "/etc/passwd" },
+          approvalId: "a1",
+        },
+        { type: "text_done", content: "done" },
+        { type: "turn_done", result: mockResult({ providerId: "mock-session" }) },
+      ],
+    ]);
+    const session = makeSession(provider, hooks);
+    await session.send("read it", TEST_AUTH);
+    await waitForIdle(session);
+
+    expect(provider.canUseToolResults[0]?.behavior).toBe("deny");
+  });
+
+  it("H3: tool_call hook mutation reaches the provider as updatedInput", async () => {
+    const hooks = new HookBus([
+      commandEntry(`printf '{"updatedInput":{"command":"echo SAFE"}}'`, {
+        name: "rewriter",
+        matcher: "^Bash$",
+      }),
+    ]);
+    const provider = new MockSessionProvider("mock-session", [bashToolTurn()]);
+    const session = makeSession(provider, hooks, { mode: "autonomous" });
+    const { client, received } = makeClient();
+    session.attach(client);
+
+    await session.send("run it", TEST_AUTH);
+    await waitForIdle(session);
+
+    expect(provider.canUseToolResults).toHaveLength(1);
+    expect(provider.canUseToolResults[0]).toMatchObject({
+      behavior: "allow",
+      updatedInput: { command: "echo SAFE" },
+    });
+    const info = received.find(
+      (m) => m.type === "session.message" && m.metadata?.event === "hook.updated_input",
+    );
+    expect(info).toBeDefined();
+    if (info?.type === "session.message") {
+      expect(info.metadata?.hooks).toEqual(["rewriter"]);
+    }
+  });
+
+  it("H4: before_turn hook append reaches the provider's TurnOpts", async () => {
+    const hooks = new HookBus([
+      commandEntry(`printf '{"systemPromptAppend":"Always answer in haiku."}'`, {
+        event: "before_turn",
+      }),
+    ]);
+    const provider = new MockSessionProvider("mock-session", [
+      [
+        { type: "text_done", content: "ok" },
+        { type: "turn_done", result: mockResult({ providerId: "mock-session" }) },
+      ],
+    ]);
+    const session = makeSession(provider, hooks);
+    await session.send("hello", TEST_AUTH);
+    await waitForIdle(session);
+
+    expect(provider.capturedOpts).toHaveLength(1);
+    expect(provider.capturedOpts[0]?.systemPromptAppend).toContain("Always answer in haiku.");
+  });
+
+  it("H5: tool_result hook patches the recorded output and canonical history", async () => {
+    const hooks = new HookBus([
+      commandEntry(`printf '{"updatedOutput":"[REDACTED BY HOOK]"}'`, {
+        event: "tool_result",
+        matcher: "^Bash$",
+      }),
+    ]);
+    const provider = new MockSessionProvider("mock-session", [
+      [
+        {
+          type: "tool_start",
+          toolId: "t1",
+          sdkToolUseId: "sdk-t1",
+          name: "Bash",
+          input: { command: "cat secrets.txt" },
+          approvalId: "a1",
+        },
+        { type: "tool_complete", sdkToolUseId: "sdk-t1", output: "AWS_SECRET=hunter2", success: true },
+        { type: "text_done", content: "done" },
+        { type: "turn_done", result: mockResult({ providerId: "mock-session" }) },
+      ],
+    ]);
+    const session = makeSession(provider, hooks, { mode: "autonomous" });
+    const { client, received } = makeClient();
+    session.attach(client);
+
+    await session.send("run it", TEST_AUTH);
+    await waitForIdle(session);
+
+    const completed = received.find(
+      (m) =>
+        m.type === "session.message.delta" &&
+        m.toolStateUpdate?.phase === "completed",
+    );
+    expect(completed).toBeDefined();
+    if (completed?.type === "session.message.delta" && completed.toolStateUpdate?.phase === "completed") {
+      expect(completed.toolStateUpdate.output).toBe("[REDACTED BY HOOK]");
+      expect(completed.toolStateUpdate.output).not.toContain("hunter2");
+    }
+  });
+
+  it("H6: session_start and after_turn observe hooks fire with session context", async () => {
+    const marker = join(tmp, "lifecycle.jsonl");
+    const hooks = new HookBus([
+      commandEntry(`cat >> "${marker}"; printf '\\n' >> "${marker}"`, { event: "session_start" }),
+      commandEntry(`cat >> "${marker}"; printf '\\n' >> "${marker}"`, { event: "after_turn" }),
+    ]);
+    const provider = new MockSessionProvider("mock-session", [
+      [
+        { type: "text_done", content: "ok" },
+        { type: "turn_done", result: mockResult({ providerId: "mock-session" }) },
+      ],
+    ]);
+    const session = makeSession(provider, hooks);
+    await session.send("hello", TEST_AUTH);
+    await waitForIdle(session);
+
+    // Fire-and-forget hooks — poll for both lines to land.
+    const deadline = Date.now() + 3000;
+    let lines: string[] = [];
+    while (Date.now() < deadline) {
+      if (existsSync(marker)) {
+        lines = readFileSync(marker, "utf8").split("\n").filter((l) => l.trim().length > 0);
+        if (lines.length >= 2) break;
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(lines.length).toBeGreaterThanOrEqual(2);
+    const events = lines.map((l) => JSON.parse(l));
+    const start = events.find((e) => e.event === "session_start");
+    const after = events.find((e) => e.event === "after_turn");
+    expect(start).toMatchObject({ source: "resume", sessionName: "hooks-integ" });
+    expect(after?.result?.model).toBeDefined();
+    expect(after?.sessionId).toBe(session.id);
+  });
+
+  it("H7: without a bus, tool flow is unchanged", async () => {
+    const provider = new MockSessionProvider("mock-session", [bashToolTurn()]);
+    const session = makeSession(provider, undefined, { mode: "autonomous", maxTurns: 5 });
+    await session.send("run it", TEST_AUTH);
+    await waitForIdle(session);
+
+    expect(provider.canUseToolResults).toHaveLength(1);
+    expect(provider.canUseToolResults[0]?.behavior).toBe("allow");
+    // Budget decremented exactly once — the pre-hook contract holds.
+    expect(session.turnsRemaining).toBe(4);
+  });
+});

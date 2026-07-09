@@ -23,6 +23,7 @@ import {
   type CompressionRegistry,
   createRegistry,
 } from "./compress/index.js";
+import { createHookBus } from "./hooks/bus.js";
 import type { CodeoidConfig } from "../config.js";
 import { CAPABILITIES, PROTOCOL_VERSION, type AuthContext, type DaemonMessage } from "../protocol/types.js";
 import { parseAuthMsg, parseClientMessage } from "@codeoid/protocol/schemas";
@@ -167,12 +168,19 @@ export class DaemonServer {
       ? createRegistry(config.fullConfig)
       : undefined;
 
+    // Build the hook bus once at startup — config-declared hooks dispatched
+    // at every session's seams, uniformly across backends (hooks/bus.ts).
+    const hooks = createHookBus(config.fullConfig);
+    if (hooks) {
+      console.log(`[codeoid] hooks: ${hooks.size} configured`);
+    }
+
     const rateLimiter = new RateLimiter();
     this.#manager = new SessionManager(
       this.#store, this.#transcriptStore, identityManager, rateLimiter,
       // Memory is wired post-construction via initMemory() — see start()
       undefined,
-      { config: config.fullConfig, compressionRegistry },
+      { config: config.fullConfig, compressionRegistry, hooks },
     );
 
     // Register cleanup functions. ShutdownManager runs them LIFO, so the
