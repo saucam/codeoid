@@ -49,9 +49,17 @@ export function ensureCommands(sessionId: string): void {
       const commands = Array.isArray(result.commands) ? result.commands : [];
       setState(produce((s) => { s.bySession[sessionId] = commands; }));
     })
-    .catch(() => {
-      // Older daemon or scope miss — cache empty so we don't hammer it.
-      setState(produce((s) => { s.bySession[sessionId] = []; }));
+    .catch((err: unknown) => {
+      // Permanent rejections (daemon predates the verb, scope miss) cache
+      // as empty so we don't re-ask on every focus change. Transient
+      // failures (timeout, reconnect blip) stay uncached — the next focus
+      // retries.
+      const message = err instanceof Error ? err.message : String(err);
+      const permanent =
+        message.includes("Unknown message type") || message.includes("Missing scope");
+      if (permanent) {
+        setState(produce((s) => { s.bySession[sessionId] = []; }));
+      }
     })
     .finally(() => {
       inflight.delete(sessionId);

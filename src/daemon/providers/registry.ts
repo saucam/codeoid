@@ -108,7 +108,7 @@ export class ProviderRegistry {
     const requested = id ?? this.defaultId;
     const factory = this.#factories.get(requested);
     if (factory) return factory;
-    console.error(
+    console.warn(
       `[codeoid/${logContext}] unknown provider "${requested}" — falling back to ${this.defaultId}`,
     );
     return this.getOrThrow(this.defaultId);

@@ -117,15 +117,22 @@ export const sessionApproveSchema = z.object({
   updatedInput: z.record(z.string(), z.unknown()).optional(),
 });
 
-export const sessionUiResponseSchema = z.object({
-  ...base,
-  type: z.literal("session.ui_response"),
-  sessionId: sessionIdField,
-  requestId: z.string().min(1).max(LIMITS.ID_MAX),
-  value: z.string().max(LIMITS.UI_TEXT_MAX).optional(),
-  confirmed: z.boolean().optional(),
-  cancelled: z.boolean().optional(),
-});
+export const sessionUiResponseSchema = z
+  .object({
+    ...base,
+    type: z.literal("session.ui_response"),
+    sessionId: sessionIdField,
+    requestId: z.string().min(1).max(LIMITS.ID_MAX),
+    value: z.string().max(LIMITS.UI_TEXT_MAX).optional(),
+    confirmed: z.boolean().optional(),
+    cancelled: z.boolean().optional(),
+  })
+  .refine(
+    (r) =>
+      [r.value, r.confirmed, r.cancelled].filter((v) => v !== undefined)
+        .length === 1,
+    { message: "exactly one of value, confirmed, or cancelled must be set" },
+  );
 
 export const sessionPartActionSchema = z.object({
   ...base,

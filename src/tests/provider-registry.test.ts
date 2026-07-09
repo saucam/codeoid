@@ -29,11 +29,14 @@ function mockFactory(id: string): ProviderFactory {
 }
 
 function makeInit(store: Store): ProviderSessionInit {
+  // sessionId and initialBackingId deliberately differ so assertions prove
+  // WHICH field feeds each provider surface (stateless providers label
+  // themselves with the codeoid session id, not the backing id).
   return {
     sessionId: "s1",
     workspaceId: "ws1",
     model: null,
-    initialBackingId: "s1",
+    initialBackingId: "backing-9",
     store,
   };
 }
@@ -89,6 +92,8 @@ describe("ProviderRegistry", () => {
 
       const gemini = registry.getOrThrow("gemini").create(init);
       expect(gemini.id).toBe("gemini");
+      // Stateless providers use the codeoid session id as their display
+      // label — NOT initialBackingId (that's for warm providers).
       expect(gemini.backingSessionId).toBe("s1");
 
       const openai = registry.getOrThrow("openai").create(init);

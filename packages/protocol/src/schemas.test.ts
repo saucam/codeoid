@@ -253,3 +253,41 @@ describe("auth handshake", () => {
     expect(authMsgSchema.safeParse({ type: "ping", token: "t" }).success).toBe(false);
   });
 });
+
+describe("session.ui_response payload exclusivity", () => {
+  test("ambiguous payloads are rejected", () => {
+    // Two payload fields at once.
+    expect(
+      parseClientMessage({
+        type: "session.ui_response",
+        id: "r1",
+        sessionId: "s1",
+        requestId: "u1",
+        value: "x",
+        cancelled: true,
+      }).ok,
+    ).toBe(false);
+    // No payload field at all.
+    expect(
+      parseClientMessage({
+        type: "session.ui_response",
+        id: "r1",
+        sessionId: "s1",
+        requestId: "u1",
+      }).ok,
+    ).toBe(false);
+  });
+
+  test("each single-field payload is accepted", () => {
+    for (const payload of [{ value: "x" }, { confirmed: false }, { cancelled: true }]) {
+      const result = parseClientMessage({
+        type: "session.ui_response",
+        id: "r1",
+        sessionId: "s1",
+        requestId: "u1",
+        ...payload,
+      });
+      expect(result.ok).toBe(true);
+    }
+  });
+});

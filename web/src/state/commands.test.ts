@@ -66,13 +66,31 @@ describe("commands store", () => {
     expect(isProviderCommand(null, "fix-tests")).toBe(false);
   });
 
-  it("caches [] on daemon rejection so older daemons aren't hammered", async () => {
-    clientRequestMock.mockRejectedValue(new Error("Unknown message type"));
+  it("caches [] on permanent rejection so older daemons aren't hammered", async () => {
+    clientRequestMock.mockRejectedValue(new Error("Unknown message type: session.commands"));
     ensureCommands("s");
     await flush();
     expect(providerCommands("s")).toEqual([]);
     ensureCommands("s");
     expect(clientRequestMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("transient failures stay uncached so the next focus retries", async () => {
+    clientRequestMock.mockRejectedValueOnce(new Error("request timed out"));
+    ensureCommands("s");
+    await flush();
+    // Not cached — the retry goes out and succeeds.
+    clientRequestMock.mockResolvedValue({
+      type: "session.commands.result",
+      requestId: "r",
+      sessionId: "s",
+      providerId: "pi",
+      commands: [{ name: "review" }],
+    });
+    ensureCommands("s");
+    await flush();
+    expect(clientRequestMock).toHaveBeenCalledTimes(2);
+    expect(providerCommands("s")).toEqual([{ name: "review" }]);
   });
 
   it("invalidateCommands forces a refetch", async () => {

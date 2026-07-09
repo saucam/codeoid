@@ -2694,7 +2694,9 @@ export class Session {
           role === "system" ? SYSTEM_IDENTITY : this.#agentIdentity,
           event.parts,
           undefined,
-          { event: "provider.message", ...event.metadata },
+          // Fixed tag last so provider metadata can never override it —
+          // clients identify provider messages by this key.
+          { ...event.metadata, event: "provider.message" },
         );
         this.#persistAndBuffer(msg);
         this.#broadcastRaw(msg);
