@@ -35,6 +35,7 @@ class FakeHost implements DispatcherHost {
   /** Behavior knobs. */
   sendError: Error | null = null;
   spawnError: Error | null = null;
+  continueError: Error | null = null;
   continueSucceeds = true;
   conductorAcceptsEvents = true;
   #nextWorker = 0;
@@ -54,6 +55,7 @@ class FakeHost implements DispatcherHost {
 
   async continueWorker(task: DispatchTaskRow): Promise<boolean> {
     this.continued.push(task);
+    if (this.continueError) throw this.continueError;
     if (this.continueSucceeds && task.workerSessionId) {
       this.statuses.set(task.workerSessionId, "thinking");
       return true;
@@ -115,9 +117,9 @@ function enqueueSend(prompt = "hello"): string {
   });
 }
 
-function enqueueSpawn(prompt = "investigate"): string {
+function enqueueSpawn(prompt = "investigate", tenant = TENANT): string {
   return dispatcher.enqueue({
-    ...TENANT,
+    ...tenant,
     kind: "spawn",
     shape: "scout",
     workdir: "/tmp/w",
@@ -257,6 +259,45 @@ describe("dispatcher — spawn lifecycle", () => {
     await new Promise((r) => setTimeout(r, 0));
     await dispatcher.tick();
     expect(store.dispatchGet(second)!.status).toBe("running");
+  });
+
+  test("one capped tenant never starves another tenant's spawns (per-task deferral)", async () => {
+    dispatcher.stop();
+    dispatcher = makeDispatcher({ maxConcurrentWorkers: 1 });
+    const OTHER = { accountId: "acc-b", projectId: "proj-b" };
+
+    // Tenant A saturates its cap, then queues another spawn (oldest queued).
+    const a1 = enqueueSpawn("a1");
+    await dispatcher.tick();
+    expect(store.dispatchGet(a1)!.status).toBe("running");
+    const a2 = enqueueSpawn("a2");
+    // Tenant B's spawn sits BEHIND tenant A's deferred task in the queue.
+    const b1 = enqueueSpawn("b1", OTHER);
+
+    await dispatcher.tick();
+    expect(store.dispatchGet(a2)!.status).toBe("queued"); // deferred, no attempt burned
+    expect(store.dispatchGet(a2)!.attempts).toBe(0);
+    expect(store.dispatchGet(b1)!.status).toBe("running"); // NOT starved
+  });
+
+  test("a terminal spawn failure never orphans a surviving worker session", async () => {
+    dispatcher.stop();
+    dispatcher = makeDispatcher({ failureLimit: 1 });
+    const id = enqueueSpawn();
+    await dispatcher.tick();
+    expect(store.dispatchGet(id)!.status).toBe("running");
+
+    // Crash → new boot reclaims (attempts=1 → will block at limit on next
+    // failure) and the continuation THROWS instead of returning false.
+    dispatcher.stop();
+    dispatcher = makeDispatcher({ failureLimit: 1 });
+    host.continueError = new Error("continuation exploded");
+    await dispatcher.tick();
+
+    const row = store.dispatchGet(id)!;
+    expect(row.status).toBe("blocked");
+    // The surviving worker was torn down, not orphaned.
+    expect(host.destroyed.map((d) => d.sessionId)).toEqual(["worker-1"]);
   });
 });
 

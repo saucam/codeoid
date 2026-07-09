@@ -563,14 +563,16 @@ export class Store {
   /**
    * Atomically claim the oldest queued task for this boot. A single UPDATE
    * with a scalar subquery — SQLite executes it under one write lock, so two
-   * concurrent claimers can never take the same task. The optional `kind`
-   * filter lets the dispatcher keep draining sends while spawns are deferred
-   * at the worker cap (no head-of-line starvation).
+   * concurrent claimers can never take the same task. `excludeIds` lets the
+   * dispatcher skip tasks it already touched this tick (cap deferrals,
+   * failed retries) WITHOUT global head-of-line blocking: only the specific
+   * deferred tasks are skipped, so neither sends nor other tenants' spawns
+   * are starved by one capped tenant.
    */
   dispatchClaimNext(
     bootId: string,
     now: number,
-    kind?: "send" | "spawn",
+    excludeIds: readonly string[] = [],
   ): DispatchTaskRow | null {
     const row = this.#db
       .prepare(
@@ -578,13 +580,14 @@ export class Store {
          SET status = 'claimed', claim_owner = ?, claimed_at = ?, updated_at = ?
          WHERE id = (
            SELECT id FROM dispatch_tasks
-           WHERE status = 'queued' AND (? IS NULL OR kind = ?)
+           WHERE status = 'queued'
              AND (not_before IS NULL OR not_before <= ?)
+             AND id NOT IN (SELECT value FROM json_each(?))
            ORDER BY created_at LIMIT 1
          )
          RETURNING *`,
       )
-      .get(bootId, now, now, kind ?? null, kind ?? null, now) as RawDispatchRow | null;
+      .get(bootId, now, now, now, JSON.stringify(excludeIds)) as RawDispatchRow | null;
     return row ? rowToDispatchTask(row) : null;
   }
 

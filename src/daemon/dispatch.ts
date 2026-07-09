@@ -245,6 +245,15 @@ export class Dispatcher {
           "task_blocked",
           `task ${task.id.slice(0, 8)} (${task.kind}/${task.shape}) auto-BLOCKED after ${task.attempts} failed attempt(s): ${task.error ?? "stale claim"}. It will not retry; inspect with fleet_tasks.`,
         );
+        // Terminal at reclaim — a surviving worker session (e.g. resumed
+        // after the crash that burned the last attempt) must not be
+        // orphaned. Same rule as the other two terminal paths.
+        if (task.kind === "spawn" && task.workerSessionId) {
+          void this.#host.destroyWorker(
+            task.workerSessionId,
+            `task ${task.id} blocked at reclaim`,
+          );
+        }
       }
     }
   }
@@ -262,25 +271,19 @@ export class Dispatcher {
   }
 
   async #claimAndExecute(): Promise<void> {
-    // Sends are always claimable; spawns respect the per-tenant worker cap.
     // Claim one at a time (each claim is atomic) until nothing is ready.
-    // After the first cap deferral, narrow to kind='send' for the rest of
-    // the tick — the deferred spawn stays queued (oldest-first, retried next
-    // tick) without a claim/release ping-pong or starving the sends behind it.
-    let kindFilter: "send" | undefined;
-    // Invariant: a task executes AT MOST ONCE per tick. A retryable failure
-    // requeues the task, which would otherwise be re-claimed immediately by
-    // this very loop (backoff or not, clocks permitting) and burn its whole
-    // failure budget in one tick.
-    const executed = new Set<string>();
+    // Two invariants, both enforced via the per-tick `touched` exclusion:
+    //  - a task executes AT MOST ONCE per tick (a retryable failure requeues
+    //    it, and without the exclusion this loop would re-claim it instantly
+    //    and burn its whole failure budget in one tick);
+    //  - a cap deferral skips ONLY that task — sends behind it and OTHER
+    //    tenants' spawns keep flowing (a single capped tenant must never
+    //    starve the rest of the queue).
+    const touched: string[] = [];
     for (;;) {
-      const task = this.#store.dispatchClaimNext(this.bootId, Date.now(), kindFilter);
+      const task = this.#store.dispatchClaimNext(this.bootId, Date.now(), touched);
       if (!task) return;
-      if (executed.has(task.id)) {
-        this.#store.dispatchRelease(task.id, Date.now());
-        return; // oldest-first would just re-claim it — end the tick
-      }
-      executed.add(task.id);
+      touched.push(task.id);
       if (
         task.kind === "spawn" &&
         this.#store.dispatchActiveSpawnCount(task.accountId, task.projectId) >
@@ -288,9 +291,8 @@ export class Dispatcher {
       ) {
         // Over the cap (the fresh claim itself counts, hence >): release the
         // claim untouched — a scheduling deferral, not a failure, so no
-        // attempt is burned.
+        // attempt is burned; retried next tick.
         this.#store.dispatchRelease(task.id, Date.now());
-        kindFilter = "send";
         continue;
       }
       await this.#execute(task);
@@ -348,6 +350,16 @@ export class Dispatcher {
           status === "blocked" ? "task_blocked" : "task_failed",
           `task ${task.id.slice(0, 8)} (${task.kind}/${task.shape}) ${status.toUpperCase()}: ${message.slice(0, 300)}`,
         );
+        // A terminal spawn failure must not orphan a surviving worker (e.g.
+        // a continueWorker attempt that threw after the session was found) —
+        // mirror #finishWorkerTask's blocked-path teardown.
+        if (task.kind === "spawn" && task.workerSessionId) {
+          this.#watched.delete(task.workerSessionId);
+          await this.#host.destroyWorker(
+            task.workerSessionId,
+            `task ${task.id} ${status}`,
+          );
+        }
       }
     }
   }

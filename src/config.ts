@@ -354,6 +354,8 @@ const DispatchSchema = z
     maxConcurrentWorkers: z.number().int().min(1).default(2),
     /** Autonomous tool-call budget per spawned worker. */
     workerToolBudget: z.number().int().min(1).default(50),
+    /** Base retry backoff (ms) for retryable failures — doubles per attempt, capped at leaseMs. */
+    retryBaseMs: z.number().int().min(0).default(15_000),
   })
   .default({
     enabled: true,
@@ -362,6 +364,7 @@ const DispatchSchema = z
     failureLimit: 2,
     maxConcurrentWorkers: 2,
     workerToolBudget: 50,
+    retryBaseMs: 15_000,
   });
 
 const RootSchema = z.object({
@@ -487,6 +490,7 @@ export interface CodeoidConfig {
     failureLimit: number;
     maxConcurrentWorkers: number;
     workerToolBudget: number;
+    retryBaseMs: number;
   };
 }
 
@@ -538,6 +542,10 @@ const ENV_OVERRIDES: readonly EnvOverride[] = [
   { env: "CODEOID_AUTO_ROTATE_HARD_PCT", path: "autoRotate.hardRotatePct", kind: "float" },
   { env: "CODEOID_AUTO_ROTATE_MIN_TURNS", path: "autoRotate.minTurnsBeforeRotate", kind: "int" },
   { env: "CODEOID_DEFAULT_MODEL", path: "session.defaultModel", kind: "string" },
+  // Dispatch kill switch — disable send-class fleet dispatch per-invocation
+  // without touching config.json. Other dispatch knobs are file-config only,
+  // matching the conductor block's convention.
+  { env: "CODEOID_DISPATCH_ENABLED", path: "dispatch.enabled", kind: "boolean" },
   { env: "CODEOID_FALLBACK_MODEL", path: "session.fallbackModel", kind: "string" },
   { env: "CODEOID_TURN_STALL_TIMEOUT_MS", path: "session.turnStallTimeoutMs", kind: "int" },
   { env: "CODEOID_MCP_TOOL_TIMEOUT_MS", path: "session.mcpToolTimeoutMs", kind: "int" },

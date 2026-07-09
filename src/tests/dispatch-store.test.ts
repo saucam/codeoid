@@ -63,12 +63,17 @@ describe("dispatch queue — claims", () => {
     expect(a?.claimOwner).toBe("boot-1");
   });
 
-  test("kind filter claims sends past a queued spawn (anti-starvation)", () => {
-    enqueue({ kind: "spawn" }); // oldest
+  test("excluded ids are skipped — the anti-starvation mechanism", () => {
+    const spawn = enqueue({ kind: "spawn" }); // oldest
     const send = enqueue({ kind: "send", targetSession: "sess-1", workdir: undefined });
 
-    const claimed = store.dispatchClaimNext("boot-1", 100, "send");
+    // With the oldest task excluded (e.g. deferred at the worker cap), the
+    // claim moves PAST it instead of head-of-line blocking the queue.
+    const claimed = store.dispatchClaimNext("boot-1", 100, [spawn]);
     expect(claimed?.id).toBe(send);
+    // Without the exclusion the oldest wins as usual.
+    store.dispatchRelease(send, 101);
+    expect(store.dispatchClaimNext("boot-1", 102)?.id).toBe(spawn);
   });
 
   test("release returns a claim untouched — no attempt burned", () => {

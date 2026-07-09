@@ -1244,7 +1244,23 @@ export class SessionManager {
         this.#sessions.set(session.id, session);
         // No rate-limiter charge: the dispatcher's own worker cap governs
         // spawn concurrency, and the human never called session.create.
-        await session.send(this.#workerBrief(task), this.#dispatchSenderAuth(task));
+        try {
+          await session.send(this.#workerBrief(task), this.#dispatchSenderAuth(task));
+        } catch (err) {
+          // Partial spawn: the session exists but never got its brief. Tear
+          // it down before rethrowing — the dispatcher only learns the
+          // worker's id from our return value, so an early throw would
+          // otherwise orphan it.
+          try {
+            await session.destroy(
+              this.#dispatchSystemAuth(task.accountId, task.projectId),
+            );
+          } catch {
+            // Best-effort cleanup.
+          }
+          this.#sessions.delete(session.id);
+          throw err;
+        }
         return { sessionId: session.id };
       },
 

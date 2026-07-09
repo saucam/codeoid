@@ -50,6 +50,7 @@ function mkConfig(): CodeoidConfig {
       failureLimit: 2,
       maxConcurrentWorkers: 2,
       workerToolBudget: 7,
+      retryBaseMs: 0,
     },
   };
 }
