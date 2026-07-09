@@ -23,6 +23,12 @@ export interface PiSpawnOptions {
   /** Extra CLI args (mode/rpc is always appended by this wrapper). */
   args?: string[];
   cwd: string;
+  /**
+   * Subprocess environment — callers pass an allowlisted build (see
+   * `buildPiEnv`), never a blanket `process.env` (GHSA-38vh vector 3: the
+   * daemon's env carries codeoid's own secrets).
+   */
+  env: Record<string, string>;
   /** Called for every non-response frame (events, extension_ui_request). */
   onEvent: (frame: PiFrame) => void;
   /** Called once when the process exits (code/signal for diagnostics). */
@@ -49,11 +55,7 @@ export class PiRpcProcess {
     this.#proc = spawn(opts.command, ["--mode", "rpc", ...(opts.args ?? [])], {
       cwd: opts.cwd,
       stdio: ["pipe", "pipe", "pipe"],
-      // pi reads provider API keys / OAuth credentials from the daemon's
-      // environment + ~/.pi — inherit rather than sandbox so a configured
-      // pi install "just works". Hardening parity with the Claude
-      // subprocess env is tracked as a follow-up.
-      env: process.env,
+      env: opts.env,
     });
 
     this.#proc.stdout.setEncoding("utf8");

@@ -34,6 +34,7 @@ import type {
 } from "../interface.js";
 import type { ProviderCommand } from "../../../protocol/types.js";
 import { renderHistorySeed, type CanonicalTurn } from "../canonical.js";
+import { buildPiEnv } from "../env.js";
 import {
   APPROVAL_TITLE,
   BRIDGE_READY_VALUE,
@@ -251,6 +252,9 @@ export class PiProvider implements SessionProvider {
       command: this.#command,
       args,
       cwd: opts.workdir,
+      // Allowlisted env (GHSA-38vh): pi gets its credentials (~/.pi via
+      // HOME, provider API keys), never codeoid's own secrets.
+      env: buildPiEnv(),
       onEvent: (frame) => this.#onFrame(frame),
       onExit: ({ code, signal, stderrTail }) => {
         this.#bridgeReady = false;

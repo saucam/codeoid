@@ -55,7 +55,7 @@ The bridge announces itself on session start; **if it fails to load, turns fail 
 
 - pi extension **custom TUI components** (`ctx.ui.custom()`, custom renderers/editors/themes) don't cross RPC — pi degrades them itself; everything logic-level keeps working.
 - The model catalog and command list populate after the first turn of a pi session (no idle subprocess just to list them).
-- The pi subprocess inherits the daemon's environment (pi needs its keys); env hardening parity with the Claude subprocess is a follow-up.
+- The pi subprocess runs with an allowlisted environment (provider API keys and `PI_*` pass through; codeoid's own secrets never do). Uncommon provider vars (e.g. `AWS_*` for Bedrock) need `CODEOID_AGENT_ENV_ALLOW=NAME1,NAME2`.
 - With an Anthropic **subscription** (OAuth) login, pi sends Claude-Code identity headers and pins the first system block — that's pi upstream behavior, not codeoid's.
 - codeoid memory/recall and the conductor fleet tools are Claude-session features today.
 
