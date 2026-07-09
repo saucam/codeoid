@@ -81,8 +81,8 @@ export interface TranscriptMeta {
   lastActivityAt: string;
   accountId: string;
   projectId: string;
-  /** "conductor" for the per-tenant conductor session; absent = normal. */
-  role?: "conductor";
+  /** "conductor" / "worker" for special sessions; absent = normal. */
+  role?: "conductor" | "worker";
   /** Provider id backing the session; absent = claude (pre-upgrade metas). */
   providerId?: string;
 }

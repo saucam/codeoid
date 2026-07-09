@@ -14,7 +14,7 @@ import { GeminiProvider } from "./providers/gemini/index.js";
 import { OpenAIProvider } from "./providers/openai/index.js";
 import { StatelessSessionProvider } from "./providers/stateless.js";
 import { CanonicalHistoryAccumulator } from "./providers/canonical.js";
-import { CONDUCTOR_SYSTEM_PROMPT_APPEND } from "./fleet.js";
+import { CONDUCTOR_SYSTEM_PROMPT_APPEND, isFleetSendTool } from "./fleet.js";
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import { type ProviderEvent, type NormalizedTurnResult, type TurnRun, type ToolApprovalFn, type SessionProvider, isSubagentEvent } from "./providers/interface.js";
 import { randomUUID } from "node:crypto";
@@ -138,9 +138,10 @@ export interface SessionCreateOptions {
   /**
    * Session role. "conductor" = the per-tenant fleet supervisor: it gets the
    * conductor system prompt and the codeoid_fleet MCP server (when `fleet`
-   * is provided), and shows up in SessionInfo.role for clients.
+   * is provided). "worker" = a disposable dispatch-spawned worker. Shown in
+   * SessionInfo.role for clients.
    */
-  role?: "conductor";
+  role?: "conductor" | "worker";
   /**
    * Provider id backing this session ("claude" | "gemini" | "openai").
    * Absent = claude. Every session carries its own selection so any session
@@ -161,6 +162,27 @@ export interface SessionCreateOptions {
    */
   defaultModel?: string;
   /**
+   * Observe every status transition of this session. The dispatcher uses
+   * this to detect a worker's turn completing (→ idle/error) or wedging
+   * (→ waiting_approval) without polling. Called AFTER the transition is
+   * applied; exceptions are swallowed (observability must not break turns).
+   */
+  onStatusChange?: (sessionId: string, status: SessionStatus) => void;
+  /**
+   * Initial execution mode + autonomous tool budget. Spawned workers start
+   * "autonomous" with a bounded budget so they can work unattended; when the
+   * budget exhausts, the mode reverts to guarded and the session waits for
+   * approval — which the dispatcher detects as a wedge.
+   */
+  initialMode?: { mode: SessionMode; maxTurns?: number };
+  /**
+   * Shape of a dispatch-spawned worker ("ship" | "scout"). Selects the
+   * shape-capped LEAF identity profile (registerWorker) instead of the
+   * standard session-agent registration: scouts hold no tools:write, and no
+   * worker ever holds session:* — a worker cannot see or direct the fleet.
+   */
+  workerShape?: "ship" | "scout";
+  /**
    * Provider override for testing. When present, replaces ClaudeProvider so
    * integration tests run without the Claude Agent SDK subprocess.
    * Name prefix signals this is test-only infrastructure — do not use in production.
@@ -177,8 +199,8 @@ export class Session {
    */
   name: string;
   readonly workdir: string;
-  /** "conductor" marks the per-tenant fleet supervisor; undefined = normal. */
-  readonly role?: "conductor";
+  /** "conductor" = fleet supervisor; "worker" = dispatch-spawned; undefined = normal. */
+  readonly role?: "conductor" | "worker";
   readonly createdBy: string;
   readonly createdAt: string;
   /**
@@ -293,6 +315,8 @@ export class Session {
   // `interactive` (prompt for everything, incl. reads) and `autonomous` (auto
   // until budget) are opt-in via /mode.
   #mode: SessionMode = "guarded";
+  #onStatusChange?: (sessionId: string, status: SessionStatus) => void;
+  #workerShape?: "ship" | "scout";
   #turnsRemaining: number | undefined = undefined;
 
   // Cumulative token + cost totals, aggregated from SDK `result` messages
@@ -372,6 +396,18 @@ export class Session {
     string,
     (result: { approved: boolean; updatedInput?: Record<string, unknown> }) => void
   >();
+  /**
+   * Decisions that arrived BEFORE canUseTool registered its resolver. The
+   * event consumer broadcasts the waiting_confirmation tool message (and the
+   * waiting_approval status) a beat before #waitForApproval runs, so a fast
+   * client — or an automation — can approve/deny inside that window; without
+   * this buffer the decision was silently dropped and the turn hung forever.
+   * Keyed by approvalId; consumed (or discarded) by #waitForApproval.
+   */
+  #earlyApprovals = new Map<
+    string,
+    { approved: boolean; updatedInput?: Record<string, unknown> }
+  >();
 
   // Active tool call messageIds — completed when next assistant message arrives
   #activeToolMsgIds: string[] = [];
@@ -402,6 +438,13 @@ export class Session {
     this.name = opts.name;
     this.workdir = opts.workdir;
     this.role = opts.role;
+    this.#onStatusChange = opts.onStatusChange;
+    this.#workerShape = opts.workerShape;
+    if (opts.initialMode) {
+      this.#mode = opts.initialMode.mode;
+      this.#turnsRemaining =
+        opts.initialMode.mode === "autonomous" ? opts.initialMode.maxTurns : undefined;
+    }
     this.createdBy = opts.auth.sub;
     this.createdAt = new Date().toISOString();
     this.accountId = opts.auth.accountId;
@@ -565,6 +608,18 @@ export class Session {
   get providerId(): string { return this.#provider.id; }
   /** Tenant-scoped memory workspace id (for fleet views / cross-session search). */
   get workspaceId(): string { return this.#workspaceId; }
+  /**
+   * Final text of the most recent assistant turn (null before any turn).
+   * Bounded consumer beware: this is the FULL turn text — digest builders
+   * must truncate. Reads the canonical history, never the provider.
+   */
+  get lastAssistantText(): string | null {
+    for (let i = this.#accumulator.history.length - 1; i >= 0; i--) {
+      const turn = this.#accumulator.history[i];
+      if (turn && turn.role === "assistant" && turn.content) return turn.content;
+    }
+    return null;
+  }
   get attachedClientCount(): number { return this.#clients.size; }
 
   /**
@@ -1068,6 +1123,7 @@ export class Session {
       resolve({ approved: false });
     }
     this.#pendingApprovals.clear();
+    this.#earlyApprovals.clear();
 
     const infoMsg = this.#makeMessage(
       "info",
@@ -1106,7 +1162,23 @@ export class Session {
       // resolve another client's pending approval just by sending an
       // unrelated id. Every UI we ship now sends the real id; if a
       // future client doesn't, fail closed rather than mis-resolving.
-      //
+
+      // Race window: the tool message (and waiting_approval status) are
+      // broadcast by the event consumer BEFORE canUseTool registers its
+      // resolver. #approvalIdToMessageId proves this approvalId belongs to
+      // the live turn — buffer the decision for #waitForApproval to consume
+      // instead of dropping it (which hung the turn forever).
+      if (this.#approvalIdToMessageId.has(approvalId)) {
+        this.#earlyApprovals.set(approvalId, { approved, updatedInput });
+        this.#store.audit(
+          sender.sub,
+          approved ? "session.approve" : "session.deny",
+          this.id,
+          `approvalId=${approvalId} (early)`,
+        );
+        return;
+      }
+
       // No live approval matches. Most likely a stale tool_call left
       // in `waiting_confirmation` after a daemon restart or failed
       // canUseTool — the SDK will never call us back for it. Walk
@@ -1164,6 +1236,7 @@ export class Session {
       resolve({ approved: false });
     }
     this.#pendingApprovals.clear();
+    this.#earlyApprovals.clear();
     this.#clients.clear();
     await this.#identityManager?.deactivateSessionAgent(this.id);
     this.#store.deleteSession(this.id);
@@ -1748,6 +1821,13 @@ export class Session {
    * first yield — the microtask ordering is deterministic.
    */
   #shouldAutoApprove(toolName: string): boolean {
+    // HARD gate, checked before any mode logic: send-class fleet dispatch
+    // (fleet_send / fleet_spawn / fleet_interrupt) must NEVER auto-approve —
+    // not in autonomous mode, not under a turn budget. The owner confirming
+    // each dispatch with the full input visible is the R3 safety invariant,
+    // not a mode default.
+    if (isFleetSendTool(toolName)) return false;
+
     if (this.#mode === "interactive") return false;
 
     // Read-only / retrieval tools — safe in both guarded and autonomous.
@@ -1779,6 +1859,7 @@ export class Session {
    * called from #makeCanUseToolFn where the actual allow/deny happens.
    */
   #peekAutoApprove(toolName: string): boolean {
+    if (isFleetSendTool(toolName)) return false;
     if (this.#mode === "interactive") return false;
     if (isSafeTool(toolName)) return true;
     if (this.#mode === "autonomous") {
@@ -1792,6 +1873,12 @@ export class Session {
   #waitForApproval(
     approvalId: string,
   ): Promise<{ approved: boolean; updatedInput?: Record<string, unknown> }> {
+    // A decision may have raced ahead of registration — consume it now.
+    const early = this.#earlyApprovals.get(approvalId);
+    if (early) {
+      this.#earlyApprovals.delete(approvalId);
+      return Promise.resolve(early);
+    }
     return new Promise((resolve) => {
       this.#pendingApprovals.set(approvalId, resolve);
     });
@@ -1801,7 +1888,12 @@ export class Session {
     const im = this.#identityManager;
     if (im && !this.#provider.hasQueried && this.#agentIdentity.sub.startsWith("agent:")) {
       try {
-        const { wimseUri } = await im.registerSessionAgent(this.id, this.name, sender.sub);
+        // Dispatch-spawned workers get a shape-capped LEAF identity created
+        // under the conductor's lineage; everything else registers the
+        // standard session agent under the human sender.
+        const { wimseUri } = this.#workerShape
+          ? await im.registerWorker(this.id, this.name, this.#workerShape)
+          : await im.registerSessionAgent(this.id, this.name, sender.sub);
         this.#agentIdentity = { sub: wimseUri, name: `${this.name} agent`, type: "agent" };
         console.log(`[codeoid] agent identity registered: ${wimseUri}`);
         const infoMsg = this.#makeMessage("info", "Agent identity registered", SYSTEM_IDENTITY, undefined, undefined, {
@@ -2668,6 +2760,19 @@ export class Session {
       status,
       timestamp: new Date().toISOString(),
     });
+
+    // Daemon-side observer (dispatcher worker-watching). After the broadcast
+    // so observers see the same ordering clients do; never throws into the
+    // status path.
+    if (this.#onStatusChange) {
+      try {
+        this.#onStatusChange(this.id, status);
+      } catch (err) {
+        console.error(
+          `[codeoid/session ${this.id}] onStatusChange observer failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
   }
 
   /** Write the CURRENT status through to the sessions DB + transcript meta,

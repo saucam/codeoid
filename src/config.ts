@@ -335,6 +335,35 @@ const OAuthSchemaFields = z
   })
   .default({});
 
+/**
+ * Dispatch queue (P4) — send-class fleet actions run through a durable
+ * SQLite work queue with a dispatcher loop. Workers spawned by the queue run
+ * autonomously up to `workerToolBudget` tool calls, then wedge safely (the
+ * lease reclaims them).
+ */
+const DispatchSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    /** Dispatcher tick interval (ms): claim / reclaim / deliver cadence. */
+    tickMs: z.number().int().min(250).default(5_000),
+    /** Claim lease (ms) — an unrenewed claim past this is reclaimed (attempts++). */
+    leaseMs: z.number().int().min(10_000).default(10 * 60_000),
+    /** Consecutive failures (incl. reclaims) before a task auto-blocks. */
+    failureLimit: z.number().int().min(1).default(2),
+    /** Max concurrently running spawned workers per tenant. */
+    maxConcurrentWorkers: z.number().int().min(1).default(2),
+    /** Autonomous tool-call budget per spawned worker. */
+    workerToolBudget: z.number().int().min(1).default(50),
+  })
+  .default({
+    enabled: true,
+    tickMs: 5_000,
+    leaseMs: 10 * 60_000,
+    failureLimit: 2,
+    maxConcurrentWorkers: 2,
+    workerToolBudget: 50,
+  });
+
 const RootSchema = z.object({
   daemonUrl: z.string().default("ws://127.0.0.1:7400"),
   dbPath: z.string().default("codeoid.db"),
@@ -355,6 +384,7 @@ const RootSchema = z.object({
   autoRotate: AutoRotateSchema,
   session: SessionSchema,
   conductor: ConductorSchema,
+  dispatch: DispatchSchema,
 });
 
 type ParsedConfig = z.infer<typeof RootSchema>;
@@ -444,6 +474,19 @@ export interface CodeoidConfig {
     name: string;
     provider: string;
     model?: string;
+  };
+  /**
+   * Send-class dispatch queue (P4). Optional in the type so hand-built test
+   * configs stay minimal; loadConfig always populates it. Absent = enabled
+   * with defaults.
+   */
+  dispatch?: {
+    enabled: boolean;
+    tickMs: number;
+    leaseMs: number;
+    failureLimit: number;
+    maxConcurrentWorkers: number;
+    workerToolBudget: number;
   };
 }
 
@@ -669,6 +712,7 @@ export function loadConfig(opts: LoadOptions = {}): CodeoidConfig {
     autoRotate: parsed.autoRotate,
     session: parsed.session,
     conductor: parsed.conductor,
+    dispatch: parsed.dispatch,
   };
 }
 

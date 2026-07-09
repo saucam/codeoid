@@ -122,9 +122,10 @@ export interface SessionInfo {
   attachedClients: number;
   /**
    * Session role. "conductor" marks the per-tenant conductor session (the
-   * fleet supervisor — one per account/project). Absent = normal session.
+   * fleet supervisor — one per account/project); "worker" marks a disposable
+   * dispatch-spawned worker. Absent = normal session.
    */
-  role?: "conductor";
+  role?: "conductor" | "worker";
   /** Id of the provider backing this session (e.g. "claude", "gemini"). */
   providerId?: string;
   /** Current execution mode (default "interactive"). */
