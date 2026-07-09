@@ -69,6 +69,45 @@ async function createSession(): Promise<string> {
   return (resp as { data: { id: string } }).data.id;
 }
 
+describe("session.create provider selection", () => {
+  it("rejects an unknown providerId fail-closed", async () => {
+    const resp = await manager.handle(
+      {
+        type: "session.create",
+        id: "cp1",
+        name: "pi-sess",
+        workdir: tmp,
+        providerId: "harness-from-the-future",
+      },
+      OWNER,
+      client(OWNER),
+    );
+    expect(resp).toMatchObject({ type: "response.error", code: "invalid_request" });
+    if (resp.type === "response.error") {
+      expect(resp.error).toContain("harness-from-the-future");
+      expect(resp.error).toContain("claude");
+    }
+  });
+
+  it("accepts a registered providerId", async () => {
+    // "pi" is in the default registry; _testProviderFactory still supplies
+    // the runtime mock, so nothing spawns.
+    const resp = await manager.handle(
+      { type: "session.create", id: "cp2", name: "pi-sess", workdir: tmp, providerId: "pi" },
+      OWNER,
+      client(OWNER),
+    );
+    expect(resp.type).toBe("response.ok");
+  });
+
+  it("providerIds() advertises the catalog with the default first", () => {
+    const ids = manager.providerIds();
+    expect(ids[0]).toBe("claude");
+    expect(ids).toContain("pi");
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+});
+
 describe("session.commands", () => {
   it("returns the provider catalog with providerId", async () => {
     mock.commands = [{ name: "review", description: "Review the diff", source: "extension" }];

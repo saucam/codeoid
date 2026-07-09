@@ -21,7 +21,7 @@ import {
   onMount,
 } from "solid-js";
 
-import { newRequestId, refreshSessions, request } from "../state/connection";
+import { authIdentity, newRequestId, refreshSessions, request } from "../state/connection";
 import { focusSession, mergeSession, sessionList } from "../state/sessions";
 import type { SessionInfo } from "../protocol/types";
 import DirectoryPicker from "./files/DirectoryPicker";
@@ -39,6 +39,12 @@ const NewSessionModal: Component = () => {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [pickerOpen, setPickerOpen] = createSignal(false);
+  // "" = daemon default (first advertised provider).
+  const [providerId, setProviderId] = createSignal("");
+
+  // Backends this daemon registered (auth.ok `providers`, default first).
+  // Older daemons don't advertise — hide the picker, sessions stay claude.
+  const providers = createMemo<string[]>(() => authIdentity()?.providers ?? []);
 
   let nameRef: HTMLInputElement | undefined;
 
@@ -106,6 +112,7 @@ const NewSessionModal: Component = () => {
         id: newRequestId(),
         name: n,
         workdir: wd,
+        ...(providerId() ? { providerId: providerId() } : {}),
       })) as SessionInfo | undefined;
       if (data && typeof data === "object" && "id" in data) {
         mergeSession(data);
@@ -120,6 +127,7 @@ const NewSessionModal: Component = () => {
       setOpenSignal(false);
       setName("");
       setWorkdir("");
+      setProviderId("");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setBusy(false);
@@ -220,6 +228,35 @@ const NewSessionModal: Component = () => {
               Path on the daemon host. Defaults to the daemon's CWD when blank.
             </p>
           </label>
+
+          <Show when={providers().length > 1}>
+            <div class="block space-y-1.5">
+              <span class="text-[11px] font-medium uppercase tracking-wider text-fg-faint">
+                Backend
+              </span>
+              <div class="flex flex-wrap gap-1" role="radiogroup" aria-label="Backend">
+                <For each={providers()}>
+                  {(id, i) => (
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={providerId() === id || (!providerId() && i() === 0)}
+                      onClick={() => setProviderId(i() === 0 ? "" : id)}
+                      class={`rounded border px-2 py-0.5 font-mono text-[12px] transition ${
+                        providerId() === id || (!providerId() && i() === 0)
+                          ? "border-accent/60 bg-accent/10 text-accent"
+                          : "border-border bg-bg text-fg-muted hover:border-accent/40 hover:text-fg"
+                      }`}
+                      disabled={busy()}
+                    >
+                      {id}
+                      {i() === 0 ? " (default)" : ""}
+                    </button>
+                  )}
+                </For>
+              </div>
+            </div>
+          </Show>
 
           <Show when={error()}>
             <div class="rounded border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">

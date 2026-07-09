@@ -479,6 +479,9 @@ export class DaemonServer {
               scopes: data.auth.scopes,
               protocolVersion: PROTOCOL_VERSION,
               capabilities: SERVER_CAPABILITIES,
+              // Registered backends, default first — feeds the new-session
+              // provider picker (see AuthOkMsg.providers).
+              providers: self.#manager.providerIds(),
             }));
             return;
           }

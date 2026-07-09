@@ -8,6 +8,28 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **pi is now an officially supported session backend** (`providerId: "pi"`,
+  [docs/providers-pi.md](docs/providers-pi.md)). One codeoid session = one
+  warm `pi --mode rpc` subprocess; pi's own session file is the backing id,
+  so daemon restarts resume the same pi conversation. What flows through:
+  - **pi extensions work end-to-end** — hooks run inside pi; extension
+    dialogs surface as codeoid `session.ui_request` dialogs, notifications
+    become transcript rows, and extension/prompt/skill slash commands feed
+    `session.commands` (invoke as `/name args` from any client).
+  - **codeoid's approval gate covers pi tools**: an injected bridge
+    extension routes every pi `tool_call` through `canUseTool` (modes,
+    budgets, `session.approve`, audit). pi has no native permission system,
+    so a missing bridge fails turns CLOSED, and any tool that executes
+    ungated is flagged loudly.
+  - Steering (`now`/`next` → pi steer, `later` → follow-up), model
+    switching (`provider/model-id`), per-turn usage deltas, rotation via
+    pi `new_session`.
+  - Config: `providers.pi.{enabled, command}`.
+- **Provider selection is user-facing**: `session.create` accepts
+  `providerId` (fail-closed on unknown ids), `auth.ok` advertises the
+  daemon's registered `providers` (default first), and the web UI's
+  new-session modal grew a backend picker.
+
 - **Provider extension surface** — the wire-additive groundwork for
   non-Claude backends (pi harness next) to expose their full feature set
   through codeoid:

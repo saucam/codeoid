@@ -22,6 +22,7 @@ import type { SessionProvider } from "./interface.js";
 import { ClaudeProvider } from "./claude/index.js";
 import { GeminiProvider } from "./gemini/index.js";
 import { OpenAIProvider } from "./openai/index.js";
+import { PiProvider } from "./pi/index.js";
 import { StatelessSessionProvider } from "./stateless.js";
 
 /**
@@ -115,8 +116,12 @@ export class ProviderRegistry {
   }
 }
 
-/** The built-in backends. Daemon startup builds exactly one of these. */
-export function createDefaultProviderRegistry(): ProviderRegistry {
+/**
+ * The built-in backends. Daemon startup builds exactly one of these.
+ * `config` gates optional backends (pi can be disabled) and carries their
+ * settings (binary path); absent = every backend with defaults.
+ */
+export function createDefaultProviderRegistry(config?: CodeoidConfig): ProviderRegistry {
   const registry = new ProviderRegistry("claude");
   registry.register({
     id: "claude",
@@ -153,5 +158,20 @@ export function createDefaultProviderRegistry(): ProviderRegistry {
         init.sessionId,
       ),
   });
+  if (config?.providers?.pi?.enabled !== false) {
+    const command = config?.providers?.pi?.command ?? "pi";
+    registry.register({
+      id: "pi",
+      displayName: "pi (pi.dev)",
+      create: (init) =>
+        new PiProvider({
+          sessionId: init.sessionId,
+          initialBackingId: init.initialBackingId,
+          command: init.config?.providers?.pi?.command ?? command,
+          store: init.store,
+          onModels: init.onModels,
+        }),
+    });
+  }
   return registry;
 }

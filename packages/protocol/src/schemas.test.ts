@@ -43,7 +43,13 @@ test("every ClientMessage variant has a schema and vice versa (compile-time)", (
 
 const samples: { [T in ClientTypes]: Extract<ClientMessage, { type: T }> } = {
   ping: { type: "ping", id: "r1" },
-  "session.create": { type: "session.create", id: "r2", name: "demo", workdir: "/tmp/w" },
+  "session.create": {
+    type: "session.create",
+    id: "r2",
+    name: "demo",
+    workdir: "/tmp/w",
+    providerId: "pi",
+  },
   "session.list": { type: "session.list", id: "r3" },
   "session.attach": { type: "session.attach", id: "r4", sessionId: "s1" },
   "session.detach": { type: "session.detach", id: "r5", sessionId: "s1" },
