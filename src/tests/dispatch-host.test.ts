@@ -139,7 +139,7 @@ describe("dispatch host — spawn end-to-end", () => {
       AUTH,
       CLIENT,
     );
-    const conductorId = (created as { data: SessionInfo }).data.id;
+    expect((created as { data: SessionInfo }).data.role).toBe("conductor");
     const conductorProvider = providers[0]!;
 
     const taskId = manager.dispatcher.enqueue({
