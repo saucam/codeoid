@@ -964,10 +964,12 @@ export interface SessionRotateMsg extends BaseClientMsg {
  * session id, scrollback, transcript, and identity all stay; the backing
  * agent is torn down and replaced, and the accumulated canonical history is
  * handed to the incoming provider (`seedFromHistory`) so it can continue
- * the conversation. Fidelity contract: the new backend receives a faithful
- * TRANSCRIPT (tool calls flattened to text), not a native continuation —
- * provider-native structures (tool_use blocks, prompt cache, extension
- * state) do not survive the switch.
+ * the conversation. Fidelity contract: STATELESS backends (gemini, openai)
+ * replay the history in their native structure (real function-call turns)
+ * on every subsequent request; WARM backends (claude, pi) receive a
+ * faithful structured-text transcript prepended to their first prompt —
+ * neither accepts synthesized native-history injection, so prompt cache
+ * and extension state still do not survive the switch.
  *
  * Rejected with `invalid_request` when the provider is unknown (fail-closed,
  * same rule as `session.create`) or the session is mid-turn — interrupt

@@ -254,6 +254,15 @@ describe("PiProvider", () => {
         content: "earlier answer",
         providerId: "claude",
         model: "opus",
+        toolCalls: [
+          {
+            id: "toolu_01",
+            name: "run_shell",
+            input: { command: "bun test" },
+            output: "1 pass",
+            success: true,
+          },
+        ],
       },
     ]);
     const events = await collect(p.runTurn(turnOpts("echo-prompt")).events);
@@ -264,6 +273,11 @@ describe("PiProvider", () => {
       expect(done.content).toContain("<conversation-history>");
       expect(done.content).toContain("earlier question");
       expect(done.content).toContain("earlier answer");
+      // Claude→pi round-trip carries STRUCTURED tool history, not the old
+      // one-line "[Tool: …]" flattening.
+      expect(done.content).toContain("### Tool call: run_shell → ok");
+      expect(done.content).toContain(`input: {"command":"bun test"}`);
+      expect(done.content).not.toContain("[Tool:");
       expect(done.content).toContain("echo-prompt");
     }
 
