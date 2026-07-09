@@ -323,6 +323,9 @@ const ProviderPicker: Component<{
                       setOpen(false);
                       return;
                     }
+                    // A stale rejection from a previous attempt would read as
+                    // if it belonged to THIS click — clear before dispatch.
+                    setError(null);
                     request({
                       type: "session.set_provider",
                       id: newRequestId(),
