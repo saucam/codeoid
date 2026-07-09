@@ -8,6 +8,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Mid-session provider switching** (`session.set_provider`, `/provider
+  <id>`): swap a live session's backend (claude ⇄ pi ⇄ gemini ⇄ openai)
+  while keeping the session id, scrollback, transcript, and identity. The
+  generic switch loop tears down the outgoing backend, re-mints the backing
+  id (an incoming backend never resumes the outgoing one's native state),
+  resets the model to the new backend's default, and offers the accumulated
+  canonical history to the incoming provider via the new optional
+  `seedFromHistory()` — stateless backends no-op it (they consume
+  `TurnOpts.history` natively), warm backends (claude, pi) prepend a
+  rendered transcript (`renderHistorySeed`, newest-turns-first truncation)
+  to their first post-switch prompt. Fidelity contract: the new backend
+  gets a faithful TRANSCRIPT, not a native continuation. Fail-closed on
+  unknown ids, rejected mid-turn (interrupt first), serialized against
+  racing prompts, seed failures degrade to an unseeded switch, and every
+  switch is audited + announced in the transcript with structured metadata.
+
 - **pi is now an officially supported session backend** (`providerId: "pi"`,
   [docs/providers-pi.md](docs/providers-pi.md)). One codeoid session = one
   warm `pi --mode rpc` subprocess; pi's own session file is the backing id,

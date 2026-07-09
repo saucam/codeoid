@@ -223,3 +223,22 @@ describe("provider-command passthrough", () => {
     expect(parseSlash("/help", { isProviderCommand })).toEqual({ kind: "help" });
   });
 });
+
+describe("/provider", () => {
+  it("parses the id case-insensitively and requires it", () => {
+    expect(parseSlash("/provider pi")).toEqual({ kind: "provider", providerId: "pi" });
+    expect(parseSlash("/provider PI")).toEqual({ kind: "provider", providerId: "pi" });
+    expect(() => parseSlash("/provider")).toThrow(/\/provider <id>/);
+  });
+
+  it("dispatches session.set_provider", () => {
+    const c = ctx();
+    dispatchSlash({ kind: "provider", providerId: "pi" }, c);
+    expect(c.sent).toHaveLength(1);
+    expect(c.sent[0]).toMatchObject({
+      type: "session.set_provider",
+      sessionId: c.sessionId,
+      providerId: "pi",
+    });
+  });
+});

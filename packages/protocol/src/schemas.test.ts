@@ -93,6 +93,12 @@ const samples: { [T in ClientTypes]: Extract<ClientMessage, { type: T }> } = {
   "session.rotate": { type: "session.rotate", id: "r13", sessionId: "s1" },
   "session.search": { type: "session.search", id: "r14", query: "auth bug", scope: "all", limit: 5 },
   "session.set_model": { type: "session.set_model", id: "r15", sessionId: "s1", model: "opus", fallbackModel: null },
+  "session.set_provider": {
+    type: "session.set_provider",
+    id: "r28",
+    sessionId: "s1",
+    providerId: "pi",
+  },
   "session.rename": { type: "session.rename", id: "r16", sessionId: "s1", name: "renamed" },
   "fs.list": { type: "fs.list", id: "r17", sessionId: "s1", path: "src" },
   "fs.read": { type: "fs.read", id: "r18", sessionId: "s1", path: "src/a.ts", maxBytes: 1024 },

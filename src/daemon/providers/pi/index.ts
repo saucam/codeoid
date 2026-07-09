@@ -33,6 +33,7 @@ import type {
   UiRequestFn,
 } from "../interface.js";
 import type { ProviderCommand } from "../../../protocol/types.js";
+import { renderHistorySeed, type CanonicalTurn } from "../canonical.js";
 import {
   APPROVAL_TITLE,
   BRIDGE_READY_VALUE,
@@ -81,6 +82,8 @@ export class PiProvider implements SessionProvider {
   #bridgeReady = false;
   #hasQueried = false;
   #model: string | null = null;
+  /** Rendered transcript from seedFromHistory() — prepended to the next prompt. */
+  #pendingHistorySeed: string | null = null;
 
   // Per-turn wiring, set by runTurn and read by the event pump.
   #turnQueue: AsyncQueue<ProviderEvent> | null = null;
@@ -149,6 +152,17 @@ export class PiProvider implements SessionProvider {
     }
   }
 
+  /**
+   * Provider switch seeding: pi's fresh session hasn't seen the
+   * conversation — prepend the rendered transcript to the first
+   * post-switch prompt. (Writing a native pi session file would be higher
+   * fidelity; deliberately not done — pi's session format is internal.)
+   */
+  seedFromHistory(history: readonly CanonicalTurn[]): void {
+    const seed = renderHistorySeed(history);
+    this.#pendingHistorySeed = seed.length > 0 ? seed : null;
+  }
+
   async listCommands(): Promise<ProviderCommand[]> {
     if (!this.#proc?.alive) return [];
     const resp = await this.#proc.request({ type: "get_commands" });
@@ -213,7 +227,12 @@ export class PiProvider implements SessionProvider {
       await this.#setModel(opts.model);
     }
 
-    const resp = await this.#proc!.request({ type: "prompt", message: opts.userMessage });
+    let message = opts.userMessage;
+    if (this.#pendingHistorySeed) {
+      message = `${this.#pendingHistorySeed}\n\n${message}`;
+      this.#pendingHistorySeed = null;
+    }
+    const resp = await this.#proc!.request({ type: "prompt", message });
     if (resp.success === false) {
       throw new Error(`pi rejected the prompt: ${String(resp.error ?? "unknown error")}`);
     }

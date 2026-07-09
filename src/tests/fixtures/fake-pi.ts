@@ -121,6 +121,17 @@ async function runPrompt(message: string): Promise<void> {
       result: { content: [{ type: "text", text: "wrote file" }] },
       isError: false,
     });
+  } else if (message.includes("echo-prompt")) {
+    // Reflect the FULL received prompt back — lets tests prove what
+    // actually reached pi (e.g. the prepended history seed).
+    emit({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: `received:${message}` }],
+        stopReason: "stop",
+      },
+    });
   } else {
     emit({
       type: "message_update",

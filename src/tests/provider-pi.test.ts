@@ -245,6 +245,36 @@ describe("PiProvider", () => {
     expect(events.some((e) => e.type === "error")).toBe(true);
   });
 
+  it("T11: seedFromHistory prepends the rendered transcript to the next prompt", async () => {
+    const p = makeProvider();
+    p.seedFromHistory([
+      { role: "user", content: "earlier question" },
+      {
+        role: "assistant",
+        content: "earlier answer",
+        providerId: "claude",
+        model: "opus",
+      },
+    ]);
+    const events = await collect(p.runTurn(turnOpts("echo-prompt")).events);
+    const done = events.find((e) => e.type === "text_done");
+    expect(done).toBeDefined();
+    if (done?.type === "text_done") {
+      // fake-pi reflects the full received prompt — the seed reached pi.
+      expect(done.content).toContain("<conversation-history>");
+      expect(done.content).toContain("earlier question");
+      expect(done.content).toContain("earlier answer");
+      expect(done.content).toContain("echo-prompt");
+    }
+
+    // The seed is one-shot: the following prompt goes through clean.
+    const second = await collect(p.runTurn(turnOpts("echo-prompt again")).events);
+    const done2 = second.find((e) => e.type === "text_done");
+    if (done2?.type === "text_done") {
+      expect(done2.content).not.toContain("<conversation-history>");
+    }
+  });
+
   it("T10: second turn reports usage as a DELTA, not the cumulative total", async () => {
     const p = makeProvider();
     await collect(p.runTurn(turnOpts("hello")).events);

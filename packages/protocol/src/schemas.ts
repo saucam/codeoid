@@ -199,6 +199,15 @@ export const sessionSearchSchema = z.object({
   limit: z.number().int().min(1).max(100).optional(),
 });
 
+export const sessionSetProviderSchema = z.object({
+  ...base,
+  type: z.literal("session.set_provider"),
+  sessionId: sessionIdField,
+  // Bounded string, not an enum — the frame must PARSE for a provider this
+  // daemon doesn't know so the daemon can fail-close with a clear error.
+  providerId: z.string().min(1).max(64),
+});
+
 export const sessionSetModelSchema = z.object({
   ...base,
   type: z.literal("session.set_model"),
@@ -296,6 +305,7 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
   sessionRotateSchema,
   sessionSearchSchema,
   sessionSetModelSchema,
+  sessionSetProviderSchema,
   sessionRenameSchema,
   fsListSchema,
   fsReadSchema,

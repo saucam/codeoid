@@ -5,6 +5,7 @@
 
 import { describe, expect, it } from "bun:test";
 import { piContentText, translatePiEvent } from "../daemon/providers/pi/translate.js";
+import { renderHistorySeed } from "../daemon/providers/canonical.js";
 
 describe("piContentText", () => {
   it("joins text blocks and ignores non-text blocks", () => {
@@ -117,5 +118,49 @@ describe("translatePiEvent", () => {
     ]) {
       expect(translatePiEvent({ type })).toEqual([]);
     }
+  });
+});
+
+describe("renderHistorySeed", () => {
+  it("renders user/assistant turns with tool calls inside an envelope", () => {
+    const seed = renderHistorySeed([
+      { role: "user", content: "fix the bug" },
+      {
+        role: "assistant",
+        content: "On it.",
+        providerId: "claude",
+        model: "opus",
+        toolCalls: [
+          {
+            id: "t1",
+            name: "run_shell",
+            input: { command: "bun test" },
+            output: "1 pass",
+            success: true,
+          },
+        ],
+      },
+    ]);
+    expect(seed).toContain("<conversation-history>");
+    expect(seed).toContain("## User\nfix the bug");
+    expect(seed).toContain("## Assistant (claude/opus)");
+    expect(seed).toContain("run_shell");
+    expect(seed).toContain("1 pass");
+    expect(seed).toContain("</conversation-history>");
+  });
+
+  it("returns empty for empty history", () => {
+    expect(renderHistorySeed([])).toBe("");
+  });
+
+  it("drops the OLDEST turns when over budget, with an elision note", () => {
+    const turns = Array.from({ length: 10 }, (_, i) => ({
+      role: "user" as const,
+      content: `turn-${i} ${"x".repeat(400)}`,
+    }));
+    const seed = renderHistorySeed(turns, { maxChars: 1500 });
+    expect(seed).toContain("earlier turn(s) omitted");
+    expect(seed).toContain("turn-9");
+    expect(seed).not.toContain("turn-0 ");
   });
 });

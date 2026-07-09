@@ -236,6 +236,12 @@ export class Session {
   readonly accountId: string;
   readonly projectId: string;
 
+  // Provider (re-)construction inputs — see switchProvider().
+  #providersRegistry?: ProviderRegistry;
+  #fleet?: McpSdkServerConfigWithInstance;
+  #compressionRegistry?: CompressionRegistry;
+  #onModels?: SessionCreateOptions["onModels"];
+
   #status: SessionStatus = "idle";
   /** Trailing-debounce timer coalescing persistence of ACTIVE status flips
    * (thinking ↔ tool_running). See #setStatus. */
@@ -498,6 +504,12 @@ export class Session {
     this.#identityManager = opts.identityManager;
     this.#memory = opts.memory;
     this.#config = opts.config;
+    // Retained for provider (re-)construction — switchProvider() rebuilds
+    // the backend long after the constructor options are gone.
+    this.#providersRegistry = opts.providers;
+    this.#fleet = opts.fleet;
+    this.#compressionRegistry = opts.compressionRegistry;
+    this.#onModels = opts.onModels;
     // Tenant-scoped (auth carries account_id/project_id) so two accounts in
     // the same directory never share memory.
     this.#workspaceId = workspaceIdFromPath(opts.workdir, opts.auth);
@@ -520,7 +532,7 @@ export class Session {
       resolveModelId(opts.config?.session.fallbackModel ?? "") ??
       null;
 
-    this.#provider = opts._testProvider ?? this.#createProvider(opts);
+    this.#provider = opts._testProvider ?? this.#createProvider(opts.providerId);
 
     // Restore any pinned files the user had on this session before.
     try {
@@ -608,9 +620,10 @@ export class Session {
    * back to the registry default rather than throw — resume must survive a
    * meta written by a newer codeoid.
    */
-  #createProvider(opts: SessionCreateOptions): SessionProvider {
-    const registry = opts.providers ?? createDefaultProviderRegistry(opts.config);
-    const factory = registry.resolve(opts.providerId, `session ${this.id}`);
+  #createProvider(requestedProviderId: string | undefined): SessionProvider {
+    const registry =
+      this.#providersRegistry ?? createDefaultProviderRegistry(this.#config);
+    const factory = registry.resolve(requestedProviderId, `session ${this.id}`);
     return factory.create({
       sessionId: this.id,
       // Pass the tenant-scoped workspace id in rather than have the provider
@@ -619,16 +632,164 @@ export class Session {
       workspaceId: this.#workspaceId,
       model: this.#model,
       initialBackingId: this.#store.getClaudeCodeSessionId(this.id) ?? this.id,
-      store: opts.store,
-      identityManager: opts.identityManager,
-      memory: opts.memory,
-      fleet: opts.fleet,
-      config: opts.config,
-      compressionRegistry: opts.compressionRegistry,
+      store: this.#store,
+      identityManager: this.#identityManager,
+      memory: this.#memory,
+      fleet: this.#fleet,
+      config: this.#config,
+      compressionRegistry: this.#compressionRegistry,
       // Tag model reports with the factory's id (known before construction),
       // so the manager caches catalogs per-provider.
-      onModels: (m) => opts.onModels?.(factory.id, m),
+      onModels: (m) => this.#onModels?.(factory.id, m),
     });
+  }
+
+  /**
+   * Switch this session's backend mid-session (`session.set_provider`).
+   * The session id, scrollback, transcript, and identity stay; the backing
+   * agent is replaced and the canonical history is offered to the incoming
+   * provider (`seedFromHistory`, best-effort). Serialized on the send chain
+   * so a racing prompt can't land between teardown and rebuild.
+   *
+   * Fail-closed on unknown ids; rejected while a turn (or any pending
+   * approval/dialog) is in flight — interrupt first, then switch.
+   */
+  async switchProvider(
+    requested: string,
+    sender: AuthContext,
+  ): Promise<{ ok: true; providerId: string } | { ok: false; code: "invalid_request"; error: string }> {
+    const registry =
+      this.#providersRegistry ?? createDefaultProviderRegistry(this.#config);
+    if (!registry.has(requested)) {
+      return {
+        ok: false,
+        code: "invalid_request",
+        error: `Unknown provider "${requested}" — available: ${registry.ids().join(", ")}`,
+      };
+    }
+    if (this.#provider.id === requested) {
+      return { ok: true, providerId: requested };
+    }
+    // Fast-path rejection for callers switching a visibly busy session.
+    // NOT sufficient on its own: a send() already queued on the chain can
+    // start a turn between this check and our chain slot — the guard is
+    // re-run inside #switchProviderInner where it's authoritative.
+    const busy = this.#switchBusyReason();
+    if (busy) return busy;
+
+    // Serialize with send(): a prompt already queued on the chain completes
+    // its dispatch against the OLD provider before we run; prompts arriving
+    // after us run against the NEW one.
+    let result!: Awaited<ReturnType<Session["switchProvider"]>>;
+    this.#sendChain = this.#sendChain
+      .catch(() => {})
+      .then(async () => {
+        result = await this.#switchProviderInner(requested, sender);
+      });
+    await this.#sendChain;
+    return result;
+  }
+
+  /** Non-null when the session cannot be switched right now (mid-turn). */
+  #switchBusyReason(): { ok: false; code: "invalid_request"; error: string } | null {
+    if (
+      isActiveStatus(this.#status) ||
+      this.#status === "waiting_approval" ||
+      this.#pendingApprovals.size > 0 ||
+      this.#pendingUiRequests.size > 0
+    ) {
+      return {
+        ok: false,
+        code: "invalid_request",
+        error: "Session is mid-turn — interrupt it, then switch providers",
+      };
+    }
+    return null;
+  }
+
+  async #switchProviderInner(
+    requested: string,
+    sender: AuthContext,
+  ): Promise<{ ok: true; providerId: string } | { ok: false; code: "invalid_request"; error: string }> {
+    // Authoritative mid-turn guard: #sendInner (queued ahead of us on the
+    // chain) starts the turn consumer and RETURNS while the turn is still
+    // streaming — the pre-check in switchProvider() can't see that turn.
+    // Rejecting here means we never tear down an actively-running provider.
+    const busy = this.#switchBusyReason();
+    if (busy) return busy;
+
+    const previous = this.#provider.id;
+
+    await this.#teardownProvider();
+
+    // Fresh backing id BEFORE building the new provider — the incoming
+    // backend must never try to resume the outgoing one's native state
+    // (a claude session id means nothing to pi and vice versa).
+    const newBackingId = randomUUID();
+    try {
+      this.#store.setClaudeCodeSessionId(this.id, newBackingId);
+    } catch (err) {
+      console.error(
+        `[codeoid/session ${this.id}] failed to persist switch backing id: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    // Model ids are provider-specific ("opus" means nothing to pi's
+    // catalog) — reset to the incoming provider's default.
+    this.#model = null;
+    this.#fallbackModel = null;
+    // A pending rotation seed is Claude-worded and now redundant — the
+    // switch seeds its own transcript. Without this, the next send() would
+    // stack the rotation anchor on top of seedFromHistory's block.
+    this.#justRotated = false;
+    try {
+      this.#store.setSessionModel(this.id, null, null);
+    } catch {
+      // Non-fatal: the in-memory reset governs this lifetime.
+    }
+
+    this.#provider = this.#createProvider(requested);
+
+    // Offer the canonical history to the incoming provider. Best-effort by
+    // contract: a seed failure degrades to an unseeded switch, never a
+    // wedged session.
+    let seeded = false;
+    if (this.#provider.seedFromHistory && this.#accumulator.history.length > 0) {
+      try {
+        await this.#provider.seedFromHistory(this.#accumulator.history);
+        seeded = true;
+      } catch (err) {
+        console.error(
+          `[codeoid/session ${this.id}] seedFromHistory failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    this.#store.audit(
+      sender.sub,
+      "session.set_provider",
+      this.id,
+      `from=${previous} to=${requested} seeded=${seeded}`,
+    );
+    const infoMsg = this.#makeMessage(
+      "info",
+      `Backend switched: ${previous} → ${requested}.${
+        seeded
+          ? " The conversation so far is carried over as a transcript."
+          : ""
+      } Model reset to the ${requested} default.`,
+      SYSTEM_IDENTITY,
+      undefined,
+      undefined,
+      { event: "provider.switched", from: previous, to: requested, seeded },
+    );
+    this.#persistAndBuffer(infoMsg);
+    this.#broadcastRaw(infoMsg);
+    // Writes the new providerId into the transcript meta (restart resume)
+    // and refreshes every client's SessionInfo.
+    this.#persistStatus();
+    this.#broadcastInfoUpdate();
+    return { ok: true, providerId: requested };
   }
 
   get status(): SessionStatus { return this.#status; }
