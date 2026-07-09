@@ -13,7 +13,9 @@
 import { Component, For, Show, createEffect, createSignal, onCleanup } from "solid-js";
 
 import {
+  authIdentity,
   newRequestId,
+  request,
   send,
 } from "../state/connection";
 import { focusedSession, removeSession } from "../state/sessions";
@@ -36,6 +38,7 @@ const SessionControls: Component = () => {
           <RotateButton sessionId={s().id} />
           <ModePicker sessionId={s().id} current={s().mode ?? "interactive"} />
           <ModelPicker sessionId={s().id} current={s().model} />
+          <ProviderPicker sessionId={s().id} current={s().providerId} />
           <ExportButton />
           <span class="ml-auto" />
           <DestroyButton sessionId={s().id} name={s().name} />
@@ -275,6 +278,86 @@ const ModelPicker: Component<{
         </div>
       </Show>
     </div>
+  );
+};
+
+/**
+ * Backend switcher (`session.set_provider`) — visual counterpart of the
+ * `/provider <id>` slash. Hidden on single-backend daemons (and legacy
+ * daemons that don't advertise providers). Uses `request()` so the
+ * daemon's rejections (mid-turn switch, unknown id) surface inline
+ * instead of vanishing.
+ */
+const ProviderPicker: Component<{
+  sessionId: string;
+  current?: string;
+}> = (props) => {
+  const [open, setOpen] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+  let rootEl: HTMLDivElement | undefined;
+  useDismissable(() => rootEl, open, () => setOpen(false));
+  const providers = () => authIdentity()?.providers ?? [];
+  const current = () => props.current ?? providers()[0] ?? "claude";
+  return (
+    <Show when={providers().length > 1}>
+      <div class="relative" ref={rootEl}>
+        <button
+          type="button"
+          onClick={() => {
+            setOpen(!open());
+            setError(null);
+          }}
+          class="flex items-center gap-1 rounded border border-border bg-bg px-2 py-1 font-mono uppercase tracking-wider text-fg-muted hover:border-accent/40 hover:text-fg"
+          title="Switch this session's backend (/provider <id>)"
+        >
+          backend <span class="text-fg">{current()}</span> ▾
+        </button>
+        <Show when={open()}>
+          <div class="absolute right-0 top-full z-30 mt-1 w-64 rounded border border-border bg-bg-elev shadow-xl">
+            <For each={providers()}>
+              {(id) => (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (id === current()) {
+                      setOpen(false);
+                      return;
+                    }
+                    request({
+                      type: "session.set_provider",
+                      id: newRequestId(),
+                      sessionId: props.sessionId,
+                      providerId: id,
+                    })
+                      .then(() => setOpen(false))
+                      .catch((e) =>
+                        setError(e instanceof Error ? e.message : String(e)),
+                      );
+                  }}
+                  class={`flex w-full items-center justify-between px-3 py-1.5 text-left text-[12px] transition hover:bg-bg-hover ${
+                    id === current() ? "bg-bg-active text-fg" : "text-fg-muted"
+                  }`}
+                >
+                  <span class="font-mono">{id}</span>
+                  <Show when={id === current()}>
+                    <span class="text-accent">●</span>
+                  </Show>
+                </button>
+              )}
+            </For>
+            <Show when={error()}>
+              <div class="border-t border-danger/40 px-3 py-1.5 text-[11px] text-danger">
+                {error()}
+              </div>
+            </Show>
+            <div class="border-t border-border px-3 py-1.5 text-[10px] text-fg-faint">
+              Keeps the session + transcript. The new backend continues from a
+              carried transcript; the model resets to its default.
+            </div>
+          </div>
+        </Show>
+      </div>
+    </Show>
   );
 };
 
