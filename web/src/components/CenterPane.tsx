@@ -18,6 +18,7 @@ import { focusedSession } from "../state/sessions";
 import { isHeaderCollapsed, toggleHeaderCollapsed } from "../state/layout";
 
 import ApprovalBar from "./transcript/ApprovalBar";
+import UiRequestBar from "./transcript/UiRequestBar";
 import PromptBox from "./prompt/PromptBox";
 import SessionControls from "./SessionControls";
 import Transcript from "./transcript/Transcript";
@@ -70,6 +71,7 @@ const CenterPane: Component = () => {
         <Transcript />
         <WorkerIndicator />
         <ApprovalBar />
+        <UiRequestBar />
         <PromptBox />
       </Show>
     </main>

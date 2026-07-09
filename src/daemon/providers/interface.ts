@@ -10,7 +10,12 @@
  *     emit ProviderEvents which Session maps to SessionMessages.
  */
 
-import type { AuthContext } from "../../protocol/types.js";
+import type {
+  AuthContext,
+  ContentPart,
+  ProviderCommand,
+  UiRequestMethod,
+} from "../../protocol/types.js";
 import type { CanonicalTurn } from "./canonical.js";
 import type { LLMCallUsage } from "../context-math.js";
 
@@ -44,6 +49,37 @@ export type ToolApprovalFn = (
   message?: string;
 }>;
 
+/**
+ * A dialog a provider raises mid-session (extension confirm gates, pick-one
+ * lists, free-text prompts). Mirrors the wire shape of
+ * `session.ui_request` minus the session/correlation fields — Session owns
+ * those. See the protocol's "Provider-initiated UI" section for semantics.
+ */
+export interface UiRequest {
+  method: UiRequestMethod;
+  title: string;
+  message?: string;
+  options?: string[];
+  placeholder?: string;
+  prefill?: string;
+  /** Auto-cancel deadline in ms. Absent = wait for a human (or interrupt). */
+  timeoutMs?: number;
+}
+
+/**
+ * The user's answer to a `UiRequest`. `cancelled: true` covers dismissal,
+ * timeout, interrupt, and session teardown — providers must treat it as
+ * "no answer", never as consent.
+ */
+export interface UiResponse {
+  value?: string;
+  confirmed?: boolean;
+  cancelled: boolean;
+}
+
+/** Raise a dialog and await the user's answer. Implemented by Session. */
+export type UiRequestFn = (req: UiRequest) => Promise<UiResponse>;
+
 export interface TurnOpts {
   /**
    * Full canonical history up to and including the current user turn.
@@ -59,6 +95,13 @@ export interface TurnOpts {
   systemPromptAppend?: string;
   /** Session's unified approval gate — same semantics across all providers. */
   canUseTool: ToolApprovalFn;
+  /**
+   * Session's dialog gate — lets the provider (or its extensions) ask the
+   * user something that is NOT a tool approval. Optional so existing
+   * providers and tests compile unchanged; providers must handle absence
+   * (treat as `{ cancelled: true }`).
+   */
+  requestUserInput?: UiRequestFn;
   sender?: AuthContext;
 }
 
@@ -111,6 +154,14 @@ export type ProviderEvent =
       name: string;
       input: Record<string, unknown>;
       approvalId: string;
+      /**
+       * Input keys the client may patch via `session.approve.updatedInput`
+       * for THIS tool call (form-style tools where the user's answer IS the
+       * input). Absent = the built-in whitelist applies (AskUserQuestion
+       * only). Providers with form tools declare the patchable keys here so
+       * the daemon's approval sanitizer doesn't need per-tool hardcoding.
+       */
+      patchableKeys?: string[];
     }
   /** Fired when a tool result is available (from the provider's user message). */
   | { type: "tool_complete"; sdkToolUseId: string; output: string; success: boolean }
@@ -121,6 +172,21 @@ export type ProviderEvent =
   | { type: "llm_call"; usage: LLMCallUsage; isPrimary: boolean }
   | { type: "api_retry"; attempt?: number; retryDelayMs?: number; errorStatus?: number | null }
   | { type: "tool_progress"; toolName?: string; elapsedSeconds?: number }
+  /**
+   * Provider-authored standalone message — extension output, status cards,
+   * rich widgets. `content` is the plain-text fallback every frontend can
+   * render; `parts` carries the rich blocks for capable ones. Persisted to
+   * scrollback + transcript like any other message; NOT sent to the LLM
+   * (canonical history ignores it).
+   */
+  | {
+      type: "custom_message";
+      /** Message role for rendering. Default "info". */
+      role?: "info" | "system";
+      content: string;
+      parts?: ContentPart[];
+      metadata?: Record<string, unknown>;
+    }
   | { type: "turn_done"; result: NormalizedTurnResult }
   | { type: "error"; message: string };
 
@@ -171,6 +237,23 @@ export interface AgentProvider {
    *  or stays warm (ClaudeProvider). */
   runTurn(opts: TurnOpts): TurnRun;
   listModels(): Promise<ModelInfo[]>;
+  /**
+   * Provider-defined slash commands currently available in this session
+   * (extension commands, prompt templates, skills). Served to clients via
+   * `session.commands`; invoked by sending "/name args" as plain prompt
+   * text. Optional — absent means "no dynamic commands".
+   */
+  listCommands?(): Promise<ProviderCommand[]>;
+  /**
+   * Handle a `ButtonPart` activation (`session.part_action`). The daemon
+   * validates the button exists on a real message before calling this.
+   * Optional — absent means the provider emits no actionable buttons and
+   * the daemon rejects the action.
+   */
+  handlePartAction?(
+    action: string,
+    data: Record<string, unknown> | undefined,
+  ): void | Promise<void>;
   dispose(): Promise<void>;
 }
 

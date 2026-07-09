@@ -64,6 +64,22 @@ const samples: { [T in ClientTypes]: Extract<ClientMessage, { type: T }> } = {
     approved: true,
     updatedInput: { answers: { "Which?": "B" } },
   },
+  "session.ui_response": {
+    type: "session.ui_response",
+    id: "r25",
+    sessionId: "s1",
+    requestId: "u1",
+    value: "Allow",
+  },
+  "session.part_action": {
+    type: "session.part_action",
+    id: "r26",
+    sessionId: "s1",
+    messageId: "m1",
+    action: "retry-build",
+    data: { target: "web" },
+  },
+  "session.commands": { type: "session.commands", id: "r27", sessionId: "s1" },
   "session.destroy": { type: "session.destroy", id: "r9", sessionId: "s1" },
   "session.set_mode": { type: "session.set_mode", id: "r10", sessionId: "s1", mode: "autonomous", maxTurns: 5 },
   "session.pin": { type: "session.pin", id: "r11", sessionId: "s1", path: "SPEC.md" },
@@ -235,5 +251,43 @@ describe("auth handshake", () => {
 
   test("wrong type literal is rejected", () => {
     expect(authMsgSchema.safeParse({ type: "ping", token: "t" }).success).toBe(false);
+  });
+});
+
+describe("session.ui_response payload exclusivity", () => {
+  test("ambiguous payloads are rejected", () => {
+    // Two payload fields at once.
+    expect(
+      parseClientMessage({
+        type: "session.ui_response",
+        id: "r1",
+        sessionId: "s1",
+        requestId: "u1",
+        value: "x",
+        cancelled: true,
+      }).ok,
+    ).toBe(false);
+    // No payload field at all.
+    expect(
+      parseClientMessage({
+        type: "session.ui_response",
+        id: "r1",
+        sessionId: "s1",
+        requestId: "u1",
+      }).ok,
+    ).toBe(false);
+  });
+
+  test("each single-field payload is accepted", () => {
+    for (const payload of [{ value: "x" }, { confirmed: false }, { cancelled: true }]) {
+      const result = parseClientMessage({
+        type: "session.ui_response",
+        id: "r1",
+        sessionId: "s1",
+        requestId: "u1",
+        ...payload,
+      });
+      expect(result.ok).toBe(true);
+    }
   });
 });

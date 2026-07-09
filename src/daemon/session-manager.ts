@@ -13,6 +13,10 @@ import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { Session, type AttachedClient } from "./session.js";
 import type { SessionProvider } from "./providers/interface.js";
+import {
+  createDefaultProviderRegistry,
+  type ProviderRegistry,
+} from "./providers/registry.js";
 import type { Store } from "./store.js";
 import { hasScope, SCOPES } from "../protocol/scopes.js";
 import { RateLimiter } from "./rate-limit.js";
@@ -143,6 +147,8 @@ export class SessionManager {
   #config?: CodeoidConfig;
   #compressionRegistry?: CompressionRegistry;
   #dispatcher: Dispatcher;
+  /** The daemon's provider catalog — one registry, shared by every session. */
+  #providers: ProviderRegistry;
   #testProviderFactory?: () => SessionProvider;
   /** Stable observer identity — every Session reports status transitions here. */
   #statusObserver = (sessionId: string, status: SessionInfo["status"]): void => {
@@ -159,6 +165,11 @@ export class SessionManager {
       config?: CodeoidConfig;
       compressionRegistry?: CompressionRegistry;
       /**
+       * Provider registry override (tests / embedders adding backends).
+       * Absent = the built-in catalog (claude, gemini, openai).
+       */
+      providers?: ProviderRegistry;
+      /**
        * Test-only: provider factory injected into every Session this manager
        * constructs, so manager-level integration tests (conductor injection,
        * worker spawn, dispatch host) run without the Claude Agent SDK
@@ -174,6 +185,7 @@ export class SessionManager {
     this.#memory = memory;
     this.#config = opts?.config;
     this.#compressionRegistry = opts?.compressionRegistry;
+    this.#providers = opts?.providers ?? createDefaultProviderRegistry();
     this.#testProviderFactory = opts?._testProviderFactory;
     this.#dispatcher = new Dispatcher(
       store,
@@ -250,6 +262,7 @@ export class SessionManager {
           },
           store: this.#store,
           transcriptStore: this.#transcriptStore,
+          providers: this.#providers,
           identityManager: this.#identityManager,
           existingId: meta.sessionId,
           memory: this.#memory,
@@ -385,6 +398,12 @@ export class SessionManager {
         return this.#interrupt(msg, auth);
       case "session.approve":
         return this.#approve(msg, auth);
+      case "session.ui_response":
+        return this.#uiResponse(msg, auth);
+      case "session.part_action":
+        return this.#partAction(msg, auth);
+      case "session.commands":
+        return this.#sessionCommands(msg, auth);
       case "session.destroy":
         return this.#destroySession(msg, auth);
       case "session.set_mode":
@@ -627,6 +646,7 @@ export class SessionManager {
               auth,
               store: this.#store,
               transcriptStore: this.#transcriptStore,
+              providers: this.#providers,
               ...(this.#identityManager
                 ? { identityManager: this.#identityManager }
                 : {}),
@@ -1008,6 +1028,7 @@ export class SessionManager {
       auth,
       store: this.#store,
       transcriptStore: this.#transcriptStore,
+      providers: this.#providers,
       identityManager: this.#identityManager,
       memory: this.#memory,
       config: this.#config,
@@ -1108,6 +1129,7 @@ export class SessionManager {
       auth,
       store: this.#store,
       transcriptStore: this.#transcriptStore,
+      providers: this.#providers,
       identityManager: this.#identityManager,
       memory: this.#memory,
       config: this.#config,
@@ -1233,6 +1255,7 @@ export class SessionManager {
           auth: this.#dispatchSenderAuth(task),
           store: this.#store,
           transcriptStore: this.#transcriptStore,
+          providers: this.#providers,
           identityManager: this.#identityManager,
           memory: this.#memory,
           config: this.#config,
@@ -1867,6 +1890,95 @@ export class SessionManager {
 
     session.approve(msg.approvalId, msg.approved, auth, msg.updatedInput);
     return { type: "response.ok", requestId: msg.id };
+  }
+
+  #uiResponse(
+    msg: Extract<ClientMessage, { type: "session.ui_response" }>,
+    auth: AuthContext,
+  ): DaemonMessage {
+    // Answering a provider dialog is the same trust class as answering a
+    // tool approval — reuse session:approve.
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_APPROVE)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Missing scope: session:approve",
+        code: "forbidden",
+      };
+    }
+    const session = this.#getOwnedSession(msg.sessionId, auth);
+    if (!session) {
+      return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
+    }
+    const applied = session.resolveUiRequestFromClient(
+      msg.requestId,
+      { value: msg.value, confirmed: msg.confirmed, cancelled: msg.cancelled },
+      auth,
+    );
+    if (!applied) {
+      // Already answered elsewhere, timed out, or never existed. Clients
+      // treat this as "dismiss my copy" (the ui_resolved broadcast already
+      // did or will do that).
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "UI request is not pending",
+        code: "not_found",
+      };
+    }
+    return { type: "response.ok", requestId: msg.id };
+  }
+
+  async #partAction(
+    msg: Extract<ClientMessage, { type: "session.part_action" }>,
+    auth: AuthContext,
+  ): Promise<DaemonMessage> {
+    // Activating a provider button is an act-on-session operation — same
+    // trust class as sending a prompt.
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_SEND)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Missing scope: session:send",
+        code: "forbidden",
+      };
+    }
+    const session = this.#getOwnedSession(msg.sessionId, auth);
+    if (!session) {
+      return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
+    }
+    const result = await session.dispatchPartAction(msg.messageId, msg.action, msg.data, auth);
+    if (!result.ok) {
+      return { type: "response.error", requestId: msg.id, error: result.error, code: result.code };
+    }
+    return { type: "response.ok", requestId: msg.id };
+  }
+
+  async #sessionCommands(
+    msg: Extract<ClientMessage, { type: "session.commands" }>,
+    auth: AuthContext,
+  ): Promise<DaemonMessage> {
+    // Read-class visibility — same gate as listing sessions.
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_LIST)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Missing scope: session:list",
+        code: "forbidden",
+      };
+    }
+    const session = this.#getOwnedSession(msg.sessionId, auth);
+    if (!session) {
+      return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
+    }
+    const commands = await session.listProviderCommands();
+    return {
+      type: "session.commands.result",
+      requestId: msg.id,
+      sessionId: session.id,
+      providerId: session.providerId,
+      commands,
+    };
   }
 
   #setMode(

@@ -31,6 +31,7 @@ import type {
   TurnOpts,
   TurnRun,
 } from "../interface.js";
+import type { ProviderCommand } from "../../../protocol/types.js";
 
 export { mockResult } from "./index.js";
 
@@ -57,6 +58,32 @@ export class MockSessionProvider implements SessionProvider {
 
   /** Incremented each time teardown() is called — useful for asserting cleanup. */
   teardownCount = 0;
+
+  /**
+   * Every canUseTool resolution observed by #emit — inspect in tests to
+   * assert what updatedInput the provider would actually run with (e.g.
+   * the approval sanitizer's patchableKeys behaviour).
+   */
+  readonly canUseToolResults: Array<{
+    behavior: "allow" | "deny";
+    updatedInput?: Record<string, unknown>;
+    message?: string;
+  }> = [];
+
+  /**
+   * Optional dynamic-command catalog. When set, the provider exposes
+   * `listCommands()` (Session → `session.commands`). A function form lets
+   * tests script failures by throwing.
+   */
+  commands?: ProviderCommand[] | (() => Promise<ProviderCommand[]>);
+
+  /**
+   * Optional part-action handler (Session → `session.part_action`). When
+   * set, the provider exposes `handlePartAction()`. Invocations are
+   * recorded in `partActions`.
+   */
+  partActionHandler?: (action: string, data: Record<string, unknown> | undefined) => void | Promise<void>;
+  readonly partActions: Array<{ action: string; data?: Record<string, unknown> }> = [];
 
   constructor(id = "mock-session", script: ProviderEvent[][] = [], opts: { stall?: boolean } = {}) {
     this.id = id;
@@ -94,6 +121,21 @@ export class MockSessionProvider implements SessionProvider {
 
   async listModels(): Promise<ModelInfo[]> {
     return [{ id: "mock-model", displayName: "Mock Model" }];
+  }
+
+  /**
+   * Always present on the mock (tests shadow it with `undefined` to model a
+   * provider without the capability); consults `this.commands`.
+   */
+  async listCommands(): Promise<ProviderCommand[]> {
+    const c = this.commands;
+    if (!c) return [];
+    return typeof c === "function" ? c() : c;
+  }
+
+  async handlePartAction(action: string, data: Record<string, unknown> | undefined): Promise<void> {
+    this.partActions.push({ action, ...(data !== undefined ? { data } : {}) });
+    if (this.partActionHandler) await this.partActionHandler(action, data);
   }
 
   runTurn(opts: TurnOpts): TurnRun {
@@ -141,7 +183,8 @@ export class MockSessionProvider implements SessionProvider {
         // Without this flush the cleanup arrives before the registration.
         await new Promise<void>((r) => setTimeout(r, 0));
         try {
-          await opts.canUseTool(event.toolId, event.approvalId, event.name, event.input);
+          const result = await opts.canUseTool(event.toolId, event.approvalId, event.name, event.input);
+          this.canUseToolResults.push(result);
         } catch {
           // canUseTool rejection (very unusual — normally returns {behavior}) — treat as denial.
         }

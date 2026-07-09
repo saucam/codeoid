@@ -29,6 +29,7 @@ import {
   replaceScrollback,
 } from "./messages";
 import { noteLiveSeq, noteReplayFrame } from "./resume";
+import { addUiRequest, removeUiRequest } from "./ui-requests";
 
 // Resolve the daemon WebSocket URL:
 //   1. explicit VITE_CODEOID_URL build override, else
@@ -173,7 +174,12 @@ export async function bootstrap(opts: { apiKey?: string; token?: string } = {}):
       token: resolved.token,
       // What this frontend can consume — the daemon tailors per-connection
       // behaviour to these (see the protocol's CAPABILITIES).
-      capabilities: [CAPABILITIES.PARTS, CAPABILITIES.CHUNKED_REPLAY, CAPABILITIES.SEQ_RESUME],
+      capabilities: [
+        CAPABILITIES.PARTS,
+        CAPABILITIES.CHUNKED_REPLAY,
+        CAPABILITIES.SEQ_RESUME,
+        CAPABILITIES.UI_DIALOGS,
+      ],
       clientName: "codeoid-web",
       // Fresh-token supplier for reconnects: re-exchange the stored zid_sk_
       // key for a new JWT (resolveToken with no `token` reads the persisted
@@ -275,6 +281,14 @@ function routeBroadcast(msg: DaemonMessage): void {
     case "session.status_change":
       setSessionStatus(msg.sessionId, msg.status);
       return;
+    case "session.ui_request":
+      addUiRequest(msg);
+      return;
+    case "session.ui_resolved":
+      // Authoritative dismiss — fires whether WE answered, another client
+      // did, the request timed out, or the turn was interrupted.
+      removeUiRequest(msg.sessionId, msg.requestId);
+      return;
     // Solicited types resolve via the request registry; nothing to do here.
     // `session.list.result` in particular is ONLY ever sent as the reply to
     // a `session.list` request (verified: the daemon's session-manager emits
@@ -287,6 +301,7 @@ function routeBroadcast(msg: DaemonMessage): void {
     case "response.ok":
     case "response.error":
     case "session.search.result":
+    case "session.commands.result":
       return;
   }
 }

@@ -9,14 +9,20 @@
  *   - Scrollback stores merged SessionMessage (not deltas)
  */
 
-import { ClaudeProvider } from "./providers/claude/index.js";
-import { GeminiProvider } from "./providers/gemini/index.js";
-import { OpenAIProvider } from "./providers/openai/index.js";
-import { StatelessSessionProvider } from "./providers/stateless.js";
 import { CanonicalHistoryAccumulator } from "./providers/canonical.js";
 import { CONDUCTOR_SYSTEM_PROMPT_APPEND, isFleetSendTool } from "./fleet.js";
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
-import { type ProviderEvent, type NormalizedTurnResult, type TurnRun, type ToolApprovalFn, type SessionProvider, isSubagentEvent } from "./providers/interface.js";
+import {
+  type ProviderEvent,
+  type NormalizedTurnResult,
+  type TurnRun,
+  type ToolApprovalFn,
+  type SessionProvider,
+  type UiRequest,
+  type UiResponse,
+  isSubagentEvent,
+} from "./providers/interface.js";
+import { createDefaultProviderRegistry, type ProviderRegistry } from "./providers/registry.js";
 import { randomUUID } from "node:crypto";
 import type {
   AuthContext,
@@ -28,11 +34,14 @@ import type {
   DaemonMessage,
   SessionMessage,
   SessionMessageDelta,
+  SessionUiRequestMsg,
+  SessionUiResolvedMsg,
   MessageIdentity,
   ContentPart,
+  ProviderCommand,
   ToolState,
 } from "../protocol/types.js";
-import { authToIdentity, isActiveStatus, SYSTEM_IDENTITY } from "../protocol/types.js";
+import { authToIdentity, CAPABILITIES, isActiveStatus, SYSTEM_IDENTITY } from "../protocol/types.js";
 import type { Store } from "./store.js";
 import type { AgentIdentityManager } from "./agent-identity.js";
 import { ScrollbackBuffer } from "./scrollback.js";
@@ -101,6 +110,12 @@ export interface AttachedClient {
    * "always ready" (`await client.flush?.()` is a no-op).
    */
   flush?(): Promise<void>;
+  /**
+   * Capability ids the client declared on its auth frame. Capability-gated
+   * frames (`session.ui_request`) are only sent to clients that declared the
+   * matching capability. Absent = legacy client (no capabilities).
+   */
+  capabilities?: readonly string[];
 }
 
 export interface SessionCreateOptions {
@@ -183,8 +198,14 @@ export interface SessionCreateOptions {
    */
   workerShape?: "ship" | "scout";
   /**
-   * Provider override for testing. When present, replaces ClaudeProvider so
-   * integration tests run without the Claude Agent SDK subprocess.
+   * The daemon's provider registry. Built once at startup by the
+   * SessionManager and shared across sessions; when absent (unit tests
+   * constructing Session directly) a default registry is built on the fly.
+   */
+  providers?: ProviderRegistry;
+  /**
+   * Provider override for testing. When present, replaces the registry
+   * lookup so integration tests run without the Claude Agent SDK subprocess.
    * Name prefix signals this is test-only infrastructure — do not use in production.
    */
   _testProvider?: SessionProvider;
@@ -409,6 +430,29 @@ export class Session {
     { approved: boolean; updatedInput?: Record<string, unknown> }
   >();
 
+  /**
+   * Pending provider-initiated dialogs (`session.ui_request`), keyed by
+   * requestId. Settled by the first client `session.ui_response`, by the
+   * request's own timeout, or by interrupt/destroy (as cancelled). Pending
+   * requests are re-sent to newly attaching capable clients so a dialog
+   * raised while nobody was watching still gets answered.
+   */
+  #pendingUiRequests = new Map<
+    string,
+    {
+      msg: SessionUiRequestMsg;
+      resolve: (r: UiResponse) => void;
+      timer?: ReturnType<typeof setTimeout>;
+    }
+  >();
+
+  /**
+   * Per-approval patchable-keys whitelist declared by the provider on
+   * `tool_start` (form-style tools). Consumed by canUseTool's approval
+   * sanitizer; cleaned up on resolution or interrupt.
+   */
+  #approvalPatchKeys = new Map<string, string[]>();
+
   // Active tool call messageIds — completed when next assistant message arrives
   #activeToolMsgIds: string[] = [];
 
@@ -557,50 +601,34 @@ export class Session {
   }
 
   /**
-   * Construct the backing provider for this session from `opts.providerId`.
-   * Every session carries its own selection (the conductor takes its from
-   * config.conductor.provider), so any session can run on a different
-   * backend. Unknown ids warn and fall back to claude rather than throw —
-   * resume must survive a meta written by a newer codeoid.
+   * Construct the backing provider for this session from `opts.providerId`
+   * via the daemon's ProviderRegistry. Every session carries its own
+   * selection (the conductor takes its from config.conductor.provider), so
+   * any session can run on a different backend. Unknown ids warn and fall
+   * back to the registry default rather than throw — resume must survive a
+   * meta written by a newer codeoid.
    */
   #createProvider(opts: SessionCreateOptions): SessionProvider {
-    const providerId = opts.providerId ?? "claude";
-    switch (providerId) {
-      case "gemini":
-        return new StatelessSessionProvider(
-          new GeminiProvider({ defaultModel: this.#model ?? undefined }),
-          this.id,
-        );
-      case "openai":
-        return new StatelessSessionProvider(
-          new OpenAIProvider({ defaultModel: this.#model ?? undefined }),
-          this.id,
-        );
-      default:
-        if (providerId !== "claude") {
-          console.error(
-            `[codeoid/session ${this.id}] unknown provider "${providerId}" — falling back to claude`,
-          );
-        }
-        return new ClaudeProvider({
-          sessionId: this.id,
-          initialBackingId: this.#store.getClaudeCodeSessionId(this.id) ?? this.id,
-          // Pass the tenant-scoped workspace id in rather than have the provider
-          // re-derive it (which would drop the tenant and desync the memory MCP
-          // binding from where episodes are actually stored).
-          workspaceId: this.#workspaceId,
-          store: opts.store,
-          identityManager: opts.identityManager,
-          memory: opts.memory,
-          fleet: opts.fleet,
-          config: opts.config,
-          compressionRegistry: opts.compressionRegistry,
-          // Tag model reports with the provider's own id — the arrow runs only
-          // after construction (models arrive async on first query), so
-          // this.#provider is set by then. Works unchanged for any provider.
-          onModels: (m) => opts.onModels?.(this.#provider.id, m),
-        });
-    }
+    const registry = opts.providers ?? createDefaultProviderRegistry();
+    const factory = registry.resolve(opts.providerId, `session ${this.id}`);
+    return factory.create({
+      sessionId: this.id,
+      // Pass the tenant-scoped workspace id in rather than have the provider
+      // re-derive it (which would drop the tenant and desync the memory MCP
+      // binding from where episodes are actually stored).
+      workspaceId: this.#workspaceId,
+      model: this.#model,
+      initialBackingId: this.#store.getClaudeCodeSessionId(this.id) ?? this.id,
+      store: opts.store,
+      identityManager: opts.identityManager,
+      memory: opts.memory,
+      fleet: opts.fleet,
+      config: opts.config,
+      compressionRegistry: opts.compressionRegistry,
+      // Tag model reports with the factory's id (known before construction),
+      // so the manager caches catalogs per-provider.
+      onModels: (m) => opts.onModels?.(factory.id, m),
+    });
   }
 
   get status(): SessionStatus { return this.#status; }
@@ -709,6 +737,16 @@ export class Session {
     this.#clients.set(client.id, client);
     this.#store.audit(client.auth.sub, "session.attach", this.id);
 
+    // Re-deliver pending provider dialogs to the newly attached client (if it
+    // can render them) — a dialog raised while nobody was attached must not
+    // hang until timeout. Dialogs are transcript-independent overlays, so
+    // ordering relative to the scrollback replay below doesn't matter.
+    if (client.capabilities?.includes(CAPABILITIES.UI_DIALOGS)) {
+      for (const pending of this.#pendingUiRequests.values()) {
+        client.send(pending.msg);
+      }
+    }
+
     // Incremental resume (`replay.resume`): when the client's cursor belongs
     // to THIS replay buffer (key match), replay only the entries mutated
     // after it — new messages plus older ones grown by deltas / tool-state
@@ -768,6 +806,7 @@ export class Session {
         else raw.send(m);
       },
       flush: raw.flush?.bind(raw),
+      capabilities: raw.capabilities,
     };
     this.#clients.set(raw.id, buffered);
 
@@ -813,6 +852,178 @@ export class Session {
     if (client) {
       this.#store.audit(client.auth.sub, "session.detach", this.id);
       this.#clients.delete(clientId);
+    }
+  }
+
+  // ── Provider-initiated UI (dialogs) ───────────────────────────────────
+
+  /**
+   * Raise a dialog on behalf of the provider and await the user's answer.
+   * Passed to providers as `TurnOpts.requestUserInput`. The promise settles
+   * when the first client answers, the request times out (`timeoutMs`), or
+   * the session is interrupted/destroyed — never rejects.
+   */
+  requestUserInput(req: UiRequest): Promise<UiResponse> {
+    const requestId = randomUUID();
+    const msg: SessionUiRequestMsg = {
+      type: "session.ui_request",
+      sessionId: this.id,
+      requestId,
+      method: req.method,
+      title: req.title,
+      ...(req.message !== undefined ? { message: req.message } : {}),
+      ...(req.options !== undefined ? { options: req.options } : {}),
+      ...(req.placeholder !== undefined ? { placeholder: req.placeholder } : {}),
+      ...(req.prefill !== undefined ? { prefill: req.prefill } : {}),
+      ...(req.timeoutMs !== undefined ? { timeoutMs: req.timeoutMs } : {}),
+      timestamp: new Date().toISOString(),
+    };
+    return new Promise<UiResponse>((resolve) => {
+      const timer =
+        req.timeoutMs !== undefined && req.timeoutMs > 0
+          ? setTimeout(() => {
+              this.#settleUiRequest(requestId, { cancelled: true }, "timeout");
+            }, req.timeoutMs)
+          : undefined;
+      this.#pendingUiRequests.set(requestId, { msg, resolve, timer });
+      this.#broadcastToCapable(CAPABILITIES.UI_DIALOGS, msg);
+    });
+  }
+
+  /** Count of unanswered provider dialogs (StatusBar / watchdog signal). */
+  get pendingUiRequestCount(): number {
+    return this.#pendingUiRequests.size;
+  }
+
+  /**
+   * Apply a client's `session.ui_response`. Returns false when the request
+   * is not pending (already answered elsewhere, timed out, or unknown) so
+   * the manager can answer `not_found`.
+   */
+  resolveUiRequestFromClient(
+    requestId: string,
+    response: { value?: string; confirmed?: boolean; cancelled?: boolean },
+    sender: AuthContext,
+  ): boolean {
+    if (!this.#pendingUiRequests.has(requestId)) return false;
+    const cancelled = response.cancelled === true;
+    this.#store.audit(
+      sender.sub,
+      "session.ui_response",
+      this.id,
+      `requestId=${requestId} ${cancelled ? "cancelled" : "answered"}`,
+    );
+    return this.#settleUiRequest(
+      requestId,
+      {
+        ...(response.value !== undefined ? { value: response.value } : {}),
+        ...(response.confirmed !== undefined ? { confirmed: response.confirmed } : {}),
+        cancelled,
+      },
+      cancelled ? "cancelled" : "answered",
+    );
+  }
+
+  /**
+   * Settle one pending dialog: resolve the provider's promise, clear the
+   * timeout, and broadcast `session.ui_resolved` so every client dismisses
+   * its copy. Idempotent — a second settle for the same id is a no-op.
+   */
+  #settleUiRequest(
+    requestId: string,
+    response: UiResponse,
+    reason: SessionUiResolvedMsg["reason"],
+  ): boolean {
+    const pending = this.#pendingUiRequests.get(requestId);
+    if (!pending) return false;
+    this.#pendingUiRequests.delete(requestId);
+    if (pending.timer) clearTimeout(pending.timer);
+    pending.resolve(response);
+    this.#broadcastToCapable(CAPABILITIES.UI_DIALOGS, {
+      type: "session.ui_resolved",
+      sessionId: this.id,
+      requestId,
+      reason,
+      timestamp: new Date().toISOString(),
+    });
+    return true;
+  }
+
+  /** Cancel every pending dialog (interrupt / destroy). */
+  #cancelAllUiRequests(reason: SessionUiResolvedMsg["reason"]): void {
+    for (const requestId of [...this.#pendingUiRequests.keys()]) {
+      this.#settleUiRequest(requestId, { cancelled: true }, reason);
+    }
+  }
+
+  /** Broadcast a frame only to clients that declared `capability`. */
+  #broadcastToCapable(capability: string, msg: DaemonMessage): void {
+    for (const client of this.#clients.values()) {
+      if (!client.capabilities?.includes(capability)) continue;
+      try {
+        client.send(msg);
+      } catch {
+        this.#clients.delete(client.id);
+      }
+    }
+  }
+
+  // ── Provider extension surface ────────────────────────────────────────
+
+  /**
+   * The provider's current slash-command catalog (`session.commands`).
+   * Providers without dynamic commands (or a failing provider) yield [].
+   */
+  async listProviderCommands(): Promise<ProviderCommand[]> {
+    if (!this.#provider.listCommands) return [];
+    try {
+      return await this.#provider.listCommands();
+    } catch (err) {
+      console.error(
+        `[codeoid/session ${this.id}] listCommands failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return [];
+    }
+  }
+
+  /**
+   * Validate + dispatch a `session.part_action` (ButtonPart activation).
+   * The button must exist on a real scrollback message with the claimed
+   * action — clients cannot mint arbitrary provider calls.
+   */
+  async dispatchPartAction(
+    messageId: string,
+    action: string,
+    data: Record<string, unknown> | undefined,
+    sender: AuthContext,
+  ): Promise<{ ok: true } | { ok: false; code: "not_found" | "invalid_request"; error: string }> {
+    const msg = this.#scrollback.getMessage(messageId) as SessionMessage | undefined;
+    if (!msg) {
+      return { ok: false, code: "not_found", error: "Message not found" };
+    }
+    const button = (msg.parts ?? []).find(
+      (p) => p.kind === "button" && p.action === action,
+    );
+    if (!button) {
+      return { ok: false, code: "not_found", error: "No such action on this message" };
+    }
+    if (!this.#provider.handlePartAction) {
+      return {
+        ok: false,
+        code: "invalid_request",
+        error: `Provider "${this.#provider.id}" does not handle part actions`,
+      };
+    }
+    this.#store.audit(sender.sub, "session.part_action", this.id, `action=${action}`);
+    try {
+      await this.#provider.handlePartAction(action, data);
+      return { ok: true };
+    } catch (err) {
+      return {
+        ok: false,
+        code: "invalid_request",
+        error: err instanceof Error ? err.message : String(err),
+      };
     }
   }
 
@@ -1044,6 +1255,7 @@ export class Session {
           workdir: this.workdir,
           systemPromptAppend: this.#buildPromptAppend(),
           canUseTool: this.#makeCanUseToolFn(recoverySender),
+          requestUserInput: (req) => this.requestUserInput(req),
           sender: recoverySender,
         });
         this.#activeRun = recoveryRun;
@@ -1061,6 +1273,7 @@ export class Session {
       workdir: this.workdir,
       systemPromptAppend: this.#buildPromptAppend(),
       canUseTool: this.#makeCanUseToolFn(sender),
+      requestUserInput: (req) => this.requestUserInput(req),
       sender,
     });
     this.#activeRun = run;
@@ -1124,6 +1337,10 @@ export class Session {
     }
     this.#pendingApprovals.clear();
     this.#earlyApprovals.clear();
+    this.#approvalPatchKeys.clear();
+    // Same for provider dialogs — an interrupted turn must not leave the
+    // provider awaiting an answer that can no longer arrive.
+    this.#cancelAllUiRequests("interrupted");
 
     const infoMsg = this.#makeMessage(
       "info",
@@ -1237,6 +1454,8 @@ export class Session {
     }
     this.#pendingApprovals.clear();
     this.#earlyApprovals.clear();
+    this.#approvalPatchKeys.clear();
+    this.#cancelAllUiRequests("cancelled");
     this.#clients.clear();
     await this.#identityManager?.deactivateSessionAgent(this.id);
     this.#store.deleteSession(this.id);
@@ -1920,6 +2139,7 @@ export class Session {
 
       if (autoApprove) {
         this.#approvalIdToMessageId.delete(approvalId); // clean up — no manual approval will reference this
+        this.#approvalPatchKeys.delete(approvalId);
         this.#store.audit(sender.sub, "session.auto_approve", this.id, `tool=${toolName} mode=${this.#mode}`);
         this.#setStatus("tool_running");
         return { behavior: "allow" as const, updatedInput: inputObj };
@@ -1959,9 +2179,11 @@ export class Session {
         this.#approvalIdToMessageId.delete(approvalId);
       }
 
+      const patchableKeys = this.#approvalPatchKeys.get(approvalId);
+      this.#approvalPatchKeys.delete(approvalId);
       if (approved) {
         this.#store.audit(sender.sub, "session.approve", this.id, `tool=${toolName} approvalId=${approvalId}`);
-        const sanitizedPatch = sanitizeApprovalPatch(toolName, updatedInput);
+        const sanitizedPatch = sanitizeApprovalPatch(toolName, updatedInput, patchableKeys);
         const merged: Record<string, unknown> = sanitizedPatch ? { ...inputObj, ...sanitizedPatch } : inputObj;
         return { behavior: "allow" as const, updatedInput: merged };
       }
@@ -1990,7 +2212,10 @@ export class Session {
     return (
       this.#status === "waiting_approval" ||
       this.#status === "tool_running" ||
-      this.#pendingApprovals.size > 0
+      this.#pendingApprovals.size > 0 ||
+      // A provider dialog blocks the provider on a human answer — event-stream
+      // silence is expected, exactly like a pending tool approval.
+      this.#pendingUiRequests.size > 0
     );
   }
 
@@ -2320,6 +2545,10 @@ export class Session {
         this.#toolUseIdToMessageId.set(event.sdkToolUseId, toolMsg.messageId);
         this.#messageIdToToolUseId.set(toolMsg.messageId, event.sdkToolUseId);
         this.#approvalIdToMessageId.set(event.approvalId, toolMsg.messageId);
+        // Provider-declared form fields — consumed by the approval sanitizer.
+        if (event.patchableKeys && event.patchableKeys.length > 0) {
+          this.#approvalPatchKeys.set(event.approvalId, event.patchableKeys);
+        }
         this.#persistAndBuffer(toolMsg);
         this.#broadcastRaw(toolMsg);
         if (!autoApprove) this.#setStatus("waiting_approval");
@@ -2448,6 +2677,29 @@ export class Session {
 
       case "tool_progress": {
         // Best-effort broadcast — tool is still running.
+        break;
+      }
+
+      case "custom_message": {
+        // Provider-authored standalone message (extension output, status
+        // cards, rich widgets). Not part of the LLM conversation — the
+        // canonical accumulator never sees it — but persisted + broadcast
+        // like any other message so it replays on attach and survives
+        // restarts. `content` is the plain fallback; `parts` carries the
+        // rich blocks for capable clients.
+        const role = event.role ?? "info";
+        const msg = this.#makeMessage(
+          role,
+          event.content,
+          role === "system" ? SYSTEM_IDENTITY : this.#agentIdentity,
+          event.parts,
+          undefined,
+          // Fixed tag last so provider metadata can never override it —
+          // clients identify provider messages by this key.
+          { ...event.metadata, event: "provider.message" },
+        );
+        this.#persistAndBuffer(msg);
+        this.#broadcastRaw(msg);
         break;
       }
 
@@ -2629,6 +2881,11 @@ export class Session {
       this.#messageIdToToolUseId.delete(msgId);
     }
     this.#toolCallMessages.delete(msgId);
+    // Drop the provider-declared patch whitelist for this tool's approval —
+    // the approval will never resolve now.
+    for (const [approvalId, mappedMsgId] of this.#approvalIdToMessageId) {
+      if (mappedMsgId === msgId) this.#approvalPatchKeys.delete(approvalId);
+    }
   }
 
   /** Create a SessionMessage with all required fields */
@@ -2840,8 +3097,14 @@ const SAFE_TOOLS = new Set<string>(["Read", "Grep", "Glob"]);
  * The shallow-merge inside `canUseTool` would otherwise let any
  * client field land in the SDK's tool input — including overriding
  * the very fields the user just inspected and approved. We allow
- * patches only for tools where the user's response IS a form input
- * (AskUserQuestion), and even then restrict the keys.
+ * patches only for tools where the user's response IS a form input,
+ * and even then restrict the keys:
+ *
+ *   - `patchableKeys` (provider-declared on `tool_start`) wins when
+ *     present: only those keys pass, values verbatim. This is how
+ *     non-Claude backends with form-style tools opt in without the
+ *     daemon hardcoding their tool names.
+ *   - Otherwise the built-in AskUserQuestion whitelist applies.
  *
  * Returns `undefined` when the patch should be ignored entirely
  * (binary-approve tools, or empty input). Returns the sanitized
@@ -2850,8 +3113,16 @@ const SAFE_TOOLS = new Set<string>(["Read", "Grep", "Glob"]);
 function sanitizeApprovalPatch(
   toolName: string,
   patch: Record<string, unknown> | undefined,
+  patchableKeys?: readonly string[],
 ): Record<string, unknown> | undefined {
   if (!patch || typeof patch !== "object") return undefined;
+  if (patchableKeys && patchableKeys.length > 0) {
+    const clean: Record<string, unknown> = {};
+    for (const key of patchableKeys) {
+      if (Object.hasOwn(patch, key)) clean[key] = patch[key];
+    }
+    return Object.keys(clean).length > 0 ? clean : undefined;
+  }
   if (toolName === "AskUserQuestion" || toolName === "ask_user_question") {
     const answers = (patch as { answers?: unknown }).answers;
     if (!answers || typeof answers !== "object") return undefined;

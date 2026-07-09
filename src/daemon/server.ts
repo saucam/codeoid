@@ -40,6 +40,8 @@ const SERVER_CAPABILITIES: string[] = [
   CAPABILITIES.CHUNKED_REPLAY,
   CAPABILITIES.SEQ_RESUME,
   CAPABILITIES.SEND_IDEMPOTENCY,
+  CAPABILITIES.UI_DIALOGS,
+  CAPABILITIES.DYNAMIC_COMMANDS,
 ];
 
 /**
@@ -517,6 +519,9 @@ export class DaemonServer {
           const client: AttachedClient = {
             id: data.clientId,
             auth: data.auth!,
+            // Declared on the auth frame; Session gates capability-specific
+            // frames (session.ui_request) on this.
+            capabilities: data.capabilities,
             send: (m: DaemonMessage) => {
               try {
                 ws.send(JSON.stringify(m));
