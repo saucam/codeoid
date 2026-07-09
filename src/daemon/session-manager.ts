@@ -2037,7 +2037,8 @@ export class SessionManager {
     msg: Extract<ClientMessage, { type: "session.set_provider" }>,
     auth: AuthContext,
   ): Promise<DaemonMessage> {
-    // Same trust class as set_model / set_mode: session-config writes.
+    // Same trust class as set_mode (set_model uses the lower SESSION_SEND
+    // scope): switching backends is a heavier session-config write.
     if (!hasScope(auth.scopes as string[], SCOPES.SESSION_APPROVE)) {
       return {
         type: "response.error",

@@ -224,6 +224,72 @@ describe("Session.switchProvider", () => {
     await session.destroy(AUTH);
   });
 
+  it("S6: a send racing the switch on the chain wins — the switch is rejected, not the turn aborted", async () => {
+    // A stalling provider: the turn starts and never completes, exactly the
+    // state #sendInner leaves behind when it returns mid-stream.
+    const created: MockSessionProvider[] = [];
+    const registry = new ProviderRegistry("mock-a");
+    registry.register({
+      id: "mock-a",
+      displayName: "mock-a",
+      create: () => {
+        const provider = new MockSessionProvider(
+          "mock-a",
+          [[{ type: "text_delta", content: "streaming…" }]],
+          { stall: true },
+        );
+        created.push(provider);
+        return provider;
+      },
+    });
+    registry.register({ id: "mock-b", displayName: "mock-b", create: () => new MockSessionProvider("mock-b") });
+    const session = makeSession(registry);
+
+    // Fire the send and the switch back-to-back WITHOUT awaiting the send:
+    // the switch's pre-check sees an idle session (the race), but its
+    // chain-serialized inner guard must see the running turn and reject.
+    const sendPromise = session.send("go", AUTH);
+    const result = await session.switchProvider("mock-b", AUTH);
+    expect(result).toMatchObject({ ok: false, code: "invalid_request" });
+    if (!result.ok) expect(result.error).toContain("mid-turn");
+    expect(session.providerId).toBe("mock-a");
+    expect(created[0]!.teardownCount).toBe(0);
+
+    await sendPromise;
+    await session.interrupt(AUTH);
+    await session.destroy(AUTH);
+  });
+
+  it("S7: switching clears a pending rotation seed (no stacked Claude-worded anchor)", async () => {
+    const { registry, created } = makeRegistry({
+      a: [textTurn("a1"), textTurn("a2"), textTurn("a3")],
+      b: [textTurn("from B")],
+    });
+    const session = makeSession(registry);
+    // Rotation requires min 3 turns before it arms.
+    for (const prompt of ["one", "two", "three"]) {
+      await session.send(prompt, AUTH);
+      await waitFor(() => session.status === "idle");
+    }
+
+    // Manual rotation arms the next-send rotation seed (Claude-worded).
+    const rotated = await session.manualRotate(AUTH);
+    expect(rotated).toBe(true);
+    const result = await session.switchProvider("mock-b", AUTH);
+    expect(result).toEqual({ ok: true, providerId: "mock-b" });
+
+    // The next send must NOT carry the rotation anchor — only the switch's
+    // own transcript seed reached the provider (via seedFromHistory), so
+    // the prompt itself is the raw user text.
+    await session.send("hello b", AUTH);
+    await waitFor(() => created["mock-b"]![0]!.capturedOpts.length === 1);
+    const prompt = created["mock-b"]![0]!.capturedOpts[0]!.userMessage;
+    expect(prompt).not.toContain("rotated");
+    expect(prompt).toContain("hello b");
+
+    await session.destroy(AUTH);
+  });
+
   it("S5: a throwing seedFromHistory degrades to an unseeded switch", async () => {
     const { registry, created } = makeRegistry({ a: [textTurn("from A")] });
     // Poison every FUTURE mock-b instance via a wrapping factory.

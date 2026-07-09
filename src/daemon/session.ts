@@ -670,6 +670,28 @@ export class Session {
     if (this.#provider.id === requested) {
       return { ok: true, providerId: requested };
     }
+    // Fast-path rejection for callers switching a visibly busy session.
+    // NOT sufficient on its own: a send() already queued on the chain can
+    // start a turn between this check and our chain slot — the guard is
+    // re-run inside #switchProviderInner where it's authoritative.
+    const busy = this.#switchBusyReason();
+    if (busy) return busy;
+
+    // Serialize with send(): a prompt already queued on the chain completes
+    // its dispatch against the OLD provider before we run; prompts arriving
+    // after us run against the NEW one.
+    let result!: Awaited<ReturnType<Session["switchProvider"]>>;
+    this.#sendChain = this.#sendChain
+      .catch(() => {})
+      .then(async () => {
+        result = await this.#switchProviderInner(requested, sender);
+      });
+    await this.#sendChain;
+    return result;
+  }
+
+  /** Non-null when the session cannot be switched right now (mid-turn). */
+  #switchBusyReason(): { ok: false; code: "invalid_request"; error: string } | null {
     if (
       isActiveStatus(this.#status) ||
       this.#status === "waiting_approval" ||
@@ -682,24 +704,20 @@ export class Session {
         error: "Session is mid-turn — interrupt it, then switch providers",
       };
     }
-
-    // Serialize with send(): a prompt already queued on the chain completes
-    // against the OLD provider before we tear it down; prompts arriving
-    // after us run against the NEW one.
-    let result!: Awaited<ReturnType<Session["switchProvider"]>>;
-    this.#sendChain = this.#sendChain
-      .catch(() => {})
-      .then(async () => {
-        result = await this.#switchProviderInner(requested, sender);
-      });
-    await this.#sendChain;
-    return result;
+    return null;
   }
 
   async #switchProviderInner(
     requested: string,
     sender: AuthContext,
   ): Promise<{ ok: true; providerId: string } | { ok: false; code: "invalid_request"; error: string }> {
+    // Authoritative mid-turn guard: #sendInner (queued ahead of us on the
+    // chain) starts the turn consumer and RETURNS while the turn is still
+    // streaming — the pre-check in switchProvider() can't see that turn.
+    // Rejecting here means we never tear down an actively-running provider.
+    const busy = this.#switchBusyReason();
+    if (busy) return busy;
+
     const previous = this.#provider.id;
 
     await this.#teardownProvider();
@@ -720,6 +738,10 @@ export class Session {
     // catalog) — reset to the incoming provider's default.
     this.#model = null;
     this.#fallbackModel = null;
+    // A pending rotation seed is Claude-worded and now redundant — the
+    // switch seeds its own transcript. Without this, the next send() would
+    // stack the rotation anchor on top of seedFromHistory's block.
+    this.#justRotated = false;
     try {
       this.#store.setSessionModel(this.id, null, null);
     } catch {
