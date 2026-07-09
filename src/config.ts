@@ -335,6 +335,38 @@ const OAuthSchemaFields = z
   })
   .default({});
 
+/**
+ * Dispatch queue (P4) — send-class fleet actions run through a durable
+ * SQLite work queue with a dispatcher loop. Workers spawned by the queue run
+ * autonomously up to `workerToolBudget` tool calls, then wedge safely (the
+ * lease reclaims them).
+ */
+const DispatchSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    /** Dispatcher tick interval (ms): claim / reclaim / deliver cadence. */
+    tickMs: z.number().int().min(250).default(5_000),
+    /** Claim lease (ms) — an unrenewed claim past this is reclaimed (attempts++). */
+    leaseMs: z.number().int().min(10_000).default(10 * 60_000),
+    /** Consecutive failures (incl. reclaims) before a task auto-blocks. */
+    failureLimit: z.number().int().min(1).default(2),
+    /** Max concurrently running spawned workers per tenant. */
+    maxConcurrentWorkers: z.number().int().min(1).default(2),
+    /** Autonomous tool-call budget per spawned worker. */
+    workerToolBudget: z.number().int().min(1).default(50),
+    /** Base retry backoff (ms) for retryable failures — doubles per attempt, capped at leaseMs. */
+    retryBaseMs: z.number().int().min(0).default(15_000),
+  })
+  .default({
+    enabled: true,
+    tickMs: 5_000,
+    leaseMs: 10 * 60_000,
+    failureLimit: 2,
+    maxConcurrentWorkers: 2,
+    workerToolBudget: 50,
+    retryBaseMs: 15_000,
+  });
+
 const RootSchema = z.object({
   daemonUrl: z.string().default("ws://127.0.0.1:7400"),
   dbPath: z.string().default("codeoid.db"),
@@ -355,6 +387,7 @@ const RootSchema = z.object({
   autoRotate: AutoRotateSchema,
   session: SessionSchema,
   conductor: ConductorSchema,
+  dispatch: DispatchSchema,
 });
 
 type ParsedConfig = z.infer<typeof RootSchema>;
@@ -445,6 +478,20 @@ export interface CodeoidConfig {
     provider: string;
     model?: string;
   };
+  /**
+   * Send-class dispatch queue (P4). Optional in the type so hand-built test
+   * configs stay minimal; loadConfig always populates it. Absent = enabled
+   * with defaults.
+   */
+  dispatch?: {
+    enabled: boolean;
+    tickMs: number;
+    leaseMs: number;
+    failureLimit: number;
+    maxConcurrentWorkers: number;
+    workerToolBudget: number;
+    retryBaseMs: number;
+  };
 }
 
 // ── Env-var override map ─────────────────────────────────────────────────
@@ -495,6 +542,10 @@ const ENV_OVERRIDES: readonly EnvOverride[] = [
   { env: "CODEOID_AUTO_ROTATE_HARD_PCT", path: "autoRotate.hardRotatePct", kind: "float" },
   { env: "CODEOID_AUTO_ROTATE_MIN_TURNS", path: "autoRotate.minTurnsBeforeRotate", kind: "int" },
   { env: "CODEOID_DEFAULT_MODEL", path: "session.defaultModel", kind: "string" },
+  // Dispatch kill switch — disable send-class fleet dispatch per-invocation
+  // without touching config.json. Other dispatch knobs are file-config only,
+  // matching the conductor block's convention.
+  { env: "CODEOID_DISPATCH_ENABLED", path: "dispatch.enabled", kind: "boolean" },
   { env: "CODEOID_FALLBACK_MODEL", path: "session.fallbackModel", kind: "string" },
   { env: "CODEOID_TURN_STALL_TIMEOUT_MS", path: "session.turnStallTimeoutMs", kind: "int" },
   { env: "CODEOID_MCP_TOOL_TIMEOUT_MS", path: "session.mcpToolTimeoutMs", kind: "int" },
@@ -669,6 +720,7 @@ export function loadConfig(opts: LoadOptions = {}): CodeoidConfig {
     autoRotate: parsed.autoRotate,
     session: parsed.session,
     conductor: parsed.conductor,
+    dispatch: parsed.dispatch,
   };
 }
 

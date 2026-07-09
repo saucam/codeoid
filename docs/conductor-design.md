@@ -116,11 +116,23 @@ is widened with `mcp__codeoid_fleet__*` when a fleet server is present, and the
 system-prompt append path no longer gates on memory so the conductor contract
 rides the `claude_code` preset.*)*
 
-**Read-only over targets, by construction (P3 scope).** The P3 fleet surface is
-`fleet_list` / `fleet_find` / `fleet_summary` / `fleet_recall` / `machine_map` —
-observation only. No send/spawn/interrupt tool exists yet (those are P4), and the
-conductor identity (P2) carries only `session:read`/`session:dispatch`, never
-`tools:write`/`tools:execute`, so nothing it delegates can mutate a target.
+**Read-only over targets, by construction (P3), dispatch behind approval (P4).**
+The read surface (`fleet_list` / `fleet_find` / `fleet_summary` / `fleet_recall` /
+`fleet_tasks` / `machine_map`) runs silently. The send surface
+(`fleet_send` / `fleet_spawn` / `fleet_interrupt`, P4) is kept OUT of the
+provider's `allowedTools` AND hard-blocked from auto-approval in every session
+mode — each dispatch rides the existing `approvalId` flow with the full tool
+input shown to the owner (R3 as an invariant, not a mode default). Approved
+dispatches execute through a durable SQLite work queue (`dispatch.ts`): atomic
+claims, boot-id stale reclaim, exponential retry backoff, failure-limit
+auto-block (the stuck-loop guard), and a per-tenant worker cap. Spawned workers
+are disposable `role:"worker"` sessions with shape-capped LEAF identities
+(scouts hold no `tools:write`; no worker ever holds `session:*`), an autonomous
+tool budget, and completion digests that flow back as batched, daemon-injected
+`<fleet_events>` turns — never raw transcripts. The conductor identity (P2)
+still carries only `session:read`/`session:dispatch`, never
+`tools:write`/`tools:execute`, so nothing it delegates can mutate a target;
+a worker's tool capability is sanctioned by the owner's fleet_spawn approval.
 
 **Provider-agnostic conductor.** Which backend drives the conductor is
 `config.conductor.provider` — any registered provider id, so an open-weight

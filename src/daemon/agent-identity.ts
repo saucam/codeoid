@@ -69,6 +69,31 @@ export const CONDUCTOR_SCOPES = [
   SCOPES.SESSION_DISPATCH, // direct, interrupt, or spawn sessions
 ] as const;
 
+/**
+ * Worker scope profiles by dispatch shape (P4, hermes leaf/orchestrator).
+ *
+ * The LEAF property: no worker profile ever includes session:read /
+ * session:dispatch / tools:agent-spawning-fleet authority — a worker cannot
+ * see or direct the fleet even if fleet tools were somehow mounted on it.
+ * The SHAPE property: scouts investigate-and-report, so their identity holds
+ * no tools:write.
+ *
+ * Why the worker's token is a ROOT grant and not a conductor delegation:
+ * ZeroID grants the intersection (requested ∩ subject.granted ∩
+ * actor.allowed) on every RFC 8693 hop, and the conductor's own authority is
+ * deliberately session:read/session:dispatch only — so a chain rooted at the
+ * conductor can NEVER carry tools:write. That is R1 working as intended: the
+ * conductor cannot mint mutation authority. A worker's tool capability is
+ * instead sanctioned by the OWNER's explicit fleet_spawn approval (R3), and
+ * the identity records `created_by = conductor WIMSE URI` for the audit
+ * lineage. Revocation rides session teardown (deactivateSessionAgent), which
+ * cascade-revokes the worker's own delegation subtree.
+ */
+const WORKER_SCOPE_PROFILES: Record<"ship" | "scout", readonly string[]> = {
+  ship: ["tools:read", "tools:write", "tools:execute", "tools:agent"],
+  scout: ["tools:read", "tools:execute", "tools:agent"],
+};
+
 /** Sub-agents get read-only by default unless explicitly promoted. */
 const SUBAGENT_DEFAULT_SCOPES = ["tools:read"] as const;
 
@@ -206,6 +231,76 @@ export class AgentIdentityManager {
         err instanceof Error ? err.message : err,
       );
       return { wimseUri: `anonymous:session:${sessionId}`, token: "" };
+    }
+  }
+
+  /**
+   * Register a dispatch-spawned WORKER identity (P4). Shape-capped LEAF
+   * profile (see WORKER_SCOPE_PROFILES for why the token is a root grant
+   * sanctioned by the owner's fleet_spawn approval, not a conductor
+   * delegation), with `created_by` = the conductor's WIMSE URI so the audit
+   * lineage reads owner → conductor → worker. Stored under the session id
+   * like any session agent, so tool audit and teardown cascade unchanged.
+   */
+  async registerWorker(
+    sessionId: string,
+    sessionName: string,
+    shape: "ship" | "scout",
+  ): Promise<{ wimseUri: string; token: string }> {
+    const externalId = `codeoid-worker-${sessionId.slice(0, 8)}`;
+    const scopes = WORKER_SCOPE_PROFILES[shape];
+    const lineage = this.#conductor?.wimseUri ?? "codeoid:dispatch";
+
+    try {
+      const registerReq = {
+        name: `codeoid/worker/${shape}/${sessionName}`,
+        external_id: externalId,
+        sub_type: "tool_agent" as const,
+        trust_level: "first_party" as const,
+        framework: "claude-agent-sdk",
+        publisher: "codeoid",
+        created_by: lineage,
+        allowed_scopes: [...scopes],
+        metadata: JSON.stringify({
+          session_id: sessionId,
+          role: "worker",
+          shape,
+          spawned_by: lineage,
+        }),
+      };
+      const resp = await this.#client.agents.register(
+        registerReq as RegisterAgentRequest,
+      );
+
+      const tokenResp = await this.#client.tokens.issueApiKey(resp.api_key, {
+        scope: scopes.join(" "),
+      });
+
+      this.#agents.set(sessionId, {
+        identityId: resp.identity.id,
+        wimseUri: resp.identity.wimse_uri,
+        token: tokenResp.access_token,
+        apiKey: resp.api_key,
+        // Orchestrator client for the worker's OWN sub-agents (Explore etc.)
+        // — their delegated scopes intersect with the shape profile, so a
+        // scout's sub-agents can't hold tools:write either.
+        client: this.#clientForAgent(resp.api_key),
+      });
+
+      this.#store.audit(
+        resp.identity.wimse_uri,
+        "worker.identity.registered",
+        sessionId,
+        `shape=${shape} spawned_by=${lineage} scopes=${scopes.join(",")}`,
+      );
+
+      return { wimseUri: resp.identity.wimse_uri, token: tokenResp.access_token };
+    } catch (err) {
+      console.error(
+        `[codeoid] failed to register worker identity for ${sessionName}:`,
+        err instanceof Error ? err.message : err,
+      );
+      return { wimseUri: `anonymous:worker:${sessionId}`, token: "" };
     }
   }
 

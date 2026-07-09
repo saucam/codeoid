@@ -7,6 +7,97 @@
 import { Database } from "bun:sqlite";
 import type { ModelInfo, SessionInfo, SessionStatus } from "../protocol/types.js";
 
+// ── Dispatch queue types (P4) ─────────────────────────────────────────────
+
+export type DispatchTaskStatus =
+  | "queued"
+  | "claimed"
+  | "running"
+  | "done"
+  | "failed"
+  | "blocked";
+
+export interface DispatchTaskRow {
+  id: string;
+  accountId: string;
+  projectId: string;
+  kind: "send" | "spawn";
+  shape: "ship" | "scout";
+  targetSession: string | null;
+  workdir: string | null;
+  prompt: string;
+  status: DispatchTaskStatus;
+  attempts: number;
+  failureLimit: number;
+  claimOwner: string | null;
+  claimedAt: number | null;
+  notBefore: number | null;
+  workerSessionId: string | null;
+  resultDigest: string | null;
+  error: string | null;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface DispatchEventRow {
+  id: number;
+  accountId: string;
+  projectId: string;
+  taskId: string;
+  type: "task_done" | "task_failed" | "task_blocked";
+  digest: string;
+  createdAt: number;
+}
+
+interface RawDispatchRow {
+  id: string;
+  account_id: string;
+  project_id: string;
+  kind: "send" | "spawn";
+  shape: "ship" | "scout";
+  target_session: string | null;
+  workdir: string | null;
+  prompt: string;
+  status: DispatchTaskStatus;
+  attempts: number;
+  failure_limit: number;
+  claim_owner: string | null;
+  claimed_at: number | null;
+  not_before: number | null;
+  worker_session_id: string | null;
+  result_digest: string | null;
+  error: string | null;
+  created_by: string;
+  created_at: number;
+  updated_at: number;
+}
+
+function rowToDispatchTask(r: RawDispatchRow): DispatchTaskRow {
+  return {
+    id: r.id,
+    accountId: r.account_id,
+    projectId: r.project_id,
+    kind: r.kind,
+    shape: r.shape,
+    targetSession: r.target_session,
+    workdir: r.workdir,
+    prompt: r.prompt,
+    status: r.status,
+    attempts: r.attempts,
+    failureLimit: r.failure_limit,
+    claimOwner: r.claim_owner,
+    claimedAt: r.claimed_at,
+    notBefore: r.not_before,
+    workerSessionId: r.worker_session_id,
+    resultDigest: r.result_digest,
+    error: r.error,
+    createdBy: r.created_by,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
 export class Store {
   #db: Database;
 
@@ -105,6 +196,57 @@ export class Store {
         updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
         PRIMARY KEY (account_id, project_id)
       );
+
+      -- Durable dispatch work queue (P4, hermes-Kanban pattern). Tasks are
+      -- the source of truth for send-class fleet actions: the queue — not
+      -- the conductor's turn — owns their lifecycle, so a spawned worker
+      -- survives a daemon restart. claim_owner is the daemon BOOT id: any
+      -- claim held by a different boot is a crashed run and gets reclaimed
+      -- (attempts++ — the reclaim counter doubles as the stuck-loop guard,
+      -- auto-blocking at failure_limit).
+      CREATE TABLE IF NOT EXISTS dispatch_tasks (
+        id                TEXT PRIMARY KEY,
+        account_id        TEXT NOT NULL,
+        project_id        TEXT NOT NULL,
+        kind              TEXT NOT NULL,             -- 'send' | 'spawn'
+        shape             TEXT NOT NULL,             -- 'ship' | 'scout'
+        target_session    TEXT,                      -- send: existing session id
+        workdir           TEXT,                      -- spawn: worker workdir
+        prompt            TEXT NOT NULL,
+        status            TEXT NOT NULL DEFAULT 'queued',
+        attempts          INTEGER NOT NULL DEFAULT 0,
+        failure_limit     INTEGER NOT NULL DEFAULT 2,
+        claim_owner       TEXT,                      -- daemon boot id
+        claimed_at        INTEGER,
+        not_before        INTEGER,                   -- retry backoff gate (claim skips rows still cooling down)
+        worker_session_id TEXT,                      -- spawn: created worker
+        result_digest     TEXT,
+        error             TEXT,
+        created_by        TEXT NOT NULL,             -- conductor WIMSE URI / sub
+        created_at        INTEGER NOT NULL,
+        updated_at        INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_dispatch_status
+        ON dispatch_tasks(status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_dispatch_tenant
+        ON dispatch_tasks(account_id, project_id, created_at DESC);
+
+      -- Durable conductor notifications (task completions/failures). An event
+      -- survives a crash between "worker finished" and "conductor saw it";
+      -- delivery marks delivered_at. Batched into ONE injected conductor turn
+      -- per delivery (burst-collapse).
+      CREATE TABLE IF NOT EXISTS dispatch_events (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id   TEXT NOT NULL,
+        project_id   TEXT NOT NULL,
+        task_id      TEXT NOT NULL,
+        type         TEXT NOT NULL,                  -- 'task_done' | 'task_failed' | 'task_blocked'
+        digest       TEXT NOT NULL,
+        created_at   INTEGER NOT NULL,
+        delivered_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_dispatch_events_pending
+        ON dispatch_events(account_id, project_id, delivered_at);
     `);
     // Pre-release single-row predecessor of provider_model_catalogs — never
     // shipped in a tagged version; drop from dev databases that ran the branch.
@@ -378,6 +520,260 @@ export class Store {
         "DELETE FROM conductor_identity WHERE account_id = ? AND project_id = ?",
       )
       .run(accountId, projectId);
+  }
+
+  // ── Dispatch queue (P4) ───────────────────────────────────────────────
+
+  dispatchEnqueue(task: {
+    id: string;
+    accountId: string;
+    projectId: string;
+    kind: "send" | "spawn";
+    shape: "ship" | "scout";
+    targetSession?: string;
+    workdir?: string;
+    prompt: string;
+    failureLimit: number;
+    createdBy: string;
+    now: number;
+  }): void {
+    this.#db
+      .prepare(
+        `INSERT INTO dispatch_tasks
+           (id, account_id, project_id, kind, shape, target_session, workdir,
+            prompt, failure_limit, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        task.id,
+        task.accountId,
+        task.projectId,
+        task.kind,
+        task.shape,
+        task.targetSession ?? null,
+        task.workdir ?? null,
+        task.prompt,
+        task.failureLimit,
+        task.createdBy,
+        task.now,
+        task.now,
+      );
+  }
+
+  /**
+   * Atomically claim the oldest queued task for this boot. A single UPDATE
+   * with a scalar subquery — SQLite executes it under one write lock, so two
+   * concurrent claimers can never take the same task. `excludeIds` lets the
+   * dispatcher skip tasks it already touched this tick (cap deferrals,
+   * failed retries) WITHOUT global head-of-line blocking: only the specific
+   * deferred tasks are skipped, so neither sends nor other tenants' spawns
+   * are starved by one capped tenant.
+   */
+  dispatchClaimNext(
+    bootId: string,
+    now: number,
+    excludeIds: readonly string[] = [],
+  ): DispatchTaskRow | null {
+    const row = this.#db
+      .prepare(
+        `UPDATE dispatch_tasks
+         SET status = 'claimed', claim_owner = ?, claimed_at = ?, updated_at = ?
+         WHERE id = (
+           SELECT id FROM dispatch_tasks
+           WHERE status = 'queued'
+             AND (not_before IS NULL OR not_before <= ?)
+             AND id NOT IN (SELECT value FROM json_each(?))
+           ORDER BY created_at LIMIT 1
+         )
+         RETURNING *`,
+      )
+      .get(bootId, now, now, now, JSON.stringify(excludeIds)) as RawDispatchRow | null;
+    return row ? rowToDispatchTask(row) : null;
+  }
+
+  /** Transition a claimed task to running (worker session known, if spawn). */
+  dispatchMarkRunning(id: string, workerSessionId: string | null, now: number): void {
+    this.#db
+      .prepare(
+        `UPDATE dispatch_tasks
+         SET status = 'running', worker_session_id = COALESCE(?, worker_session_id), updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(workerSessionId, now, id);
+  }
+
+  /** Renew the lease on tasks whose workers are verifiably still alive. */
+  dispatchTouch(ids: string[], now: number): void {
+    if (ids.length === 0) return;
+    const stmt = this.#db.prepare(
+      "UPDATE dispatch_tasks SET claimed_at = ? WHERE id = ?",
+    );
+    for (const id of ids) stmt.run(now, id);
+  }
+
+  dispatchComplete(id: string, digest: string, now: number): void {
+    this.#db
+      .prepare(
+        `UPDATE dispatch_tasks
+         SET status = 'done', result_digest = ?, error = NULL, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(digest, now, id);
+  }
+
+  /**
+   * Record a failure. Retryable failures re-queue until `failure_limit`
+   * attempts, then auto-block (hermes anti-spin); non-retryable ones (target
+   * gone, invalid input) go terminal immediately. Returns the final status.
+   */
+  dispatchFail(
+    id: string,
+    error: string,
+    now: number,
+    opts: { retryable: boolean; notBefore?: number },
+  ): "queued" | "blocked" | "failed" | null {
+    const row = this.#db
+      .prepare(
+        opts.retryable
+          ? `UPDATE dispatch_tasks
+             SET attempts = attempts + 1,
+                 status = CASE WHEN attempts + 1 >= failure_limit THEN 'blocked' ELSE 'queued' END,
+                 claim_owner = NULL, claimed_at = NULL, not_before = ?, error = ?, updated_at = ?
+             WHERE id = ?
+             RETURNING status`
+          : `UPDATE dispatch_tasks
+             SET attempts = attempts + 1, status = 'failed',
+                 claim_owner = NULL, claimed_at = NULL, error = ?, updated_at = ?
+             WHERE id = ?
+             RETURNING status`,
+      )
+      .get(
+        ...(opts.retryable
+          ? [opts.notBefore ?? null, error, now, id]
+          : [error, now, id]),
+      ) as { status: "queued" | "blocked" | "failed" } | null;
+    return row?.status ?? null;
+  }
+
+  /**
+   * Reclaim tasks whose claim is dead: held by another boot (daemon crashed)
+   * or past the lease (worker hung and the dispatcher stopped renewing).
+   * Every reclaim costs an attempt — a worker that keeps dying across
+   * restarts burns through failure_limit and lands in 'blocked': the
+   * stuck-loop escalation, in queue form. worker_session_id is preserved so
+   * a re-claimed spawn can continue its (resumed) worker session.
+   */
+  dispatchReclaimStale(bootId: string, leaseMs: number, now: number): DispatchTaskRow[] {
+    const rows = this.#db
+      .prepare(
+        `UPDATE dispatch_tasks
+         SET attempts = attempts + 1,
+             status = CASE WHEN attempts + 1 >= failure_limit THEN 'blocked' ELSE 'queued' END,
+             claim_owner = NULL, claimed_at = NULL,
+             error = COALESCE(error, 'reclaimed: stale claim'), updated_at = ?
+         WHERE status IN ('claimed', 'running')
+           AND (claim_owner IS NOT ? OR claimed_at IS NULL OR claimed_at + ? < ?)
+         RETURNING *`,
+      )
+      .all(now, bootId, leaseMs, now) as RawDispatchRow[];
+    return rows.map(rowToDispatchTask);
+  }
+
+  /**
+   * Return a claimed task to the queue untouched — a scheduling deferral
+   * (e.g. worker cap reached), NOT a failure: attempts and error stay as
+   * they were.
+   */
+  dispatchRelease(id: string, now: number): void {
+    this.#db
+      .prepare(
+        `UPDATE dispatch_tasks
+         SET status = 'queued', claim_owner = NULL, claimed_at = NULL, updated_at = ?
+         WHERE id = ? AND status = 'claimed'`,
+      )
+      .run(now, id);
+  }
+
+  dispatchGet(id: string): DispatchTaskRow | null {
+    const row = this.#db
+      .prepare("SELECT * FROM dispatch_tasks WHERE id = ?")
+      .get(id) as RawDispatchRow | null;
+    return row ? rowToDispatchTask(row) : null;
+  }
+
+  dispatchListForTenant(
+    accountId: string,
+    projectId: string,
+    limit = 30,
+  ): DispatchTaskRow[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT * FROM dispatch_tasks
+         WHERE account_id = ? AND project_id = ?
+         ORDER BY created_at DESC LIMIT ?`,
+      )
+      .all(accountId, projectId, limit) as RawDispatchRow[];
+    return rows.map(rowToDispatchTask);
+  }
+
+  /** Count of live (claimed/running) spawn tasks — the concurrency-cap read. */
+  dispatchActiveSpawnCount(accountId: string, projectId: string): number {
+    const row = this.#db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM dispatch_tasks
+         WHERE account_id = ? AND project_id = ?
+           AND kind = 'spawn' AND status IN ('claimed', 'running')`,
+      )
+      .get(accountId, projectId) as { n: number };
+    return row.n;
+  }
+
+  // ── Dispatch events (durable conductor notifications) ────────────────
+
+  dispatchEventAdd(event: {
+    accountId: string;
+    projectId: string;
+    taskId: string;
+    type: "task_done" | "task_failed" | "task_blocked";
+    digest: string;
+    now: number;
+  }): void {
+    this.#db
+      .prepare(
+        `INSERT INTO dispatch_events (account_id, project_id, task_id, type, digest, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(event.accountId, event.projectId, event.taskId, event.type, event.digest, event.now);
+  }
+
+  dispatchEventsPending(accountId: string, projectId: string): DispatchEventRow[] {
+    return this.#db
+      .prepare(
+        `SELECT id, account_id AS accountId, project_id AS projectId, task_id AS taskId,
+                type, digest, created_at AS createdAt
+         FROM dispatch_events
+         WHERE account_id = ? AND project_id = ? AND delivered_at IS NULL
+         ORDER BY id ASC`,
+      )
+      .all(accountId, projectId) as DispatchEventRow[];
+  }
+
+  dispatchEventsMarkDelivered(ids: number[], now: number): void {
+    if (ids.length === 0) return;
+    const stmt = this.#db.prepare(
+      "UPDATE dispatch_events SET delivered_at = ? WHERE id = ?",
+    );
+    for (const id of ids) stmt.run(now, id);
+  }
+
+  /** Tenants that have undelivered events — the delivery pump's work list. */
+  dispatchEventTenants(): Array<{ accountId: string; projectId: string }> {
+    return this.#db
+      .prepare(
+        `SELECT DISTINCT account_id AS accountId, project_id AS projectId
+         FROM dispatch_events WHERE delivered_at IS NULL`,
+      )
+      .all() as Array<{ accountId: string; projectId: string }>;
   }
 
   // ── Model catalog cache ───────────────────────────────────────────────

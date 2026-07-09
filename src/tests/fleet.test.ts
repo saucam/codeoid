@@ -15,9 +15,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createFleetHandlers,
+  FLEET_SEND_TOOL_NAMES,
   FLEET_TOOL_NAMES,
+  isFleetSendTool,
   type FleetDeps,
+  type FleetDispatchDeps,
   type FleetSessionView,
+  type FleetTaskView,
 } from "../daemon/fleet.js";
 import { MemoryEngine, SqliteEpisodeStore } from "../daemon/memory/index.js";
 import type { Embedder } from "../daemon/memory/embedder.js";
@@ -131,15 +135,35 @@ afterEach(async () => {
 });
 
 describe("fleet handlers — read surface", () => {
-  test("the fleet MCP tool set is exactly the read-only five", () => {
-    // A guardrail: no send-class tool leaks into P3. Dispatch arrives in P4.
+  test("the auto-allowed tool set is read-class ONLY — send tools never enter allowedTools", () => {
+    // THE R3 guardrail. FLEET_TOOL_NAMES feeds the provider's allowedTools
+    // (auto-approved, canUseTool never fires); a send-class name leaking in
+    // would silently bypass owner approval for dispatch.
     expect([...FLEET_TOOL_NAMES]).toEqual([
       "fleet_list",
       "fleet_find",
       "fleet_summary",
       "fleet_recall",
+      "fleet_tasks",
       "machine_map",
     ]);
+    expect([...FLEET_SEND_TOOL_NAMES]).toEqual([
+      "fleet_send",
+      "fleet_interrupt",
+      "fleet_spawn",
+    ]);
+    for (const sendTool of FLEET_SEND_TOOL_NAMES) {
+      expect(FLEET_TOOL_NAMES).not.toContain(sendTool);
+    }
+  });
+
+  test("isFleetSendTool matches only fully-qualified send-class MCP names", () => {
+    expect(isFleetSendTool("mcp__codeoid_fleet__fleet_send")).toBe(true);
+    expect(isFleetSendTool("mcp__codeoid_fleet__fleet_spawn")).toBe(true);
+    expect(isFleetSendTool("mcp__codeoid_fleet__fleet_interrupt")).toBe(true);
+    expect(isFleetSendTool("mcp__codeoid_fleet__fleet_list")).toBe(false);
+    expect(isFleetSendTool("fleet_send")).toBe(false); // unqualified ≠ the MCP tool
+    expect(isFleetSendTool("Bash")).toBe(false);
   });
 
   test("fleet_list groups sessions by workspace and marks the conductor", async () => {
@@ -207,5 +231,134 @@ describe("fleet handlers — read surface", () => {
     expect(out).toContain("not a git repo"); // temp dirs aren't git repos
     expect(out).toContain("authz-fix");
     expect(audits.some((a) => a.action === "fleet.machine_map")).toBe(true);
+  });
+});
+
+describe("fleet handlers — send-class (P4, post-approval)", () => {
+  function makeDispatch(): {
+    dispatch: FleetDispatchDeps;
+    enqueued: Array<Parameters<FleetDispatchDeps["enqueue"]>[0]>;
+    interrupted: string[];
+  } {
+    const enqueued: Array<Parameters<FleetDispatchDeps["enqueue"]>[0]> = [];
+    const interrupted: string[] = [];
+    const tasks: FleetTaskView[] = [
+      {
+        id: "task-abcdef12",
+        kind: "spawn",
+        shape: "scout",
+        status: "done",
+        attempts: 0,
+        target: "/tmp/repo",
+        createdAt: Date.now() - 60_000,
+        error: null,
+        resultDigest: "found the bug in auth.ts",
+      },
+      {
+        id: "task-00112233",
+        kind: "send",
+        shape: "ship",
+        status: "blocked",
+        attempts: 2,
+        target: "sess-authz-0001",
+        createdAt: Date.now() - 120_000,
+        error: "worker died twice",
+        resultDigest: null,
+      },
+    ];
+    return {
+      enqueued,
+      interrupted,
+      dispatch: {
+        enqueue: (input) => {
+          enqueued.push(input);
+          return "task-new-0001";
+        },
+        interrupt: async (sessionId) => {
+          interrupted.push(sessionId);
+        },
+        checkWorkdir: (path) => (path.startsWith("/ok") ? path : null),
+        listTasks: () => tasks,
+      },
+    };
+  }
+
+  test("fleet_send resolves the target by name and enqueues a send task", async () => {
+    const { dispatch, enqueued } = makeDispatch();
+    const out = await createFleetHandlers(makeDeps({ dispatch })).fleet_send({
+      session: "authz-fix",
+      message: "continue the latest_only fix",
+    });
+    expect(out).toContain("Queued task");
+    expect(out).toContain("authz-fix");
+    expect(enqueued).toEqual([
+      {
+        kind: "send",
+        shape: "ship",
+        targetSession: "sess-authz-0001",
+        prompt: "continue the latest_only fix",
+      },
+    ]);
+    expect(audits.some((a) => a.action === "fleet.send")).toBe(true);
+  });
+
+  test("fleet_send refuses missing targets and the conductor itself", async () => {
+    const { dispatch, enqueued } = makeDispatch();
+    const handlers = createFleetHandlers(makeDeps({ dispatch }));
+    expect(await handlers.fleet_send({ session: "nope", message: "x" })).toContain(
+      "No session matches",
+    );
+    expect(await handlers.fleet_send({ session: "conductor", message: "x" })).toContain(
+      "Refusing to dispatch to yourself",
+    );
+    expect(enqueued).toHaveLength(0);
+  });
+
+  test("fleet_spawn validates the workdir and enqueues with the normalized path", async () => {
+    const { dispatch, enqueued } = makeDispatch();
+    const handlers = createFleetHandlers(makeDeps({ dispatch }));
+
+    expect(
+      await handlers.fleet_spawn({ workdir: "/bad/path", task: "investigate" }),
+    ).toContain("Workdir not usable");
+    expect(enqueued).toHaveLength(0);
+
+    const out = await handlers.fleet_spawn({ workdir: "/ok/repo", task: "investigate" });
+    expect(out).toContain("Queued task");
+    expect(enqueued).toEqual([
+      { kind: "spawn", shape: "scout", workdir: "/ok/repo", prompt: "investigate" },
+    ]);
+  });
+
+  test("fleet_interrupt resolves and interrupts, refusing self", async () => {
+    const { dispatch, interrupted } = makeDispatch();
+    const handlers = createFleetHandlers(makeDeps({ dispatch }));
+    expect(await handlers.fleet_interrupt({ session: "migration-work" })).toContain(
+      "Interrupted",
+    );
+    expect(interrupted).toEqual(["sess-migr-0002"]);
+    expect(await handlers.fleet_interrupt({ session: "conductor" })).toContain(
+      "Refusing to interrupt yourself",
+    );
+  });
+
+  test("fleet_tasks renders the board with status, attempts, and digests", async () => {
+    const { dispatch } = makeDispatch();
+    const out = await createFleetHandlers(makeDeps({ dispatch })).fleet_tasks({});
+    expect(out).toContain("task-abc");
+    expect(out).toContain("found the bug in auth.ts");
+    expect(out).toContain("blocked (attempts 2)");
+    expect(out).toContain("worker died twice");
+  });
+
+  test("send-class tools degrade clearly when dispatch is disabled", async () => {
+    const handlers = createFleetHandlers(makeDeps()); // no dispatch deps
+    expect(await handlers.fleet_send({ session: "authz-fix", message: "x" })).toBe(
+      "Dispatch is disabled on this daemon.",
+    );
+    expect(await handlers.fleet_spawn({ workdir: "/ok", task: "x" })).toBe(
+      "Dispatch is disabled on this daemon.",
+    );
+    expect(await handlers.fleet_tasks({})).toBe("Dispatch is disabled on this daemon.");
   });
 });

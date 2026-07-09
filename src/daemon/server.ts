@@ -183,6 +183,9 @@ export class DaemonServer {
     });
     this.#shutdown.register("store", () => this.#store.close());
     this.#shutdown.register("sessions", () => this.#manager.drain(10_000));
+    // LIFO: registered after sessions → stops BEFORE the drain, so the
+    // dispatcher can't claim new work or inject events into draining sessions.
+    this.#shutdown.register("dispatcher", () => this.#manager.stopDispatcher());
     this.#shutdown.register("websockets", () => {
       for (const { ws } of this.#sockets.values()) {
         ws.close(1001, "Server shutting down");
@@ -265,6 +268,11 @@ export class DaemonServer {
     if (resumed > 0) {
       console.log(`[codeoid] resumed ${resumed} session(s) from transcript`);
     }
+
+    // Start the dispatch queue AFTER resume: the first tick reclaims tasks
+    // claimed by the previous boot, and surviving workers must already be
+    // back in the session map for continuation to find them.
+    this.#manager.startDispatcher();
 
     // Start Bun HTTP + WebSocket server
     const self = this;

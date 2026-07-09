@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { Session, type AttachedClient } from "./session.js";
+import type { SessionProvider } from "./providers/interface.js";
 import type { Store } from "./store.js";
 import { hasScope, SCOPES } from "../protocol/scopes.js";
 import { RateLimiter } from "./rate-limit.js";
@@ -33,7 +34,13 @@ import {
   type ImportedSessionInit,
 } from "./share/index.js";
 import type { AgentIdentityManager } from "./agent-identity.js";
-import { buildFleetMcpServer, type FleetSessionView } from "./fleet.js";
+import { buildFleetMcpServer, type FleetDispatchDeps, type FleetSessionView, type FleetTaskView } from "./fleet.js";
+import {
+  Dispatcher,
+  NonRetryableDispatchError,
+  type DispatcherHost,
+} from "./dispatch.js";
+import type { DispatchEventRow, DispatchTaskRow } from "./store.js";
 import { type MemoryEngine, workspaceIdFromPath } from "./memory/index.js";
 import type { CodeoidConfig } from "../config.js";
 import type { CompressionRegistry } from "./compress/index.js";
@@ -135,6 +142,12 @@ export class SessionManager {
   #modelsCache = new Map<string, ModelInfo[]>();
   #config?: CodeoidConfig;
   #compressionRegistry?: CompressionRegistry;
+  #dispatcher: Dispatcher;
+  #testProviderFactory?: () => SessionProvider;
+  /** Stable observer identity — every Session reports status transitions here. */
+  #statusObserver = (sessionId: string, status: SessionInfo["status"]): void => {
+    this.#dispatcher.onSessionStatus(sessionId, status);
+  };
 
   constructor(
     store: Store,
@@ -142,7 +155,17 @@ export class SessionManager {
     identityManager?: AgentIdentityManager,
     rateLimiter?: RateLimiter,
     memory?: MemoryEngine,
-    opts?: { config?: CodeoidConfig; compressionRegistry?: CompressionRegistry },
+    opts?: {
+      config?: CodeoidConfig;
+      compressionRegistry?: CompressionRegistry;
+      /**
+       * Test-only: provider factory injected into every Session this manager
+       * constructs, so manager-level integration tests (conductor injection,
+       * worker spawn, dispatch host) run without the Claude Agent SDK
+       * subprocess. Mirrors SessionCreateOptions._testProvider.
+       */
+      _testProviderFactory?: () => SessionProvider;
+    },
   ) {
     this.#store = store;
     this.#transcriptStore = transcriptStore;
@@ -151,6 +174,27 @@ export class SessionManager {
     this.#memory = memory;
     this.#config = opts?.config;
     this.#compressionRegistry = opts?.compressionRegistry;
+    this.#testProviderFactory = opts?._testProviderFactory;
+    this.#dispatcher = new Dispatcher(
+      store,
+      this.#makeDispatcherHost(),
+      opts?.config?.dispatch,
+    );
+  }
+
+  /** The dispatch queue driver (P4). Exposed for server lifecycle + tests. */
+  get dispatcher(): Dispatcher {
+    return this.#dispatcher;
+  }
+
+  /** Start the dispatcher loop. Call AFTER resumeSessions so surviving
+   * workers are back in #sessions before the boot-time reclaim pass runs. */
+  startDispatcher(): void {
+    this.#dispatcher.start();
+  }
+
+  stopDispatcher(): void {
+    this.#dispatcher.stop();
   }
 
   /**
@@ -221,6 +265,8 @@ export class SessionManager {
             meta.role === "conductor"
               ? this.#buildFleetServer(meta.accountId, meta.projectId)
               : undefined,
+          _testProvider: this.#testProviderFactory?.(),
+          onStatusChange: this.#statusObserver,
           onModels: (providerId, m) => this._cacheModels(providerId, m),
         });
 
@@ -587,6 +633,8 @@ export class SessionManager {
               ...(this.#memory ? { memory: this.#memory } : {}),
               config: this.#config,
               compressionRegistry: this.#compressionRegistry,
+              _testProvider: this.#testProviderFactory?.(),
+          onStatusChange: this.#statusObserver,
               onModels: (providerId, m) => this._cacheModels(providerId, m),
             });
             this.#sessions.set(session.id, session);
@@ -964,6 +1012,8 @@ export class SessionManager {
       memory: this.#memory,
       config: this.#config,
       compressionRegistry: this.#compressionRegistry,
+      _testProvider: this.#testProviderFactory?.(),
+      onStatusChange: this.#statusObserver,
       onModels: (providerId, m) => this._cacheModels(providerId, m),
     });
 
@@ -1062,6 +1112,8 @@ export class SessionManager {
       memory: this.#memory,
       config: this.#config,
       compressionRegistry: this.#compressionRegistry,
+      _testProvider: this.#testProviderFactory?.(),
+      onStatusChange: this.#statusObserver,
       onModels: (providerId, m) => this._cacheModels(providerId, m),
     });
 
@@ -1089,6 +1141,225 @@ export class SessionManager {
       }
     }
     return undefined;
+  }
+
+  // ── Dispatcher host (P4) ──────────────────────────────────────────────
+
+  /** System principal for dispatcher-driven session operations. */
+  #dispatchSystemAuth(accountId: string, projectId: string): AuthContext {
+    return {
+      sub: "system:dispatch",
+      scopes: [],
+      delegationDepth: 0,
+      accountId,
+      projectId,
+    };
+  }
+
+  /** Principal a dispatched prompt is SENT as — attributed to the conductor. */
+  #dispatchSenderAuth(task: DispatchTaskRow): AuthContext {
+    return {
+      sub: task.createdBy,
+      scopes: [],
+      delegationDepth: 1,
+      accountId: task.accountId,
+      projectId: task.projectId,
+    };
+  }
+
+  /** A tenant-scoped session lookup that treats cross-tenant ids as absent. */
+  #sessionForTask(id: string | null, task: DispatchTaskRow): Session | undefined {
+    if (!id) return undefined;
+    const session = this.#sessions.get(id);
+    if (!session) return undefined;
+    if (session.accountId !== task.accountId || session.projectId !== task.projectId) {
+      return undefined;
+    }
+    return session;
+  }
+
+  /** Complete, self-contained brief for a freshly-spawned worker. */
+  #workerBrief(task: DispatchTaskRow): string {
+    const contract =
+      task.shape === "scout"
+        ? "Investigate and report. Do NOT modify files, commit, or push — your identity holds no write scope and your report is the only deliverable."
+        : "Deliver the change described below. Keep the diff minimal and verify your work before finishing.";
+    return [
+      `<fleet_dispatch task="${task.id}" shape="${task.shape}">`,
+      `You are a disposable ${task.shape} worker spawned by the codeoid conductor with the owner's approval.`,
+      contract,
+      `Work only inside ${task.workdir}. You run unattended on a bounded tool budget — be economical.`,
+      "End your final message with a concise summary of what you found/changed: it becomes the digest reported back to the conductor.",
+      "</fleet_dispatch>",
+      "",
+      task.prompt,
+    ].join("\n");
+  }
+
+  #makeDispatcherHost(): DispatcherHost {
+    return {
+      sendToSession: async (task: DispatchTaskRow): Promise<void> => {
+        const target = this.#sessionForTask(task.targetSession, task);
+        if (!target) {
+          throw new NonRetryableDispatchError(
+            `target session ${task.targetSession ?? "?"} no longer exists`,
+          );
+        }
+        await target.send(
+          `[conductor dispatch ${task.id.slice(0, 8)} — owner-approved]\n\n${task.prompt}`,
+          this.#dispatchSenderAuth(task),
+        );
+      },
+
+      spawnWorker: async (task: DispatchTaskRow): Promise<{ sessionId: string }> => {
+        // Re-validate at execution time — the directory can vanish between
+        // approval and claim, and that's a permanent failure, not a retry.
+        const workdir = task.workdir ? normalizeWorkdir(task.workdir) : null;
+        if (!workdir) {
+          throw new NonRetryableDispatchError(
+            `workdir not usable: ${task.workdir ?? "(none)"}`,
+          );
+        }
+        const budget = this.#dispatcher.config.workerToolBudget;
+        const session = new Session({
+          name: `worker-${task.shape}-${task.id.slice(0, 8)}`,
+          workdir,
+          role: "worker",
+          workerShape: task.shape,
+          // Autonomous with a bounded budget: unattended until the budget
+          // exhausts, then guarded → waiting_approval, which the dispatcher
+          // treats as a wedge (lease stops renewing, reclaim handles it).
+          initialMode: { mode: "autonomous", maxTurns: budget },
+          auth: this.#dispatchSenderAuth(task),
+          store: this.#store,
+          transcriptStore: this.#transcriptStore,
+          identityManager: this.#identityManager,
+          memory: this.#memory,
+          config: this.#config,
+          compressionRegistry: this.#compressionRegistry,
+          _testProvider: this.#testProviderFactory?.(),
+          onStatusChange: this.#statusObserver,
+          onModels: (providerId, m) => this._cacheModels(providerId, m),
+        });
+        this.#sessions.set(session.id, session);
+        // No rate-limiter charge: the dispatcher's own worker cap governs
+        // spawn concurrency, and the human never called session.create.
+        try {
+          await session.send(this.#workerBrief(task), this.#dispatchSenderAuth(task));
+        } catch (err) {
+          // Partial spawn: the session exists but never got its brief. Tear
+          // it down before rethrowing — the dispatcher only learns the
+          // worker's id from our return value, so an early throw would
+          // otherwise orphan it.
+          try {
+            await session.destroy(
+              this.#dispatchSystemAuth(task.accountId, task.projectId),
+            );
+          } catch {
+            // Best-effort cleanup.
+          }
+          this.#sessions.delete(session.id);
+          throw err;
+        }
+        return { sessionId: session.id };
+      },
+
+      continueWorker: async (task: DispatchTaskRow): Promise<boolean> => {
+        const worker = this.#sessionForTask(task.workerSessionId, task);
+        if (!worker) return false;
+        // Mode isn't persisted across restarts — re-arm the autonomous
+        // budget before continuing or the resumed worker wedges immediately.
+        worker.setMode("autonomous", this.#dispatcher.config.workerToolBudget);
+        const note = [
+          `<fleet_dispatch task="${task.id}" continuation="true">`,
+          `The daemon restarted while you were working (attempt ${task.attempts + 1} of ${task.failureLimit}).`,
+          `Review the current state of ${worker.workdir} — your earlier progress may be partially applied — and CONTINUE the original task below to completion.`,
+          "</fleet_dispatch>",
+          "",
+          task.prompt,
+        ].join("\n");
+        await worker.send(note, this.#dispatchSenderAuth(task));
+        return true;
+      },
+
+      workerStatus: (sessionId: string) => this.#sessions.get(sessionId)?.status ?? null,
+
+      buildWorkerDigest: (task: DispatchTaskRow): string => {
+        const worker = this.#sessionForTask(task.workerSessionId, task);
+        const header = `task ${task.id.slice(0, 8)} (${task.kind}/${task.shape}) in ${task.workdir ?? task.targetSession ?? "?"}`;
+        if (!worker) return `${header} — worker session unavailable; check the workdir/git state for artifacts.`;
+        const parts: string[] = [header];
+        const finalText = worker.lastAssistantText;
+        if (finalText) {
+          const trimmed = finalText.trim();
+          parts.push(
+            `Worker's final message${trimmed.length > 700 ? " (truncated)" : ""}:`,
+            trimmed.slice(0, 700),
+          );
+        } else {
+          parts.push("(worker produced no final message)");
+        }
+        if (this.#memory) {
+          const episodes = this.#memory
+            .timeline(worker.workspaceId, 60)
+            .filter((e) => e.sessionId === worker.id)
+            .slice(0, 8);
+          if (episodes.length > 0) {
+            parts.push(
+              "Activity:",
+              ...episodes.map(
+                (e) => `- ${e.kind}${e.toolName ? `/${e.toolName}` : ""}: ${e.summary}`,
+              ),
+            );
+          }
+        }
+        return parts.join("\n");
+      },
+
+      destroyWorker: async (sessionId: string, reason: string): Promise<void> => {
+        const worker = this.#sessions.get(sessionId);
+        if (!worker || worker.role !== "worker") return;
+        try {
+          await worker.destroy(
+            this.#dispatchSystemAuth(worker.accountId, worker.projectId),
+          );
+        } catch (err) {
+          console.error(
+            `[codeoid/dispatch] worker teardown failed (${reason}): ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        this.#sessions.delete(sessionId);
+      },
+
+      deliverEvents: async (
+        accountId: string,
+        projectId: string,
+        events: DispatchEventRow[],
+      ): Promise<boolean> => {
+        const conductor = this.#conductorFor(accountId, projectId);
+        // Hold until there IS an idle conductor — events are durable, and
+        // interrupting a mid-turn conductor would corrupt its work. One
+        // batched injection per delivery: N completions = one wake.
+        if (!conductor || conductor.status !== "idle") return false;
+        const body = [
+          "<fleet_events>",
+          "(daemon-injected dispatch notifications — NOT a message from the owner)",
+          ...events.map((e) => `- [${e.type}] ${e.digest}`),
+          "</fleet_events>",
+          "",
+          "Summarize these outcomes for the owner. Decide any follow-up dispatch yourself — it will require approval as usual.",
+        ].join("\n");
+        await conductor.send(
+          body,
+          this.#dispatchSystemAuth(accountId, projectId),
+        );
+        return true;
+      },
+
+      audit: (action: string, detail: string): void => {
+        this.#store.audit("system:dispatch", action, undefined, detail);
+      },
+    };
   }
 
   /**
@@ -1127,7 +1398,59 @@ export class SessionManager {
         ),
       conductorSessionId: () =>
         this.#conductorFor(accountId, projectId)?.id ?? "",
+      // Send-class dispatch (P4). Every one of these tools is approval-gated
+      // upstream (kept out of allowedTools + the hard #shouldAutoApprove
+      // gate) — by the time a handler runs, the owner has confirmed.
+      dispatch:
+        this.#config?.dispatch?.enabled === false
+          ? undefined
+          : this._fleetDispatchDeps(accountId, projectId),
     });
+  }
+
+  /**
+   * The send-class capability surface handed to the conductor's fleet tools.
+   * Underscore-public so tests can exercise the real closures without an MCP
+   * transport (the tool wiring itself is covered in fleet.test.ts).
+   */
+  _fleetDispatchDeps(accountId: string, projectId: string): FleetDispatchDeps {
+    return {
+      enqueue: (input) =>
+        this.#dispatcher.enqueue({
+          ...input,
+          accountId,
+          projectId,
+          createdBy:
+            this.#identityManager?.conductorUri ??
+            `conductor:${accountId}/${projectId}`,
+        }),
+      interrupt: async (sessionId: string) => {
+        const session = this.#sessions.get(sessionId);
+        if (
+          !session ||
+          session.accountId !== accountId ||
+          session.projectId !== projectId
+        ) {
+          throw new Error("target session no longer exists");
+        }
+        await session.interrupt(this.#dispatchSystemAuth(accountId, projectId));
+      },
+      checkWorkdir: (path: string) => normalizeWorkdir(path),
+      listTasks: (limit: number): FleetTaskView[] =>
+        this.#store
+          .dispatchListForTenant(accountId, projectId, limit)
+          .map((t) => ({
+            id: t.id,
+            kind: t.kind,
+            shape: t.shape,
+            status: t.status,
+            attempts: t.attempts,
+            target: t.targetSession ?? t.workdir,
+            createdAt: t.createdAt,
+            error: t.error,
+            resultDigest: t.resultDigest,
+          })),
+    };
   }
 
   #list(

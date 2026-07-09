@@ -350,6 +350,66 @@ describe("AgentIdentityManager conductor lifecycle", () => {
   });
 });
 
+describe("worker identity (P4) — leaf + shape profiles", () => {
+  let tmpDir: string;
+  let store: Store;
+  let zeroid: FakeZeroID;
+  const config = {
+    auth: { baseUrl: BASE_URL },
+    accountId: ACCOUNT,
+    projectId: PROJECT,
+  };
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "codeoid-worker-unit-"));
+    store = new Store(join(tmpDir, "store.db"));
+    zeroid = new FakeZeroID();
+    zeroid.install();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    store.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("a scout worker's identity holds no tools:write and records conductor lineage", async () => {
+    const manager = new AgentIdentityManager(config, store);
+    const conductor = await manager.registerConductor("user:owner@test");
+    const { wimseUri, token } = await manager.registerWorker("sess-1", "worker-scout-abc", "scout");
+
+    expect(wimseUri).toStartWith("wimse://");
+    expect(token).toBeTruthy();
+    const req = zeroid.registerCalls.at(-1)!;
+    expect(String(req.external_id)).toStartWith("codeoid-worker-");
+    expect(req.created_by).toBe(conductor!.wimseUri);
+    expect(req.allowed_scopes).toEqual(["tools:read", "tools:execute", "tools:agent"]);
+    expect(req.allowed_scopes).not.toContain("tools:write");
+  });
+
+  test("a ship worker gets write scopes — but NEVER fleet authority (the leaf property)", async () => {
+    const manager = new AgentIdentityManager(config, store);
+    await manager.registerConductor("user:owner@test");
+    await manager.registerWorker("sess-2", "worker-ship-def", "ship");
+
+    const req = zeroid.registerCalls.at(-1)!;
+    const scopes = req.allowed_scopes as string[];
+    expect(scopes).toContain("tools:write");
+    // A worker can never see or direct the fleet, even if fleet tools were
+    // somehow mounted on it — session:* is absent from every worker profile.
+    expect(scopes).not.toContain("session:read");
+    expect(scopes).not.toContain("session:dispatch");
+  });
+
+  test("registration failure degrades to an anonymous worker URI (best-effort)", async () => {
+    zeroid.failRegister = true;
+    const manager = new AgentIdentityManager(config, store);
+    const { wimseUri, token } = await manager.registerWorker("sess-3", "worker-x", "scout");
+    expect(wimseUri).toBe("anonymous:worker:sess-3");
+    expect(token).toBe("");
+  });
+});
+
 describe("Store conductor_identity persistence", () => {
   let tmpDir: string;
   let store: Store;
