@@ -254,6 +254,17 @@ export interface AgentProvider {
     action: string,
     data: Record<string, unknown> | undefined,
   ): void | Promise<void>;
+  /**
+   * Seed a FRESH provider with the session's canonical history — called
+   * once by `session.set_provider` on the incoming backend, before its
+   * first turn. Provider-owned fidelity: stateless backends no-op (they
+   * consume `TurnOpts.history` natively every turn); warm backends
+   * implement their best strategy (typically prepending a rendered
+   * transcript — see `renderHistorySeed` — to their first prompt).
+   * Optional and best-effort: a throw degrades to an unseeded switch, it
+   * must never wedge the session.
+   */
+  seedFromHistory?(history: readonly CanonicalTurn[]): void | Promise<void>;
   dispose(): Promise<void>;
 }
 

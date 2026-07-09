@@ -28,6 +28,7 @@ export type SlashCommand =
   | { kind: "mode"; mode: SessionMode; maxTurns?: number }
   | { kind: "model"; model: string; fallback?: string | null }
   | { kind: "model-picker" }
+  | { kind: "provider"; providerId: string }
   | { kind: "help" }
   | { kind: "clear" }
   | { kind: "who" }
@@ -105,6 +106,13 @@ export function parseSlash(raw: string, opts?: ParseSlashOptions): SlashCommand 
         model: model!,
         ...(fallback !== undefined ? { fallback } : {}),
       };
+    }
+    case "provider": {
+      // Switch the focused session's BACKEND (e.g. `/provider pi`). The
+      // daemon validates the id fail-closed and rejects mid-turn switches.
+      const providerId = rest[0]?.toLowerCase();
+      if (!providerId) throw new Error("/provider <id> — e.g. /provider pi");
+      return { kind: "provider", providerId };
     }
     case "help":
       return { kind: "help" };
@@ -236,6 +244,14 @@ export function dispatchSlash(cmd: SlashCommand, ctx: SlashContext): void {
       return;
     case "model-picker":
       ctx.showModelPicker?.();
+      return;
+    case "provider":
+      fire({
+        type: "session.set_provider",
+        id: ctx.newRequestId(),
+        sessionId: ctx.sessionId,
+        providerId: cmd.providerId,
+      });
       return;
     case "help":
       ctx.showHelp?.();

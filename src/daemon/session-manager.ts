@@ -428,6 +428,8 @@ export class SessionManager {
         return this.#search(msg, auth);
       case "session.set_model":
         return this.#setModel(msg, auth);
+      case "session.set_provider":
+        return this.#setProvider(msg, auth);
       case "session.rename":
         return this.#rename(msg, auth);
       case "fs.list":
@@ -2029,6 +2031,34 @@ export class SessionManager {
     }
     session.setMode(msg.mode, msg.maxTurns, auth);
     return { type: "response.ok", requestId: msg.id };
+  }
+
+  async #setProvider(
+    msg: Extract<ClientMessage, { type: "session.set_provider" }>,
+    auth: AuthContext,
+  ): Promise<DaemonMessage> {
+    // Same trust class as set_model / set_mode: session-config writes.
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_APPROVE)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Missing scope: session:approve",
+        code: "forbidden",
+      };
+    }
+    const session = this.#getOwnedSession(msg.sessionId, auth);
+    if (!session) {
+      return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
+    }
+    const result = await session.switchProvider(msg.providerId, auth);
+    if (!result.ok) {
+      return { type: "response.error", requestId: msg.id, error: result.error, code: result.code };
+    }
+    return {
+      type: "response.ok",
+      requestId: msg.id,
+      data: { providerId: result.providerId },
+    };
   }
 
   #rename(

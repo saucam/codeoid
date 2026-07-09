@@ -58,3 +58,10 @@ The bridge announces itself on session start; **if it fails to load, turns fail 
 - The pi subprocess inherits the daemon's environment (pi needs its keys); env hardening parity with the Claude subprocess is a follow-up.
 - With an Anthropic **subscription** (OAuth) login, pi sends Claude-Code identity headers and pins the first system block — that's pi upstream behavior, not codeoid's.
 - codeoid memory/recall and the conductor fleet tools are Claude-session features today.
+
+## Switching backends mid-session
+
+`/provider pi` (or `session.set_provider`) swaps a live session's backend while keeping the session id, scrollback, transcript, and identity.
+The conversation so far is carried into the incoming backend as a rendered transcript (oldest turns dropped first past ~24k chars) — a faithful transcript, **not** a native continuation: tool_use structures, prompt-cache state, and extension state don't cross.
+Switching resets the model to the new backend's default, and mid-turn switches are rejected — interrupt first.
+`/provider claude` brings the session back the same way.

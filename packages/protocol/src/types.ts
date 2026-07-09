@@ -697,6 +697,7 @@ export type ClientMessage =
   | SessionRotateMsg
   | SessionSearchMsg
   | SessionSetModelMsg
+  | SessionSetProviderMsg
   | SessionRenameMsg
   | FsListMsg
   | FsReadMsg
@@ -956,6 +957,27 @@ export interface SessionUnpinMsg extends BaseClientMsg {
 export interface SessionRotateMsg extends BaseClientMsg {
   type: "session.rotate";
   sessionId: string;
+}
+
+/**
+ * Switch the BACKEND of a live session (e.g. claude → pi and back). The
+ * session id, scrollback, transcript, and identity all stay; the backing
+ * agent is torn down and replaced, and the accumulated canonical history is
+ * handed to the incoming provider (`seedFromHistory`) so it can continue
+ * the conversation. Fidelity contract: the new backend receives a faithful
+ * TRANSCRIPT (tool calls flattened to text), not a native continuation —
+ * provider-native structures (tool_use blocks, prompt cache, extension
+ * state) do not survive the switch.
+ *
+ * Rejected with `invalid_request` when the provider is unknown (fail-closed,
+ * same rule as `session.create`) or the session is mid-turn — interrupt
+ * first, then switch.
+ */
+export interface SessionSetProviderMsg extends BaseClientMsg {
+  type: "session.set_provider";
+  sessionId: string;
+  /** One of the ids from `AuthOkMsg.providers`. */
+  providerId: string;
 }
 
 /**

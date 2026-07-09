@@ -332,3 +332,65 @@ export class CanonicalHistoryAccumulator {
     this.#currentTools.clear();
   }
 }
+
+// ── History seeding (provider switch) ─────────────────────────────────────────
+
+/** Character budget for a rendered history seed (~6k tokens). */
+export const HISTORY_SEED_MAX_CHARS = 24_000;
+
+/**
+ * Render the canonical history as a plain-text transcript block for seeding
+ * a NEW warm backend after `session.set_provider`. Stateless providers
+ * ignore this (they consume `TurnOpts.history` natively every turn); warm
+ * providers (claude, pi) prepend it to their first post-switch prompt so
+ * the incoming agent can continue the conversation.
+ *
+ * Fidelity contract: this is a faithful TRANSCRIPT, not a native
+ * continuation — tool calls are flattened to text and provider-native
+ * structures don't survive. Oldest turns are dropped first when the budget
+ * is exceeded (recent context matters most), with an elision note.
+ */
+export function renderHistorySeed(
+  history: readonly CanonicalTurn[],
+  opts: { maxChars?: number } = {},
+): string {
+  if (history.length === 0) return "";
+  const maxChars = opts.maxChars ?? HISTORY_SEED_MAX_CHARS;
+
+  const rendered = history.map((turn) => {
+    if (turn.role === "user") {
+      return `## User\n${turn.content}`;
+    }
+    const parts: string[] = [`## Assistant (${turn.providerId}/${turn.model})`];
+    if (turn.content) parts.push(turn.content);
+    for (const tc of turn.toolCalls ?? []) {
+      parts.push(toolCallToText(tc));
+    }
+    return parts.join("\n");
+  });
+
+  // Keep the newest turns whole; drop the oldest that don't fit.
+  const kept: string[] = [];
+  let used = 0;
+  for (let i = rendered.length - 1; i >= 0; i--) {
+    const block = rendered[i]!;
+    if (used + block.length > maxChars && kept.length > 0) break;
+    kept.unshift(block);
+    used += block.length;
+  }
+  const omitted = rendered.length - kept.length;
+  if (omitted > 0) {
+    kept.unshift(`[…${omitted} earlier turn(s) omitted for length…]`);
+  }
+
+  return [
+    "<conversation-history>",
+    "You are taking over an ongoing session from another agent backend.",
+    "The conversation so far (tool calls flattened to text, possibly",
+    "truncated) follows. Continue it seamlessly — do not re-introduce",
+    "yourself or repeat completed work.",
+    "",
+    kept.join("\n\n"),
+    "</conversation-history>",
+  ].join("\n");
+}

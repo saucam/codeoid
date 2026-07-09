@@ -38,6 +38,7 @@ import { rewriteBashToolInput } from "../../compress/index.js";
 import type { CodeoidConfig } from "../../../config.js";
 import type { AuthContext } from "../../../protocol/types.js";
 import type { SessionProvider, ModelInfo, NormalizedTurnResult, ProviderEvent, TurnOpts, TurnRun } from "../interface.js";
+import { renderHistorySeed, type CanonicalTurn } from "../canonical.js";
 import type { LLMCallUsage } from "../../context-math.js";
 
 // ── Initialisation options ────────────────────────────────────────────────────
@@ -80,6 +81,8 @@ export class ClaudeProvider implements SessionProvider {
   #hasQueried = false;
   #backingRecoveryAttempted = false;
   #lastPushedContent: string | null = null;
+  /** Rendered transcript from seedFromHistory() — prepended to the next prompt. */
+  #pendingHistorySeed: string | null = null;
 
   // Long-running SDK loop (one per codeoid session)
   #query: Query | null = null;
@@ -146,8 +149,16 @@ export class ClaudeProvider implements SessionProvider {
     const turnQueue = new AsyncQueue<ProviderEvent>();
     this.#currentTurnQueue = turnQueue;
 
-    if (opts.userMessage) {
-      this.#pushSDKMessage(opts.userMessage, "later");
+    let userMessage = opts.userMessage;
+    if (this.#pendingHistorySeed && userMessage) {
+      // Post-switch seeding: this fresh Claude Code session has never seen
+      // the conversation — carry it in as a transcript block ahead of the
+      // first prompt (same mechanism as rotation's task anchor).
+      userMessage = `${this.#pendingHistorySeed}\n\n${userMessage}`;
+      this.#pendingHistorySeed = null;
+    }
+    if (userMessage) {
+      this.#pushSDKMessage(userMessage, "later");
     }
     return {
       events: turnQueue,
@@ -168,6 +179,16 @@ export class ClaudeProvider implements SessionProvider {
         this.#pushSDKMessage(content, priority);
       },
     };
+  }
+
+  /**
+   * Provider switch seeding: render the canonical history once and prepend
+   * it to the first post-switch prompt (the SDK offers no native history
+   * injection). Empty history is a no-op.
+   */
+  seedFromHistory(history: readonly CanonicalTurn[]): void {
+    const seed = renderHistorySeed(history);
+    this.#pendingHistorySeed = seed.length > 0 ? seed : null;
   }
 
   async listModels(): Promise<ModelInfo[]> {
