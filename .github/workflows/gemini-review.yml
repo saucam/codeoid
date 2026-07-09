@@ -1,0 +1,42 @@
+name: Gemini code review
+
+on:
+  pull_request:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# One review in flight per PR; a newer request supersedes a stale run.
+concurrency:
+  group: gemini-review-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Run on PR open, or on a PR comment containing the re-review command.
+    if: >
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       startsWith(github.event.comment.body, '/gemini-review'))
+    runs-on: ubuntu-latest
+    # Guards runner minutes if the Gemini API or action ever hangs.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned to v1.3.0 — bump deliberately, this action receives the API key.
+      - uses: jgunnink/gemini-review-bot@37b292a16543cd97f443416bf803dd863583c53b # v1.3.0
+        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          # No `model:` override — inherits the action's own default,
+          # gemini-flash-latest. That's a ROLLING alias (not a pinned
+          # snapshot like gemini-2.5-flash): Google repoints it to their
+          # current best free-tier flash model, and it's the exact id the
+          # action's PRD calls out as "cheapest/fastest; fits free-tier
+          # quota" and the one its own spike-test workflow verifies against.
+          # Pin an explicit model here only if you need reproducible
+          # review behavior across time more than you need it current.
