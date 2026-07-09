@@ -207,6 +207,14 @@ const SessionRow: Component<{ session: SessionInfo }> = (props) => {
           <span title={`Agent: ${props.session.agentUri ?? "anonymous"}`}>
             ⌬ <span class="font-mono">{sessionAgentLabel(props.session)}</span>
           </span>
+          <Show when={props.session.providerId && props.session.providerId !== "claude"}>
+            <span
+              class="rounded border border-accent/40 bg-accent/10 px-1 font-mono text-[10px] text-accent"
+              title={`Backend: ${props.session.providerId}`}
+            >
+              {props.session.providerId}
+            </span>
+          </Show>
           <Show when={props.session.usage}>
             {(u) => (
               <>
