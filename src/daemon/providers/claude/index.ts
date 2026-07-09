@@ -39,6 +39,7 @@ import type { CodeoidConfig } from "../../../config.js";
 import type { AuthContext } from "../../../protocol/types.js";
 import type { SessionProvider, ModelInfo, NormalizedTurnResult, ProviderEvent, TurnOpts, TurnRun } from "../interface.js";
 import { renderHistorySeed, type CanonicalTurn } from "../canonical.js";
+import { buildSubprocessEnv } from "../env.js";
 import type { LLMCallUsage } from "../../context-math.js";
 
 // ── Initialisation options ────────────────────────────────────────────────────
@@ -761,32 +762,10 @@ export function parseMcpServerConfig(value: unknown): McpServerConfig | null {
  * Pure + exported for unit testing.
  */
 export function buildAgentEnv(base: Record<string, string | undefined> = process.env): Record<string, string> {
-  const EXACT = new Set<string>([
-    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD", "LANG", "LANGUAGE",
-    "TZ", "TERM", "TMPDIR", "TEMP", "TMP", "COLORTERM",
-    // Proxy + TLS trust — needed for the CLI to reach the API through a
-    // corporate proxy / custom CA. Not secrets.
-    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
-    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
-    "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
-  ]);
-  // The CLI's own namespaces (auth token, base url, model, feature flags) plus
-  // POSIX locale categories (LC_ALL, LC_CTYPE, …).
-  const PREFIXES = ["ANTHROPIC_", "CLAUDE_", "LC_"];
-  const extra = (base.CODEOID_AGENT_ENV_ALLOW ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  const extraSet = new Set(extra);
-
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(base)) {
-    if (v === undefined) continue;
-    if (EXACT.has(k) || extraSet.has(k) || PREFIXES.some((p) => k.startsWith(p))) {
-      out[k] = v;
-    }
-  }
-  return out;
+  // The CLI's own namespaces (auth token, base url, model, feature flags)
+  // plus POSIX locale categories (LC_ALL, LC_CTYPE, …). Shared basics +
+  // CODEOID_AGENT_ENV_ALLOW come from buildSubprocessEnv.
+  return buildSubprocessEnv({ prefixes: ["ANTHROPIC_", "CLAUDE_", "LC_"] }, base);
 }
 
 export function extractToolResultText(content: unknown): string {
