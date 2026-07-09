@@ -324,7 +324,24 @@ export class HookBus {
       );
       return null;
     }
-    const text = (await res.text()).slice(0, MAX_OUTPUT_BYTES);
+    // Stream the body and stop reading at the cap — `res.text()` would
+    // buffer an arbitrarily large response in full BEFORE any slice,
+    // letting a misbehaving webhook exhaust daemon memory.
+    let text = "";
+    if (res.body) {
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      try {
+        while (text.length < MAX_OUTPUT_BYTES) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          text += decoder.decode(value, { stream: true });
+        }
+      } finally {
+        reader.cancel().catch(() => {});
+      }
+      text = text.slice(0, MAX_OUTPUT_BYTES);
+    }
     return parseOutcome(entry.name, text);
   }
 }

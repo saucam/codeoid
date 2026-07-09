@@ -308,6 +308,29 @@ describe("HookBus — webhook hooks", () => {
     }
   });
 
+  it("caps oversized webhook bodies instead of buffering them whole", async () => {
+    const server = Bun.serve({
+      port: 0,
+      // 4 MiB of non-JSON — the reader must stop at MAX_OUTPUT_BYTES and
+      // the oversized (hence unparseable) body must fail open.
+      fetch: async () => new Response("x".repeat(4 * 1024 * 1024)),
+    });
+    try {
+      const bus = new HookBus([
+        { event: "tool_call", type: "webhook", url: `http://127.0.0.1:${server.port}/big` },
+      ]);
+      const result = await bus.dispatchToolCall(ctx(), {
+        toolName: "Bash",
+        toolId: "t1",
+        input: {},
+      });
+      expect(result.blocked).toBeUndefined();
+      expect(result.updatedInput).toBeUndefined();
+    } finally {
+      server.stop(true);
+    }
+  });
+
   it("fails open when the webhook is unreachable", async () => {
     // Port 1 is reserved/closed — connection refused immediately.
     const bus = new HookBus([
