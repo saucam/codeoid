@@ -77,10 +77,34 @@ describe("ProviderRegistry", () => {
     expect(registry.resolve("pi-from-the-future", "test").id).toBe("alpha");
   });
 
-  it("default catalog registers claude, gemini, openai with claude as default", () => {
+  it("default catalog registers claude, gemini, openai, pi with claude as default", () => {
     const registry = createDefaultProviderRegistry();
-    expect(registry.ids().sort()).toEqual(["claude", "gemini", "openai"]);
+    expect(registry.ids().sort()).toEqual(["claude", "gemini", "openai", "pi"]);
     expect(registry.defaultId).toBe("claude");
+  });
+
+  it("config can disable the pi backend", () => {
+    const registry = createDefaultProviderRegistry({
+      providers: { pi: { enabled: false, command: "pi" } },
+    } as unknown as Parameters<typeof createDefaultProviderRegistry>[0]);
+    expect(registry.has("pi")).toBe(false);
+    expect(registry.ids().sort()).toEqual(["claude", "gemini", "openai"]);
+  });
+
+  it("the pi factory constructs a provider labeled with the codeoid session id", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "codeoid-registry-pi-"));
+    const store = new Store(join(tmp, "codeoid.db"));
+    try {
+      const registry = createDefaultProviderRegistry();
+      const pi = registry.getOrThrow("pi").create(makeInit(store));
+      expect(pi.id).toBe("pi");
+      // No pi session file yet — the backing id starts as the init value
+      // and is replaced by the real file on first spawn.
+      expect(pi.backingSessionId).toBe("backing-9");
+    } finally {
+      try { store.close(); } catch {}
+      try { rmSync(tmp, { recursive: true, force: true }); } catch {}
+    }
   });
 
   it("stateless factories construct providers with the right ids", () => {

@@ -367,6 +367,21 @@ const DispatchSchema = z
     retryBaseMs: 15_000,
   });
 
+/** Per-backend provider settings. Append-only — one optional block per provider. */
+const ProvidersSchema = z
+  .object({
+    /** pi coding agent (https://pi.dev) driven over `pi --mode rpc`. */
+    pi: z
+      .object({
+        /** Register the pi backend in the provider catalog. */
+        enabled: z.boolean().default(true),
+        /** Binary to spawn — override for a wrapper script or absolute path. */
+        command: z.string().default("pi"),
+      })
+      .default({ enabled: true, command: "pi" }),
+  })
+  .default({ pi: { enabled: true, command: "pi" } });
+
 const RootSchema = z.object({
   daemonUrl: z.string().default("ws://127.0.0.1:7400"),
   dbPath: z.string().default("codeoid.db"),
@@ -388,6 +403,7 @@ const RootSchema = z.object({
   session: SessionSchema,
   conductor: ConductorSchema,
   dispatch: DispatchSchema,
+  providers: ProvidersSchema,
 });
 
 type ParsedConfig = z.infer<typeof RootSchema>;
@@ -491,6 +507,16 @@ export interface CodeoidConfig {
     maxConcurrentWorkers: number;
     workerToolBudget: number;
     retryBaseMs: number;
+  };
+  /**
+   * Per-backend provider settings. Optional in the type so hand-built test
+   * configs stay minimal; loadConfig always populates it (schema defaults).
+   */
+  providers?: {
+    pi: {
+      enabled: boolean;
+      command: string;
+    };
   };
 }
 
@@ -721,6 +747,7 @@ export function loadConfig(opts: LoadOptions = {}): CodeoidConfig {
     session: parsed.session,
     conductor: parsed.conductor,
     dispatch: parsed.dispatch,
+    providers: parsed.providers,
   };
 }
 

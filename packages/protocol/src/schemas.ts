@@ -69,6 +69,13 @@ export const sessionCreateSchema = z.object({
    * wire contract.
    */
   role: z.string().max(LIMITS.NAME_MAX).optional(),
+  /**
+   * Backend id, validated as a bounded string (not an enum) on purpose: the
+   * frame must PARSE for a provider this daemon doesn't know — the daemon
+   * then fail-closes with a clear "unknown provider" error instead of the
+   * schema opaquely rejecting the whole create.
+   */
+  providerId: z.string().min(1).max(64).optional(),
 });
 
 export const sessionListSchema = z.object({ ...base, type: z.literal("session.list") });

@@ -185,7 +185,7 @@ export class SessionManager {
     this.#memory = memory;
     this.#config = opts?.config;
     this.#compressionRegistry = opts?.compressionRegistry;
-    this.#providers = opts?.providers ?? createDefaultProviderRegistry();
+    this.#providers = opts?.providers ?? createDefaultProviderRegistry(opts?.config);
     this.#testProviderFactory = opts?._testProviderFactory;
     this.#dispatcher = new Dispatcher(
       store,
@@ -197,6 +197,16 @@ export class SessionManager {
   /** The dispatch queue driver (P4). Exposed for server lifecycle + tests. */
   get dispatcher(): Dispatcher {
     return this.#dispatcher;
+  }
+
+  /**
+   * Registered provider ids, default first — advertised on `auth.ok` so
+   * clients can populate the new-session provider picker.
+   */
+  providerIds(): string[] {
+    const ids = this.#providers.ids();
+    const def = this.#providers.defaultId;
+    return [def, ...ids.filter((id) => id !== def)];
   }
 
   /** Start the dispatcher loop. Call AFTER resumeSessions so surviving
@@ -1008,6 +1018,18 @@ export class SessionManager {
       return { type: "response.error", requestId: msg.id, error: rateCheck.reason, code: "rate_limited" };
     }
 
+    // Explicit provider selection fails CLOSED: asking for a backend this
+    // daemon doesn't have must never silently hand back a claude session.
+    // (Resume keeps the warn-and-fall-back path — see ProviderRegistry.resolve.)
+    if (msg.providerId && !this.#providers.has(msg.providerId)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: `Unknown provider "${msg.providerId}" — available: ${this.#providers.ids().join(", ")}`,
+        code: "invalid_request",
+      };
+    }
+
     // Normalize + validate the workdir. A leading `~` must be expanded and a
     // missing directory rejected up front — otherwise the SDK fails opaquely
     // ("native binary … exists but failed to launch") when it can't spawn the
@@ -1029,6 +1051,7 @@ export class SessionManager {
       store: this.#store,
       transcriptStore: this.#transcriptStore,
       providers: this.#providers,
+      providerId: msg.providerId,
       identityManager: this.#identityManager,
       memory: this.#memory,
       config: this.#config,

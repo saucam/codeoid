@@ -725,6 +725,14 @@ export interface SessionCreateMsg extends BaseClientMsg {
    * daemon rejects roles it doesn't implement.
    */
   role?: string;
+  /**
+   * Backend for this session (e.g. "claude", "pi"). Must be one of the ids
+   * the daemon advertised in `AuthOkMsg.providers` — an id this daemon
+   * doesn't have registered is rejected with `invalid_request` (fail-closed:
+   * asking for pi must never silently hand back a claude session). Absent =
+   * the daemon default.
+   */
+  providerId?: string;
 }
 
 /**
@@ -1424,6 +1432,13 @@ export interface AuthOkMsg {
    * daemons that predate capability negotiation.
    */
   capabilities?: string[];
+  /**
+   * Provider ids registered on this daemon (e.g. ["claude", "gemini",
+   * "openai", "pi"]), first entry = the default. Feed the new-session
+   * provider picker from this; absent on daemons that predate multi-provider
+   * session creation (assume claude-only).
+   */
+  providers?: string[];
 }
 
 export interface ResponseOkMsg {

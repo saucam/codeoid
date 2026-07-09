@@ -609,7 +609,7 @@ export class Session {
    * meta written by a newer codeoid.
    */
   #createProvider(opts: SessionCreateOptions): SessionProvider {
-    const registry = opts.providers ?? createDefaultProviderRegistry();
+    const registry = opts.providers ?? createDefaultProviderRegistry(opts.config);
     const factory = registry.resolve(opts.providerId, `session ${this.id}`);
     return factory.create({
       sessionId: this.id,
