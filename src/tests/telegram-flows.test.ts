@@ -132,12 +132,26 @@ function makeFakeManager() {
 
   const manager = {
     findByName: (name: string) => sessions[name],
+    providerIds: () => ["claude", "codex", "pi"],
     disconnectClient: (clientId: string) => {
       disconnected.push(clientId);
     },
     handle: async (msg: any, _auth: unknown, client: AttachedClient) => {
       handled.push(msg);
       switch (msg.type) {
+        case "session.fork": {
+          // Branch the parent into a new session; keep the parent's backend
+          // unless the fork asked for a specific one.
+          const parent = Object.values(sessions).find((s) => s.id === msg.sessionId);
+          return {
+            type: "session.fork.result",
+            data: {
+              id: "sess-fork",
+              name: `${parent?.name ?? "session"} (fork)`,
+              providerId: msg.providerId ?? "claude",
+            },
+          };
+        }
         case "session.list":
           return {
             type: "session.list.result",
@@ -523,5 +537,101 @@ describe("Telegram flows — switch, failed re-attach, detach, destroy, search",
     for (const c of sent()) {
       expect(String(c.payload.text).length).toBeLessThanOrEqual(4000);
     }
+  });
+});
+
+describe("Telegram flows — provider switch", () => {
+  it("/provider with no arg lists the available backends (first = default)", async () => {
+    const { drive, sent, texts } = await boot();
+
+    await drive("/attach alpha");
+    await until(() => texts().some((t) => t.startsWith("Attached to")));
+
+    await drive("/provider");
+    await until(() => texts().some((t) => t.includes("Backends")));
+
+    const list = sent().find((c) => String(c.payload.text).includes("Backends"))!;
+    expect(list.payload.parse_mode).toBe("MarkdownV2");
+    expect(list.payload.text).toContain("claude");
+    expect(list.payload.text).toContain("codex");
+    expect(list.payload.text).toContain("pi");
+    // First backend is tagged as the default (escaped MarkdownV2 parens).
+    expect(list.payload.text).toContain("\\(default\\)");
+  });
+
+  it("/provider <id> switches the attached session's backend", async () => {
+    const { drive, manager, texts } = await boot();
+
+    await drive("/attach alpha");
+    await until(() => texts().some((t) => t.startsWith("Attached to")));
+
+    await drive("/provider codex");
+    await until(() => texts().some((t) => t.includes("Backend →")));
+
+    expect(
+      manager.handled.some(
+        (m) =>
+          m.type === "session.set_provider" &&
+          m.providerId === "codex" &&
+          m.sessionId === "sess-a",
+      ),
+    ).toBe(true);
+  });
+
+  it("/provider without an attached session tells the user to attach", async () => {
+    const { drive, texts } = await boot();
+
+    await drive("/provider codex");
+    await until(() => texts().some((t) => t.startsWith("Not attached")));
+
+    expect(texts().some((t) => t.includes("Backend →"))).toBe(false);
+  });
+});
+
+describe("Telegram flows — fork", () => {
+  it("/fork branches the attached session (same backend) and auto-attaches to the branch", async () => {
+    const { drive, manager, texts } = await boot();
+
+    await drive("/attach alpha");
+    await until(() => texts().some((t) => t.startsWith("Attached to")));
+
+    await drive("/fork");
+    await until(() => texts().some((t) => t.includes("Forked into")));
+
+    // Fork frame carried NO providerId (parent's backend kept).
+    const forkMsg = manager.handled.find((m) => m.type === "session.fork");
+    expect(forkMsg).toBeDefined();
+    expect(forkMsg.sessionId).toBe("sess-a");
+    expect(forkMsg.providerId).toBeUndefined();
+
+    // Auto-attach: parent disconnected, then the fork attached.
+    expect(manager.disconnected).toContain(`telegram:${ALLOWED_USER}`);
+    expect(
+      manager.handled.some((m) => m.type === "session.attach" && m.sessionId === "sess-fork"),
+    ).toBe(true);
+  });
+
+  it("/fork <backend> continues the branch on another backend in one step", async () => {
+    const { drive, manager, texts } = await boot();
+
+    await drive("/attach alpha");
+    await until(() => texts().some((t) => t.startsWith("Attached to")));
+
+    await drive("/fork codex");
+    await until(() => texts().some((t) => t.includes("Forked into")));
+
+    const forkMsg = manager.handled.find((m) => m.type === "session.fork");
+    expect(forkMsg.providerId).toBe("codex");
+    // The confirmation names the backend it continued on.
+    expect(texts().some((t) => t.includes("Forked into") && t.includes("codex"))).toBe(true);
+  });
+
+  it("/fork without an attached session tells the user to attach", async () => {
+    const { drive, manager, texts } = await boot();
+
+    await drive("/fork");
+    await until(() => texts().some((t) => t.startsWith("Not attached")));
+
+    expect(manager.handled.some((m) => m.type === "session.fork")).toBe(false);
   });
 });
