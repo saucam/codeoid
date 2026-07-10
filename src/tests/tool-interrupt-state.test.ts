@@ -356,3 +356,46 @@ describe("Session._applyInterruptedStateToTool — real session path", () => {
     expect(triggersErrorBanner(state!)).toBe(false);
   });
 });
+
+// ── Regression: approval→message correlation cleanup ─────────────────────────
+//
+// _applyInterruptedStateToTool used to delete the patch-key whitelist for the
+// tool's approval but NOT the #approvalIdToMessageId entry itself. Besides the
+// per-interrupt leak, a later approve() for the dead approvalId passed the
+// `.has()` check and parked in #earlyApprovals forever instead of hitting
+// #dismissStaleApproval — so a client replaying a stale ApprovalBar never got
+// a dismissal and the bar wedged.
+describe("Session._applyInterruptedStateToTool — approval correlation cleanup", () => {
+  interface SessionApprovalInternal {
+    _applyInterruptedStateToTool(msgId: string): void;
+    _seedApprovalCorrelation(approvalId: string, msgId: string): void;
+    _approvalCorrelationIds(): string[];
+  }
+
+  it("drops the approvalId mapping for the interrupted tool (and only it)", () => {
+    const session = makeSession();
+    const msgId = randomUUID();
+    const otherMsgId = randomUUID();
+    const toolMsg = makeToolCallMessage(
+      { phase: "waiting_confirmation", input: {}, description: "Edit(/tmp/foo.ts)", approvalId: "ap-dead" },
+      msgId,
+    );
+    (toolMsg as SessionMessage & { sessionId: string }).sessionId = session.id;
+    session.restoreScrollback([toolMsg]);
+
+    const internal = session as unknown as SessionApprovalInternal;
+    internal._seedApprovalCorrelation("ap-dead", msgId);
+    internal._seedApprovalCorrelation("ap-live", otherMsgId);
+
+    internal._applyInterruptedStateToTool(msgId);
+
+    // The interrupted tool's mapping is gone; an unrelated live one survives.
+    expect(internal._approvalCorrelationIds()).toEqual(["ap-live"]);
+
+    // A late decision for the dead approval no longer matches the stale
+    // mapping — it takes the dismiss path instead of parking forever in the
+    // early-approval buffer (which nothing would ever consume).
+    session.approve("ap-dead", true, TEST_AUTH);
+    expect(internal._approvalCorrelationIds()).toEqual(["ap-live"]);
+  });
+});

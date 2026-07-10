@@ -15,6 +15,10 @@
 import type { SessionMessage } from "../../protocol/types.js";
 import type { Episode } from "./types.js";
 
+/** Ceiling on tool output persisted into a memory episode — mirrors the
+ * transcript layer's 64 KiB persist cap (transcript.ts). */
+const EPISODE_OUTPUT_CAP_CHARS = 64 * 1024;
+
 export interface ChunkerContext {
   workspaceId: string;
   sessionId: string;
@@ -180,7 +184,17 @@ export class EpisodeChunker {
     if (tc.priorAssistantText) parts.push(`# Reasoning\n${tc.priorAssistantText}`);
     parts.push(`# Tool: ${tc.toolName}`);
     parts.push(`## Input\n${safeStringify(tc.input)}`);
-    if (output) parts.push(`## Result\n${output}`);
+    // Cap what memory persists, mirroring the transcript layer's cap: the
+    // insert (and its FTS tokenization) runs on the shared event path, so
+    // an uncapped 10 MB build log would stall every attached client while
+    // SQLite chews it — and the episodes DB has no retention story yet.
+    if (output) {
+      const capped =
+        output.length > EPISODE_OUTPUT_CAP_CHARS
+          ? `${output.slice(0, EPISODE_OUTPUT_CAP_CHARS)}\n…truncated for memory…`
+          : output;
+      parts.push(`## Result\n${capped}`);
+    }
 
     const content = parts.join("\n\n");
     const summary = `${tc.toolName}(${summarizeInput(tc.input)})`;

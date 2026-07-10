@@ -1609,3 +1609,100 @@ describe("mid-turn provider teardown emits idle", () => {
     expect(idleBroadcasts.length).toBeGreaterThanOrEqual(1);
   });
 });
+
+// ── T10: send during a pending approval must not auto-deny the tool ───────────
+//
+// Regression guard: `wasWorking` used to cover only thinking/tool_running, so
+// a send arriving in `waiting_approval` skipped the mid-turn path and called
+// provider.runTurn() — which closed the live turn queue, whose consumer's
+// `finally` resolved every pending approval with {approved: false}. Net
+// effect: typing "wait, what does this do?" at an approval prompt silently
+// DENIED the tool and orphaned the question's reply.
+describe("T10 – send during waiting_approval", () => {
+  const approvalToolStart = (approvalId: string) =>
+    [
+      [
+        {
+          type: "tool_start" as const,
+          toolId: `bash-${approvalId}`,
+          sdkToolUseId: `sdk-${approvalId}`,
+          name: "Bash",
+          input: { command: "rm -rf build" },
+          approvalId,
+        },
+      ],
+    ];
+
+  it("queues mid-turn (pushMidTurn backend) and keeps the approval pending", async () => {
+    const provider = new MockSessionProvider("claude", approvalToolStart("ap-t10-a"), {
+      stall: true,
+      midTurn: true,
+    });
+    const session = makeSession(provider, "t10-midturn");
+    const { client, received } = makeClient();
+    session.attach(client);
+
+    await session.send("run the cleanup", TEST_AUTH);
+    await waitForStatus(session, "waiting_approval", 4000);
+
+    // The user asks a question INSTEAD of deciding.
+    await session.send("wait, what does this do?", TEST_AUTH);
+
+    // Queued into the LIVE run — no second runTurn, no teardown…
+    expect(provider.midTurnPushes.length).toBe(1);
+    expect(provider.midTurnPushes[0]!.content).toContain("what does this do?");
+    expect(provider.capturedOpts.length).toBe(1);
+    expect(provider.teardownCount).toBe(0);
+    // …the approval is still pending (nothing resolved it)…
+    expect(provider.canUseToolResults.length).toBe(0);
+    // …and the status stays waiting_approval so every frontend keeps its
+    // approval bar up (the old path flipped it and hid the prompt).
+    expect(session.status).toBe("waiting_approval");
+
+    // The user can still decide — approve resolves the ORIGINAL tool.
+    session.approve("ap-t10-a", true, TEST_AUTH);
+    await new Promise<void>((r) => setTimeout(r, 20));
+    expect(provider.canUseToolResults.length).toBe(1);
+    expect(provider.canUseToolResults[0]!.behavior).toBe("allow");
+
+    const denied = received.find(
+      (m) =>
+        m.type === "session.message.delta" &&
+        (m as { toolStateUpdate?: { phase?: string } }).toolStateUpdate?.phase === "cancelled",
+    );
+    expect(denied).toBeUndefined();
+
+    await session.interrupt(TEST_AUTH);
+  });
+
+  it("rejects the send loudly on a backend without mid-turn injection (never auto-denies)", async () => {
+    const provider = new MockSessionProvider("claude", approvalToolStart("ap-t10-b"), {
+      stall: true,
+    });
+    const session = makeSession(provider, "t10-no-midturn");
+    const { client } = makeClient();
+    session.attach(client);
+
+    await session.send("run the cleanup", TEST_AUTH);
+    await waitForStatus(session, "waiting_approval", 4000);
+
+    // No pushMidTurn on this backend: the send must FAIL LOUDLY instead of
+    // starting a fresh turn (which would close the turn queue and auto-deny).
+    await expect(session.send("hold on, explain first", TEST_AUTH)).rejects.toThrow(
+      /approval is pending/i,
+    );
+
+    // The approval survived: nothing resolved it, no fresh turn started.
+    expect(provider.canUseToolResults.length).toBe(0);
+    expect(provider.capturedOpts.length).toBe(1);
+    expect(session.status).toBe("waiting_approval");
+
+    // Deciding still works.
+    session.approve("ap-t10-b", false, TEST_AUTH);
+    await new Promise<void>((r) => setTimeout(r, 20));
+    expect(provider.canUseToolResults.length).toBe(1);
+    expect(provider.canUseToolResults[0]!.behavior).toBe("deny");
+
+    await session.interrupt(TEST_AUTH);
+  });
+});

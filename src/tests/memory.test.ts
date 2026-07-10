@@ -581,6 +581,41 @@ describe("EpisodeChunker", () => {
     // get merged into one episode keyed by user intent.
     expect(emitted[1]!.kind).toBe("user_turn");
   });
+
+  it("caps persisted tool output — a 10 MB build log must not enter the episode row", () => {
+    // The episode insert (and its FTS tokenization) runs on the shared
+    // event path; an uncapped multi-MB output stalls every attached client
+    // and grows the retention-less episodes DB without bound.
+    const emitted: Array<{ content: string }> = [];
+    const chunker = new EpisodeChunker(
+      {
+        workspaceId: workspaceIdFromPath("/tmp/project", TENANT_A),
+        sessionId: "s1",
+        createdBy: "u",
+      },
+      (ep) => emitted.push({ content: ep.content }),
+    );
+    const t = new Date().toISOString();
+    const hugeOutput = "x".repeat(2 * 1024 * 1024); // 2 MiB
+
+    chunker.onMessage(msg("m1", "user", "build it", t));
+    chunker.onMessage(msgTool("m2", "Bash", { phase: "executing" }, { command: "make" }, t));
+    chunker.onMessage(
+      msgTool(
+        "m2",
+        "Bash",
+        { phase: "completed", success: true, output: hugeOutput },
+        { command: "make" },
+        t,
+      ),
+    );
+    chunker.onTurnEnd();
+
+    const toolEpisode = emitted[0]!;
+    // Mirrors the transcript layer's 64 KiB persist cap (+ small headers).
+    expect(toolEpisode.content.length).toBeLessThan(70 * 1024);
+    expect(toolEpisode.content).toContain("…truncated for memory…");
+  });
 });
 
 // ── Usage analytics (dailyUsage / lifetimeTotals) ───────────────────────
