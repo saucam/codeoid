@@ -104,9 +104,10 @@ describe("registry activation", () => {
     const registry = createDefaultProviderRegistry(config);
     expect(registry.has("pi")).toBe(false);
     expect(registry.unavailableHint("pi")).toContain("definitely-missing");
-    expect(registry.unavailableEntries()).toEqual([
-      { id: "pi", hint: expect.stringContaining("providers.pi.command") },
-    ]);
+    expect(registry.unavailableEntries()).toContainEqual({
+      id: "pi",
+      hint: expect.stringContaining("providers.pi.command"),
+    });
   });
 
   it("keeps pi out of the catalog entirely when disabled", () => {

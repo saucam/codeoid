@@ -102,3 +102,24 @@ export function buildPiEnv(
     base,
   );
 }
+
+/**
+ * Environment for the `codex app-server` subprocess.
+ *
+ * codex's primary credential store is `~/.codex/auth.json` (HOME is in the
+ * shared basics — ChatGPT-subscription tokens never transit codeoid), with
+ * env-key fallbacks for API-key users. Same posture as pi: conventional
+ * credential shapes plus codex's own namespace; anything exotic goes
+ * through `CODEOID_AGENT_ENV_ALLOW`.
+ */
+export function buildCodexEnv(
+  base: Record<string, string | undefined> = process.env,
+): Record<string, string> {
+  return buildSubprocessEnv(
+    {
+      prefixes: ["CODEX_", "OPENAI_", "LC_"],
+      suffixes: ["_API_KEY"],
+    },
+    base,
+  );
+}
