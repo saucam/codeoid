@@ -434,10 +434,18 @@ const ProvidersSchema = z
         command: z.string().default("codex"),
       })
       .default({ enabled: true, command: "codex" }),
+    /** Google gemini-cli driven over ACP (`gemini --acp`). */
+    geminiCli: z
+      .object({
+        enabled: z.boolean().default(true),
+        command: z.string().default("gemini"),
+      })
+      .default({ enabled: true, command: "gemini" }),
   })
   .default({
     pi: { enabled: true, command: "pi" },
     codex: { enabled: true, command: "codex" },
+    geminiCli: { enabled: true, command: "gemini" },
   });
 
 const RootSchema = z.object({
@@ -577,6 +585,10 @@ export interface CodeoidConfig {
       command: string;
     };
     codex: {
+      enabled: boolean;
+      command: string;
+    };
+    geminiCli: {
       enabled: boolean;
       command: string;
     };

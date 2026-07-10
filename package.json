@@ -81,6 +81,7 @@
   },
   "license": "MIT",
   "optionalDependencies": {
-    "@earendil-works/pi-coding-agent": "0.80.6"
+    "@earendil-works/pi-coding-agent": "0.80.6",
+    "@google/gemini-cli": "0.50.0"
   }
 }

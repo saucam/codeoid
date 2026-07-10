@@ -26,6 +26,8 @@ import { PiProvider } from "./pi/index.js";
 import { PI_INSTALL_HINT, resolvePiCommand } from "./pi/resolve.js";
 import { CodexProvider } from "./codex/index.js";
 import { CODEX_INSTALL_HINT, resolveCodexCommand } from "./codex/resolve.js";
+import { GeminiAcpProvider } from "./acp/index.js";
+import { GEMINI_CLI_INSTALL_HINT, resolveGeminiCliCommand } from "./acp/resolve.js";
 import { StatelessSessionProvider } from "./stateless.js";
 
 /**
@@ -236,6 +238,32 @@ export function createDefaultProviderRegistry(config?: CodeoidConfig): ProviderR
         configured !== undefined && configured !== "codex"
           ? `providers.codex.command (${JSON.stringify(configured)}) does not exist or is not on PATH`
           : CODEX_INSTALL_HINT,
+      );
+    }
+  }
+  if (config?.providers?.geminiCli?.enabled !== false) {
+    const configured = config?.providers?.geminiCli?.command;
+    const resolution = resolveGeminiCliCommand(configured === "gemini" ? undefined : configured);
+    if (resolution) {
+      registry.register({
+        id: "gemini-cli",
+        displayName: "Gemini CLI (Google)",
+        create: (init) =>
+          new GeminiAcpProvider({
+            sessionId: init.sessionId,
+            initialBackingId: init.initialBackingId,
+            command: resolution.command,
+            argsPrefix: resolution.argsPrefix,
+            store: init.store,
+            onModels: init.onModels,
+          }),
+      });
+    } else {
+      registry.markUnavailable(
+        "gemini-cli",
+        configured !== undefined && configured !== "gemini"
+          ? `providers.geminiCli.command (${JSON.stringify(configured)}) does not exist or is not on PATH`
+          : GEMINI_CLI_INSTALL_HINT,
       );
     }
   }
