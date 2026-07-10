@@ -61,3 +61,45 @@ expression of the meta-harness bet.
 3. Does Antigravity itself ever expose an official agent protocol/SDK? Re-check
    before GA; if yes, it likely also speaks ACP (it's Zed-adjacent tooling) —
    the AcpProvider would absorb it.
+
+## Antigravity agentapi investigation — VERDICT: do not build now (2026-07-10)
+
+Traced the full path on this machine (Antigravity IDE 2.0.6 running).
+
+**How it works (all verified live):**
+- The Antigravity Electron app spawns a `language_server` (Codeium/"exa" lineage)
+  that listens on **ephemeral localhost ports** (this run: 40133 web, 38405
+  HTTPS-gRPC) with a **per-launch CSRF token** (from the LS cmdline).
+- `~/.gemini/antigravity/bin/agentapi` is a shell wrapper → `language_server
+  agentapi <cmd>`, reading `ANTIGRAVITY_LS_ADDRESS` + `ANTIGRAVITY_CSRF_TOKEN` +
+  `ANTIGRAVITY_PROJECT_ID`.
+- Got a real conversation created end-to-end: `initialize`→CSRF auth passes→
+  `ANTIGRAVITY_PROJECT_ID` must be a REAL project uuid from
+  `~/.gemini/config/projects/<id>.json` (each maps to a workspace git folder)→
+  `new-conversation` returns a conversationId. **Auth + subscription work.**
+
+**Why it is NOT a viable codeoid backend right now:**
+1. **No response-streaming surface in the CLI.** agentapi has exactly three
+   commands: `new-conversation`, `get-conversation-metadata` (returns workspace
+   metadata only — NOT messages), `send-message`. The agent's reply streams into
+   the IDE's own trajectory store; there is no `get-messages`/`stream` command.
+   Fire-and-forget prompt injection, not a conversation loop.
+2. **The real streaming RPCs are internal LS gRPC** (`GetCascadeTrajectorySteps`,
+   `StreamCascadePanelReactiveUpdates`, `HandleStreamingCommand` on
+   `exa.remoting.RemotingService`) — no public .proto, TLS + rotating CSRF,
+   reverse-engineering required.
+3. **Requires a running GUI IDE.** The LS is a child of the Electron app: it dies
+   when the IDE closes, and the port + CSRF regenerate every launch. codeoid's
+   other harnesses are standalone CLIs codeoid spawns and owns; Antigravity's
+   agent is embedded in a desktop app.
+4. ToS/stability: consuming undocumented internal gRPC of a GUI product is
+   fragile and gray-area.
+
+**Recommendation:** park it. The subscription/auth path is proven, but the
+integration cost (proto RE + IDE-lifecycle coupling + rotating creds) is out of
+proportion to the payoff, and the surface is unstable. Revisit only if Google
+ships a standalone/headless Antigravity agent binary or a documented protocol —
+at which point it slots into the existing provider template (and likely speaks
+ACP, absorbing into the AcpProvider). For Google-subscription coverage today,
+gemini-cli over ACP already works for API-key/Vertex users; personal-OAuth is
+blocked by Google's own server policy, not by us.

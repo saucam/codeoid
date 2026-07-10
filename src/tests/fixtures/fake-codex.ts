@@ -29,8 +29,15 @@ function serverRequest(method: string, params: Record<string, unknown>): Promise
   return new Promise((resolve) => pendingServerReqs.set(id, resolve));
 }
 
-function usage() {
-  return { inputTokens: 120, cachedInputTokens: 20, outputTokens: 45 };
+/** Matches the real codex tokenUsage.last shape (thread/tokenUsage/updated). */
+function tokenUsage() {
+  return { totalTokens: 165, inputTokens: 120, cachedInputTokens: 20, outputTokens: 45, reasoningOutputTokens: 0 };
+}
+function emitUsage(threadId: string): void {
+  send({
+    method: "thread/tokenUsage/updated",
+    params: { threadId, turnId: "turn-1", tokenUsage: { total: tokenUsage(), last: tokenUsage() } },
+  });
 }
 
 async function runTurn(threadId: string, prompt: string): Promise<void> {
@@ -93,7 +100,8 @@ async function runTurn(threadId: string, prompt: string): Promise<void> {
     send({ method: "item/completed", params: { item: { id: "m1", type: "agentMessage", text: "Hello world" } } });
   }
 
-  send({ method: "turn/completed", params: { turn: { id: "turn-1", status: "completed", usage: usage() } } });
+  emitUsage(threadId);
+  send({ method: "turn/completed", params: { turn: { id: "turn-1", status: "completed" } } });
 }
 
 let buf = "";
@@ -168,7 +176,7 @@ async function handle(frame: Record<string, unknown>): Promise<void> {
     }
     case "turn/interrupt":
       send({ id, result: {} });
-      send({ method: "turn/completed", params: { turn: { id: "turn-1", status: "interrupted", usage: usage() } } });
+      send({ method: "turn/completed", params: { turn: { id: "turn-1", status: "interrupted" } } });
       break;
     case "test/noReply":
       break; // deliberately never answered — rpc timeout test

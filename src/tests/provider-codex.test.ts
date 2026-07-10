@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CodexRpcProcess } from "../daemon/providers/codex/rpc.js";
@@ -75,7 +75,9 @@ describe("CodexProvider over fake-codex", () => {
     expect(turnDone).toBeDefined();
     if (turnDone?.type === "turn_done") {
       expect(turnDone.result.providerId).toBe("codex");
-      expect(turnDone.result.inputTokens).toBe(120);
+      // Usage comes from thread/tokenUsage/updated (turn/completed has none);
+      // inputTokens excludes cache reads (claude convention): 120 - 20.
+      expect(turnDone.result.inputTokens).toBe(100);
       expect(turnDone.result.outputTokens).toBe(45);
       expect(turnDone.result.cacheReadTokens).toBe(20);
     }
@@ -321,11 +323,15 @@ describe("codex resolution + registry", () => {
     expect(registry.has("codex")).toBe(false);
     expect(registry.unavailableHint("codex")).toContain("providers.codex.command");
 
-    // No codex anywhere → null + generic install hint.
-    expect(resolveCodexCommand(undefined, { PATH: "" })).toBeNull();
-
     // Bare-name override resolves via PATH; system codex resolves as "path".
     const tmp = mkdtempSync(join(tmpdir(), "codeoid-codex-resolve-"));
+    // Isolated env: empty HOME + no version-manager vars, so the node-bin
+    // fallback has nothing to find (the real machine's nvm codex can't leak in).
+    const isolated = { PATH: "", HOME: join(tmp, "empty-home") };
+
+    // No codex anywhere → null + generic install hint.
+    expect(resolveCodexCommand(undefined, isolated)).toBeNull();
+
     try {
       const bin = join(tmp, "my-codex");
       writeFileSync(bin, "#!/bin/sh\necho fake-codex\n");
@@ -343,6 +349,19 @@ describe("codex resolution + registry", () => {
         command: sys,
         argsPrefix: [],
         source: "path",
+      });
+
+      // node-bin fallback: codex NOT on PATH but in ~/.npm-global/bin — the
+      // "daemon PATH omits the user's node bin" case this fix exists for.
+      const nodeBin = join(tmp, "home", ".npm-global", "bin");
+      mkdirSync(nodeBin, { recursive: true });
+      const codexInNodeBin = join(nodeBin, "codex");
+      writeFileSync(codexInNodeBin, "#!/bin/sh\necho fake\n");
+      chmodSync(codexInNodeBin, 0o755);
+      expect(resolveCodexCommand(undefined, { PATH: "", HOME: join(tmp, "home") })).toEqual({
+        command: codexInNodeBin,
+        argsPrefix: [],
+        source: "node-bin",
       });
     } finally {
       rmSync(tmp, { recursive: true, force: true });
