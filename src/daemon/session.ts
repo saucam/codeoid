@@ -9,7 +9,7 @@
  *   - Scrollback stores merged SessionMessage (not deltas)
  */
 
-import { CanonicalHistoryAccumulator } from "./providers/canonical.js";
+import { CanonicalHistoryAccumulator, type CanonicalTurn } from "./providers/canonical.js";
 import { CONDUCTOR_SYSTEM_PROMPT_APPEND, isFleetSendTool } from "./fleet.js";
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import {
@@ -784,17 +784,7 @@ export class Session {
     // Offer the canonical history to the incoming provider. Best-effort by
     // contract: a seed failure degrades to an unseeded switch, never a
     // wedged session.
-    let seeded = false;
-    if (this.#provider.seedFromHistory && this.#accumulator.history.length > 0) {
-      try {
-        await this.#provider.seedFromHistory(this.#accumulator.history);
-        seeded = true;
-      } catch (err) {
-        console.error(
-          `[codeoid/session ${this.id}] seedFromHistory failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
+    const seeded = await this.#seedProviderFromHistory();
 
     this.#store.audit(
       sender.sub,
@@ -1672,6 +1662,80 @@ export class Session {
     await this.#identityManager?.deactivateSessionAgent(this.id);
     this.#store.deleteSession(this.id);
     await this.#transcriptStore.delete(this.id);
+  }
+
+  /**
+   * Offer the accumulated canonical history to the current provider —
+   * shared by `switchProvider` and `session.fork`. Stateless backends no-op
+   * (they consume TurnOpts.history every turn); warm backends (claude, pi,
+   * codex) prepend a rendered transcript to their first prompt. Best-effort
+   * by contract: a throw degrades to an unseeded start, never a wedge.
+   * Returns whether a seed was actually applied.
+   */
+  async #seedProviderFromHistory(): Promise<boolean> {
+    if (!this.#provider.seedFromHistory || this.#accumulator.history.length === 0) {
+      return false;
+    }
+    try {
+      await this.#provider.seedFromHistory(this.#accumulator.history);
+      return true;
+    } catch (err) {
+      console.error(
+        `[codeoid/session ${this.id}] seedFromHistory failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * The provider-neutral conversation history. A FORK is seeded from this
+   * (`session.fork` copies the parent's history into the child's
+   * accumulator), so the branch continues the same conversation on whatever
+   * backend it runs.
+   */
+  get canonicalHistory(): readonly CanonicalTurn[] {
+    return this.#accumulator.history;
+  }
+
+  /**
+   * Prime a freshly-constructed FORK from its parent: seed the canonical
+   * history (so the fork's provider — same or different backend — continues
+   * the conversation), replay the parent's transcript into scrollback (so
+   * the fork's UI shows the prior exchange), and offer the history to the
+   * provider. Called once by SessionManager#fork before the fork is
+   * registered; never on a normal session. The fork already carries a fresh
+   * id + fresh backing id, so it can never resume the parent's native state.
+   */
+  async primeFromFork(
+    history: readonly CanonicalTurn[],
+    transcript: DaemonMessage[],
+    sizeHints?: ReadonlyArray<number | undefined>,
+  ): Promise<void> {
+    this.#accumulator.seed(history);
+    // Replay the parent's transcript into the fork for visibility (reusing
+    // restoreScrollback's frozen-tool reconciliation), but DON'T let its
+    // "prior scrollback ⇒ setHasQueried(true)" fire: a fork's backend is
+    // brand new and must run its first turn as a create, not a resume — so
+    // handle scrollback directly here.
+    //
+    // Two things the naive replay gets wrong (Gemini review): the copied
+    // rows still carry the PARENT's sessionId, and they aren't written to
+    // the fork's (empty) transcript — so clients see foreign ids and the
+    // scrollback vanishes on the next daemon restart. Restamp each row with
+    // the fork's id and persist it, so the fork is a genuinely independent
+    // session with its own durable history.
+    for (let i = 0; i < transcript.length; i++) {
+      const row = transcript[i]!;
+      if (row.type !== "session.message") continue;
+      const msg = reconcileResumedMessage({ ...row, sessionId: this.id });
+      this.#scrollback.push(msg, sizeHints?.[i]);
+      this.#transcriptStore.append(this.id, msg, this.#seq++).catch((e) => {
+        console.error(
+          `[codeoid/fork ${this.id}] transcript prime append failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      });
+    }
+    await this.#seedProviderFromHistory();
   }
 
   restoreScrollback(
