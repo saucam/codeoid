@@ -21,6 +21,7 @@ function send(obj: unknown): void {
 let nextServerReqId = 5000;
 const pendingServerReqs = new Map<number, (frame: Record<string, unknown>) => void>();
 let cancelRequested = false;
+let authenticated = "";
 
 function serverRequest(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
   const id = nextServerReqId++;
@@ -120,10 +121,31 @@ async function handle(frame: Record<string, unknown>): Promise<void> {
 
   switch (method) {
     case "initialize":
-      send({ id, result: { protocolVersion: 1, agentCapabilities: {}, authMethods: [] } });
+      send({
+        id,
+        result: {
+          protocolVersion: 1,
+          agentCapabilities: {},
+          authMethods: [
+            { id: "oauth-personal", name: "Log in with Google" },
+            { id: "gemini-api-key", name: "API key" },
+          ],
+        },
+      });
+      break;
+    case "authenticate":
+      authenticated = String(params.methodId ?? "");
+      send({ id, result: {} });
       break;
     case "session/new":
-      send({ id, result: { sessionId: "acp-session-1" } });
+      // GEMINI_FAKE_REQUIRE_AUTH mirrors real gemini-cli with cached OAuth
+      // creds but no recorded selection: session/new fails until the ACP
+      // authenticate method picks one.
+      if (process.env.GEMINI_FAKE_REQUIRE_AUTH && !authenticated) {
+        send({ id, error: { code: -32000, message: "Gemini API key is missing or not configured." } });
+        break;
+      }
+      send({ id, result: { sessionId: "acp-session-1", authMethod: authenticated || null } });
       break;
     case "session/prompt": {
       cancelRequested = false;
