@@ -10,10 +10,18 @@ permissions:
   contents: read
   pull-requests: write
 
-# One review in flight per PR; a newer request supersedes a stale run.
+# One review in flight per PR; a newer REVIEW REQUEST supersedes a stale run.
+# cancel-in-progress must be conditional: every issue_comment on the PR
+# (codecov, a human reply, the bot's own review) enters this group BEFORE
+# the job-level `if` filters it out — an unconditional `true` let any such
+# comment cancel an in-flight review (observed: codecov's comment killed
+# PR #137's review run). Only a real /gemini-review command may supersede;
+# everything else queues briefly, then skips on the job `if`.
 concurrency:
   group: gemini-review-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: true
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' ||
+        startsWith(github.event.comment.body || '', '/gemini-review') }}
 
 jobs:
   review:
