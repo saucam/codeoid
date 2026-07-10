@@ -18,9 +18,14 @@ import {
   request,
   send,
 } from "../state/connection";
-import { focusedSession, removeSession } from "../state/sessions";
+import {
+  focusSession,
+  focusedSession,
+  mergeSession,
+  removeSession,
+} from "../state/sessions";
 import { fetchModels, modelCatalog } from "../state/models";
-import type { SessionMode } from "../protocol/types";
+import type { SessionInfo, SessionMode } from "../protocol/types";
 import { openExportModal } from "./SessionExportModal";
 
 const MODE_OPTIONS: { value: SessionMode; label: string; hint: string }[] = [
@@ -39,6 +44,7 @@ const SessionControls: Component = () => {
           <ModePicker sessionId={s().id} current={s().mode ?? "interactive"} />
           <ModelPicker sessionId={s().id} current={s().model} />
           <ProviderPicker sessionId={s().id} current={s().providerId} />
+          <ForkButton sessionId={s().id} current={s().providerId} />
           <ExportButton />
           <span class="ml-auto" />
           <DestroyButton sessionId={s().id} name={s().name} />
@@ -356,6 +362,119 @@ const ProviderPicker: Component<{
             <div class="border-t border-border px-3 py-1.5 text-[10px] text-fg-faint">
               Keeps the session + transcript. The new backend continues from a
               carried transcript; the model resets to its default.
+            </div>
+          </div>
+        </Show>
+      </div>
+    </Show>
+  );
+};
+
+/**
+ * Fork the session (`session.fork`) — branch its conversation into a new
+ * independent session and focus it. On a multi-backend daemon the dropdown
+ * also offers "fork onto <backend>", continuing the same conversation on a
+ * different harness in one step. Uses `request()` so a rejection surfaces
+ * inline; on success the daemon returns the fork's SessionInfo, which we
+ * merge into the store and focus (same as create).
+ */
+const ForkButton: Component<{
+  sessionId: string;
+  current?: string;
+}> = (props) => {
+  const [open, setOpen] = createSignal(false);
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+  let rootEl: HTMLDivElement | undefined;
+  useDismissable(() => rootEl, open, () => setOpen(false));
+  const providers = () => authIdentity()?.providers ?? [];
+  // Backends OTHER than the current one — the "fork onto X" targets.
+  const otherBackends = () => providers().filter((p) => p !== (props.current ?? providers()[0]));
+
+  const doFork = (providerId?: string) => {
+    setError(null);
+    setBusy(true);
+    request({
+      type: "session.fork",
+      id: newRequestId(),
+      sessionId: props.sessionId,
+      ...(providerId ? { providerId } : {}),
+    })
+      .then((data) => {
+        if (data && typeof data === "object" && "id" in data) {
+          mergeSession(data as SessionInfo);
+          focusSession((data as SessionInfo).id);
+        }
+        setBusy(false);
+        setOpen(false);
+      })
+      .catch((e) => {
+        setError(e instanceof Error ? e.message : String(e));
+        setBusy(false);
+      });
+  };
+
+  return (
+    <Show
+      when={otherBackends().length > 0}
+      fallback={
+        // Single-backend daemon: a plain fork button, no menu.
+        <button
+          type="button"
+          disabled={busy()}
+          onClick={() => doFork()}
+          class="rounded border border-border px-2 py-1 font-mono uppercase tracking-wider text-fg-muted transition hover:border-accent/40 hover:bg-accent/5 hover:text-fg disabled:opacity-50"
+          title="Branch this conversation into a new session (/fork)"
+        >
+          ⑃ fork
+        </button>
+      }
+    >
+      <div class="relative" ref={rootEl}>
+        <button
+          type="button"
+          disabled={busy()}
+          onClick={() => {
+            setOpen(!open());
+            setError(null);
+          }}
+          class="flex items-center gap-1 rounded border border-border bg-bg px-2 py-1 font-mono uppercase tracking-wider text-fg-muted hover:border-accent/40 hover:text-fg disabled:opacity-50"
+          title="Branch this conversation — same backend, or continue it on another (/fork [backend])"
+        >
+          ⑃ fork ▾
+        </button>
+        <Show when={open()}>
+          <div class="absolute right-0 top-full z-30 mt-1 w-64 rounded border border-border bg-bg-elev shadow-xl">
+            <button
+              type="button"
+              onClick={() => doFork()}
+              class="flex w-full items-center justify-between px-3 py-1.5 text-left text-[12px] text-fg-muted transition hover:bg-bg-hover"
+            >
+              <span>fork (same backend)</span>
+              <span class="font-mono text-fg-faint">{props.current ?? providers()[0]}</span>
+            </button>
+            <div class="border-t border-border px-3 py-1 text-[10px] uppercase tracking-wider text-fg-faint">
+              continue on
+            </div>
+            <For each={otherBackends()}>
+              {(id) => (
+                <button
+                  type="button"
+                  onClick={() => doFork(id)}
+                  class="flex w-full items-center px-3 py-1.5 text-left text-[12px] text-fg-muted transition hover:bg-bg-hover"
+                >
+                  <span class="font-mono">{id}</span>
+                </button>
+              )}
+            </For>
+            <Show when={error()}>
+              <div class="border-t border-danger/40 px-3 py-1.5 text-[11px] text-danger">
+                {error()}
+              </div>
+            </Show>
+            <div class="border-t border-border px-3 py-1.5 text-[10px] text-fg-faint">
+              Branches the conversation into a new session. The original is
+              untouched; both continue independently.
             </div>
           </div>
         </Show>

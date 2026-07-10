@@ -2,7 +2,9 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { render, cleanup, fireEvent, waitFor } from "@solidjs/testing-library";
 
-const requestMock = vi.hoisted(() => vi.fn(() => Promise.resolve(undefined)));
+const requestMock = vi.hoisted(() =>
+  vi.fn<(msg: unknown) => Promise<unknown>>(() => Promise.resolve(undefined)),
+);
 const authMock = vi.hoisted(() => vi.fn(() => undefined as unknown));
 vi.mock("../state/connection", () => ({
   send: vi.fn(),
@@ -139,5 +141,58 @@ describe("ProviderPicker", () => {
     fireEvent.click(getByTitle(PICKER_TITLE));
     fireEvent.click(getByText("pi"));
     expect(await findByText(/mid-turn/)).toBeTruthy();
+  });
+});
+
+describe("ForkButton", () => {
+  const PLAIN_TITLE = "Branch this conversation into a new session (/fork)";
+  const MENU_TITLE =
+    "Branch this conversation — same backend, or continue it on another (/fork [backend])";
+
+  it("single-backend daemon: a plain fork button that forks in place", async () => {
+    requestMock.mockResolvedValueOnce({ id: "fork-1", name: "s (fork)", providerId: "claude" });
+    mockAuth(["claude"]);
+    ingestSessionList([sess("claude")]);
+    focusSession("s");
+    const { getByTitle } = render(() => <SessionControls />);
+    fireEvent.click(getByTitle(PLAIN_TITLE));
+    await waitFor(() =>
+      expect(requestMock).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "session.fork", sessionId: "s" }),
+      ),
+    );
+    // The plain fork carries NO providerId (same backend).
+    expect(requestMock.mock.calls[0]![0]).not.toHaveProperty("providerId");
+  });
+
+  it("multi-backend daemon: dropdown offers fork-onto each OTHER backend", async () => {
+    requestMock.mockResolvedValueOnce({ id: "fork-2", name: "s (fork)", providerId: "codex" });
+    mockAuth(["claude", "codex", "pi"]);
+    ingestSessionList([sess("claude")]);
+    focusSession("s");
+    const { getByTitle, getByText } = render(() => <SessionControls />);
+    fireEvent.click(getByTitle(MENU_TITLE));
+    // The "continue on" section lists the OTHER backends.
+    expect(getByText("continue on")).toBeTruthy();
+    expect(getByText("codex")).toBeTruthy();
+    fireEvent.click(getByText("codex"));
+    await waitFor(() =>
+      expect(requestMock).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "session.fork", sessionId: "s", providerId: "codex" }),
+      ),
+    );
+  });
+
+  it("surfaces a fork rejection inline", async () => {
+    requestMock.mockImplementationOnce(() =>
+      Promise.reject(new Error("Cannot fork a conductor session")),
+    );
+    mockAuth(["claude", "pi"]);
+    ingestSessionList([sess("claude")]);
+    focusSession("s");
+    const { getByTitle, getByText, findByText } = render(() => <SessionControls />);
+    fireEvent.click(getByTitle(MENU_TITLE));
+    fireEvent.click(getByText("fork (same backend)"));
+    expect(await findByText(/Cannot fork/)).toBeTruthy();
   });
 });
