@@ -2,13 +2,25 @@
  * Canonical conversation history — the format codeoid uses internally so
  * multiple providers can share turns.
  *
- * Phase 1: types + constants + history converters + CanonicalHistoryAccumulator.
- *   - Tool calls are rendered as inline text for non-Claude providers so they
- *     see what ran and what it returned, without needing function-calling support.
+ * Capture (CanonicalHistoryAccumulator) has always been structured:
+ * CanonicalTurn carries content, thinking, and CanonicalToolCall[] with
+ * ids/inputs/outputs. Phase 2 (this file's converters) renders that history
+ * in each provider's NATIVE structure — Anthropic tool_use/tool_result
+ * blocks, Gemini functionCall/functionResponse parts, OpenAI tool_calls +
+ * tool-role messages — so a switched session's history reads as real
+ * tool-call turns, not a narrated summary.
  *
- * Phase 2 (future): replace the inline-text fallback in each converter with
- *   the provider's native function_call / function_response format. The
- *   CanonicalToolCall type already captures everything needed.
+ * Two honest fidelity limits remain:
+ *   - `thinking` is captured but NOT replayed into any provider payload:
+ *     Anthropic requires a cryptographic signature on replayed thinking
+ *     blocks (ours are synthesized, so they'd be rejected — and the API
+ *     ignores prior-turn thinking anyway), and neither Gemini nor OpenAI
+ *     accepts imported reasoning. Display-only by design.
+ *   - A CanonicalTurn flattens an agent loop (text → tool → text …) into
+ *     one turn, so converters emit the parallel-tool-call shape: one
+ *     assistant message with every tool_use, then one message with every
+ *     result. Valid everywhere, but intra-turn interleaving is not
+ *     reconstructed.
  */
 
 import { type ProviderEvent, isSubagentEvent } from "./interface.js";
@@ -99,35 +111,60 @@ export function limitToolOutput(canonicalName: string, output: string): string {
   return `${output.slice(0, limit)}\n…output truncated at ${limit} chars (full output was ${output.length} chars)`;
 }
 
-// ── History converters ────────────────────────────────────────────────────────
+// ── Native message shapes ─────────────────────────────────────────────────────
+//
+// Structural subsets of each provider's message-param types, declared here so
+// canonical.ts stays dependency-free. Providers pass the converter output to
+// their SDKs, where structural typing (or a single cast at the call site)
+// takes over.
 
-/**
- * Render a CanonicalToolCall as inline text for providers that don't natively
- * support function calling (Phase 1 fallback).
- */
-function toolCallToText(tc: CanonicalToolCall): string {
-  const inputStr = Object.entries(tc.input)
-    .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
-    .join(", ");
-  const status = tc.success ? "" : " [ERROR]";
-  const outputPreview = tc.output.length > 500
-    ? `${tc.output.slice(0, 500)}…`
-    : tc.output;
-  return `[Tool: ${tc.name}(${inputStr})${status}]\n${outputPreview}`;
+/** Anthropic Messages API content blocks (the subset codeoid emits). */
+export type AnthropicContentBlock =
+  | { type: "text"; text: string }
+  | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
+  | { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean };
+
+export interface AnthropicMessageParam {
+  role: "user" | "assistant";
+  content: string | AnthropicContentBlock[];
 }
+
+export type GeminiPart =
+  | { text: string }
+  | { functionCall: { name: string; args: Record<string, unknown> } }
+  | { functionResponse: { name: string; response: Record<string, unknown> } };
+
+/** @google/generative-ai Content — functionResponse parts ride role "function". */
+export interface GeminiContent {
+  role: "user" | "model" | "function";
+  parts: GeminiPart[];
+}
+
+export type OpenAIMessageParam =
+  | { role: "system" | "user"; content: string }
+  | {
+      role: "assistant";
+      content: string | null;
+      tool_calls?: Array<{
+        id: string;
+        type: "function";
+        function: { name: string; arguments: string };
+      }>;
+    }
+  | { role: "tool"; tool_call_id: string; content: string };
+
+// ── History converters ────────────────────────────────────────────────────────
 
 /**
  * Render a CanonicalTurn[] as Google Gemini Content[].
  *
- * Phase 1: tool calls are inlined as text in the model turn.
- * Phase 2: replace the inline-text block below with proper
- *   { functionCall: { name, args } } parts in the model turn and a
- *   follow-up user turn with { functionResponse: { name, response } } parts.
+ * Tool calls become native { functionCall } parts on the model turn,
+ * followed by a role:"function" turn carrying { functionResponse } parts
+ * (the shape @google/generative-ai validates for chat history). Gemini
+ * pairs responses by NAME, not id — a limitation of its wire format.
  */
-export function toGeminiContent(
-  history: readonly CanonicalTurn[],
-): Array<{ role: "user" | "model"; parts: Array<{ text: string }> }> {
-  const out: Array<{ role: "user" | "model"; parts: Array<{ text: string }> }> = [];
+export function toGeminiContent(history: readonly CanonicalTurn[]): GeminiContent[] {
+  const out: GeminiContent[] = [];
 
   for (const turn of history) {
     if (turn.role === "user") {
@@ -135,19 +172,27 @@ export function toGeminiContent(
       continue;
     }
 
-    // Assistant turn — build text with optional tool-call summary.
-    const parts: string[] = [];
-    if (turn.content) parts.push(turn.content);
-
-    // Phase 2: replace this block with native functionCall/functionResponse parts.
-    if (turn.toolCalls && turn.toolCalls.length > 0) {
-      parts.push("\n\n[Tool calls executed by previous agent:]");
-      for (const tc of turn.toolCalls) {
-        parts.push(toolCallToText(tc));
-      }
+    if (!turn.toolCalls || turn.toolCalls.length === 0) {
+      out.push({ role: "model", parts: [{ text: turn.content }] });
+      continue;
     }
 
-    out.push({ role: "model", parts: [{ text: parts.join("\n") }] });
+    const parts: GeminiPart[] = [];
+    if (turn.content) parts.push({ text: turn.content });
+    for (const tc of turn.toolCalls) {
+      parts.push({ functionCall: { name: tc.name, args: tc.input } });
+    }
+    out.push({ role: "model", parts });
+    out.push({
+      role: "function",
+      parts: turn.toolCalls.map((tc) => ({
+        functionResponse: {
+          name: tc.name,
+          // functionResponse.response must be an OBJECT — wrap the text.
+          response: { output: tc.output, success: tc.success },
+        },
+      })),
+    });
   }
 
   return out;
@@ -156,14 +201,12 @@ export function toGeminiContent(
 /**
  * Render a CanonicalTurn[] as OpenAI ChatCompletionMessageParam[].
  *
- * Phase 1: tool calls are inlined as text in the assistant turn.
- * Phase 2: replace the inline-text block below with proper
- *   assistant.tool_calls[] + { role: "tool" } messages.
+ * Tool calls become native assistant `tool_calls[]` followed by one
+ * role:"tool" message per call (paired by `tool_call_id`). OpenAI accepts
+ * tool-history replay without the original function schemas declared.
  */
-export function toOpenAIMessages(
-  history: readonly CanonicalTurn[],
-): Array<{ role: "user" | "assistant" | "system"; content: string }> {
-  const out: Array<{ role: "user" | "assistant" | "system"; content: string }> = [];
+export function toOpenAIMessages(history: readonly CanonicalTurn[]): OpenAIMessageParam[] {
+  const out: OpenAIMessageParam[] = [];
 
   for (const turn of history) {
     if (turn.role === "user") {
@@ -171,18 +214,30 @@ export function toOpenAIMessages(
       continue;
     }
 
-    const parts: string[] = [];
-    if (turn.content) parts.push(turn.content);
-
-    // Phase 2: replace this block with tool_calls[] + tool role messages.
-    if (turn.toolCalls && turn.toolCalls.length > 0) {
-      parts.push("\n\n[Tool calls executed by previous agent:]");
-      for (const tc of turn.toolCalls) {
-        parts.push(toolCallToText(tc));
-      }
+    if (!turn.toolCalls || turn.toolCalls.length === 0) {
+      out.push({ role: "assistant", content: turn.content });
+      continue;
     }
 
-    out.push({ role: "assistant", content: parts.join("\n") });
+    out.push({
+      role: "assistant",
+      // OpenAI wants null (not "") when the turn is tool-calls-only.
+      content: turn.content || null,
+      tool_calls: turn.toolCalls.map((tc) => ({
+        id: tc.id,
+        type: "function" as const,
+        function: { name: tc.name, arguments: JSON.stringify(tc.input) },
+      })),
+    });
+    for (const tc of turn.toolCalls) {
+      // OpenAI has no is_error equivalent — failures are carried in the
+      // content string (design doc §11.3).
+      out.push({
+        role: "tool",
+        tool_call_id: tc.id,
+        content: tc.success ? tc.output : `Error: ${tc.output}`,
+      });
+    }
   }
 
   return out;
@@ -190,16 +245,21 @@ export function toOpenAIMessages(
 
 /**
  * Render a CanonicalTurn[] as Anthropic API messages[].
- * Used when ClaudeProvider is switched into stateless mode (Phase 2),
+ * Used when ClaudeProvider is switched into stateless mode,
  * or when seeding a new Claude backing session with prior context.
  *
- * Phase 1: tool calls are inlined as text.
- * Phase 2: replace with proper tool_use/tool_result content blocks.
+ * Tool calls become native `tool_use` blocks on the assistant message,
+ * followed by a user message of `tool_result` blocks paired by
+ * `tool_use_id` (the CanonicalToolCall id round-trips). Consecutive
+ * same-role messages are legal — the API merges them into one turn.
+ *
+ * `thinking` is deliberately NOT emitted: replayed thinking blocks must
+ * carry the API's signature, which synthesized history can't produce.
  */
 export function toAnthropicMessages(
   history: readonly CanonicalTurn[],
-): Array<{ role: "user" | "assistant"; content: string }> {
-  const out: Array<{ role: "user" | "assistant"; content: string }> = [];
+): AnthropicMessageParam[] {
+  const out: AnthropicMessageParam[] = [];
 
   for (const turn of history) {
     if (turn.role === "user") {
@@ -207,18 +267,27 @@ export function toAnthropicMessages(
       continue;
     }
 
-    const parts: string[] = [];
-    if (turn.content) parts.push(turn.content);
-
-    // Phase 2: replace with tool_use + tool_result content blocks.
-    if (turn.toolCalls && turn.toolCalls.length > 0) {
-      parts.push("\n\n[Tool calls executed by previous agent:]");
-      for (const tc of turn.toolCalls) {
-        parts.push(toolCallToText(tc));
-      }
+    if (!turn.toolCalls || turn.toolCalls.length === 0) {
+      out.push({ role: "assistant", content: turn.content });
+      continue;
     }
 
-    out.push({ role: "assistant", content: parts.join("\n") });
+    const blocks: AnthropicContentBlock[] = [];
+    // Empty text blocks are rejected by the API — only emit when non-empty.
+    if (turn.content) blocks.push({ type: "text", text: turn.content });
+    for (const tc of turn.toolCalls) {
+      blocks.push({ type: "tool_use", id: tc.id, name: tc.name, input: tc.input });
+    }
+    out.push({ role: "assistant", content: blocks });
+    out.push({
+      role: "user",
+      content: turn.toolCalls.map((tc) => ({
+        type: "tool_result" as const,
+        tool_use_id: tc.id,
+        content: tc.output,
+        ...(tc.success ? {} : { is_error: true }),
+      })),
+    });
   }
 
   return out;
@@ -338,17 +407,45 @@ export class CanonicalHistoryAccumulator {
 /** Character budget for a rendered history seed (~6k tokens). */
 export const HISTORY_SEED_MAX_CHARS = 24_000;
 
+/** Per-tool output budget inside the seed — the global budget drops whole
+ *  turns oldest-first, this keeps one chatty tool from eating a turn. */
+const SEED_TOOL_OUTPUT_MAX_CHARS = 2_000;
+
 /**
- * Render the canonical history as a plain-text transcript block for seeding
- * a NEW warm backend after `session.set_provider`. Stateless providers
- * ignore this (they consume `TurnOpts.history` natively every turn); warm
- * providers (claude, pi) prepend it to their first post-switch prompt so
- * the incoming agent can continue the conversation.
+ * Render one tool call as a structured text block for the seed: full input
+ * as JSON, fenced output. Structured-text — richer than a one-line summary,
+ * still prose (see renderHistorySeed's fidelity contract).
+ */
+function toolCallToSeedText(tc: CanonicalToolCall): string {
+  const output =
+    tc.output.length > SEED_TOOL_OUTPUT_MAX_CHARS
+      ? `${tc.output.slice(0, SEED_TOOL_OUTPUT_MAX_CHARS)}\n…output truncated for seed…`
+      : tc.output;
+  return [
+    `### Tool call: ${tc.name} → ${tc.success ? "ok" : "ERROR"}`,
+    `input: ${JSON.stringify(tc.input)}`,
+    "output:",
+    "```",
+    output,
+    "```",
+  ].join("\n");
+}
+
+/**
+ * Render the canonical history as a structured-text transcript block for
+ * seeding a NEW warm backend after `session.set_provider`. Stateless
+ * providers ignore this (they consume `TurnOpts.history` natively every
+ * turn — see the to*Messages converters above); warm providers (claude, pi)
+ * prepend it to their first post-switch prompt so the incoming agent can
+ * continue the conversation.
  *
  * Fidelity contract: this is a faithful TRANSCRIPT, not a native
- * continuation — tool calls are flattened to text and provider-native
- * structures don't survive. Oldest turns are dropped first when the budget
- * is exceeded (recent context matters most), with an elision note.
+ * continuation. Tool calls are rendered as structured text blocks (name,
+ * JSON input, fenced output) rather than native tool_use structures —
+ * neither the Claude Agent SDK nor pi's RPC accepts synthesized native
+ * history injection, so a prompt-prefix transcript is the warm-backend
+ * ceiling. Oldest turns are dropped first when the budget is exceeded
+ * (recent context matters most), with an elision note.
  */
 export function renderHistorySeed(
   history: readonly CanonicalTurn[],
@@ -364,7 +461,7 @@ export function renderHistorySeed(
     const parts: string[] = [`## Assistant (${turn.providerId}/${turn.model})`];
     if (turn.content) parts.push(turn.content);
     for (const tc of turn.toolCalls ?? []) {
-      parts.push(toolCallToText(tc));
+      parts.push(toolCallToSeedText(tc));
     }
     return parts.join("\n");
   });
@@ -386,9 +483,10 @@ export function renderHistorySeed(
   return [
     "<conversation-history>",
     "You are taking over an ongoing session from another agent backend.",
-    "The conversation so far (tool calls flattened to text, possibly",
-    "truncated) follows. Continue it seamlessly — do not re-introduce",
-    "yourself or repeat completed work.",
+    "The conversation so far follows — tool calls appear as structured",
+    "blocks (name, input JSON, fenced output), possibly truncated.",
+    "Continue it seamlessly — do not re-introduce yourself or repeat",
+    "completed work.",
     "",
     kept.join("\n\n"),
     "</conversation-history>",

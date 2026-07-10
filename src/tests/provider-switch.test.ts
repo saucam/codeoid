@@ -299,7 +299,7 @@ describe("toGeminiContent", () => {
     expect(result[2]).toEqual({ role: "user", parts: [{ text: "How are you?" }] });
   });
 
-  it("inlines tool calls as text in the model turn (Phase 1)", () => {
+  it("renders tool calls as native functionCall/functionResponse parts (Phase 2)", () => {
     const history: import("../daemon/providers/canonical.js").CanonicalTurn[] = [
       { role: "user", content: "Run ls" },
       {
@@ -317,10 +317,43 @@ describe("toGeminiContent", () => {
       },
     ];
     const result = toGeminiContent(history);
-    expect(result[1].role).toBe("model");
-    // Tool call should appear as inline text
-    expect(result[1].parts[0].text).toContain("run_shell");
-    expect(result[1].parts[0].text).toContain("main.ts");
+    expect(result).toHaveLength(3); // user, model, function
+    expect(result[1]).toEqual({
+      role: "model",
+      parts: [
+        { text: "Here are the files:" },
+        { functionCall: { name: "run_shell", args: { command: "ls" } } },
+      ],
+    });
+    expect(result[2]).toEqual({
+      role: "function",
+      parts: [
+        {
+          functionResponse: {
+            name: "run_shell",
+            response: { output: "main.ts\nindex.ts", success: true },
+          },
+        },
+      ],
+    });
+  });
+
+  it("omits the text part on a tool-calls-only model turn", () => {
+    const history: import("../daemon/providers/canonical.js").CanonicalTurn[] = [
+      {
+        role: "assistant",
+        content: "",
+        providerId: "claude",
+        model: "m",
+        toolCalls: [
+          { id: "t1", name: "read_file", input: { file_path: "a.ts" }, output: "x", success: true },
+        ],
+      },
+    ];
+    const result = toGeminiContent(history);
+    expect(result[0]?.parts).toEqual([
+      { functionCall: { name: "read_file", args: { file_path: "a.ts" } } },
+    ]);
   });
 
   it("returns empty array for empty history", () => {
@@ -340,7 +373,7 @@ describe("toOpenAIMessages", () => {
     expect(result[1]).toEqual({ role: "assistant", content: "Hi!" });
   });
 
-  it("inlines tool calls as text in the assistant message (Phase 1)", () => {
+  it("renders tool calls as native tool_calls[] + tool-role messages (Phase 2)", () => {
     const history: import("../daemon/providers/canonical.js").CanonicalTurn[] = [
       {
         role: "assistant",
@@ -348,7 +381,7 @@ describe("toOpenAIMessages", () => {
         providerId: "claude",
         model: "claude-opus-4-5",
         toolCalls: [{
-          id: "t1",
+          id: "call_1",
           name: "read_file",
           input: { file_path: "src/main.ts" },
           output: "export default {}",
@@ -357,8 +390,55 @@ describe("toOpenAIMessages", () => {
       },
     ];
     const result = toOpenAIMessages(history);
-    expect(result[0].content).toContain("read_file");
-    expect(result[0].content).toContain("export default {}");
+    expect(result).toHaveLength(2);
+    expect(result[0]).toEqual({
+      role: "assistant",
+      content: "Done.",
+      tool_calls: [
+        {
+          id: "call_1",
+          type: "function",
+          function: { name: "read_file", arguments: JSON.stringify({ file_path: "src/main.ts" }) },
+        },
+      ],
+    });
+    expect(result[1]).toEqual({
+      role: "tool",
+      tool_call_id: "call_1",
+      content: "export default {}",
+    });
+  });
+
+  it("uses null content on a tool-calls-only assistant message", () => {
+    const history: import("../daemon/providers/canonical.js").CanonicalTurn[] = [
+      {
+        role: "assistant",
+        content: "",
+        providerId: "claude",
+        model: "m",
+        toolCalls: [
+          { id: "c1", name: "run_shell", input: { command: "ls" }, output: "ok", success: true },
+        ],
+      },
+    ];
+    const result = toOpenAIMessages(history);
+    expect(result[0]).toMatchObject({ role: "assistant", content: null });
+  });
+
+  it("carries failures in the content string — OpenAI has no is_error (§11.3)", () => {
+    const history: import("../daemon/providers/canonical.js").CanonicalTurn[] = [
+      {
+        role: "assistant",
+        content: "",
+        providerId: "claude",
+        model: "m",
+        toolCalls: [
+          { id: "c1", name: "run_shell", input: { command: "bad" }, output: "exit 127", success: false },
+        ],
+      },
+    ];
+    const result = toOpenAIMessages(history);
+    expect(result[1]).toEqual({ role: "tool", tool_call_id: "c1", content: "Error: exit 127" });
   });
 });
 
@@ -372,6 +452,78 @@ describe("toAnthropicMessages", () => {
     expect(result).toHaveLength(2);
     expect(result[0]).toEqual({ role: "user", content: "Hello" });
     expect(result[1]).toEqual({ role: "assistant", content: "Hi!" });
+  });
+
+  it("renders tool calls as tool_use blocks + a tool_result user message (Phase 2)", () => {
+    const history: import("../daemon/providers/canonical.js").CanonicalTurn[] = [
+      { role: "user", content: "Read main.ts and check the config" },
+      {
+        role: "assistant",
+        content: "Reading both.",
+        thinking: "the user wants two files",
+        providerId: "claude",
+        model: "claude-opus-4-5",
+        toolCalls: [
+          {
+            id: "toolu_01",
+            name: "read_file",
+            input: { file_path: "src/main.ts" },
+            output: "export {}",
+            success: true,
+          },
+          {
+            id: "toolu_02",
+            name: "read_file",
+            input: { file_path: "config.json" },
+            output: "ENOENT",
+            success: false,
+          },
+        ],
+      },
+      { role: "user", content: "Thanks" },
+    ];
+    const result = toAnthropicMessages(history);
+    expect(result).toHaveLength(4); // user, assistant(blocks), user(tool_results), user
+    expect(result[1]).toEqual({
+      role: "assistant",
+      content: [
+        { type: "text", text: "Reading both." },
+        { type: "tool_use", id: "toolu_01", name: "read_file", input: { file_path: "src/main.ts" } },
+        { type: "tool_use", id: "toolu_02", name: "read_file", input: { file_path: "config.json" } },
+      ],
+    });
+    // tool_use ids round-trip into the paired tool_result blocks; failures
+    // carry is_error. Synthesized thinking is deliberately absent (no
+    // signature — the API would reject it).
+    expect(result[2]).toEqual({
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: "toolu_01", content: "export {}" },
+        { type: "tool_result", tool_use_id: "toolu_02", content: "ENOENT", is_error: true },
+      ],
+    });
+    expect(JSON.stringify(result)).not.toContain("thinking");
+  });
+
+  it("omits the empty text block on a tool-calls-only turn", () => {
+    const history: import("../daemon/providers/canonical.js").CanonicalTurn[] = [
+      {
+        role: "assistant",
+        content: "",
+        providerId: "claude",
+        model: "m",
+        toolCalls: [
+          { id: "t1", name: "run_shell", input: { command: "ls" }, output: "ok", success: true },
+        ],
+      },
+    ];
+    const result = toAnthropicMessages(history);
+    const content = result[0]?.content;
+    expect(Array.isArray(content)).toBe(true);
+    if (Array.isArray(content)) {
+      expect(content).toHaveLength(1);
+      expect(content[0]?.type).toBe("tool_use");
+    }
   });
 });
 

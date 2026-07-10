@@ -6,9 +6,10 @@
  * No persistent session state: the entire conversation context is resent on
  * every turn, which is the Gemini API's natural model.
  *
- * Phase 1: text-only. Tool calls from prior Claude turns are rendered as
- *   inline text so Gemini has full context. Function calling support (Phase 2)
- *   will replace this with proper functionCall/functionResponse parts.
+ * History fidelity: tool calls from prior turns (any backend) arrive as
+ *   native functionCall/functionResponse parts via toGeminiContent(), so
+ *   Gemini sees real tool-call turns. Gemini itself remains text-only in
+ *   its OWN turns (no function-calling loop here yet).
  *
  * Auth: reads GOOGLE_API_KEY from the environment. Override with
  *   GeminiProviderInit.apiKey for programmatic control (tests, multi-tenant).

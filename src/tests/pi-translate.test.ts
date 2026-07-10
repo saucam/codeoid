@@ -144,9 +144,36 @@ describe("renderHistorySeed", () => {
     expect(seed).toContain("<conversation-history>");
     expect(seed).toContain("## User\nfix the bug");
     expect(seed).toContain("## Assistant (claude/opus)");
-    expect(seed).toContain("run_shell");
+    // Structured tool block — not the old one-line "[Tool: …]" flattening.
+    expect(seed).toContain("### Tool call: run_shell → ok");
+    expect(seed).toContain(`input: {"command":"bun test"}`);
     expect(seed).toContain("1 pass");
+    expect(seed).not.toContain("[Tool:");
     expect(seed).toContain("</conversation-history>");
+  });
+
+  it("marks failed tool calls and truncates oversized outputs per-tool", () => {
+    const seed = renderHistorySeed([
+      {
+        role: "assistant",
+        content: "Ran it.",
+        providerId: "pi",
+        model: "m",
+        toolCalls: [
+          {
+            id: "t1",
+            name: "run_shell",
+            input: { command: "bad" },
+            output: "x".repeat(5_000),
+            success: false,
+          },
+        ],
+      },
+    ]);
+    expect(seed).toContain("### Tool call: run_shell → ERROR");
+    expect(seed).toContain("…output truncated for seed…");
+    // Global budget note should NOT appear for a single small turn.
+    expect(seed).not.toContain("omitted for length");
   });
 
   it("returns empty for empty history", () => {

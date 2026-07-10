@@ -4,9 +4,11 @@
  * Each runTurn() call converts the full CanonicalTurn[] history to OpenAI's
  * messages[] format and issues a single streaming chat completion request.
  *
- * Phase 1: text-only. Tool calls from prior Claude turns are rendered as
- *   inline text. Function calling support (Phase 2) will use tool_calls[]
- *   + { role: "tool" } messages with proper CanonicalToolCall rendering.
+ * History fidelity: tool calls from prior turns (any backend) arrive as
+ *   native assistant tool_calls[] + { role: "tool" } messages via
+ *   toOpenAIMessages(), so the model sees real tool-call turns. The
+ *   provider itself remains text-only in its OWN turns (no function-calling
+ *   loop here yet).
  *
  * Auth: reads OPENAI_API_KEY from the environment. Override with
  *   OpenAIProviderInit.apiKey for programmatic control.

@@ -97,8 +97,8 @@ Anthropic  │ assistant: { content: [tool_use blocks] }
 OpenAI     │ assistant: { tool_calls: [function call objects] }
            │ tool:      { tool_call_id, content }
 ───────────┼───────────────────────────────────────────
-Gemini     │ model: { parts: [functionCall parts] }
-           │ user:  { parts: [functionResponse parts] }
+Gemini     │ model:    { parts: [functionCall parts] }
+           │ function: { parts: [functionResponse parts] }
 ```
 
 Conversion is deterministic. Each provider API validates that tool_result messages reference declared tools. To satisfy this, every provider call includes the full canonical tool definition list regardless of which subset appears in history.
