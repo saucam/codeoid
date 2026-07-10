@@ -99,12 +99,10 @@ export class StdioJsonRpcProcess {
         reject(new Error(`${this.#opts.name} request timed out: ${method}`));
       }, timeoutMs);
       this.#pending.set(id, { resolve, reject, timer });
-      this.#proc.stdin.write(`${frame}\n`, (err) => {
-        if (err) {
-          clearTimeout(timer);
-          this.#pending.delete(id);
-          reject(err);
-        }
+      this.#write(`${frame}\n`, (err) => {
+        clearTimeout(timer);
+        this.#pending.delete(id);
+        reject(err);
       });
     });
   }
@@ -112,13 +110,27 @@ export class StdioJsonRpcProcess {
   /** Client→server notification (no response expected). */
   notify(method: string, params?: Record<string, unknown>): void {
     if (this.#exited) return;
-    this.#proc.stdin.write(
-      `${JSON.stringify({ jsonrpc: "2.0", method, ...(params ? { params } : {}) })}\n`,
-    );
+    this.#write(`${JSON.stringify({ jsonrpc: "2.0", method, ...(params ? { params } : {}) })}\n`);
   }
 
   kill(): void {
     this.#proc.kill("SIGKILL");
+  }
+
+  /**
+   * Write one frame, tolerating a dead child. Beyond the #exited flag and
+   * the stdin "error" listener (async errors), write() on a DESTROYED
+   * stream throws synchronously — swallow it: the exit handler owns
+   * diagnostics, and pending requests are already failed by #failAll.
+   */
+  #write(frame: string, onWriteError?: (err: Error) => void): void {
+    try {
+      this.#proc.stdin.write(frame, (err) => {
+        if (err) onWriteError?.(err);
+      });
+    } catch (err) {
+      onWriteError?.(err instanceof Error ? err : new Error(String(err)));
+    }
   }
 
   #onStdout(chunk: string): void {
@@ -156,10 +168,10 @@ export class StdioJsonRpcProcess {
       this.#opts
         .onServerRequest(frame.method, frame.params ?? {})
         .then((result) => {
-          this.#proc.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
+          this.#write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
         })
         .catch((err: unknown) => {
-          this.#proc.stdin.write(
+          this.#write(
             `${JSON.stringify({
               jsonrpc: "2.0",
               id,
