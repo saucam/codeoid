@@ -24,6 +24,7 @@
  * history without pretending codeoid gated them.
  */
 
+import { randomUUID } from "node:crypto";
 import { AsyncQueue } from "../../async-queue.js";
 import type { Store } from "../../store.js";
 import type {
@@ -361,7 +362,7 @@ export class CodexProvider implements SessionProvider {
         const canUseTool = this.#canUseTool;
         // Fail closed: an approval with no gate wired is denied, never run.
         if (!canUseTool) return { decision: "denied" };
-        const itemId = String(params.itemId ?? params.approvalId ?? crypto.randomUUID());
+        const itemId = String(params.itemId ?? params.approvalId ?? randomUUID());
         const { name, input } = approvalToTool(method, params);
         this.#announcedItems.set(itemId, { name, input });
         this.#push({

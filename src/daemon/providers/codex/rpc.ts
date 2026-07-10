@@ -63,6 +63,10 @@ export class CodexRpcProcess {
       [...(opts.argsPrefix ?? []), "app-server", ...(opts.args ?? [])],
       { cwd: opts.cwd, stdio: ["pipe", "pipe", "pipe"], env: opts.env },
     );
+    // A codex that dies mid-write must not crash the daemon: without an
+    // error listener, stdin's EPIPE becomes an uncaught stream error. The
+    // exit handler owns diagnostics; writes after death are just dropped.
+    this.#proc.stdin.on("error", () => {});
     this.#proc.stdout.setEncoding("utf8");
     this.#proc.stdout.on("data", (chunk: string) => this.#onStdout(chunk));
     this.#proc.stderr.setEncoding("utf8");
