@@ -16,6 +16,7 @@
 
 import type {
   ClientMessage,
+  SessionInfo,
   SessionMode,
 } from "@codeoid/protocol";
 
@@ -35,7 +36,7 @@ export type SlashCommand =
   | { kind: "capabilities"; tab: "agents" | "skills" | "mcp" | "hooks" }
   | { kind: "export" }
   | { kind: "import" }
-  | { kind: "fork" };
+  | { kind: "fork"; providerId?: string };
 
 export interface ParseSlashOptions {
   /**
@@ -138,7 +139,10 @@ export function parseSlash(raw: string, opts?: ParseSlashOptions): SlashCommand 
     case "import":
       return { kind: "import" };
     case "fork":
-      return { kind: "fork" };
+      // `/fork [backend]` — branch the CURRENT session, optionally onto a
+      // different backend. (Historically an alias for /import, which
+      // silently discarded the argument and opened the bundle dialog.)
+      return { kind: "fork", providerId: rest[0]?.toLowerCase() };
     default:
       // Not a built-in. Provider commands (pi extensions, prompt templates,
       // skills) pass through as plain prompt text — the provider expands them.
@@ -168,6 +172,12 @@ export interface SlashContext {
   showCapabilities?: (tab: "agents" | "skills" | "mcp" | "hooks") => void;
   showExport?: () => void;
   showImport?: () => void;
+  /**
+   * Called with the fork's SessionInfo after a successful `/fork`, so the
+   * frontend can add it to its store and focus it. Absent = the daemon's
+   * `session.list` broadcast is the only signal.
+   */
+  onSessionForked?: (session: SessionInfo) => void;
 }
 
 export function dispatchSlash(cmd: SlashCommand, ctx: SlashContext): void {
@@ -269,8 +279,28 @@ export function dispatchSlash(cmd: SlashCommand, ctx: SlashContext): void {
       ctx.showExport?.();
       return;
     case "import":
-    case "fork":
       ctx.showImport?.();
       return;
+    case "fork": {
+      const msg: ClientMessage = {
+        type: "session.fork",
+        id: ctx.newRequestId(),
+        sessionId: ctx.sessionId,
+        ...(cmd.providerId ? { providerId: cmd.providerId } : {}),
+      };
+      if (ctx.request) {
+        ctx
+          .request(msg)
+          .then((data) => {
+            if (data && typeof data === "object" && "id" in data) {
+              ctx.onSessionForked?.(data as SessionInfo);
+            }
+          })
+          .catch((e) => ctx.report?.(e instanceof Error ? e.message : String(e)));
+      } else {
+        ctx.send(msg);
+      }
+      return;
+    }
   }
 }

@@ -63,3 +63,72 @@ describe("PromptBox IME guard", () => {
     );
   });
 });
+
+function sess2(): SessionInfo {
+  return { ...sess(), id: "s2", name: "s2" };
+}
+
+async function dropFile(container: HTMLElement, name: string): Promise<void> {
+  const footer = container.querySelector("footer") ?? container.firstElementChild!;
+  const file = new File(["hello attachment"], name, { type: "text/plain" });
+  fireEvent.drop(footer, {
+    dataTransfer: { types: ["Files"], files: [file] as unknown as FileList },
+  });
+  // readAttachment resolves file.text() — flush the microtask queue.
+  await Promise.resolve();
+  await Promise.resolve();
+  await new Promise((r) => setTimeout(r, 0));
+}
+
+describe("PromptBox attachments are session-scoped", () => {
+  it("clears pending attachments when the focused session changes", async () => {
+    ingestSessionList([sess(), sess2()]);
+    focusSession("s");
+    const { container, queryByText, findByText } = render(() => <PromptBox />);
+
+    await dropFile(container as HTMLElement, "secrets.env");
+    expect(await findByText("secrets.env")).toBeTruthy();
+
+    // Switching sessions must NOT carry the file along — a send on s2
+    // would otherwise deliver s1's dropped file to the wrong agent.
+    focusSession("s2");
+    await Promise.resolve();
+    expect(queryByText("secrets.env")).toBeNull();
+  });
+});
+
+describe("PromptBox /fork", () => {
+  it("routes /fork <backend> to session.fork and focuses the fork", async () => {
+    vi.mocked(request).mockResolvedValueOnce({
+      id: "fork-1",
+      name: "s (fork)",
+      workdir: "/tmp",
+      status: "idle",
+      createdBy: "u",
+      createdAt: "2026-05-04T08:00:00Z",
+      attachedClients: 0,
+    });
+    ingestSessionList([sess()]);
+    focusSession("s");
+    const r = render(() => <PromptBox />);
+    const ta = r.container.querySelector("textarea") as HTMLTextAreaElement;
+
+    fireEvent.input(ta, { target: { value: "/fork codex" } });
+    fireEvent.keyDown(ta, { key: "Enter" });
+
+    // The historical bug: /fork opened the import-bundle dialog and
+    // silently dropped the backend argument. It must send session.fork.
+    expect(request).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "session.fork",
+        sessionId: "s",
+        providerId: "codex",
+      }),
+    );
+    // …and once the daemon answers, the fork becomes the focused session.
+    await Promise.resolve();
+    await Promise.resolve();
+    const { focusedSessionId } = await import("../../state/sessions");
+    expect(focusedSessionId()).toBe("fork-1");
+  });
+});

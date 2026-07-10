@@ -27,6 +27,8 @@ import {
 import {
   focusedSession,
   focusedSessionId,
+  focusSession,
+  mergeSession,
   removeSession,
 } from "../../state/sessions";
 import { openCapabilitiesDrawer } from "../CapabilitiesDrawer";
@@ -164,7 +166,16 @@ const PromptBox: Component = () => {
   });
 
   // Re-hydrate from localStorage when the focused session id changes.
-  createEffect(on(focusedSessionId, () => hydrate()));
+  // Attachments (and the error line) are session-scoped ephemera with no
+  // per-session store, unlike text drafts — clear them so a file dropped
+  // on session A can never ride along into a send on session B.
+  createEffect(
+    on(focusedSessionId, () => {
+      hydrate();
+      setAttachments([]);
+      setError(null);
+    }),
+  );
 
   // Prefetch the provider-command catalog for the focused session so the
   // slash parser can pass provider commands (pi extensions, prompt
@@ -224,6 +235,10 @@ const PromptBox: Component = () => {
           showCapabilities: openCapabilitiesDrawer,
           showExport: openExportModal,
           showImport: openImportModal,
+          onSessionForked: (forked) => {
+            mergeSession(forked);
+            focusSession(forked.id);
+          },
           showHelp: openHelpModal,
           showModelPicker: openModelPicker,
         });
@@ -268,10 +283,16 @@ const PromptBox: Component = () => {
       ...(payload.length > 0 ? { attachments: payload } : {}),
     }).catch((e) => {
       setError(`Message not delivered: ${e instanceof Error ? e.message : String(e)}`);
-      setText(raw);
+      // The draft store is keyed, so the text survives regardless; only
+      // repopulate the LIVE editor if the user is still on that session —
+      // restoring into whichever session is focused NOW would hand the
+      // failed send's attachments to the wrong agent.
       setDraft(key, raw);
-      if (sentAttachments.length > 0) setAttachments(sentAttachments);
-      autosize();
+      if (draftKey() === key) {
+        setText(raw);
+        if (sentAttachments.length > 0) setAttachments(sentAttachments);
+        autosize();
+      }
     });
     clearDraft(key);
     setText("");
