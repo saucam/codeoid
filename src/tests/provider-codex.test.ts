@@ -15,7 +15,10 @@
  */
 
 import { describe, it, expect } from "bun:test";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { CodexRpcProcess } from "../daemon/providers/codex/rpc.js";
 import { CodexProvider } from "../daemon/providers/codex/index.js";
 import { resolveCodexCommand } from "../daemon/providers/codex/resolve.js";
 import { createDefaultProviderRegistry } from "../daemon/providers/registry.js";
@@ -208,7 +211,102 @@ describe("CodexProvider over fake-codex", () => {
       { id: "gpt-5.6-terra", displayName: "GPT-5.6-Terra", description: "Balanced agentic coding model." },
     ]);
   });
+
+  it("C9: lifecycle — thread id becomes the backing id, reset/setHasQueried/dispose, onModels fires", async () => {
+    const reported: Array<{ value: string; displayName: string }> = [];
+    const p = new CodexProvider({
+      sessionId: "sess-1",
+      initialBackingId: "sess-1",
+      command: process.execPath,
+      argsPrefix: [FIXTURE],
+      store: {} as Store,
+      onModels: (models) => reported.push(...models.map((m) => ({ value: m.value, displayName: m.displayName }))),
+    });
+    expect(p.hasQueried).toBe(false);
+    expect(p.queuedMessages).toBe(0);
+
+    await collect(p.runTurn(turnOpts("hello")));
+    expect(p.hasQueried).toBe(true);
+    // codex minted the thread — it round-trips as the backing session id.
+    expect(p.backingSessionId).toBe("codex-thread-1");
+    expect(reported).toEqual([{ value: "gpt-5.6-terra", displayName: "GPT-5.6-Terra" }]);
+
+    p.setHasQueried(false);
+    expect(p.hasQueried).toBe(false);
+    p.resetToNewSession("fresh-backing");
+    expect(p.backingSessionId).toBe("fresh-backing");
+
+    await p.dispose(); // teardown via dispose
+    expect(await p.listModels()).toEqual([]); // no live process → empty catalog
+  });
+
+  it("C10: interrupt() sends turn/interrupt and the turn ends as interrupted", async () => {
+    const p = makeProvider();
+    const run = p.runTurn(turnOpts("hang-forever"));
+    // Give the turn time to start (thread + turn/start round trips).
+    await new Promise((r) => setTimeout(r, 300));
+    await run.interrupt();
+    const events = await collect(run);
+    await p.teardown();
+
+    const done = events.find((e) => e.type === "turn_done");
+    expect(done).toBeDefined();
+    if (done?.type === "turn_done") expect(done.result.stopReason).toBe("interrupted");
+  });
+
+  it("C11: unknown server→client requests are refused with a JSON-RPC error (fail closed)", async () => {
+    const p = makeProvider();
+    const events = await collect(p.runTurn(turnOpts("unknown-request")));
+    await p.teardown();
+    // The fixture saw an error response — codeoid refused rather than guessed.
+    expect(events.some((e) => e.type === "text_done" && e.content === "server-request-errored")).toBe(true);
+  });
+
+  it("C12: rpc edges — spawn failure, request timeout, request/notify after exit", async () => {
+    // Spawn failure rejects in-flight requests.
+    const dead = new CodexRpcProcess({
+      command: "/nonexistent/codex-binary",
+      cwd: "/tmp",
+      env: {},
+      onNotification: () => {},
+      onServerRequest: async () => ({}),
+      onExit: () => {},
+    });
+    expect(dead.request("initialize", {})).rejects.toThrow(/spawn failed|exited/);
+
+    // A request the server never answers times out.
+    const exited = new Promise<void>((resolve) => {
+      const rpc = new CodexRpcProcess({
+        command: process.execPath,
+        argsPrefix: [FIXTURE],
+        cwd: "/tmp",
+        env: { PATH: process.env.PATH ?? "" },
+        onNotification: () => {},
+        onServerRequest: async () => ({}),
+        onExit: () => resolve(),
+      });
+      void (async () => {
+        expect(rpc.request("test/noReply", {}, 200)).rejects.toThrow(/timed out/);
+        await new Promise((r) => setTimeout(r, 250));
+        rpc.kill();
+        await exitedSoon(rpc);
+        // Post-exit: requests reject, notify is a silent no-op.
+        expect(rpc.request("initialize", {})).rejects.toThrow(/exited/);
+        rpc.notify("initialized");
+      })();
+    });
+    await exited;
+  });
 });
+
+/** Wait until the rpc process reports dead. */
+async function exitedSoon(rpc: CodexRpcProcess): Promise<void> {
+  const deadline = Date.now() + 2000;
+  while (rpc.alive) {
+    if (Date.now() > deadline) throw new Error("codex rpc never exited");
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
 
 describe("codex resolution + registry", () => {
   it("config override → PATH → null, with registry hints", () => {
@@ -225,6 +323,30 @@ describe("codex resolution + registry", () => {
 
     // No codex anywhere → null + generic install hint.
     expect(resolveCodexCommand(undefined, { PATH: "" })).toBeNull();
+
+    // Bare-name override resolves via PATH; system codex resolves as "path".
+    const tmp = mkdtempSync(join(tmpdir(), "codeoid-codex-resolve-"));
+    try {
+      const bin = join(tmp, "my-codex");
+      writeFileSync(bin, "#!/bin/sh\necho fake-codex\n");
+      chmodSync(bin, 0o755);
+      expect(resolveCodexCommand("my-codex", { PATH: tmp })).toEqual({
+        command: bin,
+        argsPrefix: [],
+        source: "config",
+      });
+      expect(resolveCodexCommand("missing-name", { PATH: tmp })).toBeNull();
+      const sys = join(tmp, "codex");
+      writeFileSync(sys, "#!/bin/sh\necho fake-codex\n");
+      chmodSync(sys, 0o755);
+      expect(resolveCodexCommand(undefined, { PATH: tmp })).toEqual({
+        command: sys,
+        argsPrefix: [],
+        source: "path",
+      });
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
 
     // Disabled → absent entirely, no hint.
     const disabled = createDefaultProviderRegistry({

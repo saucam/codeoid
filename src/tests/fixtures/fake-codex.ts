@@ -77,6 +77,13 @@ async function runTurn(threadId: string, prompt: string): Promise<void> {
     const answers = answer.answers as Array<{ answer?: string | null }> | undefined;
     const picked = answers?.[0]?.answer ?? "no-answer";
     send({ method: "item/completed", params: { item: { id: "m1", type: "agentMessage", text: `You picked: ${picked}` } } });
+  } else if (prompt.includes("hang-forever")) {
+    // Emit nothing further — the test interrupts the turn.
+    return;
+  } else if (prompt.includes("unknown-request")) {
+    const resp = await serverRequest("custom/unknownThing", { anything: true });
+    const text = resp.__error ? "server-request-errored" : "server-request-oddly-ok";
+    send({ method: "item/completed", params: { item: { id: "m1", type: "agentMessage", text } } });
   } else if (prompt.includes("echo-prompt")) {
     send({ method: "item/completed", params: { item: { id: "m1", type: "agentMessage", text: `PROMPT:${prompt}` } } });
   } else {
@@ -118,7 +125,12 @@ async function handle(frame: Record<string, unknown>): Promise<void> {
     const resolve = pendingServerReqs.get(id);
     if (resolve) {
       pendingServerReqs.delete(id);
-      resolve((frame.result ?? { decision: "denied" }) as Record<string, unknown>);
+      const error = frame.error as { message?: string } | undefined;
+      resolve(
+        error
+          ? { __error: error.message ?? "error" }
+          : ((frame.result ?? { decision: "denied" }) as Record<string, unknown>),
+      );
     }
     return;
   }
@@ -158,6 +170,8 @@ async function handle(frame: Record<string, unknown>): Promise<void> {
       send({ id, result: {} });
       send({ method: "turn/completed", params: { turn: { id: "turn-1", status: "interrupted", usage: usage() } } });
       break;
+    case "test/noReply":
+      break; // deliberately never answered — rpc timeout test
     default:
       send({ id, error: { code: -32601, message: `fake-codex: unknown method ${method}` } });
       break;
