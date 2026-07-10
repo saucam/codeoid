@@ -331,3 +331,62 @@ describe("loadConfig — workspace index tunables", () => {
     expect(c.workspaceIndex.episodeThreshold).toBe(25);
   });
 });
+
+describe("loadConfig — hooks", () => {
+  it("defaults to enabled with no entries", () => {
+    const c = loadConfig({ configPath, env: {} });
+    expect(c.hooks).toEqual({ enabled: true, entries: [] });
+  });
+
+  it("parses configured hook entries", () => {
+    writeConfig({
+      hooks: {
+        entries: [
+          { event: "tool_call", matcher: "^Bash$", type: "command", command: "./guard.sh" },
+          { event: "after_turn", type: "webhook", url: "https://example.com/hook", timeoutMs: 5000 },
+        ],
+      },
+    });
+    const c = loadConfig({ configPath, env: {} });
+    expect(c.hooks?.enabled).toBe(true);
+    expect(c.hooks?.entries).toHaveLength(2);
+    expect(c.hooks?.entries[0]).toMatchObject({ event: "tool_call", type: "command", command: "./guard.sh" });
+    expect(c.hooks?.entries[1]).toMatchObject({ event: "after_turn", type: "webhook", timeoutMs: 5000 });
+  });
+
+  it("CODEOID_HOOKS_ENABLED=false kills every hook per-invocation", () => {
+    writeConfig({
+      hooks: {
+        entries: [{ event: "tool_call", type: "command", command: "./guard.sh" }],
+      },
+    });
+    const c = loadConfig({ configPath, env: { CODEOID_HOOKS_ENABLED: "false" } });
+    expect(c.hooks?.enabled).toBe(false);
+    expect(c.hooks?.entries).toHaveLength(1); // entries survive; the kill switch gates them
+  });
+
+  it("rejects a command hook without a command, a webhook without a url, and a bad matcher", () => {
+    writeConfig({ hooks: { entries: [{ event: "tool_call", type: "command" }] } });
+    expect(() => loadConfig({ configPath, env: {} })).toThrow(/command/);
+
+    writeConfig({ hooks: { entries: [{ event: "tool_call", type: "webhook" }] } });
+    expect(() => loadConfig({ configPath, env: {} })).toThrow(/url/);
+
+    writeConfig({
+      hooks: {
+        entries: [{ event: "tool_call", type: "command", command: "x", matcher: "([unclosed" }],
+      },
+    });
+    expect(() => loadConfig({ configPath, env: {} })).toThrow(/regular expression/);
+  });
+
+  it("rejects an unknown hook event and an out-of-range timeout", () => {
+    writeConfig({ hooks: { entries: [{ event: "not_a_seam", type: "command", command: "x" }] } });
+    expect(() => loadConfig({ configPath, env: {} })).toThrow();
+
+    writeConfig({
+      hooks: { entries: [{ event: "tool_call", type: "command", command: "x", timeoutMs: 120_000 }] },
+    });
+    expect(() => loadConfig({ configPath, env: {} })).toThrow();
+  });
+});

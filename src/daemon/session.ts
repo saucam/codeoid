@@ -23,6 +23,8 @@ import {
   isSubagentEvent,
 } from "./providers/interface.js";
 import { createDefaultProviderRegistry, type ProviderRegistry } from "./providers/registry.js";
+import type { HookBus } from "./hooks/bus.js";
+import type { HookSessionContext } from "./hooks/types.js";
 import { randomUUID } from "node:crypto";
 import type {
   AuthContext,
@@ -204,6 +206,13 @@ export interface SessionCreateOptions {
    */
   providers?: ProviderRegistry;
   /**
+   * The daemon's hook bus (config-declared hooks dispatched at this
+   * session's seams — see hooks/bus.ts). Built once at startup and shared
+   * across sessions, conductor and workers included (tenant hooks apply
+   * uniformly). Absent = no hooks, zero overhead.
+   */
+  hooks?: HookBus;
+  /**
    * Provider override for testing. When present, replaces the registry
    * lookup so integration tests run without the Claude Agent SDK subprocess.
    * Name prefix signals this is test-only infrastructure — do not use in production.
@@ -241,6 +250,7 @@ export class Session {
   #fleet?: McpSdkServerConfigWithInstance;
   #compressionRegistry?: CompressionRegistry;
   #onModels?: SessionCreateOptions["onModels"];
+  #hookBus?: HookBus;
 
   #status: SessionStatus = "idle";
   /** Trailing-debounce timer coalescing persistence of ACTIVE status flips
@@ -510,6 +520,7 @@ export class Session {
     this.#fleet = opts.fleet;
     this.#compressionRegistry = opts.compressionRegistry;
     this.#onModels = opts.onModels;
+    this.#hookBus = opts.hooks;
     // Tenant-scoped (auth carries account_id/project_id) so two accounts in
     // the same directory never share memory.
     this.#workspaceId = workspaceIdFromPath(opts.workdir, opts.auth);
@@ -610,6 +621,23 @@ export class Session {
         providerId: this.#provider.id,
       });
     }
+
+    // Hook seam: session lifecycle. `resume` = rebuilt from persisted state
+    // (daemon restart) — hooks filter on `source` so they don't fire
+    // en-masse at boot. Fire-and-forget by contract.
+    this.#hookBus?.emit("session_start", this.#hookContext(), {
+      source: opts.existingId ? "resume" : "new",
+    });
+  }
+
+  /** Session identity stamped on every hook payload. */
+  #hookContext(): HookSessionContext {
+    return {
+      sessionId: this.id,
+      sessionName: this.name,
+      workdir: this.workdir,
+      providerId: this.#provider.id,
+    };
   }
 
   /**
@@ -789,6 +817,12 @@ export class Session {
     // and refreshes every client's SessionInfo.
     this.#persistStatus();
     this.#broadcastInfoUpdate();
+    // Hook seam: observe-only. #hookContext() already reports the NEW id.
+    this.#hookBus?.emit("provider_switched", this.#hookContext(), {
+      from: previous,
+      to: requested,
+      seeded,
+    });
     return { ok: true, providerId: requested };
   }
 
@@ -1425,6 +1459,18 @@ export class Session {
       });
     };
 
+    // Hook seam: a fresh turn is starting (mid-turn injections above don't
+    // re-fire this). Hooks may contribute a system-prompt append for THIS
+    // turn — composed after the stable base append so the cached prompt
+    // prefix is untouched when no hook contributes.
+    let hookPromptAppend: string | undefined;
+    if (this.#hookBus?.hasHooks("before_turn")) {
+      ({ systemPromptAppend: hookPromptAppend } = await this.#hookBus.dispatchBeforeTurn(
+        this.#hookContext(),
+        { prompt: effectivePrompt },
+      ));
+    }
+
     this.#accumulator.pushUserTurn(effectivePrompt);
     const run = this.#provider.runTurn({
       history: this.#accumulator.history,
@@ -1432,7 +1478,7 @@ export class Session {
       model: this.#model ?? undefined,
       fallbackModel: this.#fallbackModel ?? undefined,
       workdir: this.workdir,
-      systemPromptAppend: this.#buildPromptAppend(),
+      systemPromptAppend: this.#composePromptAppend(hookPromptAppend),
       canUseTool: this.#makeCanUseToolFn(sender),
       requestUserInput: (req) => this.requestUserInput(req),
       sender,
@@ -1607,6 +1653,8 @@ export class Session {
       this.#statusPersistTimer = null;
     }
     this.#store.audit(sender.sub, "session.destroy", this.id);
+    // Hook seam: observe-only lifecycle notification.
+    this.#hookBus?.emit("session_end", this.#hookContext(), {});
     // Tear down the streamInput loop cleanly before wiping storage so we
     // don't leave a zombie SDK subprocess alive holding the transcript file.
     await this.#teardownProvider();
@@ -2080,6 +2128,11 @@ export class Session {
     this.#persistAndBuffer(infoMsg);
     this.#broadcastRaw(infoMsg);
     this.#broadcastInfoUpdate();
+    // Hook seam: observe-only lifecycle notification.
+    this.#hookBus?.emit("rotated", this.#hookContext(), {
+      reason,
+      rotationCount: this.#rotationCount,
+    });
   }
 
   /**
@@ -2158,6 +2211,16 @@ export class Session {
     return parts.length > 0 ? parts.join("\n\n") : undefined;
   }
 
+  /**
+   * Base prompt append plus a per-turn before_turn hook contribution. The
+   * hook part goes LAST so the stable base stays a cache-friendly prefix.
+   */
+  #composePromptAppend(hookAppend?: string): string | undefined {
+    const base = this.#buildPromptAppend();
+    if (!hookAppend) return base;
+    return base ? `${base}\n\n${hookAppend}` : hookAppend;
+  }
+
   #buildMemoryPromptAppend(): string {
     const index = this.#indexScheduler?.get() ?? "";
     if (!index) return MEMORY_SYSTEM_PROMPT_APPEND;
@@ -2196,9 +2259,10 @@ export class Session {
    *
    * IMPORTANT: #peekAutoApprove is used for the initial tool_call message
    * state (UI only). If you call #shouldAutoApprove from tool_start too, the
-   * budget is decremented twice per tool call (once here, once there) because
-   * tool_start runs after canUseTool's synchronous section but before its
-   * first yield — the microtask ordering is deterministic.
+   * budget is decremented twice per tool call (once here, once there) —
+   * canUseTool's first yield lets the tool_start handler run before this
+   * gate, then the decision happens exactly once here (after the hook gate,
+   * so a hook-blocked tool never burns budget).
    */
   #shouldAutoApprove(toolName: string): boolean {
     // HARD gate, checked before any mode logic: send-class fleet dispatch
@@ -2291,19 +2355,70 @@ export class Session {
   }
 
   #makeCanUseToolFn(sender: AuthContext): ToolApprovalFn {
-    return async (_toolId, approvalId, toolName, inputObj) => {
-      const autoApprove = this.#shouldAutoApprove(toolName);
-
+    return async (toolId, approvalId, toolName, inputObj) => {
       // Yield once so the tool_start event is processed by the event consumer
-      // (creating the SessionMessage) before we return the approval decision.
+      // (creating the SessionMessage) before hooks run or the approval
+      // decision is returned.
       await Promise.resolve();
+
+      // Hook gate — the policy layer, run BEFORE the approval gate. A hook
+      // block is a policy deny that never prompts the user (and never burns
+      // the autonomous budget — #shouldAutoApprove runs after this); an
+      // input mutation feeds the same updatedInput path the approval
+      // sanitizer uses. Uniform across modes: a block wins even for
+      // auto-approved safe tools.
+      let effectiveInput = inputObj;
+      if (this.#hookBus?.hasHooks("tool_call", toolName)) {
+        const hookResult = await this.#hookBus.dispatchToolCall(this.#hookContext(), {
+          toolName,
+          toolId,
+          input: inputObj,
+        });
+        if (hookResult.blocked) {
+          const { reason, hookName } = hookResult.blocked;
+          this.#approvalPatchKeys.delete(approvalId);
+          this.#resolveToolCallMessage(approvalId, {
+            phase: "cancelled",
+            reason: "denied",
+            message: `Blocked by hook "${hookName}": ${reason}`,
+          });
+          this.#store.audit(sender.sub, "session.hook_block", this.id, `tool=${toolName} hook=${hookName}`);
+          const infoMsg = this.#makeMessage(
+            "info",
+            `🪝 Hook "${hookName}" blocked ${toolName}: ${reason}`,
+            SYSTEM_IDENTITY,
+            undefined,
+            undefined,
+            { event: "hook.blocked", hook: hookName, tool: toolName, reason },
+          );
+          this.#persistAndBuffer(infoMsg);
+          this.#broadcastRaw(infoMsg);
+          return { behavior: "deny" as const, message: `Blocked by hook "${hookName}": ${reason}` };
+        }
+        if (hookResult.updatedInput) {
+          effectiveInput = hookResult.updatedInput;
+          this.#applyHookInputMutation(approvalId, effectiveInput);
+          const infoMsg = this.#makeMessage(
+            "info",
+            `🪝 Hook ${hookResult.mutatedBy.map((n) => `"${n}"`).join(", ")} updated the ${toolName} input`,
+            SYSTEM_IDENTITY,
+            undefined,
+            undefined,
+            { event: "hook.updated_input", hooks: hookResult.mutatedBy, tool: toolName },
+          );
+          this.#persistAndBuffer(infoMsg);
+          this.#broadcastRaw(infoMsg);
+        }
+      }
+
+      const autoApprove = this.#shouldAutoApprove(toolName);
 
       if (autoApprove) {
         this.#approvalIdToMessageId.delete(approvalId); // clean up — no manual approval will reference this
         this.#approvalPatchKeys.delete(approvalId);
         this.#store.audit(sender.sub, "session.auto_approve", this.id, `tool=${toolName} mode=${this.#mode}`);
         this.#setStatus("tool_running");
-        return { behavior: "allow" as const, updatedInput: inputObj };
+        return { behavior: "allow" as const, updatedInput: effectiveInput };
       }
 
       // Manual approval — wait for user response.
@@ -2312,45 +2427,83 @@ export class Session {
       this.#setStatus(approved ? "tool_running" : "thinking");
 
       // Finalize the tool_call message in scrollback + transcript.
-      const msgId = this.#approvalIdToMessageId.get(approvalId);
-      if (msgId) {
-        // Approved → "executing" (tool hasn't run yet — tool_complete will
-        // set the final "completed" state with real output). Denied → "cancelled".
-        const resolvedState = (
-          approved
-            ? { phase: "executing", input: inputObj }
-            : { phase: "cancelled", reason: "denied" }
-        ) as unknown as ToolState;
-        this.#scrollback.updateMessage(msgId, (m) => {
-          const sm = m as SessionMessage;
-          if (sm.tool) sm.tool.state = resolvedState;
-        });
-        const toolMsg = this.#toolCallMessages.get(msgId);
-        if (toolMsg?.tool) {
-          const resolvedMsg: SessionMessage = { ...toolMsg, tool: { ...toolMsg.tool, state: resolvedState }, timestamp: new Date().toISOString() };
-          this.#transcriptStore.append(this.id, resolvedMsg, this.#seq++).catch(() => {});
-          this.#broadcastRaw({
-            type: "session.message.delta",
-            sessionId: this.id,
-            messageId: msgId,
-            toolStateUpdate: resolvedState,
-            timestamp: resolvedMsg.timestamp,
-          });
-        }
-        this.#approvalIdToMessageId.delete(approvalId);
-      }
+      // Approved → "executing" (tool hasn't run yet — tool_complete will
+      // set the final "completed" state with real output). Denied → "cancelled".
+      this.#resolveToolCallMessage(
+        approvalId,
+        approved
+          ? ({ phase: "executing", input: effectiveInput } as unknown as ToolState)
+          : { phase: "cancelled", reason: "denied" },
+      );
 
       const patchableKeys = this.#approvalPatchKeys.get(approvalId);
       this.#approvalPatchKeys.delete(approvalId);
       if (approved) {
         this.#store.audit(sender.sub, "session.approve", this.id, `tool=${toolName} approvalId=${approvalId}`);
         const sanitizedPatch = sanitizeApprovalPatch(toolName, updatedInput, patchableKeys);
-        const merged: Record<string, unknown> = sanitizedPatch ? { ...inputObj, ...sanitizedPatch } : inputObj;
+        const merged: Record<string, unknown> = sanitizedPatch ? { ...effectiveInput, ...sanitizedPatch } : effectiveInput;
         return { behavior: "allow" as const, updatedInput: merged };
       }
       this.#store.audit(sender.sub, "session.deny", this.id, `tool=${toolName} approvalId=${approvalId}`);
       return { behavior: "deny" as const, message: "Denied by user" };
     };
+  }
+
+  /**
+   * Finalize the tool_call message for `approvalId` in scrollback +
+   * transcript and broadcast the state delta. Shared by the manual
+   * approval/deny path and the hook-block path so the two can't drift.
+   */
+  #resolveToolCallMessage(approvalId: string, resolvedState: ToolState): void {
+    const msgId = this.#approvalIdToMessageId.get(approvalId);
+    if (!msgId) return;
+    this.#scrollback.updateMessage(msgId, (m) => {
+      const sm = m as SessionMessage;
+      if (sm.tool) sm.tool.state = resolvedState;
+    });
+    const toolMsg = this.#toolCallMessages.get(msgId);
+    if (toolMsg?.tool) {
+      const resolvedMsg: SessionMessage = { ...toolMsg, tool: { ...toolMsg.tool, state: resolvedState }, timestamp: new Date().toISOString() };
+      this.#transcriptStore.append(this.id, resolvedMsg, this.#seq++).catch(() => {});
+      this.#broadcastRaw({
+        type: "session.message.delta",
+        sessionId: this.id,
+        messageId: msgId,
+        toolStateUpdate: resolvedState,
+        timestamp: resolvedMsg.timestamp,
+      });
+    }
+    this.#approvalIdToMessageId.delete(approvalId);
+  }
+
+  /**
+   * A tool_call hook replaced the input before the approval gate — update
+   * the displayed tool message (scrollback + pending transcript copy) and
+   * broadcast the new state so an approval prompt shows what will ACTUALLY
+   * run, not the pre-mutation input.
+   */
+  #applyHookInputMutation(approvalId: string, input: Record<string, unknown>): void {
+    const msgId = this.#approvalIdToMessageId.get(approvalId);
+    if (!msgId) return;
+    const updateTool = (sm: SessionMessage): void => {
+      if (!sm.tool) return;
+      sm.tool.input = input;
+      if (sm.tool.state.phase === "waiting_confirmation") {
+        sm.tool.state = { ...sm.tool.state, input };
+      }
+    };
+    this.#scrollback.updateMessage(msgId, (m) => updateTool(m as SessionMessage));
+    const toolMsg = this.#toolCallMessages.get(msgId);
+    if (toolMsg?.tool) {
+      updateTool(toolMsg);
+      this.#broadcastRaw({
+        type: "session.message.delta",
+        sessionId: this.id,
+        messageId: msgId,
+        toolStateUpdate: toolMsg.tool.state,
+        timestamp: new Date().toISOString(),
+      });
+    }
   }
 
   /**
@@ -2717,15 +2870,30 @@ export class Session {
       }
 
       case "tool_complete": {
-        this.#accumulator.handleEvent(event);
+        // Hook seam: tool_result hooks may patch the RECORDED output —
+        // canonical history (fed to the accumulator below), scrollback,
+        // and transcript. The native backend already consumed the original
+        // inside its own agent loop; this governs what codeoid persists
+        // and what a switched-to backend later sees (redaction use case).
         const msgId = this.#toolUseIdToMessageId.get(event.sdkToolUseId);
+        const hookToolName = msgId ? this.#toolCallMessages.get(msgId)?.tool?.name : undefined;
+        let output = event.output;
+        if (this.#hookBus?.hasHooks("tool_result", hookToolName)) {
+          const patched = await this.#hookBus.dispatchToolResult(this.#hookContext(), {
+            toolName: hookToolName ?? "",
+            output,
+            success: event.success,
+          });
+          if (patched.updatedOutput !== undefined) output = patched.updatedOutput;
+        }
+        this.#accumulator.handleEvent(output === event.output ? event : { ...event, output });
         if (msgId) {
           const toolMsg = this.#toolCallMessages.get(msgId);
           if (toolMsg?.tool) {
             const completedState = {
               phase: "completed",
               success: event.success,
-              output: event.output,
+              output,
             } as unknown as ToolState;
             this.#scrollback.updateMessage(msgId, (m) => {
               const sm = m as SessionMessage;
@@ -2867,6 +3035,10 @@ export class Session {
       case "turn_done": {
         this.#accumulator.handleEvent(event);
         this.#recordTurnFromResult(event.result);
+        // Hook seam: observe-only (git-checkpoint per turn, usage export).
+        this.#hookBus?.emit("after_turn", this.#hookContext(), {
+          result: event.result,
+        });
         if (event.result.isError) {
           const errText = event.result.errorMessage ?? "Turn ended with an error";
           const errorMsg = this.#makeMessage("system", `Error: ${errText}`, SYSTEM_IDENTITY, undefined, undefined, { event: "agent_error" });

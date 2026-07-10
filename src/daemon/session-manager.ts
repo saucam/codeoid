@@ -17,6 +17,7 @@ import {
   createDefaultProviderRegistry,
   type ProviderRegistry,
 } from "./providers/registry.js";
+import type { HookBus } from "./hooks/bus.js";
 import type { Store } from "./store.js";
 import { hasScope, SCOPES } from "../protocol/scopes.js";
 import { RateLimiter } from "./rate-limit.js";
@@ -149,6 +150,8 @@ export class SessionManager {
   #dispatcher: Dispatcher;
   /** The daemon's provider catalog — one registry, shared by every session. */
   #providers: ProviderRegistry;
+  /** The daemon's hook bus — one instance, shared by every session. */
+  #hooks?: HookBus;
   #testProviderFactory?: () => SessionProvider;
   /** Stable observer identity — every Session reports status transitions here. */
   #statusObserver = (sessionId: string, status: SessionInfo["status"]): void => {
@@ -170,6 +173,11 @@ export class SessionManager {
        */
       providers?: ProviderRegistry;
       /**
+       * The daemon's hook bus (built once at startup from config.hooks).
+       * Absent = no hooks; sessions pay zero overhead.
+       */
+      hooks?: HookBus;
+      /**
        * Test-only: provider factory injected into every Session this manager
        * constructs, so manager-level integration tests (conductor injection,
        * worker spawn, dispatch host) run without the Claude Agent SDK
@@ -186,6 +194,7 @@ export class SessionManager {
     this.#config = opts?.config;
     this.#compressionRegistry = opts?.compressionRegistry;
     this.#providers = opts?.providers ?? createDefaultProviderRegistry(opts?.config);
+    this.#hooks = opts?.hooks;
     this.#testProviderFactory = opts?._testProviderFactory;
     this.#dispatcher = new Dispatcher(
       store,
@@ -273,6 +282,7 @@ export class SessionManager {
           store: this.#store,
           transcriptStore: this.#transcriptStore,
           providers: this.#providers,
+          hooks: this.#hooks,
           identityManager: this.#identityManager,
           existingId: meta.sessionId,
           memory: this.#memory,
@@ -659,6 +669,7 @@ export class SessionManager {
               store: this.#store,
               transcriptStore: this.#transcriptStore,
               providers: this.#providers,
+              hooks: this.#hooks,
               ...(this.#identityManager
                 ? { identityManager: this.#identityManager }
                 : {}),
@@ -1053,6 +1064,7 @@ export class SessionManager {
       store: this.#store,
       transcriptStore: this.#transcriptStore,
       providers: this.#providers,
+      hooks: this.#hooks,
       providerId: msg.providerId,
       identityManager: this.#identityManager,
       memory: this.#memory,
@@ -1155,6 +1167,7 @@ export class SessionManager {
       store: this.#store,
       transcriptStore: this.#transcriptStore,
       providers: this.#providers,
+      hooks: this.#hooks,
       identityManager: this.#identityManager,
       memory: this.#memory,
       config: this.#config,
@@ -1281,6 +1294,7 @@ export class SessionManager {
           store: this.#store,
           transcriptStore: this.#transcriptStore,
           providers: this.#providers,
+          hooks: this.#hooks,
           identityManager: this.#identityManager,
           memory: this.#memory,
           config: this.#config,
