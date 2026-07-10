@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CodexRpcProcess } from "../daemon/providers/codex/rpc.js";
 import { CodexProvider } from "../daemon/providers/codex/index.js";
-import { resolveCodexCommand } from "../daemon/providers/codex/resolve.js";
+import { compareNodeVersionsDesc, resolveCodexCommand } from "../daemon/providers/codex/resolve.js";
 import { createDefaultProviderRegistry } from "../daemon/providers/registry.js";
 import type { ProviderEvent, TurnOpts, TurnRun } from "../daemon/providers/interface.js";
 import type { CodeoidConfig } from "../config.js";
@@ -363,6 +363,37 @@ describe("codex resolution + registry", () => {
         argsPrefix: [],
         source: "node-bin",
       });
+
+      // nvm: codex under ~/.nvm/versions/node/<version>/bin, resolved
+      // NEWEST-version-first (v21.5.0 preferred over v9.0.0 lexical order).
+      const nvmHome = join(tmp, "nvmhome");
+      for (const v of ["v9.0.0", "v21.5.0"]) {
+        const vbin = join(nvmHome, ".nvm", "versions", "node", v, "bin");
+        mkdirSync(vbin, { recursive: true });
+        writeFileSync(join(vbin, "codex"), "#!/bin/sh\necho fake\n");
+        chmodSync(join(vbin, "codex"), 0o755);
+      }
+      const nvmResolved = resolveCodexCommand(undefined, { PATH: "", HOME: nvmHome });
+      expect(nvmResolved?.source).toBe("node-bin");
+      // Highest version wins the sort, even though "v21" < "v9" lexically.
+      expect(nvmResolved?.command).toBe(join(nvmHome, ".nvm", "versions", "node", "v21.5.0", "bin", "codex"));
+
+      // Active version-manager env vars are searched too (NVM_BIN /
+      // VOLTA_HOME / npm_config_prefix), before the home defaults.
+      for (const key of ["NVM_BIN", "VOLTA_HOME", "npm_config_prefix"] as const) {
+        const base = join(tmp, key.toLowerCase());
+        const bin = key === "NVM_BIN" ? base : join(base, "bin");
+        mkdirSync(bin, { recursive: true });
+        writeFileSync(join(bin, "codex"), "#!/bin/sh\necho fake\n");
+        chmodSync(join(bin, "codex"), 0o755);
+        const r = resolveCodexCommand(undefined, {
+          PATH: "",
+          HOME: join(tmp, "no-home"),
+          [key]: base,
+        });
+        expect(r?.source).toBe("node-bin");
+        expect(r?.command).toBe(join(bin, "codex"));
+      }
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -376,5 +407,16 @@ describe("codex resolution + registry", () => {
     } as unknown as CodeoidConfig);
     expect(disabled.has("codex")).toBe(false);
     expect(disabled.unavailableHint("codex")).toBeUndefined();
+  });
+
+  it("compareNodeVersionsDesc orders newest-first and ties equal versions", () => {
+    expect(["v9.0.0", "v21.5.0", "v20.11.1"].sort(compareNodeVersionsDesc)).toEqual([
+      "v21.5.0",
+      "v20.11.1",
+      "v9.0.0",
+    ]);
+    // Equal versions (incl. a missing patch component) compare as 0.
+    expect(compareNodeVersionsDesc("v18.0.0", "v18.0")).toBe(0);
+    expect(compareNodeVersionsDesc("v18.1.0", "v18.1.0")).toBe(0);
   });
 });

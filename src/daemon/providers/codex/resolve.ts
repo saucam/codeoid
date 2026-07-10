@@ -90,8 +90,8 @@ function nodeBinDirs(env: Record<string, string | undefined>): string[] {
   return [...new Set(dirs)];
 }
 
-/** Sort "v21.5.0" > "v20.11.1" numerically, descending. */
-function compareNodeVersionsDesc(a: string, b: string): number {
+/** Sort "v21.5.0" > "v20.11.1" numerically, descending. Exported for tests. */
+export function compareNodeVersionsDesc(a: string, b: string): number {
   const pa = a.slice(1).split(".").map(Number);
   const pb = b.slice(1).split(".").map(Number);
   for (let i = 0; i < 3; i++) {
