@@ -218,6 +218,11 @@ export class SessionManager {
     return [def, ...ids.filter((id) => id !== def)];
   }
 
+  /** Supported backends that couldn't activate at startup (diagnostics). */
+  unavailableProviders(): Array<{ id: string; hint: string }> {
+    return this.#providers.unavailableEntries();
+  }
+
   /** Start the dispatcher loop. Call AFTER resumeSessions so surviving
    * workers are back in #sessions before the boot-time reclaim pass runs. */
   startDispatcher(): void {

@@ -20,6 +20,11 @@ export type PiFrame = Record<string, unknown> & { type: string };
 export interface PiSpawnOptions {
   /** Binary or wrapper script (config `providers.pi.command`). */
   command: string;
+  /**
+   * argv entries placed BEFORE `--mode rpc` — the bundled fallback spawns
+   * the runtime with pi's cli entry as the first arg (see pi/resolve.ts).
+   */
+  argsPrefix?: string[];
   /** Extra CLI args (mode/rpc is always appended by this wrapper). */
   args?: string[];
   cwd: string;
@@ -52,7 +57,7 @@ export class PiRpcProcess {
 
   constructor(opts: PiSpawnOptions) {
     this.#onEvent = opts.onEvent;
-    this.#proc = spawn(opts.command, ["--mode", "rpc", ...(opts.args ?? [])], {
+    this.#proc = spawn(opts.command, [...(opts.argsPrefix ?? []), "--mode", "rpc", ...(opts.args ?? [])], {
       cwd: opts.cwd,
       stdio: ["pipe", "pipe", "pipe"],
       env: opts.env,

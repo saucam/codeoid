@@ -183,6 +183,11 @@ export class DaemonServer {
       { config: config.fullConfig, compressionRegistry, hooks },
     );
 
+    console.log(`[codeoid] providers: ${this.#manager.providerIds().join(", ")}`);
+    for (const { id, hint } of this.#manager.unavailableProviders()) {
+      console.warn(`[codeoid] provider ${id} unavailable: ${hint}`);
+    }
+
     // Register cleanup functions. ShutdownManager runs them LIFO, so the
     // LAST registered runs FIRST. Order matters: sessions must DRAIN (their
     // final audit/usage writes land in store + memory) BEFORE store/memory

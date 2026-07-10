@@ -5,17 +5,31 @@ One codeoid session maps to one warm `pi --mode rpc` subprocess; pi keeps its ow
 
 ## Setup
 
-1. Install pi and log a provider in (`pi /login`), or export an API key pi understands:
+None required — codeoid **bundles pi** as a pinned dependency
+(`@earendil-works/pi-coding-agent`), so the `pi` backend works out of the box.
+Sign a model provider in once (`pi /login` from any pi, or export an API key
+pi understands, e.g. `ANTHROPIC_API_KEY`) and create a session with it:
 
-   ```bash
-   npm install -g @earendil-works/pi-coding-agent
-   pi   # first run: pick a provider, sign in
-   ```
+- **Web UI**: New session → Backend → `pi`
+- **Wire**: `session.create` with `providerId: "pi"`
 
-2. Nothing else. The `pi` backend is registered by default; create a session with it:
+### Which pi binary runs
 
-   - **Web UI**: New session → Backend → `pi`
-   - **Wire**: `session.create` with `providerId: "pi"`
+Resolved once at daemon startup, first match wins:
+
+1. an explicit `providers.pi.command` (verified at startup — a typo'd path
+   shows up as "unavailable" in the logs, not as a first-turn spawn failure)
+2. a system `pi` on `PATH` (`npm install -g @earendil-works/pi-coding-agent`)
+3. the **bundled** copy, run via the daemon's own runtime
+
+The bundle is pinned deliberately: the injected approval bridge is coupled to
+pi's RPC + extension API, and the lockfile freezes the exact pi version the
+bridge was tested against. Use a system install or `command` override when you
+want a different pi — you own the compatibility of that pairing.
+
+If no binary resolves anywhere (bundled install failed and nothing on PATH),
+pi is reported as *supported but unavailable*: the daemon logs the fix at
+startup and `session.set_provider` returns the same actionable hint.
 
 Config knobs (all optional, `~/.codeoid/config.json`):
 

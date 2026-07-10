@@ -23,6 +23,7 @@ import { ClaudeProvider } from "./claude/index.js";
 import { GeminiProvider } from "./gemini/index.js";
 import { OpenAIProvider } from "./openai/index.js";
 import { PiProvider } from "./pi/index.js";
+import { PI_INSTALL_HINT, resolvePiCommand } from "./pi/resolve.js";
 import { StatelessSessionProvider } from "./stateless.js";
 
 /**
@@ -60,6 +61,13 @@ export interface ProviderFactory {
 
 export class ProviderRegistry {
   readonly #factories = new Map<string, ProviderFactory>();
+  /**
+   * Backends codeoid supports but could not activate at startup (binary
+   * missing, etc.) — id → actionable hint. Lets `session.set_provider`
+   * answer "supported but not installed, here's how" instead of a bare
+   * "unknown provider".
+   */
+  readonly #unavailable = new Map<string, string>();
   /** Id used when a session doesn't carry a provider selection. */
   readonly defaultId: string;
 
@@ -76,6 +84,21 @@ export class ProviderRegistry {
 
   has(id: string): boolean {
     return this.#factories.has(id);
+  }
+
+  /** Record a supported-but-unactivatable backend with an actionable hint. */
+  markUnavailable(id: string, hint: string): void {
+    this.#unavailable.set(id, hint);
+  }
+
+  /** Hint for a supported backend that isn't activated, if any. */
+  unavailableHint(id: string): string | undefined {
+    return this.#unavailable.get(id);
+  }
+
+  /** All supported-but-unactivated backends (startup diagnostics). */
+  unavailableEntries(): Array<{ id: string; hint: string }> {
+    return [...this.#unavailable.entries()].map(([id, hint]) => ({ id, hint }));
   }
 
   get(id: string): ProviderFactory | undefined {
@@ -159,19 +182,34 @@ export function createDefaultProviderRegistry(config?: CodeoidConfig): ProviderR
       ),
   });
   if (config?.providers?.pi?.enabled !== false) {
-    const command = config?.providers?.pi?.command ?? "pi";
-    registry.register({
-      id: "pi",
-      displayName: "pi (pi.dev)",
-      create: (init) =>
-        new PiProvider({
-          sessionId: init.sessionId,
-          initialBackingId: init.initialBackingId,
-          command: init.config?.providers?.pi?.command ?? command,
-          store: init.store,
-          onModels: init.onModels,
-        }),
-    });
+    // Resolve once at startup: explicit config command → system PATH →
+    // the bundled optionalDependency (see pi/resolve.ts). A verified
+    // resolution means picking pi can't fail on a missing binary; no
+    // resolution means the catalog says "not installed" with the fix.
+    const configured = config?.providers?.pi?.command;
+    const resolution = resolvePiCommand(configured === "pi" ? undefined : configured);
+    if (resolution) {
+      registry.register({
+        id: "pi",
+        displayName: "pi (pi.dev)",
+        create: (init) =>
+          new PiProvider({
+            sessionId: init.sessionId,
+            initialBackingId: init.initialBackingId,
+            command: resolution.command,
+            argsPrefix: resolution.argsPrefix,
+            store: init.store,
+            onModels: init.onModels,
+          }),
+      });
+    } else {
+      registry.markUnavailable(
+        "pi",
+        configured !== undefined && configured !== "pi"
+          ? `providers.pi.command (${JSON.stringify(configured)}) does not exist or is not on PATH`
+          : PI_INSTALL_HINT,
+      );
+    }
   }
   return registry;
 }

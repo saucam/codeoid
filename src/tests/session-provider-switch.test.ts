@@ -181,6 +181,20 @@ describe("Session.switchProvider", () => {
     await session.destroy(AUTH);
   });
 
+  it("S2b: supported-but-unavailable provider fails with the install hint", async () => {
+    const { registry } = makeRegistry();
+    registry.markUnavailable("pi", "no pi binary found — install it");
+    const session = makeSession(registry);
+    const result = await session.switchProvider("pi", AUTH);
+    expect(result).toMatchObject({ ok: false, code: "invalid_request" });
+    if (!result.ok) {
+      expect(result.error).toContain("supported but not available");
+      expect(result.error).toContain("no pi binary found");
+    }
+    expect(session.providerId).toBe("mock-a");
+    await session.destroy(AUTH);
+  });
+
   it("S3: same-id switch is a no-op ack", async () => {
     const { registry, created } = makeRegistry();
     const session = makeSession(registry);

@@ -689,10 +689,13 @@ export class Session {
     const registry =
       this.#providersRegistry ?? createDefaultProviderRegistry(this.#config);
     if (!registry.has(requested)) {
+      const hint = registry.unavailableHint(requested);
       return {
         ok: false,
         code: "invalid_request",
-        error: `Unknown provider "${requested}" — available: ${registry.ids().join(", ")}`,
+        error: hint
+          ? `Provider "${requested}" is supported but not available: ${hint}`
+          : `Unknown provider "${requested}" — available: ${registry.ids().join(", ")}`,
       };
     }
     if (this.#provider.id === requested) {
