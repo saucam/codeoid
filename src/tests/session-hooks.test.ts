@@ -37,6 +37,8 @@ import { MockSessionProvider } from "../daemon/providers/mock/session-provider.j
 import { mockResult } from "../daemon/providers/mock/index.js";
 import { HookBus } from "../daemon/hooks/bus.js";
 import type { HookEntryConfig } from "../daemon/hooks/types.js";
+import { ProviderRegistry } from "../daemon/providers/registry.js";
+import type { CodeoidConfig } from "../config.js";
 import type { DaemonMessage, AuthContext } from "../protocol/types.js";
 import type { ProviderEvent } from "../daemon/providers/interface.js";
 
@@ -82,6 +84,7 @@ function makeSession(
   provider: MockSessionProvider,
   hooks?: HookBus,
   initialMode?: { mode: "guarded" | "autonomous" | "interactive"; maxTurns?: number },
+  extra?: Partial<ConstructorParameters<typeof Session>[0]>,
 ): Session {
   const id = randomUUID();
   store.createSession({
@@ -105,7 +108,28 @@ function makeSession(
     _testProvider: provider,
     hooks,
     ...(initialMode ? { initialMode } : {}),
+    ...(extra ?? {}),
   });
+}
+
+/**
+ * Poll until `path` holds parseable JSON and return it. Existence alone is
+ * not enough: `cat > file` creates (truncates) the file before the payload
+ * bytes land, so an exists-check races a partial write.
+ */
+async function waitForJson(path: string, timeoutMs = 3000): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (existsSync(path)) {
+      try {
+        return JSON.parse(readFileSync(path, "utf8"));
+      } catch {
+        /* partial write — keep polling */
+      }
+    }
+    if (Date.now() > deadline) throw new Error(`no JSON payload appeared at: ${path}`);
+    await new Promise((r) => setTimeout(r, 20));
+  }
 }
 
 function makeClient(): { client: AttachedClient; received: DaemonMessage[] } {
@@ -370,5 +394,133 @@ describe("Session hook integration", () => {
     expect(provider.canUseToolResults[0]?.behavior).toBe("allow");
     // Budget decremented exactly once — the pre-hook contract holds.
     expect(session.turnsRemaining).toBe(4);
+  });
+
+  it("H8: hook mutation composes with MANUAL approval — user approves the mutated input", async () => {
+    const hooks = new HookBus([
+      commandEntry(`printf '{"updatedInput":{"command":"echo SAFE"}}'`, {
+        name: "rewriter",
+        matcher: "^Bash$",
+      }),
+    ]);
+    const provider = new MockSessionProvider("mock-session", [bashToolTurn()]);
+    // Default guarded mode: Bash is a write/exec tool → manual approval.
+    const session = makeSession(provider, hooks);
+    const { client, received } = makeClient();
+    session.attach(client);
+
+    await session.send("run it", TEST_AUTH);
+    // Wait for the hook's mutation broadcast, not just waiting_approval:
+    // the tool_start handler flips the status from its side-effect-free
+    // peek BEFORE canUseTool's hook gate has run.
+    const deadline = Date.now() + 4000;
+    while (
+      !received.some(
+        (m) => m.type === "session.message" && m.metadata?.event === "hook.updated_input",
+      )
+    ) {
+      if (Date.now() > deadline) throw new Error(`mutation never broadcast — ${session.status}`);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(session.status).toBe("waiting_approval");
+
+    // The approval UI must display what will ACTUALLY run — the delta from
+    // the mutation broadcast carries the hook-rewritten input.
+    const mutatedDelta = received.find(
+      (m) =>
+        m.type === "session.message.delta" &&
+        m.toolStateUpdate?.phase === "waiting_confirmation" &&
+        (m.toolStateUpdate.input as { command?: string })?.command === "echo SAFE",
+    );
+    expect(mutatedDelta).toBeDefined();
+
+    session.approve("a1", true, TEST_AUTH);
+    await waitForIdle(session);
+
+    // The provider runs the mutated input (the approval merge base is the
+    // hook's output, not the model's original).
+    expect(provider.canUseToolResults).toHaveLength(1);
+    expect(provider.canUseToolResults[0]).toMatchObject({
+      behavior: "allow",
+      updatedInput: { command: "echo SAFE" },
+    });
+  });
+
+  it("H9: provider_switched observe hook fires with from/to on backend switch", async () => {
+    const marker = join(tmp, "switched.json");
+    const hooks = new HookBus([
+      commandEntry(`cat > "${marker}"`, { event: "provider_switched" }),
+    ]);
+    // Registry supplying the incoming backend for switchProvider().
+    const registry = new ProviderRegistry("mock-session");
+    registry.register({
+      id: "mock-b",
+      displayName: "mock-b",
+      create: () => new MockSessionProvider("mock-b", []),
+    });
+    const provider = new MockSessionProvider("mock-session", []);
+    const session = makeSession(provider, hooks, undefined, { providers: registry });
+
+    const result = await session.switchProvider("mock-b", TEST_AUTH);
+    expect(result.ok).toBe(true);
+
+    const payload = await waitForJson(marker);
+    expect(payload).toMatchObject({
+      event: "provider_switched",
+      from: "mock-session",
+      to: "mock-b",
+      providerId: "mock-b", // context reports the NEW backend
+      sessionId: session.id,
+    });
+  });
+
+  it("H10: rotated observe hook fires on manual context rotation", async () => {
+    const marker = join(tmp, "rotated.json");
+    const hooks = new HookBus([commandEntry(`cat > "${marker}"`, { event: "rotated" })]);
+    // Minimal config: manualRotate's min-turns guard reads autoRotate, and
+    // #shouldRotate dereferences it on every send.
+    const config = {
+      session: {},
+      autoRotate: {
+        enabled: false,
+        warnPct: 0.75,
+        rotatePct: 0.9,
+        hardRotatePct: 0.97,
+        minTurnsBeforeRotate: 1,
+        strategy: "task-anchor",
+      },
+    } as unknown as CodeoidConfig;
+    const provider = new MockSessionProvider("mock-session", [
+      [
+        { type: "text_done", content: "ok" },
+        { type: "turn_done", result: mockResult({ providerId: "mock-session" }) },
+      ],
+    ]);
+    const session = makeSession(provider, hooks, undefined, { config });
+
+    await session.send("hello", TEST_AUTH);
+    await waitForIdle(session);
+    const rotated = await session.manualRotate(TEST_AUTH);
+    expect(rotated).toBe(true);
+
+    const payload = await waitForJson(marker);
+    expect(payload).toMatchObject({
+      event: "rotated",
+      reason: "manual",
+      rotationCount: 1,
+      sessionId: session.id,
+    });
+  });
+
+  it("H11: session_end observe hook fires on destroy", async () => {
+    const marker = join(tmp, "ended.json");
+    const hooks = new HookBus([commandEntry(`cat > "${marker}"`, { event: "session_end" })]);
+    const provider = new MockSessionProvider("mock-session", []);
+    const session = makeSession(provider, hooks);
+
+    await session.destroy(TEST_AUTH);
+
+    const payload = await waitForJson(marker);
+    expect(payload).toMatchObject({ event: "session_end", sessionId: session.id });
   });
 });
