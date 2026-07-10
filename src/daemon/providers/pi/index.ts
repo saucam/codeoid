@@ -49,8 +49,10 @@ export interface PiProviderInit {
   /** pi session FILE from a previous run (absolute .jsonl path), or the
    *  codeoid session id on first run (nothing to resume). */
   initialBackingId: string;
-  /** Binary/wrapper from config `providers.pi.command`. */
+  /** Resolved binary/wrapper (see pi/resolve.ts — config → PATH → bundled). */
   command: string;
+  /** argv entries preceding `--mode rpc` (bundled: the cli entry path). */
+  argsPrefix?: string[];
   store: Store;
   onModels?: (
     models: ReadonlyArray<{ value: string; displayName: string; description?: string }>,
@@ -76,6 +78,7 @@ export class PiProvider implements SessionProvider {
   #sessionId: string;
   #backingSessionId: string;
   #command: string;
+  #argsPrefix: string[];
   #store: Store;
   #onModels?: PiProviderInit["onModels"];
 
@@ -100,6 +103,7 @@ export class PiProvider implements SessionProvider {
     this.#sessionId = init.sessionId;
     this.#backingSessionId = init.initialBackingId;
     this.#command = init.command;
+    this.#argsPrefix = init.argsPrefix ?? [];
     this.#store = init.store;
     this.#onModels = init.onModels;
   }
@@ -250,6 +254,7 @@ export class PiProvider implements SessionProvider {
     this.#bridgeReady = false;
     this.#proc = new PiRpcProcess({
       command: this.#command,
+      argsPrefix: this.#argsPrefix,
       args,
       cwd: opts.workdir,
       // Allowlisted env (GHSA-38vh): pi gets its credentials (~/.pi via
