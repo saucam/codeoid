@@ -99,6 +99,7 @@ const samples: { [T in ClientTypes]: Extract<ClientMessage, { type: T }> } = {
     sessionId: "s1",
     providerId: "pi",
   },
+  "session.fork": { type: "session.fork", id: "r16f", sessionId: "s1", name: "branch", providerId: "codex" },
   "session.rename": { type: "session.rename", id: "r16", sessionId: "s1", name: "renamed" },
   "fs.list": { type: "fs.list", id: "r17", sessionId: "s1", path: "src" },
   "fs.read": { type: "fs.read", id: "r18", sessionId: "s1", path: "src/a.ts", maxBytes: 1024 },

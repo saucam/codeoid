@@ -698,6 +698,7 @@ export type ClientMessage =
   | SessionSearchMsg
   | SessionSetModelMsg
   | SessionSetProviderMsg
+  | SessionForkMsg
   | SessionRenameMsg
   | FsListMsg
   | FsReadMsg
@@ -733,6 +734,33 @@ export interface SessionCreateMsg extends BaseClientMsg {
    * asking for pi must never silently hand back a claude session). Absent =
    * the daemon default.
    */
+  providerId?: string;
+}
+
+/**
+ * Fork a session — branch its conversation into a brand-new session. The
+ * fork gets a fresh id and starts with a COPY of the parent's canonical
+ * history and scrollback, so it continues the same conversation from the
+ * same point; the parent is untouched and both evolve independently.
+ *
+ * Optionally forks onto a DIFFERENT backend in one step (`providerId`) —
+ * "branch this claude conversation and continue it on codex". The fork's
+ * backing agent is always fresh (a claude session id means nothing to
+ * codex), so history crosses via the same seed mechanism as
+ * `session.set_provider`: stateless backends replay it natively, warm
+ * backends receive a rendered transcript.
+ *
+ * Returns the new session's `SessionInfo` (like `session.create`). Rejected
+ * with `not_found` for an unknown/foreign session and `invalid_request` for
+ * an unknown `providerId` (fail-closed, same rule as create/set_provider).
+ */
+export interface SessionForkMsg extends BaseClientMsg {
+  type: "session.fork";
+  /** Session to branch from. */
+  sessionId: string;
+  /** Name for the fork. Absent = the parent's name + " (fork)". */
+  name?: string;
+  /** Backend for the fork. Absent = the parent's current backend. */
   providerId?: string;
 }
 

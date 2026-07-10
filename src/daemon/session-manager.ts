@@ -445,6 +445,8 @@ export class SessionManager {
         return this.#setModel(msg, auth);
       case "session.set_provider":
         return this.#setProvider(msg, auth);
+      case "session.fork":
+        return this.#fork(msg, auth);
       case "session.rename":
         return this.#rename(msg, auth);
       case "fs.list":
@@ -1088,6 +1090,101 @@ export class SessionManager {
       requestId: msg.id,
       data: session.toInfo(),
     };
+  }
+
+  /**
+   * Fork a session (`session.fork`) — branch its conversation into a new,
+   * independent session seeded with a COPY of the parent's canonical history
+   * and scrollback. Optionally onto a different backend (`providerId`), so
+   * "branch this claude conversation and continue it on codex" is one call.
+   * The parent is untouched.
+   *
+   * Fails closed: a foreign/unknown parent is `not_found`; an unknown
+   * providerId is `invalid_request` (same rule as create/set_provider).
+   */
+  async #fork(
+    msg: Extract<ClientMessage, { type: "session.fork" }>,
+    auth: AuthContext,
+  ): Promise<DaemonMessage> {
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_CREATE)) {
+      return { type: "response.error", requestId: msg.id, error: "Missing scope: session:create", code: "forbidden" };
+    }
+
+    const parent = this.#getOwnedSession(msg.sessionId, auth);
+    if (!parent) {
+      return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
+    }
+    // Forking THE conductor would mint a second fleet supervisor — refuse.
+    if (parent.role) {
+      return { type: "response.error", requestId: msg.id, error: `Cannot fork a ${parent.role} session`, code: "invalid_request" };
+    }
+
+    const providerId = msg.providerId ?? parent.providerId;
+    if (providerId && !this.#providers.has(providerId)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: `Unknown provider "${providerId}" — available: ${this.#providers.ids().join(", ")}`,
+        code: "invalid_request",
+      };
+    }
+
+    const rateCheck = this.#rateLimiter.check(auth.sub);
+    if (!rateCheck.allowed) {
+      return { type: "response.error", requestId: msg.id, error: rateCheck.reason, code: "rate_limited" };
+    }
+
+    // Snapshot the parent's state BEFORE building the fork. Canonical history
+    // is the source of truth for the conversation; the transcript rows are
+    // replayed into the fork's scrollback for UI visibility.
+    const history = parent.canonicalHistory.map((t) => ({ ...t }));
+    const parentInfo = parent.toInfo();
+    let transcriptRows: DaemonMessage[] = [];
+    let sizeHints: Array<number | undefined> = [];
+    try {
+      const entries = await this.#transcriptStore.loadTranscript(msg.sessionId, {
+        maxBytes: RESUME_TRANSCRIPT_MAX_BYTES,
+      });
+      transcriptRows = entries.map((e) => e.message);
+      sizeHints = entries.map((e) => e.bytes);
+    } catch (err) {
+      // Scrollback replay is best-effort — the fork's CONVERSATION is carried
+      // by the canonical history above, which is already in memory.
+      console.error(
+        `[codeoid/fork] transcript load failed for ${msg.sessionId} (fork keeps history, drops scrollback): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    const fork = new Session({
+      name: msg.name ?? `${parentInfo.name} (fork)`,
+      workdir: parent.workdir,
+      auth,
+      store: this.#store,
+      transcriptStore: this.#transcriptStore,
+      providers: this.#providers,
+      hooks: this.#hooks,
+      providerId,
+      identityManager: this.#identityManager,
+      memory: this.#memory,
+      config: this.#config,
+      compressionRegistry: this.#compressionRegistry,
+      _testProvider: this.#testProviderFactory?.(),
+      onStatusChange: this.#statusObserver,
+      onModels: (pid, m) => this._cacheModels(pid, m),
+    });
+
+    await fork.primeFromFork(history, transcriptRows, sizeHints);
+
+    this.#sessions.set(fork.id, fork);
+    this.#rateLimiter.recordCreation(auth.sub);
+    this.#store.audit(
+      auth.sub,
+      "session.fork",
+      fork.id,
+      `from=${msg.sessionId} provider=${providerId ?? "default"} turns=${history.length}`,
+    );
+
+    return { type: "response.ok", requestId: msg.id, data: fork.toInfo() };
   }
 
   /**

@@ -400,6 +400,17 @@ export class CanonicalHistoryAccumulator {
     this.#currentThinking = "";
     this.#currentTools.clear();
   }
+
+  /**
+   * Replace the history with a copy of `turns` — used to prime a FORK from
+   * its parent's canonical history (`session.fork`). Clears any in-progress
+   * turn state, like reset(). The shallow copy is deep enough that the fork
+   * and parent never share turn objects.
+   */
+  seed(turns: readonly CanonicalTurn[]): void {
+    this.reset();
+    this.#history = turns.map((t) => ({ ...t }));
+  }
 }
 
 // ── History seeding (provider switch) ─────────────────────────────────────────

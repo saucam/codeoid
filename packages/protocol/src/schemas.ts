@@ -216,6 +216,14 @@ export const sessionSetModelSchema = z.object({
   fallbackModel: z.string().max(LIMITS.MODEL_MAX).nullable().optional(),
 });
 
+export const sessionForkSchema = z.object({
+  ...base,
+  type: z.literal("session.fork"),
+  sessionId: sessionIdField,
+  name: nameField.optional(),
+  providerId: z.string().min(1).max(64).optional(),
+});
+
 export const sessionRenameSchema = z.object({
   ...base,
   type: z.literal("session.rename"),
@@ -306,6 +314,7 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
   sessionSearchSchema,
   sessionSetModelSchema,
   sessionSetProviderSchema,
+  sessionForkSchema,
   sessionRenameSchema,
   fsListSchema,
   fsReadSchema,
