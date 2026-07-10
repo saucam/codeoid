@@ -19,7 +19,7 @@ import {
   resolvePiCommand,
 } from "../daemon/providers/pi/resolve.js";
 import { createDefaultProviderRegistry } from "../daemon/providers/registry.js";
-import type { CodeoidConfig } from "../../src/config.js";
+import type { CodeoidConfig } from "../config.js";
 
 let tmp: string;
 
