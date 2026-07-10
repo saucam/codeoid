@@ -24,6 +24,8 @@ import { GeminiProvider } from "./gemini/index.js";
 import { OpenAIProvider } from "./openai/index.js";
 import { PiProvider } from "./pi/index.js";
 import { PI_INSTALL_HINT, resolvePiCommand } from "./pi/resolve.js";
+import { CodexProvider } from "./codex/index.js";
+import { CODEX_INSTALL_HINT, resolveCodexCommand } from "./codex/resolve.js";
 import { StatelessSessionProvider } from "./stateless.js";
 
 /**
@@ -208,6 +210,32 @@ export function createDefaultProviderRegistry(config?: CodeoidConfig): ProviderR
         configured !== undefined && configured !== "pi"
           ? `providers.pi.command (${JSON.stringify(configured)}) does not exist or is not on PATH`
           : PI_INSTALL_HINT,
+      );
+    }
+  }
+  if (config?.providers?.codex?.enabled !== false) {
+    const configured = config?.providers?.codex?.command;
+    const resolution = resolveCodexCommand(configured === "codex" ? undefined : configured);
+    if (resolution) {
+      registry.register({
+        id: "codex",
+        displayName: "Codex (OpenAI)",
+        create: (init) =>
+          new CodexProvider({
+            sessionId: init.sessionId,
+            initialBackingId: init.initialBackingId,
+            command: resolution.command,
+            argsPrefix: resolution.argsPrefix,
+            store: init.store,
+            onModels: init.onModels,
+          }),
+      });
+    } else {
+      registry.markUnavailable(
+        "codex",
+        configured !== undefined && configured !== "codex"
+          ? `providers.codex.command (${JSON.stringify(configured)}) does not exist or is not on PATH`
+          : CODEX_INSTALL_HINT,
       );
     }
   }

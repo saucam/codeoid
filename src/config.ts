@@ -425,8 +425,20 @@ const ProvidersSchema = z
         command: z.string().default("pi"),
       })
       .default({ enabled: true, command: "pi" }),
+    /** OpenAI Codex CLI driven over `codex app-server` (JSON-RPC/stdio). */
+    codex: z
+      .object({
+        /** Register the codex backend in the provider catalog. */
+        enabled: z.boolean().default(true),
+        /** Binary to spawn — override for a wrapper script or absolute path. */
+        command: z.string().default("codex"),
+      })
+      .default({ enabled: true, command: "codex" }),
   })
-  .default({ pi: { enabled: true, command: "pi" } });
+  .default({
+    pi: { enabled: true, command: "pi" },
+    codex: { enabled: true, command: "codex" },
+  });
 
 const RootSchema = z.object({
   daemonUrl: z.string().default("ws://127.0.0.1:7400"),
@@ -561,6 +573,10 @@ export interface CodeoidConfig {
    */
   providers?: {
     pi: {
+      enabled: boolean;
+      command: string;
+    };
+    codex: {
       enabled: boolean;
       command: string;
     };
