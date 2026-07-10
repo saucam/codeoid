@@ -20,6 +20,7 @@ import {
 } from "../lib/format";
 import { identityLabel, identityColorClass } from "../lib/identity";
 import { authIdentity, connectionStatus, disconnect } from "../state/connection";
+import { nowTick } from "../state/clock";
 import { isMobile, toggleNav } from "../state/layout";
 import { focusedSession } from "../state/sessions";
 import { forgetApiKey } from "../lib/auth";
@@ -125,7 +126,7 @@ const SessionMetrics: Component = () => {
           <span class="flex items-center gap-3 font-mono text-xs">
             <span title="Wall-clock since session started">
               <span class="text-fg-faint">⏱</span>{" "}
-              <span>{elapsedSince(s().createdAt)}</span>
+              <span>{elapsedSince(s().createdAt, nowTick())}</span>
             </span>
             <span title="Total turns">
               <span class="text-fg-faint">↻</span>{" "}

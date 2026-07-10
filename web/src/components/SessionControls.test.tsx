@@ -17,6 +17,7 @@ vi.mock("./SessionExportModal", () => ({ openExportModal: vi.fn() }));
 
 import SessionControls from "./SessionControls";
 import {
+  getSession,
   ingestSessionList,
   focusSession,
   _resetSessionsForTest,
@@ -79,6 +80,192 @@ describe("SessionControls mode dropdown dismissal", () => {
     expect(queryByText("interactive")).not.toBeNull();
     fireEvent.pointerDown(document.body); // click somewhere outside the menu
     expect(queryByText("interactive")).toBeNull();
+  });
+});
+
+describe("ModePicker requests", () => {
+  const MODE_TITLE = "Cycle execution mode";
+
+  it("sends session.set_mode via request() and closes the menu on resolve", async () => {
+    ingestSessionList([sess()]);
+    focusSession("s");
+    const { getByTitle, getByText, queryByText } = render(() => <SessionControls />);
+    fireEvent.click(getByTitle(MODE_TITLE));
+    fireEvent.click(getByText("autonomous"));
+    await waitFor(() =>
+      expect(requestMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "session.set_mode",
+          sessionId: "s",
+          mode: "autonomous",
+        }),
+      ),
+    );
+    await waitFor(() => expect(queryByText("autonomous")).toBeNull()); // menu closed
+  });
+
+  it("keeps the menu open and surfaces a rejection inline", async () => {
+    requestMock.mockImplementationOnce(() =>
+      Promise.reject(new Error("mode locked by policy")),
+    );
+    ingestSessionList([sess()]);
+    focusSession("s");
+    const { getByTitle, getByText, queryByText, findByText } = render(() => (
+      <SessionControls />
+    ));
+    fireEvent.click(getByTitle(MODE_TITLE));
+    fireEvent.click(getByText("interactive"));
+    expect(await findByText(/mode locked/)).toBeTruthy();
+    expect(queryByText("autonomous")).not.toBeNull(); // still open, retry possible
+  });
+
+  it("disables the options while a request is in flight", () => {
+    requestMock.mockImplementationOnce(() => new Promise(() => {}));
+    ingestSessionList([sess()]);
+    focusSession("s");
+    const { getByTitle, getByText } = render(() => <SessionControls />);
+    fireEvent.click(getByTitle(MODE_TITLE));
+    const opt = getByText("interactive").closest("button") as HTMLButtonElement;
+    fireEvent.click(opt);
+    expect(opt.disabled).toBe(true);
+  });
+});
+
+describe("ModelPicker custom model id", () => {
+  const MODEL_TITLE = "Switch model (next turn applies)";
+
+  /** The picker's open state is module-level (bare `/model` opens it), so a
+   * previous test can leave it open — only toggle when it's closed. */
+  function openModelMenu(
+    getByTitle: (t: string) => HTMLElement,
+    queryByPlaceholderText: (t: string) => HTMLElement | null,
+  ): HTMLInputElement {
+    if (!queryByPlaceholderText("custom model id")) {
+      fireEvent.click(getByTitle(MODEL_TITLE));
+    }
+    return queryByPlaceholderText("custom model id") as HTMLInputElement;
+  }
+
+  it("submits via request() and keeps the typed id on rejection", async () => {
+    requestMock.mockImplementationOnce(() =>
+      Promise.reject(new Error("unknown model: clade-5-typo")),
+    );
+    ingestSessionList([sess()]);
+    focusSession("s");
+    const { getByTitle, queryByPlaceholderText, findByText } = render(() => (
+      <SessionControls />
+    ));
+    const input = openModelMenu(getByTitle, queryByPlaceholderText);
+    fireEvent.input(input, { target: { value: "clade-5-typo" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(requestMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "session.set_model",
+        sessionId: "s",
+        model: "clade-5-typo",
+      }),
+    );
+    // Rejection surfaces inline; the text stays put so the user can fix it.
+    expect(await findByText(/unknown model/)).toBeTruthy();
+    expect(input.value).toBe("clade-5-typo");
+  });
+
+  it("clears the input and closes the menu on resolve", async () => {
+    ingestSessionList([sess()]);
+    focusSession("s");
+    const { getByTitle, queryByPlaceholderText } = render(() => <SessionControls />);
+    const input = openModelMenu(getByTitle, queryByPlaceholderText);
+    fireEvent.input(input, { target: { value: "claude-sonnet-4-5" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() =>
+      expect(requestMock).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "session.set_model", model: "claude-sonnet-4-5" }),
+      ),
+    );
+    await waitFor(() => expect(queryByPlaceholderText("custom model id")).toBeNull());
+  });
+});
+
+describe("RotateButton", () => {
+  const ROTATE_TITLE =
+    "Rotate the Claude Code backing context (refresh skills/settings; memory preserved)";
+
+  it("rotates via request(), disabling while in flight (no double-fire)", async () => {
+    let resolveReq!: (v: unknown) => void;
+    requestMock.mockImplementationOnce(
+      () => new Promise((r) => (resolveReq = r)),
+    );
+    ingestSessionList([sess()]);
+    focusSession("s");
+    const { getByTitle } = render(() => <SessionControls />);
+    const btn = getByTitle(ROTATE_TITLE) as HTMLButtonElement;
+    fireEvent.click(btn);
+    fireEvent.click(btn); // second click while in flight must not re-send
+    expect(requestMock).toHaveBeenCalledTimes(1);
+    expect(requestMock).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "session.rotate", sessionId: "s" }),
+    );
+    expect(btn.disabled).toBe(true);
+    resolveReq(undefined);
+    await waitFor(() => expect(btn.disabled).toBe(false));
+  });
+
+  it("surfaces a rotate rejection inline", async () => {
+    requestMock.mockImplementationOnce(() =>
+      Promise.reject(new Error("rotate failed: harness busy")),
+    );
+    ingestSessionList([sess()]);
+    focusSession("s");
+    const { getByTitle, findByText } = render(() => <SessionControls />);
+    fireEvent.click(getByTitle(ROTATE_TITLE));
+    expect(await findByText(/rotate failed/)).toBeTruthy();
+  });
+});
+
+describe("DestroyButton", () => {
+  const DESTROY_TITLE = "Destroy this session";
+
+  it("removes the session only after the daemon confirms", async () => {
+    ingestSessionList([sess()]);
+    focusSession("s");
+    const { getByTitle, getByText } = render(() => <SessionControls />);
+    fireEvent.click(getByTitle(DESTROY_TITLE));
+    fireEvent.click(getByText("yes"));
+    expect(requestMock).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "session.destroy", sessionId: "s" }),
+    );
+    // Removal happens on resolve, not optimistically at click time.
+    await waitFor(() => expect(getSession("s")).toBeUndefined());
+  });
+
+  it("keeps the session and shows the error inline when destroy is rejected", async () => {
+    requestMock.mockImplementationOnce(() =>
+      Promise.reject(new Error("session is mid-turn")),
+    );
+    ingestSessionList([sess()]);
+    focusSession("s");
+    const { getByTitle, getByText, findByText } = render(() => <SessionControls />);
+    fireEvent.click(getByTitle(DESTROY_TITLE));
+    fireEvent.click(getByText("yes"));
+    expect(await findByText(/mid-turn/)).toBeTruthy();
+    expect(getSession("s")).toBeDefined(); // list did NOT desync
+  });
+
+  it("disables the confirm button while the destroy is in flight", async () => {
+    let resolveReq!: (v: unknown) => void;
+    requestMock.mockImplementationOnce(
+      () => new Promise((r) => (resolveReq = r)),
+    );
+    ingestSessionList([sess()]);
+    focusSession("s");
+    const { getByTitle, getByText } = render(() => <SessionControls />);
+    fireEvent.click(getByTitle(DESTROY_TITLE));
+    const yes = getByText("yes") as HTMLButtonElement;
+    fireEvent.click(yes);
+    expect(yes.disabled).toBe(true);
+    expect(getSession("s")).toBeDefined(); // still present while pending
+    resolveReq(undefined);
+    await waitFor(() => expect(getSession("s")).toBeUndefined());
   });
 });
 

@@ -9,6 +9,7 @@ import { Component, createSignal, For, Show } from "solid-js";
 
 import { formatCostUsd, formatTokens, relativeTime } from "../lib/format";
 import { sessionAgentLabel, shortSub } from "../lib/identity";
+import { nowTick } from "../state/clock";
 import {
   focusedSessionId,
   focusSession,
@@ -251,7 +252,7 @@ const SessionRow: Component<{ session: SessionInfo }> = (props) => {
           </Show>
         </div>
         <div class="text-[10px] text-fg-faint">
-          created {relativeTime(props.session.createdAt)}
+          created {relativeTime(props.session.createdAt, nowTick())}
         </div>
       </button>
     </li>

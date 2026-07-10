@@ -7,7 +7,9 @@
  *
  * All actions go through the same protocol verbs the slash commands use
  * (single source of truth) and rely on the daemon's `session.info_update`
- * broadcast for state to reflect — no optimistic updates here.
+ * broadcast for state to reflect — no optimistic updates here. Mutating
+ * verbs use `request()` so a daemon rejection surfaces inline instead of
+ * silently doing nothing (or worse, desyncing the local store).
  */
 
 import { Component, For, Show, createEffect, createSignal, onCleanup } from "solid-js";
@@ -25,7 +27,8 @@ import {
   removeSession,
 } from "../state/sessions";
 import { fetchModels, modelCatalog } from "../state/models";
-import type { SessionInfo, SessionMode } from "../protocol/types";
+import { effectiveMode } from "../lib/session-mode";
+import type { ClientMessage, SessionInfo, SessionMode } from "../protocol/types";
 import { openExportModal } from "./SessionExportModal";
 
 const MODE_OPTIONS: { value: SessionMode; label: string; hint: string }[] = [
@@ -34,6 +37,49 @@ const MODE_OPTIONS: { value: SessionMode; label: string; hint: string }[] = [
   { value: "autonomous", label: "autonomous", hint: "every tool auto-approved — no prompts" },
 ];
 
+/**
+ * Shared request-action state for a control that fires a mutating protocol
+ * verb: `busy` while the request is in flight (callers disable their
+ * controls), `error` carrying the daemon's rejection for inline rendering
+ * (the ProviderPicker's error-row pattern). Success runs `onOk`; rejection
+ * surfaces instead of vanishing into a fire-and-forget `send()`.
+ */
+function createAction(): {
+  busy: () => boolean;
+  error: () => string | null;
+  clearError: () => void;
+  run: (msg: ClientMessage, onOk?: () => void) => void;
+} {
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+  const run = (msg: ClientMessage, onOk?: () => void): void => {
+    if (busy()) return; // one in-flight request per control
+    // A stale rejection from a previous attempt would read as if it
+    // belonged to THIS dispatch — clear before sending.
+    setError(null);
+    setBusy(true);
+    request(msg)
+      .then(() => {
+        setBusy(false);
+        onOk?.();
+      })
+      .catch((e) => {
+        setError(e instanceof Error ? e.message : String(e));
+        setBusy(false);
+      });
+  };
+  return { busy, error, clearError: () => setError(null), run };
+}
+
+/** Inline rejection row for dropdown menus — same shape ProviderPicker uses. */
+const MenuError: Component<{ error: string | null }> = (props) => (
+  <Show when={props.error}>
+    <div role="alert" class="border-t border-danger/40 px-3 py-1.5 text-[11px] text-danger">
+      {props.error}
+    </div>
+  </Show>
+);
+
 const SessionControls: Component = () => {
   return (
     <Show when={focusedSession()}>
@@ -41,7 +87,7 @@ const SessionControls: Component = () => {
         <div class="flex flex-wrap items-center gap-1.5 text-[11px]">
           <InterruptButton sessionId={s().id} status={s().status} />
           <RotateButton sessionId={s().id} />
-          <ModePicker sessionId={s().id} current={s().mode ?? "interactive"} />
+          <ModePicker sessionId={s().id} current={effectiveMode(s())} />
           <ModelPicker sessionId={s().id} current={s().model} />
           <ProviderPicker sessionId={s().id} current={s().providerId} />
           <ForkButton sessionId={s().id} current={s().providerId} />
@@ -96,22 +142,33 @@ const ExportButton: Component = () => (
   </button>
 );
 
-const RotateButton: Component<{ sessionId: string }> = (props) => (
-  <button
-    type="button"
-    onClick={() =>
-      send({
-        type: "session.rotate",
-        id: newRequestId(),
-        sessionId: props.sessionId,
-      })
-    }
-    class="rounded border border-border px-2 py-1 font-mono uppercase tracking-wider text-fg-muted transition hover:border-accent/40 hover:bg-accent/5 hover:text-fg"
-    title="Rotate the Claude Code backing context (refresh skills/settings; memory preserved)"
-  >
-    ↻ rotate
-  </button>
-);
+const RotateButton: Component<{ sessionId: string }> = (props) => {
+  const act = createAction();
+  return (
+    <span class="flex items-center gap-1">
+      <button
+        type="button"
+        disabled={act.busy()}
+        onClick={() =>
+          act.run({
+            type: "session.rotate",
+            id: newRequestId(),
+            sessionId: props.sessionId,
+          })
+        }
+        class="rounded border border-border px-2 py-1 font-mono uppercase tracking-wider text-fg-muted transition hover:border-accent/40 hover:bg-accent/5 hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
+        title="Rotate the Claude Code backing context (refresh skills/settings; memory preserved)"
+      >
+        ↻ rotate
+      </button>
+      <Show when={act.error()}>
+        <span role="alert" class="text-[11px] text-danger">
+          {act.error()}
+        </span>
+      </Show>
+    </span>
+  );
+};
 
 /** Dismiss a dropdown on Escape or a pointer-down outside its root — the menus
  * previously closed only on `onMouseLeave`, which a keyboard/touch user can't
@@ -144,13 +201,17 @@ const ModePicker: Component<{
   current: SessionMode;
 }> = (props) => {
   const [open, setOpen] = createSignal(false);
+  const act = createAction();
   let rootEl: HTMLDivElement | undefined;
   useDismissable(() => rootEl, open, () => setOpen(false));
   return (
     <div class="relative" ref={rootEl}>
       <button
         type="button"
-        onClick={() => setOpen(!open())}
+        onClick={() => {
+          setOpen(!open());
+          act.clearError();
+        }}
         class="flex items-center gap-1 rounded border border-border bg-bg px-2 py-1 font-mono uppercase tracking-wider text-fg-muted hover:border-accent/40 hover:text-fg"
         title="Cycle execution mode"
       >
@@ -165,16 +226,19 @@ const ModePicker: Component<{
             {(opt) => (
               <button
                 type="button"
-                onClick={() => {
-                  send({
-                    type: "session.set_mode",
-                    id: newRequestId(),
-                    sessionId: props.sessionId,
-                    mode: opt.value,
-                  });
-                  setOpen(false);
-                }}
-                class={`flex w-full flex-col gap-0.5 px-3 py-1.5 text-left transition hover:bg-bg-hover ${
+                disabled={act.busy()}
+                onClick={() =>
+                  act.run(
+                    {
+                      type: "session.set_mode",
+                      id: newRequestId(),
+                      sessionId: props.sessionId,
+                      mode: opt.value,
+                    },
+                    () => setOpen(false),
+                  )
+                }
+                class={`flex w-full flex-col gap-0.5 px-3 py-1.5 text-left transition hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50 ${
                   opt.value === props.current ? "bg-bg-active" : ""
                 }`}
               >
@@ -183,6 +247,7 @@ const ModePicker: Component<{
               </button>
             )}
           </For>
+          <MenuError error={act.error()} />
         </div>
       </Show>
     </div>
@@ -204,6 +269,7 @@ const ModelPicker: Component<{
   const open = modelPickerOpen;
   const setOpen = setModelPickerOpen;
   const [custom, setCustom] = createSignal("");
+  const act = createAction();
   let rootEl: HTMLDivElement | undefined;
   useDismissable(() => rootEl, open, () => setOpen(false));
   return (
@@ -213,6 +279,7 @@ const ModelPicker: Component<{
         onClick={() => {
           const next = !open();
           setOpen(next);
+          act.clearError();
           if (next) void fetchModels();
         }}
         class="flex items-center gap-1 rounded border border-border bg-bg px-2 py-1 font-mono uppercase tracking-wider text-fg-muted hover:border-accent/40 hover:text-fg"
@@ -235,16 +302,19 @@ const ModelPicker: Component<{
               {(opt) => (
                 <button
                   type="button"
-                  onClick={() => {
-                    send({
-                      type: "session.set_model",
-                      id: newRequestId(),
-                      sessionId: props.sessionId,
-                      model: opt.value,
-                    });
-                    setOpen(false);
-                  }}
-                  class={`flex w-full items-center justify-between px-3 py-1.5 text-left text-[12px] transition hover:bg-bg-hover ${
+                  disabled={act.busy()}
+                  onClick={() =>
+                    act.run(
+                      {
+                        type: "session.set_model",
+                        id: newRequestId(),
+                        sessionId: props.sessionId,
+                        model: opt.value,
+                      },
+                      () => setOpen(false),
+                    )
+                  }
+                  class={`flex w-full items-center justify-between px-3 py-1.5 text-left text-[12px] transition hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50 ${
                     opt.value === props.current ? "bg-bg-active text-fg" : "text-fg-muted"
                   }`}
                   title={opt.description ?? opt.value}
@@ -265,22 +335,30 @@ const ModelPicker: Component<{
               type="text"
               placeholder="custom model id"
               value={custom()}
+              disabled={act.busy()}
               onInput={(e) => setCustom(e.currentTarget.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && custom().trim()) {
-                  send({
-                    type: "session.set_model",
-                    id: newRequestId(),
-                    sessionId: props.sessionId,
-                    model: custom().trim(),
-                  });
-                  setOpen(false);
-                  setCustom("");
+                  // On rejection (a typo'd id the daemon bounces) the text
+                  // stays in the input so the user can fix it in place.
+                  act.run(
+                    {
+                      type: "session.set_model",
+                      id: newRequestId(),
+                      sessionId: props.sessionId,
+                      model: custom().trim(),
+                    },
+                    () => {
+                      setOpen(false);
+                      setCustom("");
+                    },
+                  );
                 }
               }}
-              class="w-full rounded border border-border bg-bg px-2 py-1 font-mono text-[11px] text-fg outline-none focus:border-accent"
+              class="w-full rounded border border-border bg-bg px-2 py-1 font-mono text-[11px] text-fg outline-none focus:border-accent disabled:opacity-50"
             />
           </div>
+          <MenuError error={act.error()} />
         </div>
       </Show>
     </div>
@@ -488,13 +566,17 @@ const DestroyButton: Component<{
   name: string;
 }> = (props) => {
   const [confirming, setConfirming] = createSignal(false);
+  const act = createAction();
   return (
     <Show
       when={confirming()}
       fallback={
         <button
           type="button"
-          onClick={() => setConfirming(true)}
+          onClick={() => {
+            setConfirming(true);
+            act.clearError();
+          }}
           class="rounded border border-border px-2 py-1 font-mono uppercase tracking-wider text-fg-faint transition hover:border-danger/40 hover:text-danger"
           title="Destroy this session"
         >
@@ -506,26 +588,46 @@ const DestroyButton: Component<{
         <span class="text-danger">delete "{props.name}"?</span>
         <button
           type="button"
+          disabled={act.busy()}
           onClick={() => {
-            send({
-              type: "session.destroy",
-              id: newRequestId(),
-              sessionId: props.sessionId,
-            });
-            removeSession(props.sessionId);
-            setConfirming(false);
+            // Daemon-confirmed removal only: dropping the session from the
+            // local store before the daemon answered silently desynced the
+            // list whenever the destroy was rejected (still-running turn,
+            // permission). The store mutates on resolve; a rejection keeps
+            // the session and surfaces inline instead. Capture the id at
+            // click time so the resolve removes the session we asked about.
+            const sessionId = props.sessionId;
+            act.run(
+              {
+                type: "session.destroy",
+                id: newRequestId(),
+                sessionId,
+              },
+              () => {
+                removeSession(sessionId);
+                setConfirming(false);
+              },
+            );
           }}
-          class="rounded bg-danger px-2 py-1 font-mono uppercase tracking-wider text-bg hover:bg-danger/80"
+          class="rounded bg-danger px-2 py-1 font-mono uppercase tracking-wider text-bg hover:bg-danger/80 disabled:cursor-not-allowed disabled:opacity-50"
         >
           yes
         </button>
         <button
           type="button"
-          onClick={() => setConfirming(false)}
+          onClick={() => {
+            setConfirming(false);
+            act.clearError();
+          }}
           class="rounded border border-border px-2 py-1 font-mono uppercase tracking-wider text-fg-muted hover:bg-bg-hover"
         >
           cancel
         </button>
+        <Show when={act.error()}>
+          <span role="alert" class="text-[11px] text-danger">
+            {act.error()}
+          </span>
+        </Show>
       </span>
     </Show>
   );
