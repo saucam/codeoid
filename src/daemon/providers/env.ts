@@ -123,3 +123,22 @@ export function buildCodexEnv(
     base,
   );
 }
+
+/**
+ * Environment for the `gemini --acp` subprocess.
+ *
+ * gemini-cli's primary credential store is `~/.gemini` (HOME is in the
+ * shared basics — Google-account OAuth never transits codeoid), with env
+ * fallbacks for API-key users (GEMINI_API_KEY / GOOGLE_* for Vertex).
+ */
+export function buildGeminiCliEnv(
+  base: Record<string, string | undefined> = process.env,
+): Record<string, string> {
+  return buildSubprocessEnv(
+    {
+      prefixes: ["GEMINI_", "GOOGLE_", "LC_"],
+      suffixes: ["_API_KEY"],
+    },
+    base,
+  );
+}

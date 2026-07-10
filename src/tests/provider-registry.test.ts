@@ -77,9 +77,13 @@ describe("ProviderRegistry", () => {
     expect(registry.resolve("pi-from-the-future", "test").id).toBe("alpha");
   });
 
-  it("default catalog registers claude, gemini, openai, pi with claude as default", () => {
+  it("default catalog registers claude, gemini, openai, pi, gemini-cli with claude as default", () => {
     const registry = createDefaultProviderRegistry();
-    expect(registry.ids().sort()).toEqual(["claude", "gemini", "openai", "pi"]);
+    // pi + gemini-cli are BUNDLED (always activate); codex is PATH-dependent,
+    // so assert membership rather than the exact machine-dependent set.
+    for (const id of ["claude", "gemini", "openai", "pi", "gemini-cli"]) {
+      expect(registry.has(id)).toBe(true);
+    }
     expect(registry.defaultId).toBe("claude");
   });
 
@@ -88,7 +92,9 @@ describe("ProviderRegistry", () => {
       providers: { pi: { enabled: false, command: "pi" } },
     } as unknown as Parameters<typeof createDefaultProviderRegistry>[0]);
     expect(registry.has("pi")).toBe(false);
-    expect(registry.ids().sort()).toEqual(["claude", "gemini", "openai"]);
+    for (const id of ["claude", "gemini", "openai"]) {
+      expect(registry.has(id)).toBe(true);
+    }
   });
 
   it("the pi factory constructs a provider labeled with the codeoid session id", () => {
