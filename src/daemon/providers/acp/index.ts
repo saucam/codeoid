@@ -63,6 +63,9 @@ export class GeminiAcpProvider implements SessionProvider {
 
   #proc: StdioJsonRpcProcess | null = null;
   #acpSessionId: string | null = null;
+  /** Auth methods advertised at initialize (e.g. "oauth-personal"). */
+  #authMethods: string[] = [];
+  #authenticated = false;
   #hasQueried = false;
   #pendingHistorySeed: string | null = null;
 
@@ -212,7 +215,7 @@ export class GeminiAcpProvider implements SessionProvider {
           }
         },
       });
-      await this.#proc.request("initialize", {
+      const init = (await this.#proc.request("initialize", {
         protocolVersion: 1,
         clientCapabilities: {
           // Declined on purpose: gemini-cli falls back to its own tools,
@@ -220,19 +223,42 @@ export class GeminiAcpProvider implements SessionProvider {
           fs: { readTextFile: false, writeTextFile: false },
           terminal: false,
         },
-      });
+      })) as { authMethods?: Array<{ id?: string } | string> };
+      this.#authMethods = (init.authMethods ?? [])
+        .map((m) => (typeof m === "string" ? m : (m.id ?? "")))
+        .filter((m) => m.length > 0);
+      this.#authenticated = false;
     }
 
     // ACP session/load (resume) is capability-gated and gemini-cli support
     // varies; first slice always starts fresh — the canonical-history seed
     // carries context across daemon restarts and switches.
-    const started = (await this.#proc.request("session/new", {
-      cwd: opts.workdir,
-      mcpServers: [],
-    })) as { sessionId?: string };
+    const started = await this.#sessionNew(opts.workdir);
     if (!started.sessionId) throw new Error("gemini-cli session/new returned no sessionId");
     this.#acpSessionId = started.sessionId;
     this.#backingSessionId = started.sessionId;
+  }
+
+  /**
+   * session/new with an authenticate fallback. API-key setups create
+   * sessions directly, but an agent whose cached credential has no
+   * recorded SELECTION (observed: gemini-cli with ~/.gemini/oauth_creds
+   * but no settings.json) rejects session/new until the ACP `authenticate`
+   * method picks one. Prefer the OAuth method — the subscription posture
+   * this backend exists for — then retry once.
+   */
+  async #sessionNew(cwd: string): Promise<{ sessionId?: string }> {
+    const params = { cwd, mcpServers: [] };
+    try {
+      return (await this.#proc!.request("session/new", params)) as { sessionId?: string };
+    } catch (err) {
+      if (this.#authenticated || this.#authMethods.length === 0) throw err;
+      const preferred =
+        this.#authMethods.find((m) => m.includes("oauth")) ?? this.#authMethods[0]!;
+      await this.#proc!.request("authenticate", { methodId: preferred });
+      this.#authenticated = true;
+      return (await this.#proc!.request("session/new", params)) as { sessionId?: string };
+    }
   }
 
   #push(event: ProviderEvent): void {

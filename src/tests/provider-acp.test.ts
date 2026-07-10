@@ -188,6 +188,22 @@ describe("GeminiAcpProvider over fake-acp", () => {
     expect(events.some((e) => e.type === "text_delta" && e.content === "server-request-errored")).toBe(true);
   });
 
+  it("A10: authenticate fallback — auth-required session/new retries after selecting OAuth", async () => {
+    // Mirrors real gemini-cli with ~/.gemini/oauth_creds.json but no
+    // settings.json: session/new rejects until `authenticate` runs.
+    process.env.GEMINI_FAKE_REQUIRE_AUTH = "1";
+    try {
+      const p = makeProvider();
+      const events = await collect(p.runTurn(turnOpts("hello")));
+      await p.teardown();
+      const done = events.find((e) => e.type === "turn_done");
+      expect(done).toBeDefined(); // turn succeeded despite the auth gate
+      expect(events.some((e) => e.type === "error")).toBe(false);
+    } finally {
+      delete process.env.GEMINI_FAKE_REQUIRE_AUTH;
+    }
+  });
+
   it("A8: a missing gemini binary surfaces a clear error", async () => {
     const p = makeProvider("/nonexistent/gemini-binary", []);
     const events = await collect(p.runTurn(turnOpts("hello")));
