@@ -40,6 +40,7 @@ const COMMANDS: readonly CommandDoc[] = [
   { usage: "/mcp", desc: "Show MCP servers + their commands" },
   { usage: "/hooks", desc: "Show configured hooks" },
   { usage: "/who", desc: "Show the connected ZeroID identity" },
+  { usage: "/fork", desc: "Branch the session — optionally continue on another backend" },
   { usage: "/export", desc: "Export / share the focused session" },
   { usage: "/import", desc: "Import (fork) a session from a share" },
   { usage: "/clear", desc: "Clear the prompt box" },

@@ -30,6 +30,7 @@ import type {
   ClaudeConfigResultMsg,
   DaemonMessage,
   ModelsListResultMsg,
+  SessionInfo,
   SessionMode,
   SessionSearchResultMsg,
   ToolInfo,
@@ -142,6 +143,8 @@ export class TelegramFrontend implements Frontend {
         { command: "interrupt", description: "Stop the current turn" },
         { command: "mode", description: "Set mode: interactive | auto | autonomous" },
         { command: "model", description: "Show or switch the model" },
+        { command: "provider", description: "Show or switch the backend: /provider <id>" },
+        { command: "fork", description: "Branch this session: /fork [backend]" },
         { command: "rotate", description: "Fresh context (memory kept)" },
         { command: "rename", description: "Rename the attached session" },
         { command: "search", description: "Search across sessions" },
@@ -200,6 +203,8 @@ export class TelegramFrontend implements Frontend {
     this.#bot.command("rotate", (ctx) => this.#handleRotate(ctx));
     this.#bot.command("mode", (ctx) => this.#handleMode(ctx));
     this.#bot.command("model", (ctx) => this.#handleModel(ctx));
+    this.#bot.command("provider", (ctx) => this.#handleProvider(ctx));
+    this.#bot.command("fork", (ctx) => this.#handleFork(ctx));
     this.#bot.command("who", (ctx) => this.#handleWho(ctx));
     // Capabilities discovery — mirror the web /agents /skills /mcp /hooks.
     this.#bot.command("agents", (ctx) => this.#handleCapabilities(ctx, "agents"));
@@ -664,6 +669,88 @@ export class TelegramFrontend implements Frontend {
       return;
     }
     await ctx.reply(`Model → *${escMd(arg)}*\\.`, { parse_mode: "MarkdownV2" });
+  }
+
+  /** `/provider` — list backends; `/provider <id>` switches the attached session. */
+  async #handleProvider(ctx: Context): Promise<void> {
+    const state = this.#requireAuth(ctx);
+    if (!state || !state.attachedSessionId) {
+      await ctx.reply("Not attached. Use /attach <name>.");
+      return;
+    }
+    const arg = ctx.message?.text?.split(/\s+/)[1];
+    if (!arg) {
+      const list = this.#manager
+        .providerIds()
+        .map((id, i) => `• \`${escMd(id)}\`${i === 0 ? " \\(default\\)" : ""}`)
+        .join("\n");
+      await ctx.reply(`*Backends* \\(use /provider \\<id\\>\\)\n${list}`, { parse_mode: "MarkdownV2" });
+      return;
+    }
+    const resp = await this.#manager.handle(
+      { type: "session.set_provider", id: randomUUID(), sessionId: state.attachedSessionId, providerId: arg },
+      state.auth!,
+      this.#makeClient(state, ctx),
+    );
+    if (resp.type === "response.error") {
+      await ctx.reply(`Error: ${resp.error}`);
+      return;
+    }
+    await ctx.reply(`Backend → *${escMd(arg)}*\\.`, { parse_mode: "MarkdownV2" });
+  }
+
+  /**
+   * `/fork` — branch the attached session into a new one and switch to it.
+   * `/fork <providerId>` forks onto a different backend in one step
+   * ("continue this conversation on codex"). The chat auto-attaches to the
+   * fork so the next message goes to the branch, not the parent.
+   */
+  async #handleFork(ctx: Context): Promise<void> {
+    const state = this.#requireAuth(ctx);
+    if (!state || !state.attachedSessionId) {
+      await ctx.reply("Not attached. Use /attach <name>.");
+      return;
+    }
+    const providerId = ctx.message?.text?.split(/\s+/)[1];
+    const chatId = ctx.chat!.id;
+
+    const resp = await this.#manager.handle(
+      {
+        type: "session.fork",
+        id: randomUUID(),
+        sessionId: state.attachedSessionId,
+        ...(providerId ? { providerId } : {}),
+      },
+      state.auth!,
+      this.#makeClient(state, ctx),
+    );
+    if (resp.type === "response.error") {
+      await ctx.reply(`Error: ${resp.error}`);
+      return;
+    }
+    const fork = (resp as { data: SessionInfo }).data;
+
+    // Auto-attach to the fork (mirror /attach): detach the parent so its
+    // stream stops landing here, flush anything buffered, then attach the
+    // branch. Set attachedSessionId BEFORE the attach call — live broadcasts
+    // can arrive the moment the daemon registers the client.
+    if (state.attachedSessionId !== fork.id) {
+      this.#manager.disconnectClient(state.clientId);
+      state.relay.flushAndClear(chatId);
+    }
+    state.attachedSessionId = fork.id;
+    state.attachedSessionName = fork.name;
+    await this.#manager.handle(
+      { type: "session.attach", id: randomUUID(), sessionId: fork.id },
+      state.auth!,
+      this.#makeClient(state, ctx),
+    );
+
+    const onBackend = providerId ? ` on *${escMd(fork.providerId ?? providerId)}*` : "";
+    await ctx.reply(
+      `Forked into *${escMd(fork.name)}*${onBackend}\\. You're on the branch now — the parent is untouched\\.`,
+      { parse_mode: "MarkdownV2" },
+    );
   }
 
   // ── Discovery ─────────────────────────────────────────────────────────
