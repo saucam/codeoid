@@ -38,6 +38,7 @@ import type {
 import type { AttachedClient } from "../../daemon/session.js";
 import {
   StreamRelay,
+  escCode,
   escMd,
   formatSessionLine,
   type RelayApi,
@@ -52,9 +53,12 @@ interface AskQuestion {
 }
 
 /**
- * A pending tool approval awaiting a button tap. Keyed by a short token (the
- * approvalId's first 8 chars) so it fits Telegram's 64-byte callback_data.
- * Concurrent approvals each get their own entry + keyboard.
+ * A pending tool approval awaiting a button tap. Keyed by
+ * `${userId}:${short}` where `short` is the approvalId's first 8 chars —
+ * only `short` travels in callback_data (Telegram's 64-byte limit); the
+ * userId half is rebuilt from ctx.from.id on tap. Per-user keys let the same
+ * approval fan out to every attached user without one registration
+ * clobbering another's. Concurrent approvals each get their own entry.
  */
 interface PendingApproval {
   approvalId: string;
@@ -91,6 +95,15 @@ interface UserState {
    * turn is active.
    */
   stopMessageId: number | null;
+  /**
+   * Bumped whenever a turn ends (idle/error) or the attachment is torn down
+   * (detach/switch/fork). The "⏳ Working…" send captures the value before
+   * the API call; if it has advanced by the time the send resolves, the turn
+   * is already over and the just-sent message is deleted instead of stored —
+   * otherwise it lingers as an orphaned Stop control that fires a spurious
+   * interrupt when tapped.
+   */
+  stopGeneration: number;
 }
 
 export class TelegramFrontend implements Frontend {
@@ -102,7 +115,7 @@ export class TelegramFrontend implements Frontend {
   #authConfig!: AuthConfig;
   #store!: Store;
   #users = new Map<number, UserState>();
-  /** Short-token → pending approval, for inline-keyboard tool approvals. */
+  /** `${userId}:${short}` → pending approval (inline-keyboard approvals). */
   #approvals = new Map<string, PendingApproval>();
   /** Approval time-to-live (ms); overridable so tests can exercise expiry. */
   #approvalTtlMs: number;
@@ -141,7 +154,7 @@ export class TelegramFrontend implements Frontend {
         { command: "attach", description: "Attach to a session: /attach <name>" },
         { command: "detach", description: "Detach from the current session" },
         { command: "interrupt", description: "Stop the current turn" },
-        { command: "mode", description: "Set mode: interactive | auto | autonomous" },
+        { command: "mode", description: "Set mode: interactive | guarded | autonomous" },
         { command: "model", description: "Show or switch the model" },
         { command: "provider", description: "Show or switch the backend: /provider <id>" },
         { command: "fork", description: "Branch this session: /fork [backend]" },
@@ -229,8 +242,10 @@ export class TelegramFrontend implements Frontend {
         "*Run control*\n" +
         "/interrupt — stop the current turn\n" +
         "/rotate — fresh context, memory kept\n" +
-        "/mode `<interactive|auto|autonomous>`\n" +
-        "/model `[name]` — show/switch model\n\n" +
+        "/mode `<interactive|guarded|autonomous>`\n" +
+        "/model `[name]` — show/switch model\n" +
+        "/provider `[id]` — show/switch backend\n" +
+        "/fork `[backend]` — branch this session\n\n" +
         "*Discover*\n" +
         "/agents · /skills · /mcp · /hooks · /who\n\n" +
         "Send text to talk to the attached session\\. Tool approvals show\n" +
@@ -311,6 +326,10 @@ export class TelegramFrontend implements Frontend {
       // path with markdown specials must not 400 the reply.
       const lines = resp.sessions.map((s) => formatSessionLine(s));
       await ctx.reply(lines.join("\n\n"), { parse_mode: "MarkdownV2" });
+    } else if (resp.type === "response.error") {
+      // Never fail silently — a scope/tenancy error would otherwise render
+      // as the bot simply not answering.
+      await ctx.reply(`Error: ${resp.error}`);
     }
   }
 
@@ -373,7 +392,9 @@ export class TelegramFrontend implements Frontend {
       await state.relay.settle();
       // Remove the ⏹ Stop button for the old session. The old session's
       // idle status_change (which normally deletes it) won't arrive after
-      // we disconnected, so it would otherwise linger in the chat.
+      // we disconnected, so it would otherwise linger in the chat. Bump the
+      // generation so an in-flight "⏳ Working…" send deletes itself too.
+      state.stopGeneration++;
       if (state.stopMessageId !== null) {
         this.#bot.api.deleteMessage(chatId, state.stopMessageId).catch(() => {});
         state.stopMessageId = null;
@@ -427,6 +448,7 @@ export class TelegramFrontend implements Frontend {
     // land so the "Detached from …" confirmation can't overtake it.
     state.relay.flushAndClear(chatId);
     await state.relay.settle();
+    state.stopGeneration++;
     if (state.stopMessageId !== null) {
       this.#bot.api.deleteMessage(chatId, state.stopMessageId).catch(() => {});
       state.stopMessageId = null;
@@ -441,11 +463,15 @@ export class TelegramFrontend implements Frontend {
       return;
     }
 
-    await this.#manager.handle(
+    const resp = await this.#manager.handle(
       { type: "session.interrupt", id: randomUUID(), sessionId: state.attachedSessionId },
       state.auth!,
       this.#makeClient(state, ctx),
     );
+    if (resp.type === "response.error") {
+      await ctx.reply(`Error: ${resp.error}`);
+      return;
+    }
     await ctx.reply("Interrupted.");
   }
 
@@ -465,11 +491,17 @@ export class TelegramFrontend implements Frontend {
       return;
     }
 
-    await this.#manager.handle(
+    const resp = await this.#manager.handle(
       { type: "session.destroy", id: randomUUID(), sessionId: session.id },
       state.auth!,
       this.#makeClient(state, ctx),
     );
+    if (resp.type === "response.error") {
+      // The session is still alive (and still attached, if it was) — don't
+      // report success or clear the attachment.
+      await ctx.reply(`Error: ${resp.error}`);
+      return;
+    }
 
     if (state.attachedSessionId === session.id) {
       state.attachedSessionId = null;
@@ -587,11 +619,15 @@ export class TelegramFrontend implements Frontend {
       await ctx.reply("Not attached. Use /attach <name>.");
       return;
     }
-    await this.#manager.handle(
+    const resp = await this.#manager.handle(
       { type: "session.rotate", id: randomUUID(), sessionId: state.attachedSessionId },
       state.auth!,
       this.#makeClient(state, ctx),
     );
+    if (resp.type === "response.error") {
+      await ctx.reply(`Error: ${resp.error}`);
+      return;
+    }
     await ctx.reply("🔄 Context rotated — memory preserved.");
   }
 
@@ -605,8 +641,9 @@ export class TelegramFrontend implements Frontend {
     const mode: SessionMode | undefined =
       arg === "i" || arg === "interactive"
         ? "interactive"
-        : // `auto-allow` kept as a backward-compat alias for the renamed `guarded`.
-          arg === "g" || arg === "guarded" || arg === "auto-allow"
+        : // `a`/`auto`/`auto-allow` kept as backward-compat aliases for the
+          // renamed `guarded` — mirror packages/core/src/slash.ts.
+          arg === "g" || arg === "guarded" || arg === "a" || arg === "auto" || arg === "auto-allow"
           ? "guarded"
           : arg === "x" || arg === "autonomous"
             ? "autonomous"
@@ -651,7 +688,7 @@ export class TelegramFrontend implements Frontend {
         return;
       }
       const list = (resp as ModelsListResultMsg).models
-        .map((m) => `• \`${escMd(m.value)}\` — ${escMd(m.displayName)}${m.isDefault ? " \\(default\\)" : ""}`)
+        .map((m) => `• \`${escCode(m.value)}\` — ${escMd(m.displayName)}${m.isDefault ? " \\(default\\)" : ""}`)
         .join("\n");
       await ctx.reply(
         `*Models* \\(use /model \\<name\\>\\)\n${list}`,
@@ -682,7 +719,7 @@ export class TelegramFrontend implements Frontend {
     if (!arg) {
       const list = this.#manager
         .providerIds()
-        .map((id, i) => `• \`${escMd(id)}\`${i === 0 ? " \\(default\\)" : ""}`)
+        .map((id, i) => `• \`${escCode(id)}\`${i === 0 ? " \\(default\\)" : ""}`)
         .join("\n");
       await ctx.reply(`*Backends* \\(use /provider \\<id\\>\\)\n${list}`, { parse_mode: "MarkdownV2" });
       return;
@@ -737,6 +774,17 @@ export class TelegramFrontend implements Frontend {
     if (state.attachedSessionId !== fork.id) {
       this.#manager.disconnectClient(state.clientId);
       state.relay.flushAndClear(chatId);
+      // Wait for the flushed tail to land so the fork confirmation can't
+      // overtake it (mirror #handleAttach's switch sequence).
+      await state.relay.settle();
+      // Remove the parent's ⏹ Stop button — its idle status_change won't
+      // arrive after the disconnect, and a stale Stop tapped later would
+      // fire a spurious interrupt at the parent.
+      state.stopGeneration++;
+      if (state.stopMessageId !== null) {
+        this.#bot.api.deleteMessage(chatId, state.stopMessageId).catch(() => {});
+        state.stopMessageId = null;
+      }
     }
     state.attachedSessionId = fork.id;
     state.attachedSessionName = fork.name;
@@ -761,10 +809,10 @@ export class TelegramFrontend implements Frontend {
     const a = state.auth!;
     const lines = [
       "*Identity*",
-      `sub: \`${escMd(a.sub)}\``,
+      `sub: \`${escCode(a.sub)}\``,
       a.name ? `name: ${escMd(a.name)}` : "",
-      a.accountId ? `account: \`${escMd(a.accountId)}\`` : "",
-      a.projectId ? `project: \`${escMd(a.projectId)}\`` : "",
+      a.accountId ? `account: \`${escCode(a.accountId)}\`` : "",
+      a.projectId ? `project: \`${escCode(a.projectId)}\`` : "",
       `scopes: ${escMd((a.scopes ?? []).join(", ") || "none")}`,
       a.delegationDepth ? `delegation depth: ${a.delegationDepth}` : "",
     ].filter(Boolean);
@@ -800,7 +848,9 @@ export class TelegramFrontend implements Frontend {
         (m) => `• *${escMd(m.name)}* — ${escMd(m.command ?? m.scope)}`,
       );
     } else {
-      lines = cfg.hooks.map((h) => `• \`${escMd(h.command)}\``);
+      // Inside a MarkdownV2 code span only ` and \ are special — escMd here
+      // rendered literal backslashes that broke copy-paste of the command.
+      lines = cfg.hooks.map((h) => `• \`${escCode(h.command)}\``);
     }
     const title = { agents: "Subagents", skills: "Skills", mcp: "MCP servers", hooks: "Hooks" }[tab];
     await ctx.reply(
@@ -891,17 +941,29 @@ export class TelegramFrontend implements Frontend {
           if (state.attachedSessionId && state.stopMessageId === null) {
             const sid = state.attachedSessionId;
             const kb = new InlineKeyboard().text("⏹ Stop", `stop:${sid}`);
+            // Capture the turn generation BEFORE the send: if idle/error (or
+            // a detach/switch) lands while the send is in flight, the .then
+            // below must delete the just-sent message rather than store it —
+            // a `stopMessageId === null` check alone can't tell "not sent
+            // yet" apart from "turn already ended and cleanup already ran".
+            const gen = state.stopGeneration;
             this.#bot.api
               .sendMessage(chatId, "⏳ Working…", { reply_markup: kb })
               .then((m) => {
-                // Guard against a race where the turn already ended.
-                if (state.stopMessageId === null) state.stopMessageId = m.message_id;
-                else this.#bot.api.deleteMessage(chatId, m.message_id).catch(() => {});
+                if (state.stopGeneration === gen && state.stopMessageId === null) {
+                  state.stopMessageId = m.message_id;
+                } else {
+                  // Turn already ended (or another control exists) — remove
+                  // the orphan instead of leaving a live spurious Stop.
+                  this.#bot.api.deleteMessage(chatId, m.message_id).catch(() => {});
+                }
               })
               .catch(() => {});
           }
         } else if (msg.status === "idle" || msg.status === "error") {
-          // Turn ended — remove the Stop control.
+          // Turn ended — invalidate any in-flight "⏳ Working…" send and
+          // remove the Stop control.
+          state.stopGeneration++;
           if (state.stopMessageId !== null) {
             this.#bot.api.deleteMessage(chatId, state.stopMessageId).catch(() => {});
             state.stopMessageId = null;
@@ -953,15 +1015,28 @@ export class TelegramFrontend implements Frontend {
       }));
 
     this.#pruneApprovals();
-    this.#approvals.set(short, {
-      approvalId,
-      sessionId,
-      userId,
-      chatId,
-      questions,
-      answers: {},
-      createdAt: Date.now(),
-    });
+    // Keyed by user AND short token: the same waiting_confirmation broadcast
+    // fans out to every attached user, and a token-only key meant the last
+    // registration won — every other user's tap failed forever. The callback
+    // handler rebuilds the key from ctx.from.id, so callback_data stays small.
+    const key = `${userId}:${short}`;
+    const existing = this.#approvals.get(key);
+    // A re-broadcast of the same approval must not wipe answers already
+    // collected via the option buttons — preserve the live entry.
+    const keepExisting =
+      existing?.approvalId === approvalId &&
+      Object.keys(existing.answers).length > 0;
+    if (!keepExisting) {
+      this.#approvals.set(key, {
+        approvalId,
+        sessionId,
+        userId,
+        chatId,
+        questions,
+        answers: {},
+        createdAt: Date.now(),
+      });
+    }
 
     if (questions && questions.length > 0) {
       questions.forEach((q, qi) => {
@@ -969,13 +1044,36 @@ export class TelegramFrontend implements Frontend {
         q.options.forEach((opt, oi) => {
           kb.text(opt.label, `q:${short}:${qi}:${oi}`).row();
         });
+        // Cap the question BEFORE escaping — an unbounded model-authored
+        // question 400s the send (mirror the 800-char binary-approval cap).
+        const question = q.question.slice(0, 800);
         const head = q.header ? `*${escMd(q.header)}* — ` : "";
         this.#bot.api
-          .sendMessage(chatId, `❓ ${head}${escMd(q.question)}`, {
+          .sendMessage(chatId, `❓ ${head}${escMd(question)}`, {
             parse_mode: "MarkdownV2",
             reply_markup: kb,
           } as Record<string, unknown>)
-          .catch(() => {});
+          .catch(() =>
+            // MarkdownV2 can still 400 on pathological text; retry as plain
+            // text with the same keyboard so the approval stays actionable
+            // instead of hanging the turn invisibly.
+            this.#bot.api
+              .sendMessage(
+                chatId,
+                `❓ ${q.header ? `${q.header} — ` : ""}${question}`,
+                { reply_markup: kb } as Record<string, unknown>,
+              )
+              .catch(() =>
+                // Last resort: tell the user the turn is blocked on an
+                // approval they cannot see, and how to get out.
+                this.#bot.api
+                  .sendMessage(
+                    chatId,
+                    `⚠️ Approval prompt failed to render — approval ${short} is pending; reply /interrupt to abort`,
+                  )
+                  .catch(() => {}),
+              ),
+          );
       });
       return;
     }
@@ -1031,24 +1129,32 @@ export class TelegramFrontend implements Frontend {
       return;
     }
 
-    const pending = short ? this.#approvals.get(short) : undefined;
+    // Approvals are keyed `${userId}:${short}` — each attached user has
+    // their own registration for the same fanned-out approval, so one user's
+    // entry can never clobber another's. The tapping user's id rebuilds the
+    // key; a user can only ever resolve their OWN registration (GHSA-4g69:
+    // a different allowlisted user tapping a forwarded button must not act
+    // under the owner's identity).
+    const tapperId = ctx.from?.id;
+    const key = tapperId !== undefined ? `${tapperId}:${short}` : "";
+    const pending = short ? this.#approvals.get(key) : undefined;
     if (!pending) {
-      await ctx.answerCallbackQuery({ text: "This prompt expired." }).catch(() => {});
+      // Distinguish "someone else's approval" (forwarded/screenshotted
+      // button) from a prompt that is genuinely gone.
+      const foreign =
+        !!short &&
+        [...this.#approvals.keys()].some((k) => k.endsWith(`:${short}`));
+      await ctx
+        .answerCallbackQuery({ text: foreign ? "Not your approval." : "This prompt expired." })
+        .catch(() => {});
       return;
     }
     // Enforce the approval TTL on tap, not just when a later prompt triggers
     // #pruneApprovals — otherwise an approval older than the TTL stays
     // actionable indefinitely if no new prompt ever arrives.
     if (Date.now() - pending.createdAt > this.#approvalTtlMs) {
-      this.#approvals.delete(short);
+      this.#approvals.delete(key);
       await ctx.answerCallbackQuery({ text: "This prompt expired." }).catch(() => {});
-      return;
-    }
-    // Only the user the approval was queued for may resolve it — a different
-    // (allowlisted) user tapping a forwarded button must not act under the
-    // owner's identity (GHSA-4g69 hardening).
-    if (ctx.from?.id !== pending.userId) {
-      await ctx.answerCallbackQuery({ text: "Not your approval." }).catch(() => {});
       return;
     }
     const state = this.#users.get(pending.userId);
@@ -1072,7 +1178,7 @@ export class TelegramFrontend implements Frontend {
 
     if (kind === "a") {
       const approved = rest[0] === "y";
-      this.#approvals.delete(short);
+      this.#approvals.delete(key);
       await this.#manager.handle(
         {
           type: "session.approve",
@@ -1105,7 +1211,7 @@ export class TelegramFrontend implements Frontend {
         .catch(() => {});
       // Submit once every question has an answer.
       if (Object.keys(pending.answers).length >= pending.questions.length) {
-        this.#approvals.delete(short);
+        this.#approvals.delete(key);
         const answers: Record<string, string> = {};
         for (const qq of pending.questions) {
           answers[qq.question] = (pending.answers[qq.question] ?? []).join(", ");
@@ -1156,6 +1262,7 @@ export class TelegramFrontend implements Frontend {
         clientId: `telegram:${userId}`,
         relay: new StreamRelay(this.#relayApi),
         stopMessageId: null,
+        stopGeneration: 0,
       };
       this.#users.set(userId, state);
     }

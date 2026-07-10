@@ -127,8 +127,12 @@ function makeFakeManager() {
   const handled: any[] = [];
   const disconnected: string[] = [];
   const attachClients = new Map<string, AttachedClient>();
+  /** Every attach client in attach order (attachClients keeps only the last per session). */
+  const attachedAll: AttachedClient[] = [];
   /** Session names whose attach should fail with response.error. */
   const failAttach = new Set<string>();
+  /** Message types that should fail with response.error. */
+  const failTypes = new Set<string>();
 
   const manager = {
     findByName: (name: string) => sessions[name],
@@ -138,6 +142,9 @@ function makeFakeManager() {
     },
     handle: async (msg: any, _auth: unknown, client: AttachedClient) => {
       handled.push(msg);
+      if (failTypes.has(msg.type)) {
+        return { type: "response.error", error: `boom:${msg.type}` };
+      }
       switch (msg.type) {
         case "session.fork": {
           // Branch the parent into a new session; keep the parent's backend
@@ -164,8 +171,25 @@ function makeFakeManager() {
           const failing = [...failAttach].some((n) => sessions[n]?.id === msg.sessionId);
           if (failing) return { type: "response.error", error: "attach exploded" };
           attachClients.set(msg.sessionId, client);
+          attachedAll.push(client);
           return { type: "response.ok" };
         }
+        case "models.list":
+          return {
+            type: "models.list.result",
+            models: [
+              { value: "claude-opus-4.8", displayName: "Claude Opus 4.8", isDefault: true },
+              { value: "claude-haiku-4.5", displayName: "Claude Haiku 4.5" },
+            ],
+          };
+        case "claude.config":
+          return {
+            type: "claude.config.result",
+            agents: [{ name: "code-reviewer", description: "Reviews diffs" }],
+            skills: [],
+            mcpServers: [],
+            hooks: [{ command: "scripts/pre-commit.sh --fix" }],
+          };
         case "session.search":
           return {
             type: "session.search.result",
@@ -186,19 +210,21 @@ function makeFakeManager() {
     handled,
     disconnected,
     attachClients,
+    attachedAll,
     failAttach,
+    failTypes,
   };
   return manager;
 }
 
-function textUpdate(updateId: number, text: string) {
+function textUpdate(updateId: number, text: string, fromId = ALLOWED_USER) {
   return {
     update_id: updateId,
     message: {
       message_id: 10_000 + updateId,
       date: Math.floor(Date.now() / 1000),
       chat: { id: CHAT_ID, type: "private" as const, first_name: "u" },
-      from: { id: ALLOWED_USER, is_bot: false, first_name: "u" },
+      from: { id: fromId, is_bot: false, first_name: "u" },
       text,
       entities: text.startsWith("/")
         ? [{ type: "bot_command" as const, offset: 0, length: text.split(" ")[0]!.length }]
@@ -207,12 +233,12 @@ function textUpdate(updateId: number, text: string) {
   };
 }
 
-function callbackUpdate(updateId: number, data: string) {
+function callbackUpdate(updateId: number, data: string, fromId = ALLOWED_USER) {
   return {
     update_id: updateId,
     callback_query: {
       id: `cbq-${updateId}`,
-      from: { id: ALLOWED_USER, is_bot: false, first_name: "u" },
+      from: { id: fromId, is_bot: false, first_name: "u" },
       message: {
         message_id: 20_000 + updateId,
         date: Math.floor(Date.now() / 1000),
@@ -235,11 +261,20 @@ async function until(cond: () => boolean, ms = 2000): Promise<void> {
   }
 }
 
+interface BootOpts {
+  /** Allowlisted Telegram user ids (default just ALLOWED_USER). */
+  allowed?: number[];
+  /** Fail matching sends with a Telegram 400 (call is still recorded). */
+  failWhen?: (method: string, payload: any) => boolean;
+  /** Delay matching calls by N ms before responding (recorded at call time). */
+  delayFor?: (method: string, payload: any) => number;
+}
+
 /**
  * Boot a frontend with a stubbed bot + fake manager, authenticate via /auth
  * with the real signed JWT (real verifyToken against the local JWKS).
  */
-async function boot() {
+async function boot(opts: BootOpts = {}) {
   const bot = new Bot("43:TEST_TOKEN", { botInfo });
   const calls: ApiCall[] = [];
   let nextMessageId = 1;
@@ -255,14 +290,23 @@ async function boot() {
       });
     }
     calls.push({ method, payload });
-    return {
-      ok: true,
-      result: method === "sendMessage" ? { message_id: nextMessageId++ } : true,
-    } as any;
+    // message_id is assigned in CALL order so tests can correlate a send with
+    // its id even when a delayed send resolves after later ones.
+    const result = method === "sendMessage" ? { message_id: nextMessageId++ } : true;
+    const delay = opts.delayFor?.(method, payload) ?? 0;
+    if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+    if (opts.failWhen?.(method, payload)) {
+      return {
+        ok: false,
+        error_code: 400,
+        description: "Bad Request: can't parse entities",
+      } as any;
+    }
+    return { ok: true, result } as any;
   });
 
   const manager = makeFakeManager();
-  const fe = new TelegramFrontend("43:TEST_TOKEN", [ALLOWED_USER], bot);
+  const fe = new TelegramFrontend("43:TEST_TOKEN", opts.allowed ?? [ALLOWED_USER], bot);
   const ctx: FrontendContext = {
     manager: manager as never,
     store: { audit() {} } as never,
@@ -275,16 +319,24 @@ async function boot() {
   startedBots.push(bot);
 
   let updateId = 1;
-  const drive = (text: string) => bot.handleUpdate(textUpdate(updateId++, text));
-  const driveCallback = (data: string) => bot.handleUpdate(callbackUpdate(updateId++, data));
+  const drive = (text: string, fromId = ALLOWED_USER) =>
+    bot.handleUpdate(textUpdate(updateId++, text, fromId));
+  const driveCallback = (data: string, fromId = ALLOWED_USER) =>
+    bot.handleUpdate(callbackUpdate(updateId++, data, fromId));
   const sent = () => calls.filter((c) => c.method === "sendMessage");
   const texts = () => sent().map((c) => String(c.payload.text));
 
   // Authenticate with the real signed JWT — exercises verifyToken + JWKS.
-  await drive(`/auth ${jwt}`);
-  await until(() => texts().some((t) => t.startsWith("Authenticated as Tester")));
+  const authAs = async (fromId: number) => {
+    const before = texts().filter((t) => t.startsWith("Authenticated as Tester")).length;
+    await drive(`/auth ${jwt}`, fromId);
+    await until(
+      () => texts().filter((t) => t.startsWith("Authenticated as Tester")).length > before,
+    );
+  };
+  await authAs(ALLOWED_USER);
 
-  return { bot, fe, manager, calls, drive, driveCallback, sent, texts };
+  return { bot, fe, manager, calls, drive, driveCallback, sent, texts, authAs };
 }
 
 // ── Session-scoped daemon broadcast builders ──────────────────────────────────
@@ -331,6 +383,35 @@ function toolCallMsg(
 
 function statusMsg(sessionId: string, status: string): DaemonMessage {
   return { type: "session.status_change", sessionId, status } as DaemonMessage;
+}
+
+/** AskUserQuestion-style approval: questions ride on `tool.input`. */
+function askUserQuestionMsg(
+  sessionId: string,
+  messageId: string,
+  approvalId: string,
+  questions: unknown,
+): DaemonMessage {
+  return {
+    type: "session.message",
+    sessionId,
+    messageId,
+    role: "tool_call",
+    content: "",
+    tool: {
+      toolId: `t-${messageId}`,
+      name: "AskUserQuestion",
+      state: {
+        phase: "waiting_confirmation",
+        input: { questions },
+        description: "AskUserQuestion",
+        approvalId,
+      },
+      input: { questions },
+    },
+    identity: { sub: "agent:x", type: "agent" },
+    timestamp: new Date().toISOString(),
+  } as DaemonMessage;
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -633,5 +714,401 @@ describe("Telegram flows — fork", () => {
     await until(() => texts().some((t) => t.startsWith("Not attached")));
 
     expect(manager.handled.some((m) => m.type === "session.fork")).toBe(false);
+  });
+
+  it("/fork settles the flushed tail and removes the parent's stop button before confirming", async () => {
+    // Slow down the buffered-tail send: without the settle() the "Forked
+    // into" confirmation overtakes the flushed content.
+    const { drive, manager, calls, texts } = await boot({
+      delayFor: (m, p) =>
+        m === "sendMessage" && String(p.text) === "buffered from parent" ? 30 : 0,
+    });
+
+    await drive("/attach alpha");
+    await until(() => texts().some((t) => t.startsWith("Attached to")));
+    const client = manager.attachClients.get("sess-a")!;
+
+    // Active turn on the parent → ⏹ Stop control visible.
+    client.send(statusMsg("sess-a", "thinking"));
+    await until(() => texts().some((t) => t.startsWith("⏳ Working")));
+    await new Promise((r) => setTimeout(r, 10)); // let stopMessageId store
+
+    // Streamed-but-unflushed parent content.
+    client.send(assistantMsg("sess-a", "m1", ""));
+    client.send(deltaMsg("sess-a", "m1", "buffered from parent"));
+
+    await drive("/fork");
+    await until(() => texts().some((t) => t.includes("Forked into")));
+
+    const all = texts();
+    const iTail = all.indexOf("buffered from parent");
+    const iMarker = all.findIndex((t) => t.includes("✂️"));
+    const iConfirm = all.findIndex((t) => t.includes("Forked into"));
+    expect(iTail).toBeGreaterThanOrEqual(0);
+    expect(iMarker).toBeGreaterThan(iTail);
+    expect(iConfirm).toBeGreaterThan(iMarker);
+
+    // The parent's stop button was deleted (its idle will never arrive).
+    const sends = calls.filter((c) => c.method === "sendMessage");
+    const workingId = sends.findIndex((c) => String(c.payload.text).startsWith("⏳ Working")) + 1;
+    expect(
+      calls.some((c) => c.method === "deleteMessage" && c.payload.message_id === workingId),
+    ).toBe(true);
+  });
+});
+
+describe("Telegram flows — response.error surfaced on ls/interrupt/rotate/destroy", () => {
+  it("/ls replies with the error instead of staying silent", async () => {
+    const { drive, manager, texts } = await boot();
+
+    manager.failTypes.add("session.list");
+    await drive("/ls");
+    await until(() => texts().some((t) => t === "Error: boom:session.list"));
+  });
+
+  it("/interrupt reports the error instead of claiming Interrupted", async () => {
+    const { drive, manager, texts } = await boot();
+
+    await drive("/attach alpha");
+    await until(() => texts().some((t) => t.startsWith("Attached to")));
+
+    manager.failTypes.add("session.interrupt");
+    await drive("/interrupt");
+    await until(() => texts().some((t) => t === "Error: boom:session.interrupt"));
+    expect(texts().some((t) => t === "Interrupted.")).toBe(false);
+
+    // And still succeeds once the daemon recovers.
+    manager.failTypes.delete("session.interrupt");
+    await drive("/interrupt");
+    await until(() => texts().some((t) => t === "Interrupted."));
+  });
+
+  it("/rotate reports the error instead of claiming the context rotated", async () => {
+    const { drive, manager, texts } = await boot();
+
+    await drive("/attach alpha");
+    await until(() => texts().some((t) => t.startsWith("Attached to")));
+
+    manager.failTypes.add("session.rotate");
+    await drive("/rotate");
+    await until(() => texts().some((t) => t === "Error: boom:session.rotate"));
+    expect(texts().some((t) => t.includes("Context rotated"))).toBe(false);
+
+    manager.failTypes.delete("session.rotate");
+    await drive("/rotate");
+    await until(() => texts().some((t) => t.includes("Context rotated")));
+  });
+
+  it("/destroy reports the error, keeps the attachment, and doesn't claim destruction", async () => {
+    const { drive, manager, texts } = await boot();
+
+    await drive("/attach alpha");
+    await until(() => texts().some((t) => t.startsWith("Attached to")));
+    const client = manager.attachClients.get("sess-a")!;
+
+    manager.failTypes.add("session.destroy");
+    await drive("/destroy alpha");
+    await until(() => texts().some((t) => t === "Error: boom:session.destroy"));
+    expect(texts().some((t) => t.includes("destroyed"))).toBe(false);
+
+    // Still attached: the session wasn't destroyed, broadcasts keep flowing.
+    client.send(assistantMsg("sess-a", "m9", "still alive"));
+    await until(() => texts().includes("still alive"));
+  });
+});
+
+describe("Telegram flows — /mode aliases and advertised strings", () => {
+  it("accepts auto and a as guarded aliases (parity with core slash parsing)", async () => {
+    const { drive, manager, texts } = await boot();
+
+    await drive("/attach alpha");
+    await until(() => texts().some((t) => t.startsWith("Attached to")));
+
+    await drive("/mode auto");
+    await until(() =>
+      manager.handled.some((m) => m.type === "session.set_mode" && m.mode === "guarded"),
+    );
+    await drive("/mode a");
+    await until(
+      () =>
+        manager.handled.filter((m) => m.type === "session.set_mode" && m.mode === "guarded")
+          .length >= 2,
+    );
+    expect(texts().some((t) => t.includes("Mode → *guarded*"))).toBe(true);
+  });
+
+  it("advertises the real mode names and lists /provider + /fork in help", async () => {
+    const { drive, calls, texts } = await boot();
+
+    // The command menu registered at start() must match what the parser accepts.
+    const smc = calls.find((c) => c.method === "setMyCommands");
+    expect(smc).toBeDefined();
+    const modeCmd = (smc!.payload.commands as { command: string; description: string }[]).find(
+      (c) => c.command === "mode",
+    );
+    expect(modeCmd!.description).toBe("Set mode: interactive | guarded | autonomous");
+
+    await drive("/help");
+    await until(() => texts().some((t) => t.includes("Codeoid")));
+    const help = texts().find((t) => t.includes("Codeoid"))!;
+    expect(help).toContain("interactive|guarded|autonomous");
+    expect(help).not.toContain("interactive|auto|autonomous");
+    expect(help).toContain("/provider");
+    expect(help).toContain("/fork");
+  });
+});
+
+describe("Telegram flows — inline-code spans escape only ` and \\", () => {
+  it("/model renders copy-pasteable model ids inside backticks", async () => {
+    const { drive, sent, texts } = await boot();
+
+    await drive("/attach alpha");
+    await until(() => texts().some((t) => t.startsWith("Attached to")));
+
+    await drive("/model");
+    await until(() => texts().some((t) => t.includes("Models")));
+
+    const msg = sent().find((c) => String(c.payload.text).includes("Models"))!;
+    expect(msg.payload.parse_mode).toBe("MarkdownV2");
+    // The id inside the code span is NOT backslash-escaped (copy-paste works)…
+    expect(msg.payload.text).toContain("`claude-opus-4.8`");
+    expect(msg.payload.text).not.toContain("claude\\-opus");
+    // …while the display name outside the span still escapes MarkdownV2.
+    expect(msg.payload.text).toContain("Claude Opus 4\\.8");
+  });
+
+  it("/who renders identity values in clean code spans", async () => {
+    const { drive, sent, texts } = await boot();
+
+    await drive("/who");
+    await until(() => texts().some((t) => t.includes("Identity")));
+
+    const msg = sent().find((c) => String(c.payload.text).includes("Identity"))!;
+    expect(msg.payload.text).toContain("`acc-1`");
+    expect(msg.payload.text).toContain("`proj-1`");
+    expect(msg.payload.text).not.toContain("acc\\-1");
+  });
+
+  it("/hooks renders hook commands in clean code spans", async () => {
+    const { drive, sent, texts } = await boot();
+
+    await drive("/attach alpha");
+    await until(() => texts().some((t) => t.startsWith("Attached to")));
+
+    await drive("/hooks");
+    await until(() => texts().some((t) => t.includes("Hooks")));
+
+    const msg = sent().find((c) => String(c.payload.text).includes("Hooks"))!;
+    expect(msg.payload.text).toContain("`scripts/pre-commit.sh --fix`");
+    expect(msg.payload.text).not.toContain("\\-\\-fix");
+  });
+});
+
+describe("Telegram flows — AskUserQuestion prompt rendering", () => {
+  it("caps a runaway question at 800 chars and still renders the option keyboard", async () => {
+    const { drive, driveCallback, manager, sent, texts } = await boot();
+
+    await drive("/attach alpha");
+    await until(() => texts().some((t) => t.startsWith("Attached to")));
+    const client = manager.attachClients.get("sess-a")!;
+
+    const longQ = `Should I proceed ${"y".repeat(1200)}ENDMARKER`;
+    client.send(
+      askUserQuestionMsg("sess-a", "tq0", "12345678-rest", [
+        { question: longQ, header: "Plan", options: [{ label: "Yes" }, { label: "No" }] },
+      ]),
+    );
+    await until(() => texts().some((t) => t.startsWith("❓")));
+
+    const prompt = sent().find((c) => String(c.payload.text).startsWith("❓"))!;
+    expect(prompt.payload.reply_markup).toBeDefined();
+    expect(prompt.payload.text).toContain("Should I proceed");
+    expect(prompt.payload.text).not.toContain("ENDMARKER"); // truncated
+    expect(String(prompt.payload.text).length).toBeLessThanOrEqual(900);
+
+    // The tap still resolves the approval, keyed by the FULL question text.
+    await driveCallback("q:12345678:0:0");
+    await until(() => manager.handled.some((m) => m.type === "session.approve"));
+    const approve = manager.handled.find((m) => m.type === "session.approve");
+    expect(approve.approvalId).toBe("12345678-rest");
+    expect(approve.updatedInput.answers[longQ]).toBe("Yes");
+  });
+
+  it("retries as plain text (same keyboard) when MarkdownV2 rendering 400s", async () => {
+    const { drive, driveCallback, manager, sent, texts } = await boot({
+      failWhen: (m, p) =>
+        m === "sendMessage" &&
+        p.parse_mode === "MarkdownV2" &&
+        String(p.text).startsWith("❓"),
+    });
+
+    await drive("/attach alpha");
+    await until(() => texts().some((t) => t.startsWith("Attached to")));
+    const client = manager.attachClients.get("sess-a")!;
+
+    client.send(
+      askUserQuestionMsg("sess-a", "tq1", "fa11back-rest", [
+        { question: "Pick one```", options: [{ label: "A" }] },
+      ]),
+    );
+    await until(() =>
+      sent().some(
+        (c) => String(c.payload.text).startsWith("❓") && c.payload.parse_mode === undefined,
+      ),
+    );
+    const plain = sent().find(
+      (c) => String(c.payload.text).startsWith("❓") && c.payload.parse_mode === undefined,
+    )!;
+    expect(plain.payload.reply_markup).toBeDefined();
+
+    // The approval stays actionable through the plain-text keyboard.
+    await driveCallback("q:fa11back:0:0");
+    await until(() => manager.handled.some((m) => m.type === "session.approve"));
+  });
+
+  it("warns visibly (with the short id + /interrupt hint) when the prompt cannot be delivered at all", async () => {
+    const { drive, manager, texts } = await boot({
+      failWhen: (m, p) => m === "sendMessage" && String(p.text).startsWith("❓"),
+    });
+
+    await drive("/attach alpha");
+    await until(() => texts().some((t) => t.startsWith("Attached to")));
+    const client = manager.attachClients.get("sess-a")!;
+
+    client.send(
+      askUserQuestionMsg("sess-a", "tq2", "deadfa11-rest", [
+        { question: "Anyone there?", options: [{ label: "Yes" }] },
+      ]),
+    );
+    await until(() =>
+      texts().some((t) => t.startsWith("⚠️ Approval prompt failed to render")),
+    );
+    const warning = texts().find((t) => t.startsWith("⚠️ Approval prompt failed to render"))!;
+    expect(warning).toContain("deadfa11");
+    expect(warning).toContain("/interrupt");
+  });
+});
+
+describe("Telegram flows — approvals fan out per user (no clobbering)", () => {
+  it("two attached users can each resolve their own registration of the same approval", async () => {
+    const OTHER_USER = 333;
+    const { drive, driveCallback, manager, calls, texts, authAs } = await boot({
+      allowed: [ALLOWED_USER, OTHER_USER],
+    });
+    await authAs(OTHER_USER);
+
+    await drive("/attach alpha");
+    await until(() => texts().some((t) => t.startsWith("Attached to")));
+    await drive("/attach alpha", OTHER_USER);
+    await until(() => texts().filter((t) => t.startsWith("Attached to")).length >= 2);
+    const [cA, cB] = manager.attachedAll;
+    expect(cA).toBeDefined();
+    expect(cB).toBeDefined();
+
+    // The daemon fans the same waiting_confirmation out to every client.
+    const fanned = (mid: string) =>
+      toolCallMsg("sess-a", mid, "Write", {
+        phase: "waiting_confirmation",
+        input: {},
+        description: "Write(/tmp/f)",
+        approvalId: "fanout12-rest",
+      });
+    cA!.send(fanned("tcA"));
+    cB!.send(fanned("tcB"));
+    await until(
+      () => texts().filter((t) => t.startsWith("⚠️ Permission needed")).length >= 2,
+    );
+
+    // Pre-fix, the second registration clobbered the first: the first user's
+    // tap hit "Not your approval." forever.
+    await driveCallback("a:fanout12:y", ALLOWED_USER);
+    await until(
+      () => manager.handled.filter((m) => m.type === "session.approve").length >= 1,
+    );
+    await driveCallback("a:fanout12:n", OTHER_USER);
+    await until(
+      () => manager.handled.filter((m) => m.type === "session.approve").length >= 2,
+    );
+
+    const approves = manager.handled.filter((m) => m.type === "session.approve");
+    expect(approves[0]).toMatchObject({ approvalId: "fanout12-rest", approved: true });
+    expect(approves[1]).toMatchObject({ approvalId: "fanout12-rest", approved: false });
+    const cbAnswers = calls
+      .filter((c) => c.method === "answerCallbackQuery")
+      .map((c) => String(c.payload.text ?? ""));
+    expect(cbAnswers.some((t) => t.includes("Not your approval"))).toBe(false);
+  });
+
+  it("a re-broadcast of the same approval preserves already-collected answers", async () => {
+    const { drive, driveCallback, manager, calls, texts } = await boot();
+
+    await drive("/attach alpha");
+    await until(() => texts().some((t) => t.startsWith("Attached to")));
+    const client = manager.attachClients.get("sess-a")!;
+
+    const questions = [
+      { question: "Pick color", header: "Color", options: [{ label: "Red" }, { label: "Blue" }] },
+      { question: "Pick size", options: [{ label: "S" }, { label: "L" }] },
+    ];
+    client.send(askUserQuestionMsg("sess-a", "tq1", "beefcafe-rest", questions));
+    await until(() => texts().filter((t) => t.startsWith("❓")).length >= 2);
+
+    // Answer the first question.
+    await driveCallback("q:beefcafe:0:0");
+    await until(() =>
+      calls.some(
+        (c) => c.method === "answerCallbackQuery" && String(c.payload.text).includes("Red"),
+      ),
+    );
+
+    // The daemon re-broadcasts the same waiting_confirmation (e.g. a client
+    // re-attach elsewhere). Pre-fix this wiped the collected answer.
+    client.send(askUserQuestionMsg("sess-a", "tq1", "beefcafe-rest", questions));
+    await until(() => texts().filter((t) => t.startsWith("❓")).length >= 4);
+
+    // Answer the second question — BOTH answers must be submitted.
+    await driveCallback("q:beefcafe:1:1");
+    await until(() => manager.handled.some((m) => m.type === "session.approve"));
+    const approve = manager.handled.find((m) => m.type === "session.approve");
+    expect(approve.approved).toBe(true);
+    expect(approve.updatedInput.answers).toEqual({ "Pick color": "Red", "Pick size": "L" });
+  });
+});
+
+describe("Telegram flows — stop-button race", () => {
+  it("deletes an orphaned Working message when idle arrives before the send resolves", async () => {
+    // The "⏳ Working…" send is slow; the turn's idle lands while it is still
+    // in flight. Pre-fix the .then stored the message id afterwards, leaving
+    // an orphaned Stop control that fired a spurious interrupt when tapped.
+    const { drive, manager, calls, texts } = await boot({
+      delayFor: (m, p) =>
+        m === "sendMessage" && String(p.text).startsWith("⏳ Working") ? 30 : 0,
+    });
+
+    await drive("/attach alpha");
+    await until(() => texts().some((t) => t.startsWith("Attached to")));
+    const client = manager.attachClients.get("sess-a")!;
+
+    client.send(statusMsg("sess-a", "thinking"));
+    client.send(statusMsg("sess-a", "idle")); // idle beats the Working send
+    await until(() => texts().includes("✅ Done."));
+
+    // The late-resolving Working message is deleted, not stored as an orphan.
+    // (Match its message_id specifically — /auth also issues a deleteMessage
+    // for the message that carried the API key.)
+    const workingId = () =>
+      calls
+        .filter((c) => c.method === "sendMessage")
+        .findIndex((c) => String(c.payload.text).startsWith("⏳ Working")) + 1;
+    expect(workingId()).toBeGreaterThan(0);
+    await until(() =>
+      calls.some((c) => c.method === "deleteMessage" && c.payload.message_id === workingId()),
+    );
+
+    // A fresh turn still gets its own Working control afterwards.
+    client.send(statusMsg("sess-a", "thinking"));
+    await until(
+      () => texts().filter((t) => t.startsWith("⏳ Working")).length >= 2,
+    );
   });
 });

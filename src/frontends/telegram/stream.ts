@@ -43,6 +43,11 @@ interface StreamBuf {
 /** Telegram message size limit is 4096; leave headroom. */
 const CHUNK_LIMIT = 4000;
 
+/** Flush a pending tool-line batch after this much quiet time. */
+const TOOL_BATCH_MS = 1000;
+/** Flush a pending tool-line batch when it reaches this many lines. */
+const TOOL_BATCH_MAX = 10;
+
 /**
  * Split text into Telegram-sized chunks, preferring line boundaries so a
  * message isn't cut mid-line when a newline exists within the window.
@@ -81,9 +86,26 @@ export class StreamRelay {
    * overtake content.
    */
   #chain: Promise<unknown> = Promise.resolve();
+  /**
+   * Pending coalesced tool-status lines. A 30-tool turn used to produce 60+
+   * sequential sends (one ⚡ per start + one ✓/✗ per completion), tripping
+   * Telegram's flood limit and stalling the relay chain on 429s for minutes.
+   * Consecutive tool lines are buffered here and flushed as ONE multi-line
+   * message when (a) a non-tool send is enqueued, (b) the batch reaches
+   * `#toolBatchMax` lines, or (c) `#toolBatchMs` elapses.
+   */
+  #toolBatch: { chatId: number; lines: string[] } | null = null;
+  #toolBatchTimer: ReturnType<typeof setTimeout> | null = null;
+  #toolBatchMs: number;
+  #toolBatchMax: number;
 
-  constructor(api: RelayApi) {
+  constructor(
+    api: RelayApi,
+    opts: { toolBatchMs?: number; toolBatchMax?: number } = {},
+  ) {
     this.#api = api;
+    this.#toolBatchMs = opts.toolBatchMs ?? TOOL_BATCH_MS;
+    this.#toolBatchMax = opts.toolBatchMax ?? TOOL_BATCH_MAX;
   }
 
   /** Number of live streaming buffers (exposed for tests/invariants). */
@@ -107,6 +129,18 @@ export class StreamRelay {
     text: string,
     opts?: Record<string, unknown>,
   ): Promise<void> {
+    // A non-tool send flushes any pending tool-line batch first, preserving
+    // the order tool lines were produced in relative to this message.
+    this.#flushToolBatch();
+    return this.#rawSend(chatId, text, opts);
+  }
+
+  /** send() without the tool-batch flush (used by the flush itself). */
+  #rawSend(
+    chatId: number,
+    text: string,
+    opts?: Record<string, unknown>,
+  ): Promise<void> {
     return this.enqueue(() => this.#api.sendMessage(chatId, text, opts)).then(
       () => {},
       () => {},
@@ -115,6 +149,7 @@ export class StreamRelay {
 
   /** Queue a long message, split into ordered, sequentially-awaited chunks. */
   sendChunked(chatId: number, text: string): Promise<void> {
+    this.#flushToolBatch();
     const chunks = chunkText(text);
     if (chunks.length === 0) return Promise.resolve();
     return this.enqueue(async () => {
@@ -135,6 +170,7 @@ export class StreamRelay {
    * dropping the thought.
    */
   sendThinking(chatId: number, text: string): Promise<void> {
+    this.#flushToolBatch();
     const body = `💭 _thinking_\n${text.slice(0, 1500)}`;
     return this.enqueue(async () => {
       try {
@@ -185,7 +221,7 @@ export class StreamRelay {
         // toolStateUpdate delta referencing this messageId.
         this.#toolNames.set(m.messageId, m.tool.name);
         const line = toolLine(m.tool.name, m.tool.state);
-        if (line) this.send(chatId, line);
+        if (line) this.#queueToolLine(chatId, line);
         break;
       }
       case "system":
@@ -208,7 +244,7 @@ export class StreamRelay {
       this.#flushOthers(chatId, d.messageId);
       const name = this.#toolNames.get(d.messageId) ?? "tool";
       const line = toolLine(name, d.toolStateUpdate);
-      if (line) this.send(chatId, line);
+      if (line) this.#queueToolLine(chatId, line);
       const phase = d.toolStateUpdate.phase;
       if (phase === "completed" || phase === "cancelled") {
         this.#toolNames.delete(d.messageId);
@@ -226,10 +262,50 @@ export class StreamRelay {
   }
 
   /**
+   * Buffer a tool-status line for coalesced delivery (see `#toolBatch`).
+   * Batches are per-chat; a line for a different chat flushes the previous
+   * chat's batch first so cross-chat ordering is never violated.
+   */
+  #queueToolLine(chatId: number, line: string): void {
+    if (this.#toolBatch && this.#toolBatch.chatId !== chatId) {
+      this.#flushToolBatch();
+    }
+    if (!this.#toolBatch) this.#toolBatch = { chatId, lines: [] };
+    this.#toolBatch.lines.push(line);
+    if (this.#toolBatch.lines.length >= this.#toolBatchMax) {
+      this.#flushToolBatch();
+      return;
+    }
+    if (this.#toolBatchTimer === null) {
+      this.#toolBatchTimer = setTimeout(() => {
+        this.#toolBatchTimer = null;
+        this.#flushToolBatch();
+      }, this.#toolBatchMs);
+      // Don't hold the process open just for a pending batch flush.
+      (this.#toolBatchTimer as { unref?: () => void }).unref?.();
+    }
+  }
+
+  /** Enqueue the pending tool-line batch as one multi-line message. */
+  #flushToolBatch(): void {
+    if (this.#toolBatchTimer !== null) {
+      clearTimeout(this.#toolBatchTimer);
+      this.#toolBatchTimer = null;
+    }
+    const batch = this.#toolBatch;
+    this.#toolBatch = null;
+    if (!batch || batch.lines.length === 0) return;
+    this.#rawSend(batch.chatId, batch.lines.join("\n"));
+  }
+
+  /**
    * Session detach/switch: deliver whatever is buffered (never discard
    * content invisibly), mark the stream as cut short, and reset state.
    */
   flushAndClear(chatId: number): void {
+    // Deliver any batched tool lines first — after a detach nothing else
+    // would ever flush them.
+    this.#flushToolBatch();
     let interrupted = false;
     for (const buf of this.#buffers.values()) {
       if (buf.content.length > buf.flushed) interrupted = true;
@@ -258,8 +334,11 @@ export class StreamRelay {
     else this.sendChunked(chatId, pending);
   }
 
-  /** Resolves once everything queued so far has been sent (test helper). */
+  /** Resolves once everything queued so far has been sent. Flushes any
+   * pending tool-line batch first so "queued so far" includes it — the
+   * detach/switch/fork handlers await this before their confirmations. */
   settle(): Promise<void> {
+    this.#flushToolBatch();
     return this.#chain.then(
       () => {},
       () => {},
