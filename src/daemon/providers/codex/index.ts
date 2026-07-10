@@ -41,6 +41,15 @@ import { renderHistorySeed, type CanonicalTurn } from "../canonical.js";
 import { buildCodexEnv } from "../env.js";
 import { CodexRpcProcess } from "./rpc.js";
 
+/** codex `tokenUsage.last` / `.total` shape (thread/tokenUsage/updated). */
+interface CodexTokenUsage {
+  totalTokens?: number;
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  reasoningOutputTokens?: number;
+}
+
 export interface CodexProviderInit {
   sessionId: string;
   /** codex thread id from a previous run, or the codeoid session id on first run. */
@@ -88,6 +97,13 @@ export class CodexProvider implements SessionProvider {
   #turnStartedAt = 0;
   #turnModel = "codex";
   #currentTurnId: string | null = null;
+  /**
+   * Latest per-turn token usage from `thread/tokenUsage/updated`. codex's
+   * `turn/completed` carries NO usage (verified live) — it arrives on the
+   * separate token-usage notification, `tokenUsage.last` being this turn's
+   * counts. Captured here and folded into turn_done.
+   */
+  #lastTokenUsage: CodexTokenUsage | null = null;
   /** item id → {name, input} for items already announced via tool_start. */
   #announcedItems = new Map<string, { name: string; input: Record<string, unknown> }>();
 
@@ -132,6 +148,7 @@ export class CodexProvider implements SessionProvider {
     this.#turnStartedAt = Date.now();
     this.#turnModel = opts.model ?? "codex";
     this.#announcedItems.clear();
+    this.#lastTokenUsage = null;
     this.#hasQueried = true;
 
     void this.#startTurn(opts).catch((err: unknown) => {
@@ -328,13 +345,16 @@ export class CodexProvider implements SessionProvider {
       }
       case "turn/completed": {
         const turn = params.turn as Record<string, unknown> | undefined;
-        const usage = (turn?.usage ?? params.usage ?? {}) as Record<string, number>;
+        const u = this.#lastTokenUsage;
+        // Match the claude convention: inputTokens = NEW tokens (cache reads
+        // excluded); codex's inputTokens INCLUDES its cachedInputTokens.
+        const cacheRead = u?.cachedInputTokens ?? 0;
         const result: NormalizedTurnResult = {
           providerId: this.id,
           model: this.#turnModel,
-          inputTokens: usage.inputTokens ?? usage.input_tokens ?? 0,
-          outputTokens: usage.outputTokens ?? usage.output_tokens ?? 0,
-          cacheReadTokens: usage.cachedInputTokens ?? usage.cached_input_tokens ?? 0,
+          inputTokens: Math.max(0, (u?.inputTokens ?? 0) - cacheRead),
+          outputTokens: u?.outputTokens ?? 0,
+          cacheReadTokens: cacheRead,
           cacheCreationTokens: 0,
           totalCostUsd: 0,
           durationMs: Date.now() - this.#turnStartedAt,
@@ -342,6 +362,11 @@ export class CodexProvider implements SessionProvider {
         };
         this.#push({ type: "turn_done", result });
         this.#turnQueue?.close();
+        break;
+      }
+      case "thread/tokenUsage/updated": {
+        const usage = (params.tokenUsage as { last?: CodexTokenUsage } | undefined)?.last;
+        if (usage) this.#lastTokenUsage = usage;
         break;
       }
       case "error": {
