@@ -221,6 +221,15 @@ describe("SessionManager session.fork", () => {
     const ids = (info as { sessions: Array<{ id: string }> }).sessions.map((s) => s.id);
     expect(ids).toContain(parentId);
     expect(ids).toContain(fork.id);
+
+    // The replayed scrollback is persisted to the fork's OWN transcript and
+    // restamped with the fork's id (survives restart; no foreign session id).
+    await transcript.flush();
+    const rows = await transcript.loadTranscript(fork.id, {});
+    const msgs = rows.map((r) => r.message).filter((m) => m.type === "session.message");
+    expect(msgs.length).toBeGreaterThan(0);
+    for (const m of msgs) expect((m as { sessionId: string }).sessionId).toBe(fork.id);
+    expect(msgs.some((m) => (m as { role: string }).role === "user")).toBe(true);
   });
 
   it("F2: forks onto a DIFFERENT backend in one call, parent untouched", async () => {
