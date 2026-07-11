@@ -9,6 +9,7 @@ import {
   hasMessage,
   lastActivityAt,
   messagesFor,
+  prependMessages,
   registerSessionCachePruner,
   replaceScrollback,
   versionOf,
@@ -374,5 +375,92 @@ describe("messages store", () => {
     unregister();
     clearSessionMessages("s1");
     expect(pruned).toEqual(["s1"]); // unregistered — not called again
+  });
+});
+
+describe("prependMessages — scrollback.page backfill (#152)", () => {
+  beforeEach(() => _resetMessagesForTest());
+
+  function ids(sessionId: string): string[] {
+    return messagesFor(sessionId).map((m) => m.messageId);
+  }
+
+  it("inserts an older page at the FRONT preserving order", () => {
+    replaceScrollback("s1", [
+      makeMsg({ messageId: "m5", content: "five" }),
+      makeMsg({ messageId: "m6", content: "six" }),
+    ]);
+    prependMessages("s1", [
+      makeMsg({ messageId: "m2", content: "two" }),
+      makeMsg({ messageId: "m3", content: "three" }),
+      makeMsg({ messageId: "m4", content: "four" }),
+    ]);
+    expect(ids("s1")).toEqual(["m2", "m3", "m4", "m5", "m6"]);
+  });
+
+  it("prepends into an empty session and multiple pages walk backwards", () => {
+    prependMessages("s1", [makeMsg({ messageId: "m3" }), makeMsg({ messageId: "m4" })]);
+    prependMessages("s1", [makeMsg({ messageId: "m1" }), makeMsg({ messageId: "m2" })]);
+    expect(ids("s1")).toEqual(["m1", "m2", "m3", "m4"]);
+  });
+
+  it("dedupes against already-held ids (overlapping page) and within the batch", () => {
+    replaceScrollback("s1", [
+      makeMsg({ messageId: "m3", content: "held" }),
+      makeMsg({ messageId: "m4" }),
+    ]);
+    prependMessages("s1", [
+      makeMsg({ messageId: "m1" }),
+      makeMsg({ messageId: "m2" }),
+      makeMsg({ messageId: "m2" }), // in-batch duplicate
+      makeMsg({ messageId: "m3", content: "page-copy" }), // already in store
+    ]);
+    expect(ids("s1")).toEqual(["m1", "m2", "m3", "m4"]);
+    // Held content wins for a store collision — history is immutable, the
+    // colliding page copy is dropped rather than upserted.
+    expect(messagesFor("s1")[2]!.content).toBe("held");
+  });
+
+  it("keeps the positional index coherent — deltas still land after a prepend", () => {
+    replaceScrollback("s1", [makeMsg({ messageId: "m9", content: "tail" })]);
+    prependMessages("s1", [
+      makeMsg({ messageId: "m7", content: "seven" }),
+      makeMsg({ messageId: "m8", content: "eight" }),
+    ]);
+    // Delta targets the SHIFTED position of m9 (index 2 now, was 0).
+    applyDelta({
+      type: "session.message.delta",
+      sessionId: "s1",
+      messageId: "m9",
+      contentAppend: "+d",
+      timestamp: "t",
+    } as SessionMessageDelta);
+    expect(messagesFor("s1")[2]!.content).toBe("tail+d");
+    // And a fresh page still dedupes against every id, old and new.
+    expect(hasMessage("s1", "m7")).toBe(true);
+    expect(hasMessage("s1", "m8")).toBe(true);
+    expect(hasMessage("s1", "m9")).toBe(true);
+    // New live messages append at the correct index after the shift.
+    applyMessage(makeMsg({ messageId: "m10", content: "live" }));
+    expect(ids("s1")).toEqual(["m7", "m8", "m9", "m10"]);
+    applyDelta({
+      type: "session.message.delta",
+      sessionId: "s1",
+      messageId: "m10",
+      contentAppend: "!",
+      timestamp: "t",
+    } as SessionMessageDelta);
+    expect(messagesFor("s1")[3]!.content).toBe("live!");
+  });
+
+  it("bumps the session epoch, no-ops on empty/fully-duplicate input", () => {
+    replaceScrollback("s1", [makeMsg({ messageId: "m2" })]);
+    const before = epochOf("s1");
+    prependMessages("s1", []);
+    expect(epochOf("s1")).toBe(before); // empty — untouched
+    prependMessages("s1", [makeMsg({ messageId: "m2" })]);
+    expect(epochOf("s1")).toBe(before); // all duplicates — untouched
+    prependMessages("s1", [makeMsg({ messageId: "m1" })]);
+    expect(epochOf("s1")).toBe(before + 1);
   });
 });

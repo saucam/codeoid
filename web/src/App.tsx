@@ -18,9 +18,9 @@ import {
   bootstrap,
   connectionStatus,
   newRequestId,
-  request,
   send,
 } from "./state/connection";
+import { attachRetryEpoch, attachSession } from "./state/attach";
 import { closeFile, openedFile } from "./state/files";
 import { focusedSession, focusedSessionId, mergeSession } from "./state/sessions";
 import { resumeFor } from "./state/resume";
@@ -80,7 +80,11 @@ const App: Component = () => {
     // unsubscribed (no scrollback, no deltas, stale "thinking" forever). The
     // status effect above clears `attached` on drop; this re-attaches on the
     // following `connected`.
-    on([authIdentity, focusedSessionId, connectionStatus], () => {
+    //
+    // attachRetryEpoch: bumped by the transcript's "Retry" affordance after a
+    // failed attach (#152) — the failure removed the id from `attached`, so a
+    // bump re-runs this dispatch for the focused session.
+    on([authIdentity, focusedSessionId, connectionStatus, attachRetryEpoch], () => {
       const auth = authIdentity();
       const id = focusedSessionId();
       if (!auth || !id || attached.has(id)) return;
@@ -89,11 +93,11 @@ const App: Component = () => {
       // Mark attached optimistically so concurrent effect firings don't send
       // duplicate attaches. On failure, remove so the next focus change retries.
       attached.add(id);
-      const reqId = newRequestId();
       // Resume incrementally when we hold a cursor for this session — the
       // daemon then replays only what changed since, not the full scrollback.
-      const resume = resumeFor(id);
-      request({ type: "session.attach", id: reqId, sessionId: id, ...(resume ? { resume } : {}) })
+      // attachSession (state/attach.ts) tracks the pending → settled | failed
+      // lifecycle the transcript renders (#152).
+      attachSession(id, resumeFor(id))
         .then((data) => {
           // The attach response includes the session's current SessionInfo.
           // Update local state immediately so the status dot reflects reality

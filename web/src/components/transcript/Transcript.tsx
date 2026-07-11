@@ -16,7 +16,9 @@
 import {
   Component,
   For,
+  Match,
   Show,
+  Switch,
   createEffect,
   createMemo,
   createSignal,
@@ -34,12 +36,37 @@ import {
 } from "../../state/messages";
 import { focusedSession, focusedSessionId } from "../../state/sessions";
 import {
+  attachError,
+  attachState,
+  hasOlderHistory,
+  loadOlderHistory,
+  pagingBusy,
+  pagingError,
+  requestAttachRetry,
+} from "../../state/attach";
+import {
   findJumpTarget,
   pendingSearchJump,
   setPendingSearchJump,
 } from "../../state/search-jump";
 
 const SCROLL_STICKY_THRESHOLD_PX = 80;
+
+/**
+ * Anchored-prepend scroll math (#152): after older history is inserted at
+ * the TOP of the scroll content, keep the viewport visually still by
+ * preserving the distance from the scroll position to the BOTTOM of the
+ * content (`prevHeight - prevTop`), which prepending cannot change.
+ * Exported for unit tests — jsdom has no real layout, so the arithmetic is
+ * what gets asserted.
+ */
+export function computeAnchoredScrollTop(
+  prevHeight: number,
+  prevTop: number,
+  newHeight: number,
+): number {
+  return newHeight - (prevHeight - prevTop);
+}
 
 const Transcript: Component = () => {
   const messages = focusedSessionMessages;
@@ -374,6 +401,83 @@ const Transcript: Component = () => {
     requestAnimationFrame(tryFlash);
   });
 
+  // ---------- older-history backfill (#152) ----------
+
+  // Anchored prepend: capture scroll geometry synchronously around the store
+  // mutation (attach.ts brackets the prepend with these hooks — capturing
+  // before the network await would go stale if the user keeps scrolling).
+  // The restore runs twice: synchronously after Solid's reactive flush (the
+  // virtualizer count-push effect has already resized the sizer with
+  // estimated heights — set scrollTop before paint so there's no flicker),
+  // and again on the next frame. The rAF pass recomputes the same
+  // "distance-to-bottom" invariant, so it composes with (rather than fights)
+  // virtual-core's own resizeItem scroll adjustment, which corrects for
+  // prepended rows re-measuring from estimateSize to their real heights.
+  // When the user is stuck to the bottom (tiny transcript auto-filling), the
+  // sticky pinObserver owns the scroll — anchoring stays out of the way.
+  function loadOlder(): void {
+    const sid = focusedSessionId();
+    if (!sid) return;
+    let prevHeight = 0;
+    let prevTop = 0;
+    void loadOlderHistory(sid, {
+      onBeforePrepend: () => {
+        prevHeight = containerRef?.scrollHeight ?? 0;
+        prevTop = containerRef?.scrollTop ?? 0;
+      },
+      onAfterPrepend: () => {
+        const apply = (): void => {
+          if (!containerRef || stuckBottom()) return;
+          containerRef.scrollTop = computeAnchoredScrollTop(
+            prevHeight,
+            prevTop,
+            containerRef.scrollHeight,
+          );
+        };
+        apply();
+        requestAnimationFrame(apply);
+      },
+    });
+  }
+
+  // Auto-trigger when the sentinel scrolls into view. Environment-safe:
+  // without IntersectionObserver the sentinel falls back to click-to-load
+  // only. Single-flight is enforced inside loadOlderHistory. The sentinel
+  // element flows through a SIGNAL (not a bare ref) because its <Show> can
+  // mount it during the first render — BEFORE onMount has created the
+  // observer — and again on any later hasOlderHistory flip; the effect below
+  // re-observes whichever element is current, whenever both exist.
+  const [sentinelEl, setSentinelEl] = createSignal<HTMLElement | null>(null);
+  onMount(() => {
+    if (typeof IntersectionObserver === "undefined") return;
+    const historyObserver = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) loadOlder();
+        }
+      },
+      { root: containerRef ?? null },
+    );
+    createEffect(() => {
+      const el = sentinelEl();
+      if (!el) return;
+      historyObserver.observe(el);
+      onCleanup(() => historyObserver.unobserve(el));
+    });
+    onCleanup(() => historyObserver.disconnect());
+  });
+
+  const focusedAttachState = () => attachState(focusedSessionId());
+  const focusedAttachError = () => attachError(focusedSessionId());
+  const focusedHasOlder = () => hasOlderHistory(focusedSessionId());
+  const focusedPagingBusy = () => pagingBusy(focusedSessionId());
+  const focusedPagingError = () => pagingError(focusedSessionId());
+
+  function retryAttach(): void {
+    const sid = focusedSessionId();
+    if (sid) requestAttachRetry(sid);
+  }
+
   return (
     <div
       ref={containerRef}
@@ -383,11 +487,106 @@ const Transcript: Component = () => {
       <Show
         when={messages().length > 0}
         fallback={
+          // Empty transcript — but "empty" has three distinct truths (#152):
+          // a replay still in flight (don't invite typing into a session we
+          // haven't attached), a failed attach (surface it + retry), and a
+          // genuinely message-less session.
           <div class="flex h-full items-center justify-center text-sm text-fg-muted">
-            <p>No messages yet — type below and press Enter.</p>
+            <Switch
+              fallback={<p>No messages yet — type below and press Enter.</p>}
+            >
+              <Match when={focusedAttachState() === "pending"}>
+                <p>
+                  <span class="inline-block h-2 w-2 animate-pulse rounded-full bg-accent" />{" "}
+                  loading transcript…
+                </p>
+              </Match>
+              <Match when={focusedAttachState() === "failed"}>
+                <div class="flex flex-col items-center gap-2">
+                  <p class="text-danger">
+                    Couldn't attach to this session
+                    {focusedAttachError() ? `: ${focusedAttachError()}` : "."}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={retryAttach}
+                    class="rounded border border-accent/40 px-3 py-1 text-xs text-accent hover:bg-bg-active"
+                  >
+                    Retry
+                  </button>
+                </div>
+              </Match>
+            </Switch>
           </div>
         }
       >
+        {/* Re-attach failure with an existing transcript (reconnect path):
+            the messages stay useful, but surface the error inline instead of
+            only console.warn — the session isn't receiving updates. */}
+        <Show when={focusedAttachState() === "failed"}>
+          <div class="mx-auto mb-2 flex w-full max-w-3xl items-center justify-between gap-2 rounded border border-danger/40 bg-danger/10 px-3 py-1.5 text-xs text-danger">
+            <span>
+              Attach failed
+              {focusedAttachError() ? `: ${focusedAttachError()}` : "."}
+            </span>
+            <button
+              type="button"
+              onClick={retryAttach}
+              class="shrink-0 rounded border border-danger/40 px-2 py-0.5 hover:bg-danger/20"
+            >
+              Retry
+            </button>
+          </div>
+        </Show>
+        {/* Older-history sentinel: rendered ABOVE the virtualized list while
+            the daemon reports more history (`tail`+`hasMore`). Click loads a
+            page; scrolling it into view auto-loads via IntersectionObserver.
+            Lives OUTSIDE the absolutely-positioned sizer so it takes part in
+            normal flow — prepends below it shift content, which the anchored
+            scroll restore in loadOlder() compensates for. */}
+        <Show when={focusedHasOlder()}>
+          <div
+            ref={(el) => {
+              setSentinelEl(el);
+              // Solid never calls refs with null on unmount — clear by hand
+              // so the observer effect releases the detached node.
+              onCleanup(() => setSentinelEl(null));
+            }}
+            class="mx-auto w-full max-w-3xl pb-2 text-center text-xs text-fg-muted"
+            data-testid="older-history-sentinel"
+          >
+            <Switch
+              fallback={
+                <button
+                  type="button"
+                  onClick={loadOlder}
+                  class="rounded border border-border px-3 py-1 hover:bg-bg-active hover:text-fg"
+                >
+                  ↑ older messages — scroll or click to load
+                </button>
+              }
+            >
+              <Match when={focusedPagingBusy()}>
+                <span>
+                  <span class="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />{" "}
+                  loading older…
+                </span>
+              </Match>
+              <Match when={focusedPagingError()}>
+                <span class="text-danger">
+                  Couldn't load older messages: {focusedPagingError()}{" "}
+                  <button
+                    type="button"
+                    onClick={loadOlder}
+                    class="rounded border border-danger/40 px-2 py-0.5 hover:bg-danger/20"
+                  >
+                    Retry
+                  </button>
+                </span>
+              </Match>
+            </Switch>
+          </div>
+        </Show>
         <div
           ref={(el) => {
             sizerRef = el;
