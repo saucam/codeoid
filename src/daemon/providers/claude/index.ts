@@ -90,6 +90,15 @@ export class ClaudeProvider implements SessionProvider {
   #abortController: AbortController | null = null;
   #inputQueue: AsyncQueue<SDKUserMessage> | null = null;
   #consumerTask: Promise<void> | null = null;
+  /** The systemPromptAppend the LIVE query loop was built with. The SDK fixes
+   * the system prompt at query construction, so a changed append (before_turn
+   * hook output, refreshed memory index) requires a loop rebuild — see
+   * #ensureQueryLoop. */
+  #builtSystemPromptAppend = "";
+  /** Monotonic loop generation. Bumped on every (re)build so an orphaned
+   * consumer from a superseded loop can neither emit stale events into the
+   * new loop's turn queue nor close it from its `finally`. */
+  #loopGeneration = 0;
 
   // Long-running event queue — closed only when the SDK loop ends.
   // turn_done events are emitted as regular items; Session decides when to stop.
@@ -247,12 +256,32 @@ export class ClaudeProvider implements SessionProvider {
   }
 
   #ensureQueryLoop(opts: TurnOpts): void {
-    if (this.#consumerTask && this.#inputQueue && !this.#inputQueue.closed) return;
+    const desiredAppend = opts.systemPromptAppend ?? "";
+    if (this.#consumerTask && this.#inputQueue && !this.#inputQueue.closed) {
+      if (this.#builtSystemPromptAppend === desiredAppend) return;
+      // Per-turn system-prompt contributions changed (before_turn hooks,
+      // memory workspace-index refresh). The SDK fixes the system prompt at
+      // query construction, so the warm loop would silently drop the new
+      // append (#153) — rebuild instead. The fresh query RESUMES the same
+      // backing session, so no conversation context is lost; this trades
+      // subprocess warmth for the documented per-turn hook contract. Loops
+      // whose append never changes keep full warm-reuse.
+      console.error(
+        `[claude-provider ${this.#init.sessionId.slice(0, 8)}] systemPromptAppend changed (${this.#builtSystemPromptAppend.length}B → ${desiredAppend.length}B) — rebuilding query loop`,
+      );
+      this.#inputQueue?.close();
+      this.#abortController?.abort();
+      // The generation bump below orphans the old consumer; its identity-
+      // guarded finally cannot clobber the new loop's slots.
+    }
 
     const init = this.#init;
     const sessionId = init.sessionId;
     this.#abortController = new AbortController();
     this.#inputQueue = new AsyncQueue<SDKUserMessage>();
+    this.#builtSystemPromptAppend = desiredAppend;
+    this.#loopGeneration += 1;
+    const myGeneration = this.#loopGeneration;
 
     const sessionOpts = this.#hasQueried
       ? { resume: this.#claudeCodeSessionId }
@@ -312,12 +341,12 @@ export class ClaudeProvider implements SessionProvider {
         // Any non-empty append (memory guidance, conductor contract) rides on
         // the claude_code preset — previously gated on memory alone, which
         // silently dropped non-memory appends.
-        ...(init.memory || opts.systemPromptAppend
+        ...(init.memory || desiredAppend
           ? {
               systemPrompt: {
                 type: "preset" as const,
                 preset: "claude_code" as const,
-                append: opts.systemPromptAppend ?? "",
+                append: desiredAppend,
               },
             }
           : {}),
@@ -434,10 +463,13 @@ export class ClaudeProvider implements SessionProvider {
     selfTask = this.#consumerTask = (async () => {
       try {
         for await (const msg of query$) {
+          // Superseded by a rebuild: drop late translations instead of
+          // emitting them into the NEW loop's turn queue.
+          if (this.#loopGeneration !== myGeneration) break;
           this.#translateSDKMessage(msg);
         }
       } catch (err) {
-        if (!ac.signal.aborted) {
+        if (!ac.signal.aborted && this.#loopGeneration === myGeneration) {
           const emsg = err instanceof Error ? err.message : String(err);
           if (
             this.#hasQueried &&
@@ -453,9 +485,13 @@ export class ClaudeProvider implements SessionProvider {
           }
         }
       } finally {
-        // Close the current turn queue — session's for-await loop will finish.
-        this.#currentTurnQueue?.close();
-        this.#currentTurnQueue = null;
+        // Close the current turn queue — session's for-await loop will
+        // finish. Generation-guarded: after a rebuild this queue belongs to
+        // the NEW loop and closing it would instantly end the new turn.
+        if (this.#loopGeneration === myGeneration) {
+          this.#currentTurnQueue?.close();
+          this.#currentTurnQueue = null;
+        }
 
         if (this.#query === query$) this.#query = null;
         if (this.#abortController === ac) this.#abortController = null;
@@ -464,8 +500,9 @@ export class ClaudeProvider implements SessionProvider {
         if (this.#consumerTask === selfTask) this.#consumerTask = null;
       }
 
-      // Post-teardown recovery.
-      if (recoverContent !== null) {
+      // Post-teardown recovery. Skipped for superseded loops — the rebuild
+      // already owns the session's continuity.
+      if (recoverContent !== null && this.#loopGeneration === myGeneration) {
         this.#backingRecoveryAttempted = true;
         this.onRecoveryNeeded?.(recoverContent);
       }
