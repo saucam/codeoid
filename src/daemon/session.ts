@@ -619,7 +619,9 @@ export class Session {
         projectId: opts.auth.projectId,
         role: this.role,
         providerId: this.#provider.id,
-      });
+        // Fire-and-forget: saveMeta's write chain owns the failure log; an
+        // unconsumed rejection here would be an unhandled-rejection crash.
+      }).catch(() => {});
     }
 
     // Hook seam: session lifecycle. `resume` = rebuilt from persisted state
@@ -1290,8 +1292,17 @@ export class Session {
     // the new message to land mid-turn — auto-promote priority to `now`
     // so the SDK's agent loop observes it immediately rather than FIFO
     // queueing it behind the current turn's output.
+    //
+    // waiting_approval MUST count as working: the SDK turn is alive,
+    // blocked inside canUseTool. Starting a fresh turn here closes the
+    // live turn queue, whose consumer's `finally` resolves every pending
+    // approval with {approved: false} — i.e. typing "wait, what does this
+    // do?" at an approval prompt silently DENIED the tool and orphaned
+    // the question's reply.
     const wasWorking =
-      this.#status === "thinking" || this.#status === "tool_running";
+      this.#status === "thinking" ||
+      this.#status === "tool_running" ||
+      this.#status === "waiting_approval";
 
     // PERSIST THE USER MESSAGE FIRST — before any fallible work (attachment
     // resolution, rotation, ensureQueryLoop). Whatever fails downstream, what
@@ -1409,9 +1420,22 @@ export class Session {
       this.#accumulator.pushUserTurn(effectivePrompt);
       this.#pendingMidTurnCount++;
       this.#activeRun.pushMidTurn(effectivePrompt, effectivePriority ?? "now");
-      this.#setStatus("thinking");
+      // Keep waiting_approval visible — the approval is still pending and
+      // every frontend keys its approval bar off it; the queued text is
+      // consumed after the user answers.
+      if (this.#status !== "waiting_approval") this.#setStatus("thinking");
       this.#broadcastInfoUpdate();
       return;
+    }
+
+    // No mid-turn injection on this backend while an approval is pending:
+    // falling through to a fresh turn would close the live turn queue and
+    // auto-deny the approval (see wasWorking above). Fail loudly instead —
+    // the message is already persisted, the user re-sends after deciding.
+    if (this.#status === "waiting_approval") {
+      throw new Error(
+        "A tool approval is pending — approve or deny it before sending (this backend can't queue mid-turn).",
+      );
     }
 
     await this.#ensureAgentIdentity(sender);
@@ -3243,6 +3267,23 @@ export class Session {
    * without a live SDK turn — call via `(session as SessionInternal)._applyInterruptedStateToTool(msgId)`.
    * Do NOT call from production code outside this class.
    */
+  /**
+   * TS-private test accessors for the #-private approval correlation map —
+   * the leak `_applyInterruptedStateToTool` cleans is otherwise unobservable
+   * (a wedged early-approval buffer is silent by construction). Same
+   * convention as `_applyInterruptedStateToTool`; do NOT call from
+   * production code.
+   */
+  // Not `private`: TS6133 flags private members with no internal caller.
+  // The underscore + doc comment carry the "test-only" contract, matching
+  // how tests already consume _applyInterruptedStateToTool via a cast.
+  _seedApprovalCorrelation(approvalId: string, msgId: string): void {
+    this.#approvalIdToMessageId.set(approvalId, msgId);
+  }
+  _approvalCorrelationIds(): string[] {
+    return [...this.#approvalIdToMessageId.keys()];
+  }
+
   private _applyInterruptedStateToTool(msgId: string): void {
     // A tool reaching this fallback never produced a real tool_result — it was
     // interrupted mid-flight. Use `cancelled/interrupted` (not `completed/false`)
@@ -3281,10 +3322,20 @@ export class Session {
       this.#messageIdToToolUseId.delete(msgId);
     }
     this.#toolCallMessages.delete(msgId);
-    // Drop the provider-declared patch whitelist for this tool's approval —
-    // the approval will never resolve now.
+    // Drop the provider-declared patch whitelist AND the approval→message
+    // mapping for this tool's approval — the approval will never resolve
+    // now. Leaving the mapping alive did two bad things: the map leaked one
+    // entry per denied/interrupted tool for the session's lifetime, and a
+    // later approve() for the stale approvalId passed the
+    // `#approvalIdToMessageId.has()` check and parked in #earlyApprovals
+    // forever instead of hitting #dismissStaleApproval — so a client
+    // replaying a stale ApprovalBar (e.g. after reattach) never got the
+    // dismissal broadcast and the bar wedged.
     for (const [approvalId, mappedMsgId] of this.#approvalIdToMessageId) {
-      if (mappedMsgId === msgId) this.#approvalPatchKeys.delete(approvalId);
+      if (mappedMsgId === msgId) {
+        this.#approvalPatchKeys.delete(approvalId);
+        this.#approvalIdToMessageId.delete(approvalId);
+      }
     }
   }
 

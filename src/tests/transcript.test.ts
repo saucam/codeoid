@@ -106,6 +106,35 @@ describe("TranscriptStore", () => {
     expect(metas[0].lastStatus).toBe("idle");
   });
 
+  test("a failed meta write does not wedge writes queued behind it", async () => {
+    const meta = (status: "idle" | "thinking") => ({
+      sessionId: "sess-chain",
+      sessionName: "chain",
+      workdir: "/tmp/chain",
+      createdBy: "u",
+      createdAt: "t",
+      lastStatus: status,
+      lastActivityAt: "t",
+      accountId: "a",
+      projectId: "p",
+    });
+
+    // Make the FIRST write fail: read-only transcript dir. saveMeta chains
+    // per-session; before the fix a rejected leaf skipped every write
+    // queued behind it in the same burst (bare `prev.then(...)`).
+    const { chmodSync } = await import("node:fs");
+    chmodSync(tmpDir, 0o555);
+    const first = store.saveMeta(meta("thinking"));
+    await expect(first).rejects.toThrow();
+    chmodSync(tmpDir, 0o755);
+
+    // The next write must go through — the chain absorbed the failure.
+    await store.saveMeta(meta("idle"));
+    const metas = await store.loadAllMeta();
+    const chain = metas.find((m) => m.sessionId === "sess-chain");
+    expect(chain?.lastStatus).toBe("idle");
+  });
+
   test("loadAllMeta loads multiple sessions", async () => {
     await store.saveMeta({
       sessionId: "s1", sessionName: "oracle", workdir: "/tmp/1",

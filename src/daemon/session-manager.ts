@@ -1823,7 +1823,10 @@ export class SessionManager {
     const limit = Math.max(1, Math.min(msg.limit ?? 10, 50));
     const hits = await this.#memory.searchSessions({
       query: msg.query,
-      workspaceId,
+      // Global scope = OMIT workspaceId (the engine treats undefined as
+      // "every workspace"); passing "" selected a nonexistent empty
+      // workspace and scope:"all" always returned zero hits.
+      ...(scope === "all" ? {} : { workspaceId }),
       limit,
       sessionNames,
     });

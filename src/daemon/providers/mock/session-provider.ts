@@ -91,12 +91,23 @@ export class MockSessionProvider implements SessionProvider {
   /** When set, seedFromHistory() throws it (best-effort degradation tests). */
   seedFromHistoryError: Error | null = null;
 
-  constructor(id = "mock-session", script: ProviderEvent[][] = [], opts: { stall?: boolean } = {}) {
+  /** When true, TurnRuns expose pushMidTurn (recorded in `midTurnPushes`). */
+  #midTurn: boolean;
+
+  /** Every pushMidTurn injection observed — inspect in tests. */
+  readonly midTurnPushes: Array<{ content: string; priority: string }> = [];
+
+  constructor(
+    id = "mock-session",
+    script: ProviderEvent[][] = [],
+    opts: { stall?: boolean; midTurn?: boolean } = {},
+  ) {
     this.id = id;
     this.displayName = `MockSession(${id})`;
     this.#backingSessionId = `${id}-backing`;
     this.#script = script.map((s) => [...s]);
     this.#stall = opts.stall ?? false;
+    this.#midTurn = opts.midTurn ?? false;
   }
 
   get backingSessionId(): string { return this.#backingSessionId; }
@@ -164,12 +175,18 @@ export class MockSessionProvider implements SessionProvider {
     // to simulate the SDK's PreToolUse hook firing before the tool runs.
     void this.#emit(events, queue, opts);
 
-    return {
+    const run: TurnRun = {
       events: queue,
       interrupt: async () => {
         queue.close(); // idempotent — safe to call even if already closed
       },
     };
+    if (this.#midTurn) {
+      run.pushMidTurn = (content: string, priority: string) => {
+        this.midTurnPushes.push({ content, priority });
+      };
+    }
+    return run;
   }
 
   async #emit(events: ProviderEvent[], queue: AsyncQueue<ProviderEvent>, opts: TurnOpts): Promise<void> {

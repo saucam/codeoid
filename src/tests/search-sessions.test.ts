@@ -267,3 +267,75 @@ describe("searchSessions — limit + workspace scope", () => {
     expect(scoped[0]!.sessionId).toBe("sess-1");
   });
 });
+
+// ── SessionManager #search scope plumbing ────────────────────────────────────
+//
+// Regression guard: `scope: "all"` used to pass `workspaceId: ""` to the
+// engine — which selects a nonexistent EMPTY workspace, so global search
+// always returned zero hits. Global means OMITTING workspaceId entirely
+// (the engine treats undefined as "every workspace").
+describe("SessionManager session.search scope plumbing", () => {
+  it('scope:"all" omits workspaceId; scope:"workspace" passes one', async () => {
+    const { SessionManager } = await import("../daemon/session-manager.js");
+    const { Store } = await import("../daemon/store.js");
+    const { TranscriptStore } = await import("../daemon/transcript.js");
+
+    const dir = mkdtempSync(join(tmpdir(), "codeoid-search-scope-"));
+    const store = new Store(join(dir, "db.sqlite"));
+    const transcript = new TranscriptStore(join(dir, "transcripts"));
+
+    const calls: Array<Record<string, unknown>> = [];
+    const fakeMemory = {
+      searchSessions: async (opts: Record<string, unknown>) => {
+        calls.push(opts);
+        return [];
+      },
+    } as unknown as MemoryEngine;
+
+    const manager = new SessionManager(
+      store,
+      transcript,
+      undefined,
+      undefined,
+      fakeMemory,
+    );
+    const auth = {
+      sub: "user:t",
+      scopes: ["session:list"],
+      delegationDepth: 0,
+      accountId: "acc",
+      projectId: "proj",
+    };
+    const fakeClient = {
+      id: "c1",
+      auth,
+      send: () => {},
+    };
+
+    await manager.handle(
+      { type: "session.search", id: "r1", query: "auth bug", scope: "all" } as never,
+      auth as never,
+      fakeClient as never,
+    );
+    expect(calls.length).toBe(1);
+    expect("workspaceId" in calls[0]!).toBe(false);
+
+    await manager.handle(
+      {
+        type: "session.search",
+        id: "r2",
+        query: "auth bug",
+        scope: "workspace",
+        workdir: dir,
+      } as never,
+      auth as never,
+      fakeClient as never,
+    );
+    expect(calls.length).toBe(2);
+    expect(typeof calls[1]!.workspaceId).toBe("string");
+    expect((calls[1]!.workspaceId as string).length).toBeGreaterThan(0);
+
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

@@ -288,19 +288,32 @@ export class TranscriptStore {
   async saveMeta(meta: TranscriptMeta): Promise<void> {
     const id = meta.sessionId;
     const prev = this.#metaWriteChain.get(id) ?? Promise.resolve();
-    const next = prev.then(() => this.#writeMetaAtomic(meta));
-    this.#metaWriteChain.set(
-      id,
-      next.finally(() => {
-        // Clear the chain entry once this leaf settles, so the map
-        // doesn't grow without bound for sessions whose metas land
-        // in steady state.
-        if (this.#metaWriteChain.get(id) === next) {
-          this.#metaWriteChain.delete(id);
-        }
-      }),
-    );
-    return next;
+    // Absorb the previous write's failure so one rejected write can't skip
+    // every write queued behind it — and LOG failures: *.meta.json is the
+    // sole restart-resume discovery mechanism, so silent failures here mean
+    // sessions vanish on the next restart with zero diagnostic.
+    const attempt = prev.then(() => this.#writeMetaAtomic(meta));
+    // The STORED chain absorbs the rejection (fire-and-forget callers never
+    // consume it — a rejected promise in the map is an unhandled-rejection
+    // crash under Bun) and owns the exactly-once error log. The RETURNED
+    // promise still rejects so awaiting callers can react.
+    const stored = attempt.catch((err) => {
+      console.error(
+        `[codeoid/transcript ${id}] meta write failed (sessions may not resume after restart): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    });
+    const chained = stored.finally(() => {
+      // Clear the chain entry once this leaf settles, so the map
+      // doesn't grow without bound for sessions whose metas land
+      // in steady state.
+      if (this.#metaWriteChain.get(id) === chained) {
+        this.#metaWriteChain.delete(id);
+      }
+    });
+    this.#metaWriteChain.set(id, chained);
+    return attempt;
   }
 
   async #writeMetaAtomic(meta: TranscriptMeta): Promise<void> {

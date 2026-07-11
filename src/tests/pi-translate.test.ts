@@ -152,6 +152,47 @@ describe("renderHistorySeed", () => {
     expect(seed).toContain("</conversation-history>");
   });
 
+  it("truncates oversized serialized tool INPUTS (Write/Edit carry file contents)", () => {
+    const seed = renderHistorySeed([
+      {
+        role: "assistant",
+        content: "Writing the file.",
+        providerId: "claude",
+        model: "opus",
+        toolCalls: [
+          {
+            id: "t1",
+            name: "write_file",
+            input: { file_path: "/x.ts", content: "z".repeat(100_000) },
+            output: "ok",
+            success: true,
+          },
+        ],
+      },
+    ]);
+    // The old behavior put the full 100 KB input JSON into a ~24 KB-budget
+    // seed. Now it's capped like outputs are.
+    expect(seed).toContain("…input truncated for seed…");
+    expect(seed.length).toBeLessThan(30_000);
+  });
+
+  it("hard-slices the newest turn when it alone busts the whole budget", () => {
+    const seed = renderHistorySeed(
+      [
+        { role: "user", content: "earlier turn" },
+        { role: "user", content: "y".repeat(50_000) },
+      ],
+      { maxChars: 5_000 },
+    );
+    // Newest-block-wins used to keep the block WHOLE even over budget —
+    // a 3 MB turn rode into the incoming backend's first prompt.
+    expect(seed).toContain("…turn truncated for seed…");
+    expect(seed.length).toBeLessThan(7_000);
+    // The older turn was dropped with the elision note.
+    expect(seed).toContain("earlier turn(s) omitted for length");
+    expect(seed).not.toContain("## User\nearlier turn");
+  });
+
   it("marks failed tool calls and truncates oversized outputs per-tool", () => {
     const seed = renderHistorySeed([
       {

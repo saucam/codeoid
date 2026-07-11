@@ -433,9 +433,17 @@ function toolCallToSeedText(tc: CanonicalToolCall): string {
     tc.output.length > SEED_TOOL_OUTPUT_MAX_CHARS
       ? `${tc.output.slice(0, SEED_TOOL_OUTPUT_MAX_CHARS)}\n…output truncated for seed…`
       : tc.output;
+  // Inputs need the same cap: a Write/Edit tool call carries the full file
+  // contents in `input.content`, so an uncapped stringify can put multiple
+  // MB into a seed with a ~24 KB budget.
+  const inputJson = JSON.stringify(tc.input);
+  const input =
+    inputJson.length > SEED_TOOL_OUTPUT_MAX_CHARS
+      ? `${inputJson.slice(0, SEED_TOOL_OUTPUT_MAX_CHARS)}…input truncated for seed…`
+      : inputJson;
   return [
     `### Tool call: ${tc.name} → ${tc.success ? "ok" : "ERROR"}`,
-    `input: ${JSON.stringify(tc.input)}`,
+    `input: ${input}`,
     "output:",
     "```",
     output,
@@ -478,12 +486,18 @@ export function renderHistorySeed(
     return parts.join("\n");
   });
 
-  // Keep the newest turns whole; drop the oldest that don't fit.
+  // Keep the newest turns whole; drop the oldest that don't fit. The
+  // newest block is kept even when it alone busts the budget — but
+  // hard-sliced to it, so one pathological turn can't blow the incoming
+  // backend's first prompt (or the RPC frame) by orders of magnitude.
   const kept: string[] = [];
   let used = 0;
   for (let i = rendered.length - 1; i >= 0; i--) {
-    const block = rendered[i]!;
-    if (used + block.length > maxChars && kept.length > 0) break;
+    let block = rendered[i]!;
+    if (used + block.length > maxChars) {
+      if (kept.length > 0) break;
+      block = `${block.slice(0, maxChars)}\n…turn truncated for seed…`;
+    }
     kept.unshift(block);
     used += block.length;
   }

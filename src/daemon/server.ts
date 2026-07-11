@@ -77,8 +77,20 @@ const PROXY_RATE_MAX = 30;
 const PROXY_RATE_WINDOW_MS = 60_000;
 const PROXY_BODY_MAX_BYTES = 8 * 1024;
 const proxyHits = new Map<string, number[]>();
+/** Entries whose newest hit fell out of the window are dead weight — sweep
+ * them so a scan from many source IPs (this is a PRE-AUTH endpoint) can't
+ * grow the map without bound. O(map) but bounded by the sweep itself. */
+function sweepProxyHits(now: number): void {
+  for (const [ip, hits] of proxyHits) {
+    const newest = hits[hits.length - 1];
+    if (newest === undefined || now - newest >= PROXY_RATE_WINDOW_MS) {
+      proxyHits.delete(ip);
+    }
+  }
+}
 function proxyRateOk(ip: string): boolean {
   const now = Date.now();
+  sweepProxyHits(now);
   const arr = (proxyHits.get(ip) ?? []).filter((t) => now - t < PROXY_RATE_WINDOW_MS);
   if (arr.length >= PROXY_RATE_MAX) {
     proxyHits.set(ip, arr);
