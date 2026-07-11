@@ -312,13 +312,17 @@ export class SessionManager {
         // the persisted tail so new appends continue the monotonic sequence.
         // Byte-budgeted + deadline-aware: one huge transcript can neither
         // OOM the daemon nor eat the whole resume window by itself.
+        const loadStats: { truncated?: boolean } = {};
         const entries = await this.#transcriptStore.loadTranscript(meta.sessionId, {
           maxBytes: RESUME_TRANSCRIPT_MAX_BYTES,
           deadlineAt: deadline,
+          stats: loadStats,
         });
         const messages = entries.map((e) => e.message);
         const maxSeq = entries.reduce((max, e) => Math.max(max, e.seq), -1);
-        session.restoreScrollback(messages, maxSeq + 1, entries.map((e) => e.bytes));
+        session.restoreScrollback(messages, maxSeq + 1, entries.map((e) => e.bytes), {
+          partialHistory: loadStats.truncated === true,
+        });
 
         this.#sessions.set(session.id, session);
         // Resume is NOT a creation — don't burn a slot in the
@@ -415,6 +419,8 @@ export class SessionManager {
         return this.#list(msg, auth);
       case "session.attach":
         return this.#attach(msg, auth, client);
+      case "scrollback.page":
+        return this.#pageScrollback(msg, auth);
       case "session.detach":
         return this.#detach(msg, client);
       case "session.send":
@@ -1660,6 +1666,29 @@ export class SessionManager {
 
     session.attach(client, msg.resume);
     return { type: "response.ok", requestId: msg.id, data: session.toInfo() };
+  }
+
+  /** History paging (`scrollback.paging`) — same read authority as attach. */
+  async #pageScrollback(
+    msg: Extract<ClientMessage, { type: "scrollback.page" }>,
+    auth: AuthContext,
+  ): Promise<DaemonMessage> {
+    const scope = hasScope(auth.scopes as string[], SCOPES.SESSION_ATTACH)
+      || hasScope(auth.scopes as string[], SCOPES.SESSION_WATCH);
+    if (!scope) {
+      return { type: "response.error", requestId: msg.id, error: "Missing scope: session:attach or session:watch", code: "forbidden" };
+    }
+    const session = this.#getOwnedSession(msg.sessionId, auth);
+    if (!session) {
+      return { type: "response.error", requestId: msg.id, error: "Session not found", code: "not_found" };
+    }
+    const page = await session.pageScrollback(msg.beforeMessageId, msg.maxBytes);
+    return {
+      type: "scrollback.page.result",
+      requestId: msg.id,
+      sessionId: msg.sessionId,
+      ...page,
+    };
   }
 
   #detach(

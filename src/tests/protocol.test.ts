@@ -425,6 +425,7 @@ describe("DaemonMessage routing", () => {
         case "session.ui_resolved": return `ui_resolved:${msg.reason}`;
         case "session.commands.result": return `commands:${msg.commands.length}`;
         case "scrollback.replay": return `replay:${msg.messages.length}`;
+        case "scrollback.page.result": return `page:${msg.source}:${msg.messages.length}`;
         case "session.search.result": return `search:${msg.sessions.length}`;
         case "fs.list.result": return `fs.list:${msg.entries.length}`;
         case "fs.read.result": return `fs.read:${msg.size}`;

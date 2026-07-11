@@ -224,6 +224,14 @@ export const sessionForkSchema = z.object({
   providerId: z.string().min(1).max(64).optional(),
 });
 
+export const scrollbackPageSchema = z.object({
+  ...base,
+  type: z.literal("scrollback.page"),
+  sessionId: sessionIdField,
+  beforeMessageId: z.string().min(1).max(128),
+  maxBytes: z.number().int().min(1).optional(),
+});
+
 export const sessionRenameSchema = z.object({
   ...base,
   type: z.literal("session.rename"),
@@ -315,6 +323,7 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
   sessionSetModelSchema,
   sessionSetProviderSchema,
   sessionForkSchema,
+  scrollbackPageSchema,
   sessionRenameSchema,
   fsListSchema,
   fsReadSchema,

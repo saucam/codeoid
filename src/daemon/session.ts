@@ -98,6 +98,22 @@ const STATUS_PERSIST_DEBOUNCE_MS = 500;
  */
 const REPLAY_CHUNK_BYTES = 4 * 1024 * 1024;
 
+/**
+ * Tail window replayed on attach for `scrollback.paging` clients — enough
+ * context to continue the conversation instantly; everything older is pulled
+ * on demand via `scrollback.page`. Legacy clients get the full buffer.
+ */
+const ATTACH_TAIL_BYTES = 512 * 1024;
+
+/** Default / ceiling for one `scrollback.page` response. */
+const PAGE_DEFAULT_BYTES = 256 * 1024;
+const PAGE_MAX_BYTES = 2 * 1024 * 1024;
+
+/** How much of the on-disk transcript (newest end) one page request may scan
+ * when the anchor is older than the in-memory buffer. Bounds the I/O of a
+ * single page against multi-GB transcript files. */
+const PAGE_TRANSCRIPT_SCAN_BYTES = 64 * 1024 * 1024;
+
 /** A connected client that can receive messages from this session. */
 export interface AttachedClient {
   id: string;
@@ -945,18 +961,41 @@ export class Session {
     // authoritative full snapshot; the client resets on `mode: "snapshot"`.
     const incremental = resume !== undefined && resume.key === this.#resumeKey;
 
+    // Tail-first attach (`scrollback.paging`): a capable client gets only
+    // the NEWEST window — enough context to continue instantly — and pages
+    // older history on demand. Priority order matters here: the legacy full
+    // replay streams oldest→newest, so on a 20 MB session the tail the user
+    // actually needs arrived LAST. Incremental resumes are already tiny
+    // (mutations since the cursor) and skip the tail logic entirely.
+    const paging =
+      !incremental && client.capabilities?.includes(CAPABILITIES.SCROLLBACK_PAGING) === true;
+
     // Replay scrollback — full SessionMessage objects, not deltas. Partition
     // by byte budget so a large session can't emit one oversized frame that
     // trips the WS backpressure limit and force-closes the client (#84).
-    const chunks = (
-      incremental
-        ? this.#scrollback.readChunkedSince(resume.sinceSeq, REPLAY_CHUNK_BYTES)
-        : this.#scrollback.readChunked(REPLAY_CHUNK_BYTES)
-    ) as SessionMessage[][];
+    let tailMeta: { tail: true; hasMore: boolean } | undefined;
+    let chunks: SessionMessage[][];
+    if (incremental) {
+      chunks = this.#scrollback.readChunkedSince(
+        resume.sinceSeq,
+        REPLAY_CHUNK_BYTES,
+      ) as SessionMessage[][];
+    } else if (paging) {
+      const tail = this.#scrollback.readTailChunked(ATTACH_TAIL_BYTES, REPLAY_CHUNK_BYTES);
+      chunks = tail.chunks as SessionMessage[][];
+      // hasMore covers the on-disk transcript too: the buffer holding its
+      // oldest entry doesn't prove disk has nothing older, so only a fully-
+      // drained buffer with nothing evicted reports false. Erring towards
+      // true just costs one empty page request.
+      tailMeta = { tail: true, hasMore: tail.hasMore || this.#scrollback.partialHistory };
+    } else {
+      chunks = this.#scrollback.readChunked(REPLAY_CHUNK_BYTES) as SessionMessage[][];
+    }
     const meta = {
       mode: incremental ? ("incremental" as const) : ("snapshot" as const),
       resumeKey: this.#resumeKey,
       maxSeq: this.#scrollback.maxSeq,
+      ...(tailMeta ?? {}),
     };
 
     if (chunks.length === 0) {
@@ -1035,6 +1074,70 @@ export class Session {
       });
       if (i < last) await raw.flush?.();
     }
+  }
+
+  /**
+   * Serve one `scrollback.page` — history strictly OLDER than the anchor
+   * messageId (the oldest the client holds), oldest→newest.
+   *
+   * Source precedence: the in-memory buffer when it can satisfy the page;
+   * the on-disk JSONL transcript when the anchor predates the buffer or sits
+   * at its evicted floor. Disk paging is what makes history beyond the
+   * buffer cap (5k msgs / 20 MB) reachable by clients at all — previously
+   * it was export-only. The transcript scan is byte- and deadline-bounded
+   * so one page request can't wedge on a multi-GB file; an anchor beyond
+   * the scan window ends paging with `hasMore: false`.
+   */
+  async pageScrollback(
+    beforeMessageId: string,
+    maxBytes?: number,
+  ): Promise<{ messages: SessionMessage[]; hasMore: boolean; source: "buffer" | "transcript" }> {
+    const budget = Math.min(Math.max(1, maxBytes ?? PAGE_DEFAULT_BYTES), PAGE_MAX_BYTES);
+
+    const fromBuffer = this.#scrollback.readPageBefore(beforeMessageId, budget);
+    if (fromBuffer && fromBuffer.messages.length > 0) {
+      return {
+        messages: fromBuffer.messages as SessionMessage[],
+        // A page that drained the buffer floor still has older history when
+        // anything was ever evicted to disk.
+        hasMore: fromBuffer.hasMore || this.#scrollback.partialHistory,
+        source: "buffer",
+      };
+    }
+    if (fromBuffer && !this.#scrollback.partialHistory) {
+      // Anchor is the buffer's oldest AND nothing was ever evicted — the
+      // buffer IS the full history. Paging is done.
+      return { messages: [], hasMore: false, source: "buffer" };
+    }
+
+    // Anchor unknown to the buffer (or at its evicted floor): page from the
+    // on-disk transcript.
+    const entries = await this.#transcriptStore.loadTranscript(this.id, {
+      maxBytes: PAGE_TRANSCRIPT_SCAN_BYTES,
+      deadlineAt: Date.now() + 5_000,
+    });
+    const msgs = entries.filter(
+      (e): e is typeof e & { message: SessionMessage } => e.message.type === "session.message",
+    );
+    const anchor = msgs.findIndex((e) => e.message.messageId === beforeMessageId);
+    if (anchor < 0) {
+      // Beyond the bounded scan window (or a foreign id): stop paging rather
+      // than scanning unbounded history.
+      return { messages: [], hasMore: false, source: "transcript" };
+    }
+    let start = anchor;
+    let used = 0;
+    while (start > 0) {
+      const size = msgs[start - 1]!.bytes ?? JSON.stringify(msgs[start - 1]!.message).length;
+      if (used + size > budget && start < anchor) break;
+      used += size;
+      start -= 1;
+    }
+    return {
+      messages: msgs.slice(start, anchor).map((e) => e.message),
+      hasMore: start > 0,
+      source: "transcript",
+    };
   }
 
   detach(clientId: string): void {
@@ -1766,7 +1869,11 @@ export class Session {
     messages: DaemonMessage[],
     nextSeq?: number,
     sizeHints?: ReadonlyArray<number | undefined>,
+    opts?: { partialHistory?: boolean },
   ): void {
+    // Restart-restore with a byte-budgeted transcript window: the buffer
+    // holds only the tail, so history paging must know disk has more.
+    if (opts?.partialHistory) this.#scrollback.markPartialHistory();
     // Seed the transcript sequence counter past the loaded log's tail.
     // Without this, post-restart appends restart at seq 0 — harmless for
     // loadTranscript (which orders by file position) but it makes seq
