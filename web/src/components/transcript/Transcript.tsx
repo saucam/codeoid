@@ -421,13 +421,20 @@ const Transcript: Component = () => {
     let prevHeight = 0;
     let prevTop = 0;
     void loadOlderHistory(sid, {
+      // Both hooks fire when the RESPONSE lands — the user may have switched
+      // sessions while the request was in flight. The prepend itself is
+      // keyed by sid (correct store regardless); only the scroll-anchoring
+      // must not touch the container now showing a DIFFERENT session.
       onBeforePrepend: () => {
+        if (focusedSessionId() !== sid) return;
         prevHeight = containerRef?.scrollHeight ?? 0;
         prevTop = containerRef?.scrollTop ?? 0;
       },
       onAfterPrepend: () => {
         const apply = (): void => {
-          if (!containerRef || stuckBottom()) return;
+          // Re-checked per pass: focus can change between the sync pass
+          // and the rAF pass.
+          if (!containerRef || stuckBottom() || focusedSessionId() !== sid) return;
           containerRef.scrollTop = computeAnchoredScrollTop(
             prevHeight,
             prevTop,

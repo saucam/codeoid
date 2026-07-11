@@ -237,6 +237,69 @@ describe("older-history sentinel + backfill", () => {
     expect(queryByTestId("older-history-sentinel")).toBeTruthy();
   });
 
+  it("a mid-flight session switch never applies the old session's scroll math", async () => {
+    // Regression (review catch): the anchoring hooks fire when the RESPONSE
+    // lands — if the user switched sessions while the page request was in
+    // flight, they must not read/write the container now showing the OTHER
+    // session. The prepend itself still lands in the ORIGINAL session's
+    // store (keyed by sid).
+    seed(true);
+    mergeSession({
+      id: "sess-2",
+      name: "other",
+      workdir: "/tmp",
+      status: "idle",
+      createdBy: "u",
+      createdAt: "2026-07-11T00:00:00Z",
+      attachedClients: 0,
+    } as never);
+
+    let resolvePage!: (v: unknown) => void;
+    clientRequestMock.mockImplementationOnce(
+      () => new Promise((res) => (resolvePage = res)),
+    );
+
+    const { getByText, container } = render(() => <Transcript />);
+    const scroller = container.querySelector(".overflow-y-auto") as HTMLElement;
+    // Mock geometry so the ANCHOR write is uniquely identifiable: an
+    // unguarded onBeforePrepend would capture (h=5000, top=100) at response
+    // time, and the anchor write would be 5000 − (5000 − 100) = 100. Other
+    // legitimate writes (focus-switch autoscroll, virtualizer) write 0 or
+    // scrollHeight in jsdom — never 100.
+    const writes: number[] = [];
+    Object.defineProperty(scroller, "scrollHeight", {
+      get: () => 5000,
+      configurable: true,
+    });
+    Object.defineProperty(scroller, "clientHeight", {
+      get: () => 500,
+      configurable: true,
+    });
+    Object.defineProperty(scroller, "scrollTop", {
+      get: () => 100,
+      set: (v: number) => void writes.push(v),
+      configurable: true,
+    });
+
+    fireEvent.click(getByText(/older messages — scroll or click to load/));
+    await waitFor(() => expect(clientRequestMock).toHaveBeenCalledTimes(1));
+
+    // Switch focus BEFORE the response lands — and scroll UP in the new
+    // session (top=100 of 5000), so the pre-existing stuckBottom() check
+    // can't mask an unguarded anchor write.
+    focusSession("sess-2");
+    fireEvent.scroll(scroller);
+    resolvePage(pageResult({ messages: [makeMsg("m2"), makeMsg("m3")], hasMore: false }));
+
+    // The page still lands in sess-1's store…
+    await waitFor(() =>
+      expect(messagesFor(SID).map((m) => m.messageId)).toEqual(["m2", "m3", "m4", "m5"]),
+    );
+    await new Promise((r) => requestAnimationFrame(() => r(undefined)));
+    // …but no anchoring write hit the (now sess-2) container.
+    expect(writes.filter((w) => w === 100)).toEqual([]);
+  });
+
   it("hasMore=false hides the sentinel after the page lands", async () => {
     seed(true);
     clientRequestMock.mockImplementationOnce(() =>
