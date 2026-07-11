@@ -385,7 +385,7 @@ describe("StreamRelay — toolStateUpdate deltas render tool completion", () => 
     };
   }
 
-  it("renders ✓ with the remembered tool name when a completed delta arrives", async () => {
+  it("renders ✓ with the remembered tool name when a completed delta arrives (coalesced)", async () => {
     const { api, texts } = makeApi();
     const relay = new StreamRelay(api);
 
@@ -396,10 +396,12 @@ describe("StreamRelay — toolStateUpdate deltas render tool completion", () => 
     relay.handleDelta(CHAT, toolDelta("tc1", { phase: "completed", success: true, output: "ok" }));
     await relay.settle();
 
-    expect(texts()).toEqual(["⚡ Bash", "✓ Bash"]);
+    // Consecutive tool lines coalesce into ONE multi-line message (flood-
+    // limit protection) — content and order are unchanged.
+    expect(texts()).toEqual(["⚡ Bash\n✓ Bash"]);
   });
 
-  it("renders ✗ failed when the tool completed unsuccessfully", async () => {
+  it("renders ✗ failed when the tool completed unsuccessfully (coalesced)", async () => {
     const { api, texts } = makeApi();
     const relay = new StreamRelay(api);
 
@@ -410,7 +412,7 @@ describe("StreamRelay — toolStateUpdate deltas render tool completion", () => 
     relay.handleDelta(CHAT, toolDelta("tc1", { phase: "completed", success: false }));
     await relay.settle();
 
-    expect(texts()).toEqual(["⚡ Edit", "✗ Edit failed"]);
+    expect(texts()).toEqual(["⚡ Edit\n✗ Edit failed"]);
   });
 
   it("renders ✗ cancelled for a cancelled delta (denied approval)", async () => {
@@ -466,6 +468,158 @@ describe("StreamRelay — toolStateUpdate deltas render tool completion", () => 
     await relay.settle();
 
     expect(texts()).toEqual(["✓ tool"]);
+  });
+});
+
+// ── Tool-line coalescing (flood-limit protection) ─────────────────────────────
+
+describe("StreamRelay — consecutive tool lines coalesce into batched sends", () => {
+  function toolExec(id: string, name: string): SessionMessage {
+    return full(id, "tool_call", "", { toolId: `t-${id}`, name, state: { phase: "executing" } });
+  }
+
+  it("a burst of tool lines becomes one multi-line message, not one send per tool", async () => {
+    const { api, sent, texts } = makeApi();
+    const relay = new StreamRelay(api);
+
+    for (let i = 0; i < 6; i++) relay.handleMessage(CHAT, toolExec(`tc${i}`, `Tool${i}`));
+    await relay.settle();
+
+    expect(sent).toHaveLength(1);
+    expect(texts()[0]).toBe(
+      ["⚡ Tool0", "⚡ Tool1", "⚡ Tool2", "⚡ Tool3", "⚡ Tool4", "⚡ Tool5"].join("\n"),
+    );
+  });
+
+  it("flushes at the batch cap (10 lines) without waiting for the timer", async () => {
+    const { api, sent } = makeApi();
+    // Long timer: only the cap can flush the first batch.
+    const relay = new StreamRelay(api, { toolBatchMs: 60_000 });
+
+    for (let i = 0; i < 12; i++) relay.handleMessage(CHAT, toolExec(`tc${i}`, `T${i}`));
+    // The first 10 flushed on the cap — before settle() flushes the rest.
+    await relay.settle();
+
+    expect(sent).toHaveLength(2);
+    expect(sent[0]!.text.split("\n")).toHaveLength(10);
+    expect(sent[1]!.text.split("\n")).toHaveLength(2);
+  });
+
+  it("flushes after the quiet-time timer when nothing else arrives", async () => {
+    const { api, sent } = makeApi();
+    const relay = new StreamRelay(api, { toolBatchMs: 20 });
+
+    relay.handleMessage(CHAT, toolExec("tc1", "Bash"));
+    relay.handleMessage(CHAT, toolExec("tc2", "Read"));
+    expect(sent).toHaveLength(0); // still buffered
+
+    await new Promise((r) => setTimeout(r, 60));
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.text).toBe("⚡ Bash\n⚡ Read");
+
+    // Nothing left to double-send.
+    await relay.settle();
+    expect(sent).toHaveLength(1);
+  });
+
+  it("a non-tool send flushes the pending batch first, preserving order", async () => {
+    const { api, texts } = makeApi();
+    const relay = new StreamRelay(api);
+
+    relay.handleMessage(CHAT, toolExec("tc1", "Bash"));
+    relay.handleMessage(CHAT, toolExec("tc2", "Read"));
+    relay.send(CHAT, "✅ Done.");
+    await relay.settle();
+
+    expect(texts()).toEqual(["⚡ Bash\n⚡ Read", "✅ Done."]);
+  });
+
+  it("a system message flushes the batch before its own send", async () => {
+    const { api, texts } = makeApi();
+    const relay = new StreamRelay(api);
+
+    relay.handleMessage(CHAT, toolExec("tc1", "Bash"));
+    relay.handleMessage(CHAT, full("s1", "system", "context low"));
+    await relay.settle();
+
+    expect(texts()).toEqual(["⚡ Bash", "⚠️ context low"]);
+  });
+
+  it("a thinking send flushes the batch before its own send", async () => {
+    const { api, texts } = makeApi();
+    const relay = new StreamRelay(api);
+
+    relay.handleMessage(CHAT, toolExec("tc1", "Bash"));
+    relay.handleMessage(CHAT, full("t1", "thinking", "pondering"));
+    await relay.settle();
+
+    expect(texts()[0]).toBe("⚡ Bash");
+    expect(texts()[1]).toContain("pondering");
+  });
+
+  it("a tool line for a different chat flushes the previous chat's batch first", async () => {
+    const { api, sent } = makeApi();
+    const relay = new StreamRelay(api);
+    const OTHER_CHAT = CHAT + 1;
+
+    relay.handleMessage(CHAT, toolExec("tc1", "Bash"));
+    relay.handleMessage(OTHER_CHAT, toolExec("tc2", "Read"));
+    await relay.settle();
+
+    expect(sent).toHaveLength(2);
+    expect(sent[0]).toMatchObject({ chatId: CHAT, text: "⚡ Bash" });
+    expect(sent[1]).toMatchObject({ chatId: OTHER_CHAT, text: "⚡ Read" });
+  });
+
+  it("interleaved streamed text still lands between tool batches, exactly once", async () => {
+    const { api, texts } = makeApi();
+    const relay = new StreamRelay(api);
+
+    relay.handleMessage(CHAT, full("m1", "assistant", ""));
+    relay.handleDelta(CHAT, delta("m1", "Checking. "));
+    relay.handleMessage(CHAT, toolExec("tc1", "Bash"));
+    relay.handleMessage(CHAT, toolExec("tc2", "Read"));
+    relay.handleDelta(CHAT, delta("m1", "Found it."));
+    relay.handleMessage(CHAT, full("m1", "assistant", "Checking. Found it."));
+    relay.flushIdle(CHAT);
+    await relay.settle();
+
+    expect(texts()).toEqual([
+      "Checking. ",
+      "⚡ Bash\n⚡ Read",
+      "Found it.",
+      "✅ Done.",
+    ]);
+    expect(countOccurrences(texts(), "Checking. ")).toBe(1);
+  });
+
+  it("flushAndClear delivers a pending tool batch (nothing lingers past a detach)", async () => {
+    const { api, texts } = makeApi();
+    const relay = new StreamRelay(api, { toolBatchMs: 60_000 });
+
+    relay.handleMessage(CHAT, toolExec("tc1", "Bash"));
+    relay.flushAndClear(CHAT);
+    await relay.settle();
+
+    expect(texts()).toEqual(["⚡ Bash"]);
+  });
+
+  it("flushIdle delivers a pending tool batch before Done", async () => {
+    const { api, texts } = makeApi();
+    const relay = new StreamRelay(api, { toolBatchMs: 60_000 });
+
+    relay.handleMessage(CHAT, toolExec("tc1", "Bash"));
+    relay.handleDelta(CHAT, {
+      type: "session.message.delta",
+      sessionId: "sess-1",
+      messageId: "tc1",
+      toolStateUpdate: { phase: "completed", success: true },
+      timestamp: new Date().toISOString(),
+    });
+    relay.flushIdle(CHAT);
+    await relay.settle();
+
+    expect(texts()).toEqual(["⚡ Bash\n✓ Bash", "✅ Done."]);
   });
 });
 
