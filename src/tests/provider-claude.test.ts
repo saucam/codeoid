@@ -26,6 +26,8 @@ let sdkMessages: SDKMsg[] = [];
 let sdkThrowError: Error | null = null;
 /** Captures the options passed to query() so tests can invoke callbacks. */
 let capturedQueryOpts: Record<string, unknown> | null = null;
+/** Total query() constructions — distinguishes warm reuse from rebuilds. */
+let queryCallCount = 0;
 /** When set, the mock loop blocks before finishing so tests can invoke captured
  *  callbacks (canUseTool, hooks) while the turn queue is still open. */
 let sdkGate: Promise<void> | null = null;
@@ -54,6 +56,7 @@ function makeMockQuery() {
 mock.module("@anthropic-ai/claude-agent-sdk", () => ({
   query: (opts: unknown) => {
     capturedQueryOpts = opts as Record<string, unknown>;
+    queryCallCount += 1;
     return makeMockQuery();
   },
 }));
@@ -733,5 +736,98 @@ describe("ClaudeProvider – runTurn with mocked SDK", () => {
     // If hooks were invoked, events were emitted into the turn queue
     // (may or may not be in events depending on timing — just verify no throw)
     expect(true).toBe(true);
+  });
+});
+
+// ── #153: warm loop vs per-turn systemPromptAppend ────────────────────────────
+//
+// The SDK fixes the system prompt at query() construction. The warm
+// keep-alive loop therefore must be REBUILT when a turn arrives with a
+// different systemPromptAppend (before_turn hook output, refreshed memory
+// index) — and must keep full warm-reuse when the append is unchanged.
+describe("ClaudeProvider – systemPromptAppend loop rebuild (#153)", () => {
+  let openGate: () => void = () => {};
+  beforeEach(() => {
+    sdkMessages = [];
+    sdkThrowError = null;
+    capturedQueryOpts = null;
+    queryCallCount = 0;
+    // Keep the mock SDK stream open so the loop stays WARM across turns;
+    // resolvable so teardown() (which awaits the consumer) can finish.
+    sdkGate = new Promise<void>((r) => {
+      openGate = r;
+    });
+  });
+
+  async function shutdown(provider: ClaudeProvider): Promise<void> {
+    openGate();
+    await provider.teardown();
+  }
+
+  function turn(provider: ClaudeProvider, append: string | undefined, msg: string) {
+    return provider.runTurn({
+      history: [],
+      userMessage: msg,
+      workdir: "/tmp",
+      canUseTool: async () => ({ behavior: "allow" as const }),
+      ...(append !== undefined ? { systemPromptAppend: append } : {}),
+    });
+  }
+
+  function appendOf(opts: Record<string, unknown> | null): string | undefined {
+    // query() is called as query({ prompt, options }) — the interesting
+    // fields live under `.options`.
+    const options = opts?.options as { systemPrompt?: { append?: string } } | undefined;
+    return options?.systemPrompt?.append;
+  }
+
+  it("keeps the warm loop when the append is unchanged, rebuilds when it changes", async () => {
+    const provider = makeProvider();
+
+    // Turn 1 — loop built with append "sprint: alpha".
+    turn(provider, "sprint: alpha", "t1");
+    expect(queryCallCount).toBe(1);
+    expect(appendOf(capturedQueryOpts)).toBe("sprint: alpha");
+
+    // Turn 2 — same append: warm reuse, NO new query construction.
+    turn(provider, "sprint: alpha", "t2");
+    expect(queryCallCount).toBe(1);
+
+    // Turn 3 — the hook contributed something new. Before the fix this was
+    // silently dropped (the warm loop kept turn 1's system prompt); now the
+    // loop rebuilds with the new append.
+    turn(provider, "sprint: beta", "t3");
+    expect(queryCallCount).toBe(2);
+    expect(appendOf(capturedQueryOpts)).toBe("sprint: beta");
+
+    // Turn 4 — stable again: back to warm reuse.
+    turn(provider, "sprint: beta", "t4");
+    expect(queryCallCount).toBe(2);
+
+    await shutdown(provider);
+  });
+
+  it("treats absent and empty appends as the same loop configuration", async () => {
+    const provider = makeProvider();
+    turn(provider, undefined, "t1");
+    expect(queryCallCount).toBe(1);
+    // undefined → "" — no gratuitous rebuild.
+    turn(provider, "", "t2");
+    expect(queryCallCount).toBe(1);
+    await shutdown(provider);
+  });
+
+  it("a rebuilt loop resumes the same backing session (no context loss)", async () => {
+    const provider = makeProvider();
+    turn(provider, "a", "t1");
+    // hasQueried flips after the SDK acks in production; simulate it so the
+    // rebuild takes the resume path exactly like a mid-session change.
+    provider.setHasQueried(true);
+    turn(provider, "b", "t2");
+    expect(queryCallCount).toBe(2);
+    // The rebuild must RESUME (continuity) rather than mint a new session.
+    const options = capturedQueryOpts?.options as { resume?: string } | undefined;
+    expect(options?.resume).toBe("test-backing");
+    await shutdown(provider);
   });
 });
