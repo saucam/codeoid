@@ -20,6 +20,12 @@ import type { ClusterableEpisode } from "./cluster.js";
 import type { Episode, FileReadRecord, RecallQuery } from "./types.js";
 import type { TurnUsage } from "../../protocol/types.js";
 
+/** Default byte ceiling for the decoded embedding-matrix cache (#154).
+ * 128 MiB ≈ 87k episodes of 384-dim float32 — generous for interactive
+ * recall while bounding a long-lived daemon whose recallGlobal would
+ * otherwise pin every workspace's matrix forever. Overridable per store. */
+const DEFAULT_VECTOR_CACHE_MAX_BYTES = 128 * 1024 * 1024;
+
 export interface DailyUsageBucket {
   day: string;
   costUsd: number;
@@ -181,20 +187,54 @@ export class SqliteEpisodeStore {
   /** Decoded embedding matrix per workspace, memoized so recall() doesn't
    * re-read + re-decode every embedding BLOB on each query. Kept in sync
    * incrementally on writes (insert-with-embedding / setEmbedding) — new
-   * vectors are appended in place, so a matrix built once stays warm for the
-   * lifetime of the process instead of being invalidated by every embed
-   * batch. `indexById` makes the re-embed (replace) path O(1). */
+   * vectors are appended in place. `indexById` makes the re-embed (replace)
+   * path O(1). LRU-bounded by `#vectorCacheMaxBytes` (#154): without a
+   * ceiling, a long-lived daemon pinned every workspace ever searched
+   * (recallGlobal touches ALL of them) for the life of the process —
+   * 300+ MB on a 200k-episode corpus. */
   #vectorCache = new Map<
     string,
-    { ids: string[]; vectors: Float32Array[]; indexById: Map<string, number> }
+    { ids: string[]; vectors: Float32Array[]; indexById: Map<string, number>; sizeBytes: number }
   >();
+  /** Total vector bytes currently cached (id strings / index maps are noise
+   * next to the Float32Arrays and aren't counted). */
+  #vectorCacheBytes = 0;
+  #vectorCacheMaxBytes: number;
 
-  constructor(dbPath: string) {
+  constructor(dbPath: string, opts: { vectorCacheMaxBytes?: number } = {}) {
+    this.#vectorCacheMaxBytes = Math.max(
+      1,
+      Math.floor(opts.vectorCacheMaxBytes ?? DEFAULT_VECTOR_CACHE_MAX_BYTES),
+    );
     this.#db = new Database(dbPath, { create: true });
     this.#db.exec("PRAGMA journal_mode = WAL");
     this.#db.exec("PRAGMA synchronous = NORMAL");
     this.#db.exec("PRAGMA foreign_keys = ON");
     this.#migrate();
+  }
+
+  /** Observable cache accounting — diagnostics + tests. */
+  vectorCacheStats(): { workspaces: number; bytes: number; maxBytes: number } {
+    return {
+      workspaces: this.#vectorCache.size,
+      bytes: this.#vectorCacheBytes,
+      maxBytes: this.#vectorCacheMaxBytes,
+    };
+  }
+
+  /** Evict least-recently-used matrices until the total fits the ceiling.
+   * Map insertion order is the recency order (loadVectorMatrix re-inserts
+   * on hit). `keep` — the workspace just queried/extended — is never
+   * evicted, so one workspace larger than the whole ceiling stays usable;
+   * it just evicts everything else. An evicted workspace reloads from
+   * SQLite on its next query. */
+  #evictVectorCacheOver(keep: string): void {
+    for (const [ws, entry] of this.#vectorCache) {
+      if (this.#vectorCacheBytes <= this.#vectorCacheMaxBytes) break;
+      if (ws === keep) continue;
+      this.#vectorCache.delete(ws);
+      this.#vectorCacheBytes -= entry.sizeBytes;
+    }
   }
 
   #migrate(): void {
@@ -420,6 +460,7 @@ export class SqliteEpisodeStore {
 
       this.#db.exec(`PRAGMA user_version = ${TENANT_WS_MIGRATION_VERSION}`);
       this.#vectorCache.clear();
+      this.#vectorCacheBytes = 0;
     })();
 
     return { migrated: true, reKeyed };
@@ -452,12 +493,25 @@ export class SqliteEpisodeStore {
     const copy = new Float32Array(vector);
     const existing = cached.indexById.get(id);
     if (existing !== undefined) {
+      const delta = copy.byteLength - cached.vectors[existing]!.byteLength;
       cached.vectors[existing] = copy;
+      cached.sizeBytes += delta;
+      this.#vectorCacheBytes += delta;
     } else {
       cached.indexById.set(id, cached.ids.length);
       cached.ids.push(id);
       cached.vectors.push(copy);
+      cached.sizeBytes += copy.byteLength;
+      this.#vectorCacheBytes += copy.byteLength;
     }
+    // A write is a recency signal too: re-insert so an actively-WRITTEN
+    // workspace can't sit at the front of the Map (oldest position) and be
+    // evicted by the next query on some other workspace (review catch).
+    this.#vectorCache.delete(workspaceId);
+    this.#vectorCache.set(workspaceId, cached);
+    // Growth can push the total past the ceiling — evict OTHER workspaces
+    // (the one being written stays; it's clearly hot).
+    this.#evictVectorCacheOver(workspaceId);
   }
 
   /** Run `fn` inside a single transaction so a batch of writes commits once
@@ -982,7 +1036,12 @@ export class SqliteEpisodeStore {
    * reload after the first query. */
   loadVectorMatrix(workspaceId: string): { ids: string[]; vectors: Float32Array[] } {
     const cached = this.#vectorCache.get(workspaceId);
-    if (cached) return cached;
+    if (cached) {
+      // Touch: re-insert so Map order tracks query recency (LRU).
+      this.#vectorCache.delete(workspaceId);
+      this.#vectorCache.set(workspaceId, cached);
+      return cached;
+    }
 
     const rows = this.#db
       .prepare(
@@ -994,13 +1053,18 @@ export class SqliteEpisodeStore {
     const ids: string[] = [];
     const vectors: Float32Array[] = [];
     const indexById = new Map<string, number>();
+    let sizeBytes = 0;
     for (const row of rows) {
       indexById.set(row.id, ids.length);
       ids.push(row.id);
-      vectors.push(uint8ToFloat32(row.embedding));
+      const v = uint8ToFloat32(row.embedding);
+      sizeBytes += v.byteLength;
+      vectors.push(v);
     }
-    const matrix = { ids, vectors, indexById };
+    const matrix = { ids, vectors, indexById, sizeBytes };
     this.#vectorCache.set(workspaceId, matrix);
+    this.#vectorCacheBytes += sizeBytes;
+    this.#evictVectorCacheOver(workspaceId);
     return matrix;
   }
 
