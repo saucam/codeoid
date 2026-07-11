@@ -266,7 +266,9 @@ export class ClaudeProvider implements SessionProvider {
       // backing session, so no conversation context is lost; this trades
       // subprocess warmth for the documented per-turn hook contract. Loops
       // whose append never changes keep full warm-reuse.
-      console.error(
+      // console.log, not error: an expected control-flow event (log-level
+      // alerting shouldn't page on it).
+      console.log(
         `[claude-provider ${this.#init.sessionId.slice(0, 8)}] systemPromptAppend changed (${this.#builtSystemPromptAppend.length}B → ${desiredAppend.length}B) — rebuilding query loop`,
       );
       this.#inputQueue?.close();
