@@ -22,9 +22,19 @@
  *     `answers: {}` and Claude reports "user answered nothing".
  */
 
-import { Component, For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import {
+  Component,
+  For,
+  Show,
+  createEffect,
+  createMemo,
+  createSignal,
+  on,
+  onCleanup,
+  onMount,
+} from "solid-js";
 
-import { newRequestId, send } from "../../state/connection";
+import { newRequestId, request } from "../../state/connection";
 import { epochOf, focusedSessionMessages } from "../../state/messages";
 import { focusedSession, focusedSessionId } from "../../state/sessions";
 import { findPendingApproval } from "../../lib/approvals";
@@ -113,6 +123,42 @@ const ApprovalBar: Component = () => {
     };
   });
 
+  // One in-flight approve per bar. `busy` disables every button (and gates
+  // the keyboard path) so a double-click can't ship the same approvalId
+  // twice; `error` surfaces the daemon's rejection inline. Both reset when
+  // the pending approval changes — a new approval must not inherit the
+  // previous one's error text or disabled state.
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+  createEffect(
+    on(
+      () => snapshot()?.approvalId,
+      () => {
+        setBusy(false);
+        setError(null);
+      },
+    ),
+  );
+
+  const dispatch = (
+    sessionId: string,
+    approvalId: string,
+    approved: boolean,
+    updatedInput?: Record<string, unknown>,
+  ): void => {
+    if (busy()) return;
+    setError(null);
+    setBusy(true);
+    approve(sessionId, approvalId, approved, updatedInput)
+      // Success keeps the bar disabled: it dismisses when the daemon's
+      // tool-state delta lands, and re-enabling before that would let a
+      // second (now stale) approve fire for the same approvalId.
+      .catch((e) => {
+        setError(e instanceof Error ? e.message : String(e));
+        setBusy(false);
+      });
+  };
+
   // Alt+Y / Alt+D keyboard shortcuts — advertised in the button tooltips but
   // previously never implemented. Binary approve/deny only (AskUserQuestion
   // needs a real answer), and never while typing in an input/textarea.
@@ -126,7 +172,7 @@ const ApprovalBar: Component = () => {
       const el = document.activeElement;
       if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA")) return;
       ev.preventDefault();
-      approve(cur.sessionId, cur.approvalId, k === "y");
+      dispatch(cur.sessionId, cur.approvalId, k === "y");
     };
     window.addEventListener("keydown", onKey);
     onCleanup(() => window.removeEventListener("keydown", onKey));
@@ -142,32 +188,44 @@ const ApprovalBar: Component = () => {
           const cur = snapshot();
           if (!cur || cur.approvalId !== snap().approvalId) return;
           if (cur.sessionId !== snap().sessionId) return;
-          approve(snap().sessionId, snap().approvalId, approved, updatedInput);
+          dispatch(snap().sessionId, snap().approvalId, approved, updatedInput);
         };
         return (
-          <Show when={isAsk()} fallback={
-            <BinaryBar
-              toolName={snap().toolName}
-              description={snap().description}
-              isPlanMode={isPlanMode()}
-              onApprove={() => safeApprove(true)}
-              onRefine={() => {
-                safeApprove(false);
-                focusPromptWithHint(
-                  isPlanMode()
-                    ? "What should change in the plan?"
-                    : "What would you like Claude to do instead?",
-                );
-              }}
-              onDeny={() => safeApprove(false)}
-            />
-          }>
-            <AskUserQuestionForm
-              questions={extractQuestions(snap().input)}
-              onSubmit={(answers) => safeApprove(true, { answers })}
-              onCancel={() => safeApprove(false)}
-            />
-          </Show>
+          <>
+            <Show when={error()}>
+              <div
+                role="alert"
+                class="border-t border-danger/40 bg-danger/5 px-4 py-1.5 text-center text-[11px] text-danger"
+              >
+                {error()}
+              </div>
+            </Show>
+            <Show when={isAsk()} fallback={
+              <BinaryBar
+                toolName={snap().toolName}
+                description={snap().description}
+                isPlanMode={isPlanMode()}
+                busy={busy()}
+                onApprove={() => safeApprove(true)}
+                onRefine={() => {
+                  safeApprove(false);
+                  focusPromptWithHint(
+                    isPlanMode()
+                      ? "What should change in the plan?"
+                      : "What would you like Claude to do instead?",
+                  );
+                }}
+                onDeny={() => safeApprove(false)}
+              />
+            }>
+              <AskUserQuestionForm
+                questions={extractQuestions(snap().input)}
+                busy={busy()}
+                onSubmit={(answers) => safeApprove(true, { answers })}
+                onCancel={() => safeApprove(false)}
+              />
+            </Show>
+          </>
         );
       }}
     </Show>
@@ -178,6 +236,7 @@ const BinaryBar: Component<{
   toolName: string;
   description: string;
   isPlanMode: boolean;
+  busy: boolean;
   onApprove: () => void;
   onRefine: () => void;
   onDeny: () => void;
@@ -199,7 +258,8 @@ const BinaryBar: Component<{
       </div>
       <button
         type="button"
-        class="rounded bg-success/90 px-3 py-1.5 text-xs font-semibold text-bg transition hover:bg-success"
+        disabled={props.busy}
+        class="rounded bg-success/90 px-3 py-1.5 text-xs font-semibold text-bg transition hover:bg-success disabled:cursor-not-allowed disabled:opacity-50"
         onClick={props.onApprove}
         title="Approve · Alt+Y"
       >
@@ -207,7 +267,8 @@ const BinaryBar: Component<{
       </button>
       <button
         type="button"
-        class="rounded border border-accent/60 bg-bg px-3 py-1.5 text-xs font-semibold text-accent transition hover:bg-accent/10"
+        disabled={props.busy}
+        class="rounded border border-accent/60 bg-bg px-3 py-1.5 text-xs font-semibold text-accent transition hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-50"
         onClick={props.onRefine}
         title="Deny + focus prompt for follow-up feedback"
       >
@@ -215,7 +276,8 @@ const BinaryBar: Component<{
       </button>
       <button
         type="button"
-        class="rounded border border-danger/60 bg-bg px-3 py-1.5 text-xs font-semibold text-danger transition hover:bg-danger/10"
+        disabled={props.busy}
+        class="rounded border border-danger/60 bg-bg px-3 py-1.5 text-xs font-semibold text-danger transition hover:bg-danger/10 disabled:cursor-not-allowed disabled:opacity-50"
         onClick={props.onDeny}
         title="Deny · Alt+D"
       >
@@ -227,6 +289,7 @@ const BinaryBar: Component<{
 
 const AskUserQuestionForm: Component<{
   questions: AskQuestion[];
+  busy: boolean;
   onSubmit: (answers: Record<string, string>) => void;
   onCancel: () => void;
 }> = (props) => {
@@ -359,7 +422,8 @@ const AskUserQuestionForm: Component<{
         <div class="flex items-center justify-end gap-2">
           <button
             type="button"
-            class="rounded border border-danger/60 bg-bg px-3 py-1.5 text-xs font-semibold text-danger transition hover:bg-danger/10"
+            disabled={props.busy}
+            class="rounded border border-danger/60 bg-bg px-3 py-1.5 text-xs font-semibold text-danger transition hover:bg-danger/10 disabled:cursor-not-allowed disabled:opacity-50"
             onClick={props.onCancel}
             title="Cancel — Claude will see this as a denied tool call"
           >
@@ -367,7 +431,7 @@ const AskUserQuestionForm: Component<{
           </button>
           <button
             type="button"
-            disabled={!allAnswered()}
+            disabled={!allAnswered() || props.busy}
             class="rounded bg-success/90 px-3 py-1.5 text-xs font-semibold text-bg transition hover:bg-success disabled:cursor-not-allowed disabled:opacity-50"
             onClick={handleSubmit}
             title={
@@ -384,13 +448,16 @@ const AskUserQuestionForm: Component<{
   );
 };
 
+/** Ship an approval decision and await the daemon's answer — a rejection
+ * (stale approvalId, permission) rejects the promise so callers can surface
+ * it instead of assuming the fire-and-forget went through. */
 export function approve(
   sessionId: string,
   approvalId: string,
   approved: boolean,
   updatedInput?: Record<string, unknown>,
-): void {
-  send({
+): Promise<unknown> {
+  return request({
     type: "session.approve",
     id: newRequestId(),
     sessionId,

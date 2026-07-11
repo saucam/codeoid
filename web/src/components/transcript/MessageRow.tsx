@@ -190,8 +190,25 @@ const Md: Component<{ text: string; reconcile?: boolean }> = (props) => (
   />
 );
 
+/** Count lines without `split("\n")` — the split allocated an array of the
+ * whole reasoning text's lines on every delta just to read `.length`. */
+function countLines(text: string): number {
+  let n = 1;
+  for (let i = text.indexOf("\n"); i !== -1; i = text.indexOf("\n", i + 1)) n++;
+  return n;
+}
+
 const ThinkingBlock: Component<{ text: string; streaming?: boolean }> = (props) => {
-  const lineCount = createMemo(() => props.text.split("\n").length);
+  // Same remedy MarkdownBlock uses for #87: while the reasoning is streaming
+  // (and the <details> is forced open), coalesce delta-rate updates to one
+  // per animation frame instead of recomputing/re-rendering per chunk. When
+  // streaming ends the throttle passes through, so the final render is
+  // byte-identical to the non-streaming path.
+  const throttled = createFrameThrottled(
+    () => props.text,
+    () => props.streaming === true,
+  );
+  const lineCount = createMemo(() => countLines(throttled()));
   return (
     <details class="text-[12px] italic text-role-thinking" open={props.streaming}>
       <summary class="cursor-pointer select-none text-fg-faint hover:text-fg-muted">
@@ -200,7 +217,7 @@ const ThinkingBlock: Component<{ text: string; streaming?: boolean }> = (props) 
           <span class="md-streaming-caret ml-1" aria-label="streaming" />
         </Show>
       </summary>
-      <div class="mt-1 whitespace-pre-wrap pl-3">{props.text}</div>
+      <div class="mt-1 whitespace-pre-wrap pl-3">{throttled()}</div>
     </details>
   );
 };

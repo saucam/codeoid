@@ -14,6 +14,8 @@ import {
   relativeTime,
 } from "../lib/format";
 import { sessionAgentLabel, shortSub, truncateWimseUri } from "../lib/identity";
+import { effectiveMode } from "../lib/session-mode";
+import { nowTick } from "../state/clock";
 import { focusedSession } from "../state/sessions";
 import { isHeaderCollapsed, toggleHeaderCollapsed } from "../state/layout";
 
@@ -86,7 +88,7 @@ const SessionHeader: Component = () => (
           <div class="flex items-center gap-3">
             <h2 class="font-semibold text-fg">{s().name}</h2>
             <span class="rounded border border-border bg-bg px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-fg-muted">
-              {s().mode ?? "interactive"}
+              {effectiveMode(s())}
             </span>
             <Show when={s().model}>
               <span class="rounded border border-accent/30 bg-accent/5 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-accent">
@@ -94,7 +96,7 @@ const SessionHeader: Component = () => (
               </span>
             </Show>
             <span class="ml-auto font-mono text-[11px] text-fg-faint">
-              created {relativeTime(s().createdAt)}
+              created {relativeTime(s().createdAt, nowTick())}
             </span>
             <button
               type="button"
@@ -139,7 +141,7 @@ const CollapsedHeader: Component = () => (
         <span class="font-semibold text-fg">{s().name}</span>
         <span class="text-fg-faint">·</span>
         <span class="font-mono uppercase tracking-wider text-fg-muted">
-          {s().mode ?? "interactive"}
+          {effectiveMode(s())}
         </span>
         <Show when={s().model}>
           <span class="text-fg-faint">·</span>

@@ -1,11 +1,17 @@
 // @vitest-environment jsdom
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { render, cleanup } from "@solidjs/testing-library";
+import { render, cleanup, fireEvent, waitFor } from "@solidjs/testing-library";
 
-vi.mock("../../state/connection", () => ({ send: vi.fn(), newRequestId: () => "r" }));
+const requestMock = vi.hoisted(() =>
+  vi.fn<(msg: unknown) => Promise<unknown>>(() => Promise.resolve(undefined)),
+);
+vi.mock("../../state/connection", () => ({
+  send: vi.fn(),
+  request: requestMock,
+  newRequestId: () => "r",
+}));
 
 import ApprovalBar from "./ApprovalBar";
-import { send } from "../../state/connection";
 import {
   ingestSessionList,
   focusSession,
@@ -52,22 +58,23 @@ afterEach(() => {
   cleanup();
   _resetSessionsForTest();
   _resetMessagesForTest();
-  vi.mocked(send).mockClear();
+  requestMock.mockReset();
+  requestMock.mockImplementation(() => Promise.resolve(undefined));
 });
 
-describe("ApprovalBar keyboard shortcuts", () => {
-  function setup() {
-    ingestSessionList([pendingSession()]);
-    focusSession("s");
-    applyMessage(pendingToolMsg());
-    return render(() => <ApprovalBar />);
-  }
+function setup() {
+  ingestSessionList([pendingSession()]);
+  focusSession("s");
+  applyMessage(pendingToolMsg());
+  return render(() => <ApprovalBar />);
+}
 
+describe("ApprovalBar keyboard shortcuts", () => {
   it("Alt+Y approves the pending tool", () => {
     const { container } = setup();
     expect(container.textContent).toContain("Bash"); // bar is showing
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "y", altKey: true, bubbles: true }));
-    expect(send).toHaveBeenCalledWith(
+    expect(requestMock).toHaveBeenCalledWith(
       expect.objectContaining({ type: "session.approve", approvalId: "ap-1", approved: true }),
     );
   });
@@ -75,7 +82,7 @@ describe("ApprovalBar keyboard shortcuts", () => {
   it("Alt+D denies the pending tool", () => {
     setup();
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "d", altKey: true, bubbles: true }));
-    expect(send).toHaveBeenCalledWith(
+    expect(requestMock).toHaveBeenCalledWith(
       expect.objectContaining({ type: "session.approve", approvalId: "ap-1", approved: false }),
     );
   });
@@ -83,6 +90,61 @@ describe("ApprovalBar keyboard shortcuts", () => {
   it("ignores the shortcut without the Alt modifier", () => {
     setup();
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "y", bubbles: true }));
-    expect(send).not.toHaveBeenCalled();
+    expect(requestMock).not.toHaveBeenCalled();
+  });
+
+  it("does not double-fire while an approve is already in flight", () => {
+    requestMock.mockImplementationOnce(() => new Promise(() => {}));
+    setup();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "y", altKey: true, bubbles: true }));
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "y", altKey: true, bubbles: true }));
+    expect(requestMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("ApprovalBar buttons", () => {
+  it("a double-click on approve sends ONE session.approve", () => {
+    const { getByText } = setup();
+    const btn = getByText("approve") as HTMLButtonElement;
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    expect(requestMock).toHaveBeenCalledTimes(1);
+    expect(requestMock).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "session.approve", approvalId: "ap-1", approved: true }),
+    );
+  });
+
+  it("disables every button while the approve is in flight", () => {
+    requestMock.mockImplementationOnce(() => new Promise(() => {}));
+    const { getByText } = setup();
+    fireEvent.click(getByText("approve"));
+    expect((getByText("approve") as HTMLButtonElement).disabled).toBe(true);
+    expect((getByText("refine") as HTMLButtonElement).disabled).toBe(true);
+    expect((getByText("deny") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("surfaces a daemon rejection inline and re-enables the buttons", async () => {
+    requestMock.mockImplementationOnce(() =>
+      Promise.reject(new Error("stale approval — the turn was interrupted")),
+    );
+    const { getByText, findByText } = setup();
+    fireEvent.click(getByText("approve"));
+    expect(await findByText(/stale approval/)).toBeTruthy();
+    // Re-enabled after the rejection: a second attempt goes out.
+    const btn = getByText("approve") as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+    fireEvent.click(btn);
+    await waitFor(() => expect(requestMock).toHaveBeenCalledTimes(2));
+  });
+
+  it("deny also routes through the gated request path", () => {
+    const { getByText } = setup();
+    const btn = getByText("deny") as HTMLButtonElement;
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    expect(requestMock).toHaveBeenCalledTimes(1);
+    expect(requestMock).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "session.approve", approvalId: "ap-1", approved: false }),
+    );
   });
 });
