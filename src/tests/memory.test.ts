@@ -880,3 +880,115 @@ function msgTool(
     timestamp,
   };
 }
+
+// ── #154: vector-cache LRU bound ─────────────────────────────────────────────
+//
+// The decoded embedding-matrix cache used to grow forever ("stays warm for
+// the lifetime of the process") and recallGlobal touches EVERY workspace —
+// one global search pinned the whole corpus's Float32Arrays in RAM. The
+// cache is now byte-bounded with least-recently-QUERIED eviction.
+describe("SqliteEpisodeStore — vector cache LRU (#154)", () => {
+  const DIM = 8;
+  /** 3 episodes × 8 dims × 4 bytes = 96 bytes per workspace matrix. */
+  const WS_BYTES = 3 * DIM * 4;
+
+  function seedWorkspace(store: SqliteEpisodeStore, ws: string): void {
+    for (let i = 0; i < 3; i++) {
+      store.insert({
+        workspaceId: ws,
+        sessionId: `sess-${ws}`,
+        kind: "tool_call",
+        toolName: "Read",
+        summary: `${ws} ep ${i}`,
+        content: `content ${ws} ${i}`,
+        filePaths: [],
+        tokenEstimate: 1,
+        embedding: new Float32Array(DIM).fill(i + 1),
+        embeddingModel: "stub",
+        createdAt: Date.now(),
+        createdBy: "u",
+      });
+    }
+  }
+
+  it("evicts the least-recently-queried workspace past the byte ceiling", () => {
+    // Ceiling fits exactly two matrices.
+    const store = new SqliteEpisodeStore(":memory:", {
+      vectorCacheMaxBytes: WS_BYTES * 2,
+    });
+    for (const ws of ["ws_a", "ws_b", "ws_c"]) seedWorkspace(store, ws);
+
+    const a1 = store.loadVectorMatrix("ws_a");
+    store.loadVectorMatrix("ws_b");
+    expect(store.vectorCacheStats()).toMatchObject({
+      workspaces: 2,
+      bytes: WS_BYTES * 2,
+    });
+
+    // Touch ws_a so ws_b becomes the LRU victim, then load ws_c.
+    const a2 = store.loadVectorMatrix("ws_a");
+    expect(a2).toBe(a1); // cache HIT — same object identity
+    store.loadVectorMatrix("ws_c");
+
+    const stats = store.vectorCacheStats();
+    expect(stats.workspaces).toBe(2);
+    expect(stats.bytes).toBeLessThanOrEqual(stats.maxBytes);
+
+    // ws_a survived (recently touched): identity preserved. ws_b was
+    // evicted: a fresh load rebuilds a NEW matrix from SQLite — with the
+    // right contents (correctness never depends on the cache).
+    expect(store.loadVectorMatrix("ws_a")).toBe(a1);
+    const bReloaded = store.loadVectorMatrix("ws_b");
+    expect(bReloaded.ids.length).toBe(3);
+    expect(bReloaded.vectors[0]!.length).toBe(DIM);
+  });
+
+  it("keeps a single workspace even when it alone exceeds the ceiling", () => {
+    const store = new SqliteEpisodeStore(":memory:", { vectorCacheMaxBytes: 16 });
+    seedWorkspace(store, "ws_big");
+    const m = store.loadVectorMatrix("ws_big");
+    expect(m.ids.length).toBe(3);
+    // Documented: the just-queried workspace is never evicted — recall must
+    // still work; the ceiling empties everything else instead.
+    expect(store.vectorCacheStats().workspaces).toBe(1);
+
+    // A second oversized workspace displaces the first.
+    seedWorkspace(store, "ws_big2");
+    store.loadVectorMatrix("ws_big2");
+    expect(store.vectorCacheStats().workspaces).toBe(1);
+  });
+
+  it("write-path growth is byte-accounted and can trigger eviction", () => {
+    const store = new SqliteEpisodeStore(":memory:", {
+      vectorCacheMaxBytes: WS_BYTES * 2,
+    });
+    for (const ws of ["ws_a", "ws_b"]) seedWorkspace(store, ws);
+    store.loadVectorMatrix("ws_a");
+    store.loadVectorMatrix("ws_b");
+    const before = store.vectorCacheStats().bytes;
+
+    // Insert-with-embedding into the cached ws_b: the in-place append must
+    // be accounted (and ws_a — now over the ceiling — evicted).
+    store.insert({
+      workspaceId: "ws_b",
+      sessionId: "sess-ws_b",
+      kind: "tool_call",
+      toolName: "Read",
+      summary: "growth",
+      content: "growth",
+      filePaths: [],
+      tokenEstimate: 1,
+      embedding: new Float32Array(DIM).fill(9),
+      embeddingModel: "stub",
+      createdAt: Date.now(),
+      createdBy: "u",
+    });
+
+    const stats = store.vectorCacheStats();
+    expect(stats.bytes).toBeGreaterThan(before - WS_BYTES); // grew…
+    expect(stats.bytes).toBeLessThanOrEqual(stats.maxBytes); // …then fit
+    expect(stats.workspaces).toBe(1); // ws_a evicted, hot ws_b kept
+    // The evicted workspace reloads correctly on demand.
+    expect(store.loadVectorMatrix("ws_a").ids.length).toBe(3);
+  });
+});
