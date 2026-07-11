@@ -22,6 +22,7 @@ import type {
 } from "../protocol/types";
 
 import { ingestSessionList, mergeSession, setSessionStatus } from "./sessions";
+import { noteAttachReplay } from "./attach";
 import {
   applyDelta,
   applyMessage,
@@ -179,6 +180,10 @@ export async function bootstrap(opts: { apiKey?: string; token?: string } = {}):
         CAPABILITIES.CHUNKED_REPLAY,
         CAPABILITIES.SEQ_RESUME,
         CAPABILITIES.UI_DIALOGS,
+        // Tail-first attach: the daemon replays only the newest window
+        // (instant first paint) and we backfill older history on demand
+        // via `scrollback.page` (state/attach.ts + the Transcript sentinel).
+        CAPABILITIES.SCROLLBACK_PAGING,
       ],
       clientName: "codeoid-web",
       // Fresh-token supplier for reconnects: re-exchange the stored zid_sk_
@@ -260,6 +265,9 @@ function routeBroadcast(msg: DaemonMessage): void {
       return;
     case "scrollback.replay":
       noteReplayFrame(msg);
+      // Settle the attach lifecycle (#152) and record whether older history
+      // exists beyond a tail-first window (`tail`/`hasMore`).
+      noteAttachReplay(msg);
       // Incremental resume (`replay.resume`): the daemon sent only the tail
       // mutated since our cursor — upsert into the existing buffer, never
       // reset (chunk 0 of an incremental replay is NOT a snapshot).
@@ -301,6 +309,7 @@ function routeBroadcast(msg: DaemonMessage): void {
     case "response.ok":
     case "response.error":
     case "session.search.result":
+    case "scrollback.page.result":
     case "session.commands.result":
       return;
   }

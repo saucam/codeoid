@@ -258,6 +258,56 @@ export function appendScrollback(sessionId: string, messages: readonly SessionMe
   });
 }
 
+/**
+ * Prepend a page of OLDER history (`scrollback.page` backfill, #152).
+ * `messages` arrive oldest→newest and strictly older than the session's
+ * current head; they're inserted at the FRONT preserving that order. Dedupe
+ * is by messageId — within the incoming batch via the shared kernel
+ * (first position kept), and against the store by DROPPING already-held
+ * ids: a collision only means an overlapping/re-requested page, and
+ * history content is immutable, so there's nothing to upsert.
+ *
+ * The O(1) positional index is REBUILT here (offset-shifted): prepending
+ * breaks the append-only invariant the incremental index maintenance
+ * relies on everywhere else in this module.
+ */
+export function prependMessages(
+  sessionId: string,
+  messages: readonly SessionMessage[],
+): void {
+  if (messages.length === 0) return;
+  const existing = indexBySession.get(sessionId);
+  const { messages: incoming } = dedupeReplay(messages);
+  const fresh = existing
+    ? incoming.filter((m) => !existing.has(m.messageId))
+    : incoming;
+  if (fresh.length === 0) return;
+
+  // Rebuild the positional index: fresh pages occupy 0..f-1, every existing
+  // entry shifts down by f. Done before the store mutation so a delta
+  // landing in the same tick resolves against correct positions.
+  const index = new Map<string, number>();
+  for (let i = 0; i < fresh.length; i++) index.set(fresh[i]!.messageId, i);
+  if (existing) {
+    for (const [id, at] of existing) index.set(id, at + fresh.length);
+  }
+  indexBySession.set(sessionId, index);
+
+  // Deliberately NOT touching activityAtBySession — backfilled history is
+  // not live activity and must not un-stale the busy indicator.
+  batch(() => {
+    setState(
+      produce<MessagesState>((s) => {
+        const buf = (s.bySession[sessionId] ??= []);
+        buf.unshift(...fresh);
+        // Per-message version bumps omitted for the same reason as
+        // replaceScrollback: the epoch bump is the invalidation signal.
+        s.epochBySession[sessionId] = (s.epochBySession[sessionId] ?? 0) + 1;
+      }),
+    );
+  });
+}
+
 /** Check whether a (sessionId, messageId) pair exists in the store. O(1). */
 export function hasMessage(sessionId: string, messageId: string): boolean {
   return indexBySession.get(sessionId)?.has(messageId) ?? false;
