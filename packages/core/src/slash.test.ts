@@ -179,10 +179,54 @@ describe("dispatchSlash", () => {
     const c = { ...ctx(), showExport, showImport };
     dispatchSlash({ kind: "export" }, c);
     dispatchSlash({ kind: "import" }, c);
-    dispatchSlash({ kind: "fork" }, c);
     expect(showExport).toHaveBeenCalledTimes(1);
-    expect(showImport).toHaveBeenCalledTimes(2);
+    expect(showImport).toHaveBeenCalledTimes(1);
     expect(c.sent).toEqual([]);
+  });
+
+  it("parses /fork with an optional lowercased backend", () => {
+    expect(parseSlash("/fork")).toEqual({ kind: "fork", providerId: undefined });
+    expect(parseSlash("/fork CODEX")).toEqual({ kind: "fork", providerId: "codex" });
+  });
+
+  it("dispatchSlash /fork sends session.fork — NOT the import dialog", () => {
+    const showImport = mock();
+    const c = { ...ctx(), showImport };
+    dispatchSlash({ kind: "fork" }, c);
+    expect(showImport).not.toHaveBeenCalled();
+    expect(c.sent).toEqual([
+      { type: "session.fork", id: "req-1", sessionId: "s1" },
+    ]);
+  });
+
+  it("dispatchSlash /fork carries the backend and reports rejections", async () => {
+    // With a request channel: success surfaces the fork via onSessionForked.
+    const forked: unknown[] = [];
+    const okCtx = {
+      ...ctx(),
+      request: mock(() => Promise.resolve({ id: "fork-1", name: "s (fork)" })),
+      onSessionForked: (s: unknown) => void forked.push(s),
+    };
+    dispatchSlash({ kind: "fork", providerId: "codex" }, okCtx);
+    await Bun.sleep(0);
+    expect(okCtx.request).toHaveBeenCalledWith({
+      type: "session.fork",
+      id: "req-1",
+      sessionId: "s1",
+      providerId: "codex",
+    });
+    expect(forked).toEqual([{ id: "fork-1", name: "s (fork)" }]);
+
+    // Rejection lands in report, not the void.
+    const reports: string[] = [];
+    const errCtx = {
+      ...ctx(),
+      request: mock(() => Promise.reject(new Error("mid-turn"))),
+      report: (m: string) => void reports.push(m),
+    };
+    dispatchSlash({ kind: "fork" }, errCtx);
+    await Bun.sleep(0);
+    expect(reports).toEqual(["mid-turn"]);
   });
 
   it("dispatchSlash routes /agents /skills /mcp /hooks to showCapabilities", () => {

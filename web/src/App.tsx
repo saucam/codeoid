@@ -21,6 +21,7 @@ import {
   request,
   send,
 } from "./state/connection";
+import { closeFile, openedFile } from "./state/files";
 import { focusedSession, focusedSessionId, mergeSession } from "./state/sessions";
 import { resumeFor } from "./state/resume";
 import type { SessionInfo } from "./protocol/types";
@@ -143,6 +144,14 @@ const App: Component = () => {
       // dead on desktop).
       if (ev.key === "Escape") {
         if (document.querySelector(".fixed.inset-0")) return;
+        // The file viewer owns Esc too ("Close (Esc)") — on desktop it's a
+        // grid pane, not a fixed overlay, so the selector above misses it
+        // and Esc used to interrupt the running turn instead of closing
+        // the file the user was reading.
+        if (openedFile()) {
+          closeFile();
+          return;
+        }
         const s = focusedSession();
         if (!s || !isBusy(s.status)) return;
         ev.preventDefault();

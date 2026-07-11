@@ -77,8 +77,13 @@ const SearchModal: Component = () => {
       if (debounceTimer) clearTimeout(debounceTimer);
       const trimmed = q.trim();
       if (trimmed.length < 2) {
+        // Invalidate any in-flight request too — its debounce may already
+        // have fired, and without the bump its stale hits would repopulate
+        // the list under the "type at least 2 characters" hint.
+        runId += 1;
         setHits([]);
         setBusy(false);
+        setError(null);
         return;
       }
       const myRun = ++runId;
