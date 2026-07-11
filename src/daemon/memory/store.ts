@@ -504,6 +504,11 @@ export class SqliteEpisodeStore {
       cached.sizeBytes += copy.byteLength;
       this.#vectorCacheBytes += copy.byteLength;
     }
+    // A write is a recency signal too: re-insert so an actively-WRITTEN
+    // workspace can't sit at the front of the Map (oldest position) and be
+    // evicted by the next query on some other workspace (review catch).
+    this.#vectorCache.delete(workspaceId);
+    this.#vectorCache.set(workspaceId, cached);
     // Growth can push the total past the ceiling — evict OTHER workspaces
     // (the one being written stays; it's clearly hot).
     this.#evictVectorCacheOver(workspaceId);

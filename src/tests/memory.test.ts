@@ -958,6 +958,36 @@ describe("SqliteEpisodeStore — vector cache LRU (#154)", () => {
     expect(store.vectorCacheStats().workspaces).toBe(1);
   });
 
+  it("a write refreshes recency — an actively-written workspace outlives a colder read-only one", () => {
+    const store = new SqliteEpisodeStore(":memory:", {
+      vectorCacheMaxBytes: WS_BYTES * 2 + DIM * 4,
+    });
+    for (const ws of ["ws_a", "ws_b", "ws_c"]) seedWorkspace(store, ws);
+
+    const a1 = store.loadVectorMatrix("ws_a");
+    store.loadVectorMatrix("ws_b"); // recency now: a (oldest), b
+
+    // ws_a receives a WRITE (no read) — that must count as recency,
+    // otherwise the next query on ws_c evicts the actively-written ws_a.
+    store.insert({
+      workspaceId: "ws_a",
+      sessionId: "sess-ws_a",
+      kind: "tool_call",
+      toolName: "Read",
+      summary: "hot write",
+      content: "hot write",
+      filePaths: [],
+      tokenEstimate: 1,
+      embedding: new Float32Array(DIM).fill(7),
+      embeddingModel: "stub",
+      createdAt: Date.now(),
+      createdBy: "u",
+    });
+
+    store.loadVectorMatrix("ws_c"); // evicts the LRU — must be ws_b
+    expect(store.loadVectorMatrix("ws_a")).toBe(a1); // identity: never evicted
+  });
+
   it("write-path growth is byte-accounted and can trigger eviction", () => {
     const store = new SqliteEpisodeStore(":memory:", {
       vectorCacheMaxBytes: WS_BYTES * 2,
