@@ -145,6 +145,18 @@ export class ScrollbackBuffer {
     return entry.seq;
   }
 
+  /** True once the buffer is known NOT to hold the session's full history:
+   * an entry was evicted, or the buffer was seeded from a truncated
+   * transcript window on daemon restart. Consulted by tail-first attach and
+   * `scrollback.page` for `hasMore` — older history lives on disk. */
+  #partialHistory = false;
+  get partialHistory(): boolean {
+    return this.#partialHistory;
+  }
+  markPartialHistory(): void {
+    this.#partialHistory = true;
+  }
+
   /** Evict oldest entries until within both limits. */
   #evict(): void {
     while (
@@ -153,6 +165,7 @@ export class ScrollbackBuffer {
     ) {
       const evicted = this.#entries.shift();
       if (!evicted) break;
+      this.#partialHistory = true;
       this.#bytes -= evicted.size;
       const id = messageIdOf(evicted.msg);
       if (id !== undefined && this.#byId.get(id) === evicted) {
@@ -195,6 +208,61 @@ export class ScrollbackBuffer {
   readChunkedSince(sinceSeq: number, maxBytes: number): DaemonMessage[][] {
     const stale = this.#entries.filter((e) => e.seq > sinceSeq);
     return ScrollbackBuffer.#partition(stale, maxBytes);
+  }
+
+  /**
+   * Tail-first attach window (`scrollback.paging`): the NEWEST entries whose
+   * accounted payload fits `tailBytes` (never splits a message; always
+   * includes at least the newest entry), partitioned into `chunkBytes`
+   * frames like `readChunked`. `hasMore` reports whether older history
+   * remains in the buffer — the client pages it on demand.
+   */
+  readTailChunked(
+    tailBytes: number,
+    chunkBytes: number,
+  ): { chunks: DaemonMessage[][]; hasMore: boolean } {
+    if (this.#entries.length === 0) return { chunks: [], hasMore: false };
+    let start = this.#entries.length;
+    let used = 0;
+    while (start > 0) {
+      const size = this.#entries[start - 1]!.size;
+      if (used + size > tailBytes && start < this.#entries.length) break;
+      used += size;
+      start -= 1;
+    }
+    return {
+      chunks: ScrollbackBuffer.#partition(this.#entries.slice(start), chunkBytes),
+      hasMore: start > 0,
+    };
+  }
+
+  /**
+   * History page for `scrollback.page`: entries strictly OLDER than the
+   * anchor messageId, walking backwards until ~`maxBytes` (never splits a
+   * message; always returns at least one when any exist). Oldest→newest
+   * order, ready to prepend. Returns null when the anchor isn't in the
+   * buffer — the caller falls back to the on-disk transcript.
+   */
+  readPageBefore(
+    beforeMessageId: string,
+    maxBytes: number,
+  ): { messages: DaemonMessage[]; hasMore: boolean } | null {
+    const anchorEntry = this.#byId.get(beforeMessageId);
+    if (!anchorEntry) return null;
+    const anchor = this.#entries.indexOf(anchorEntry);
+    if (anchor < 0) return null; // defensive: id map / entries drift
+    let start = anchor;
+    let used = 0;
+    while (start > 0) {
+      const size = this.#entries[start - 1]!.size;
+      if (used + size > maxBytes && start < anchor) break;
+      used += size;
+      start -= 1;
+    }
+    return {
+      messages: this.#entries.slice(start, anchor).map((e) => e.msg),
+      hasMore: start > 0,
+    };
   }
 
   /**

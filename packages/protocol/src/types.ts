@@ -55,6 +55,14 @@ export const CAPABILITIES = {
    * by the daemon; clients feature-detect before fetching.
    */
   DYNAMIC_COMMANDS: "commands.dynamic",
+  /**
+   * Tail-first attach + on-demand history paging. Clients that declare this
+   * receive only the newest scrollback window on attach (`scrollback.replay`
+   * with `tail: true` + `hasMore`) and backfill older history on demand via
+   * `scrollback.page`. Clients that don't declare it keep the legacy
+   * full-buffer replay.
+   */
+  SCROLLBACK_PAGING: "scrollback.paging",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -699,6 +707,7 @@ export type ClientMessage =
   | SessionSetModelMsg
   | SessionSetProviderMsg
   | SessionForkMsg
+  | ScrollbackPageMsg
   | SessionRenameMsg
   | FsListMsg
   | FsReadMsg
@@ -754,6 +763,23 @@ export interface SessionCreateMsg extends BaseClientMsg {
  * with `not_found` for an unknown/foreign session and `invalid_request` for
  * an unknown `providerId` (fail-closed, same rule as create/set_provider).
  */
+/**
+ * Fetch a page of history OLDER than a message the client already holds
+ * (`scrollback.paging` capability). Anchored by messageId — not seq — so
+ * cursors survive daemon restarts and buffer rebuilds. Served from the
+ * in-memory scrollback buffer when the anchor is buffered, else from the
+ * on-disk JSONL transcript (history beyond the buffer cap, previously
+ * unreachable by clients). Daemon answers with `scrollback.page.result`.
+ */
+export interface ScrollbackPageMsg extends BaseClientMsg {
+  type: "scrollback.page";
+  sessionId: string;
+  /** The OLDEST messageId the client currently holds — pages end before it. */
+  beforeMessageId: string;
+  /** Soft byte budget for the page (defaults ~256 KiB, daemon-clamped). */
+  maxBytes?: number;
+}
+
 export interface SessionForkMsg extends BaseClientMsg {
   type: "session.fork";
   /** Session to branch from. */
@@ -1458,6 +1484,7 @@ export type DaemonMessage =
   | SessionUiResolvedMsg
   | SessionCommandsResultMsg
   | ScrollbackReplayMsg
+  | ScrollbackPageResultMsg
   | SessionSearchResultMsg
   | FsListResultMsg
   | FsReadResultMsg
@@ -1556,6 +1583,19 @@ export interface SessionInfoUpdateMsg {
  * fields ignore them and replace on each frame — ending on the newest chunk,
  * which degrades gracefully rather than crashing.
  */
+/** Answer to `scrollback.page` — a window of history strictly OLDER than the
+ * requested anchor, oldest→newest. Clients PREPEND (upsert by messageId). */
+export interface ScrollbackPageResultMsg {
+  type: "scrollback.page.result";
+  requestId: string;
+  sessionId: string;
+  messages: SessionMessage[];
+  /** Whether history older than this page exists (keep paging). */
+  hasMore: boolean;
+  /** Where the page came from — diagnostics only. */
+  source: "buffer" | "transcript";
+}
+
 export interface ScrollbackReplayMsg {
   type: "scrollback.replay";
   sessionId: string;
@@ -1586,6 +1626,14 @@ export interface ScrollbackReplayMsg {
   resumeKey?: string;
   /** Highest session sequence included/known — the client's next cursor. */
   maxSeq?: number;
+  /**
+   * True when this snapshot is only the NEWEST window of the scrollback
+   * (`scrollback.paging` capability): older history exists and is fetched
+   * on demand via `scrollback.page`. Absent/false = the full buffer.
+   */
+  tail?: boolean;
+  /** With `tail: true` — whether history older than this window exists. */
+  hasMore?: boolean;
 }
 
 /** Result of a session.search query. */

@@ -51,6 +51,14 @@ export interface LoadTranscriptOptions {
    * daemon startup past the resume deadline.
    */
   deadlineAt?: number;
+  /**
+   * Out-param: the loader sets `truncated: true` when the returned entries
+   * are NOT the complete on-disk history (byte budget skipped older
+   * segments, or the deadline stopped the parse early). Callers seeding a
+   * scrollback buffer use it to mark the buffer as partial so history
+   * paging (`scrollback.page`) knows older messages exist on disk.
+   */
+  stats?: { truncated?: boolean };
 }
 
 /** Tuning knobs, injectable for tests. */
@@ -392,6 +400,7 @@ export class TranscriptStore {
       }
     }
     if (skippedBytes > 0) {
+      if (opts.stats) opts.stats.truncated = true;
       console.warn(
         `[codeoid] transcript ${sessionId}: replay window capped at ${opts.maxBytes} bytes — ${skippedBytes} bytes of older history left on disk (still exported by share.pack).`,
       );
@@ -407,6 +416,7 @@ export class TranscriptStore {
         if (++sinceDeadlineCheck >= DEADLINE_CHECK_EVERY) {
           sinceDeadlineCheck = 0;
           if (opts.deadlineAt !== undefined && Date.now() > opts.deadlineAt) {
+            if (opts.stats) opts.stats.truncated = true;
             console.warn(
               `[codeoid] transcript ${sessionId}: resume deadline hit mid-parse — replaying the ${order.length} message(s) merged so far.`,
             );
