@@ -12,7 +12,8 @@ vi.mock("../state/connection", () => ({
   newRequestId: () => "r",
   authIdentity: authMock,
 }));
-vi.mock("../state/models", () => ({ fetchModels: vi.fn(), modelCatalog: () => [] }));
+const fetchModelsMock = vi.hoisted(() => vi.fn(() => Promise.resolve()));
+vi.mock("../state/models", () => ({ fetchModels: fetchModelsMock, modelCatalog: () => [] }));
 vi.mock("./SessionExportModal", () => ({ openExportModal: vi.fn() }));
 
 import SessionControls from "./SessionControls";
@@ -20,6 +21,7 @@ import {
   getSession,
   ingestSessionList,
   focusSession,
+  mergeSession,
   _resetSessionsForTest,
 } from "../state/sessions";
 import type { SessionInfo } from "../protocol/types";
@@ -50,6 +52,7 @@ function mockAuth(providers?: string[]): void {
 afterEach(() => {
   cleanup();
   _resetSessionsForTest();
+  fetchModelsMock.mockClear();
   requestMock.mockReset();
   requestMock.mockImplementation(() => Promise.resolve(undefined));
   authMock.mockReset();
@@ -381,5 +384,31 @@ describe("ForkButton", () => {
     fireEvent.click(getByTitle(MENU_TITLE));
     fireEvent.click(getByText("fork (same backend)"));
     expect(await findByText(/Cannot fork/)).toBeTruthy();
+  });
+});
+
+describe("ModelPicker — catalog follows the backend", () => {
+  it("fetches the focused session's backend catalog on mount", () => {
+    mockAuth(["claude", "codex"]);
+    ingestSessionList([sess("codex")]);
+    focusSession("s");
+    render(() => <SessionControls />);
+    // Not the daemon default — the SESSION's backend.
+    expect(fetchModelsMock).toHaveBeenCalledWith("codex", true);
+  });
+
+  it("refetches when the session's backend switches (the reported bug)", async () => {
+    mockAuth(["claude", "codex"]);
+    ingestSessionList([sess("claude")]);
+    focusSession("s");
+    render(() => <SessionControls />);
+    expect(fetchModelsMock).toHaveBeenCalledWith("claude", true);
+    fetchModelsMock.mockClear();
+
+    // A `/provider` switch arrives as an info_update flipping providerId.
+    mergeSession({ id: "s", providerId: "codex" });
+    await waitFor(() =>
+      expect(fetchModelsMock).toHaveBeenCalledWith("codex", true),
+    );
   });
 });
