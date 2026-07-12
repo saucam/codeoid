@@ -55,10 +55,25 @@ function commandEntry(
 }
 
 /** Poll until `path` exists (fire-and-forget emit tests). */
-async function waitForFile(path: string, timeoutMs = 3000): Promise<void> {
+/**
+ * Poll until `path` contains parseable JSON, then return it. An observe-hook
+ * command like `cat > marker` CREATES the file empty and fills it
+ * asynchronously, so waiting on existence alone races the write and reads an
+ * empty (or partial) file — the flaky "JSON Parse error: Unexpected EOF". Wait
+ * for valid content instead.
+ */
+async function waitForJson<T = Record<string, unknown>>(path: string, timeoutMs = 3000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
-  while (!existsSync(path)) {
-    if (Date.now() > deadline) throw new Error(`file never appeared: ${path}`);
+  for (;;) {
+    if (existsSync(path)) {
+      try {
+        const raw = readFileSync(path, "utf8");
+        if (raw.length > 0) return JSON.parse(raw) as T;
+      } catch {
+        // File exists but isn't fully written yet — keep polling.
+      }
+    }
+    if (Date.now() > deadline) throw new Error(`file never contained JSON: ${path}`);
     await new Promise((r) => setTimeout(r, 20));
   }
 }
@@ -251,8 +266,7 @@ describe("HookBus — command hooks", () => {
       commandEntry(`cat > "${marker}"`, { event: "after_turn" }),
     ]);
     bus.emit("after_turn", ctx(), { result: { model: "mock-model" } });
-    await waitForFile(marker);
-    const payload = JSON.parse(readFileSync(marker, "utf8"));
+    const payload = await waitForJson<{ event: string; result: unknown }>(marker);
     expect(payload.event).toBe("after_turn");
     expect(payload.result).toEqual({ model: "mock-model" });
   });
