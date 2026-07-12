@@ -394,7 +394,7 @@ describe("ModelPicker — catalog follows the backend", () => {
     focusSession("s");
     render(() => <SessionControls />);
     // Not the daemon default — the SESSION's backend.
-    expect(fetchModelsMock).toHaveBeenCalledWith("codex", true);
+    expect(fetchModelsMock).toHaveBeenCalledWith("codex");
   });
 
   it("refetches when the session's backend switches (the reported bug)", async () => {
@@ -402,13 +402,11 @@ describe("ModelPicker — catalog follows the backend", () => {
     ingestSessionList([sess("claude")]);
     focusSession("s");
     render(() => <SessionControls />);
-    expect(fetchModelsMock).toHaveBeenCalledWith("claude", true);
+    expect(fetchModelsMock).toHaveBeenCalledWith("claude");
     fetchModelsMock.mockClear();
 
     // A `/provider` switch arrives as an info_update flipping providerId.
     mergeSession({ id: "s", providerId: "codex" });
-    await waitFor(() =>
-      expect(fetchModelsMock).toHaveBeenCalledWith("codex", true),
-    );
+    await waitFor(() => expect(fetchModelsMock).toHaveBeenCalledWith("codex"));
   });
 });

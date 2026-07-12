@@ -278,13 +278,18 @@ const ModelPicker: Component<{
   const act = createAction();
   let rootEl: HTMLDivElement | undefined;
   useDismissable(() => rootEl, open, () => setOpen(false));
-  // Refetch whenever the session's backend changes — the model catalog is
-  // per-backend, so a `/provider` switch must swap the picker's list (the
-  // reported bug: switching to codex kept showing claude's models).
+  // Track the session's backend — the catalog is per-backend, so a
+  // `/provider` switch (or tabbing to a session on another backend) must
+  // swap the list (the reported bug: switching to codex kept showing
+  // claude's models). NOT forced: a backend already fetched live serves
+  // from cache instantly (no daemon round-trip while navigating sessions),
+  // and a not-yet-live backend still refetches. This must run regardless of
+  // whether the picker is open — the `/model` slash and the help modal read
+  // the same catalog.
   createEffect(
     on(
       () => props.provider,
-      (provider) => void fetchModels(provider, true),
+      (provider) => void fetchModels(provider),
     ),
   );
   return (
