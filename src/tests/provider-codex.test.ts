@@ -12,9 +12,14 @@
  *   C7  missing binary surfaces a clear error
  *   C8  model/list maps to ModelInfo
  *   C9  resolveCodexCommand: config → PATH → null (+ registry hint)
- *   C13 default policies: untrusted + danger-full-access on thread & turn start
- *   C14 CODEX_APPROVAL_POLICY / CODEX_SANDBOX_POLICY env overrides
+ *   C13 default policies: untrusted + {type:dangerFullAccess} on thread & turn
+ *   C14 CODEX_APPROVAL_POLICY / CODEX_SANDBOX_POLICY env overrides (tagged)
  *   C15 unknown env policy value → safe default fallback
+ *   C16 read-only maps to the tagged readOnly variant
+ *   C17 shared validator rejects the bare-string sandboxPolicy (regression guard)
+ *
+ * See provider-codex.integration.test.ts for opt-in tests against the REAL
+ * `codex app-server` binary (wire-shape acceptance + end-to-end execution).
  */
 
 import { describe, it, expect } from "bun:test";
@@ -23,6 +28,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CodexRpcProcess } from "../daemon/providers/codex/rpc.js";
 import { CodexProvider } from "../daemon/providers/codex/index.js";
+import { sandboxPolicyError } from "./fixtures/fake-codex-validate.js";
 import { compareNodeVersionsDesc, resolveCodexCommand } from "../daemon/providers/codex/resolve.js";
 import { createDefaultProviderRegistry } from "../daemon/providers/registry.js";
 import type { ProviderEvent, TurnOpts, TurnRun } from "../daemon/providers/interface.js";
@@ -281,7 +287,8 @@ describe("CodexProvider over fake-codex", () => {
       const done = events.find((e) => e.type === "text_done");
       expect(done).toBeDefined();
       const seen = JSON.parse((done as { content: string }).content);
-      const expected = { approvalPolicy: "untrusted", sandboxPolicy: "danger-full-access" };
+      // sandboxPolicy is codex's INTERNALLY-TAGGED enum, not the bare string.
+      const expected = { approvalPolicy: "untrusted", sandboxPolicy: { type: "dangerFullAccess" } };
       expect(seen.thread).toEqual(expected);
       expect(seen.turn).toEqual(expected);
     } finally {
@@ -299,7 +306,17 @@ describe("CodexProvider over fake-codex", () => {
       const events = await collect(p.runTurn(turnOpts("echo-policy")));
       await p.teardown();
       const seen = JSON.parse((events.find((e) => e.type === "text_done") as { content: string }).content);
-      const expected = { approvalPolicy: "on-request", sandboxPolicy: "workspace-write" };
+      // workspace-write maps to the tagged variant WITH the workdir as a writable root.
+      const expected = {
+        approvalPolicy: "on-request",
+        sandboxPolicy: {
+          type: "workspaceWrite",
+          writableRoots: ["/tmp"],
+          networkAccess: false,
+          excludeTmpdirEnvVar: false,
+          excludeSlashTmp: false,
+        },
+      };
       expect(seen.thread).toEqual(expected);
       expect(seen.turn).toEqual(expected);
     } finally {
@@ -317,11 +334,37 @@ describe("CodexProvider over fake-codex", () => {
       const events = await collect(p.runTurn(turnOpts("echo-policy")));
       await p.teardown();
       const seen = JSON.parse((events.find((e) => e.type === "text_done") as { content: string }).content);
-      expect(seen.turn).toEqual({ approvalPolicy: "untrusted", sandboxPolicy: "danger-full-access" });
+      expect(seen.turn).toEqual({ approvalPolicy: "untrusted", sandboxPolicy: { type: "dangerFullAccess" } });
     } finally {
       restoreEnv("CODEX_APPROVAL_POLICY", prev.a);
       restoreEnv("CODEX_SANDBOX_POLICY", prev.s);
     }
+  });
+
+  it("C16: read-only maps to the tagged readOnly variant", async () => {
+    const prev = process.env.CODEX_SANDBOX_POLICY;
+    process.env.CODEX_SANDBOX_POLICY = "read-only";
+    try {
+      const p = makeProvider();
+      const events = await collect(p.runTurn(turnOpts("echo-policy")));
+      await p.teardown();
+      const seen = JSON.parse((events.find((e) => e.type === "text_done") as { content: string }).content);
+      expect(seen.turn.sandboxPolicy).toEqual({ type: "readOnly", networkAccess: false });
+    } finally {
+      restoreEnv("CODEX_SANDBOX_POLICY", prev);
+    }
+  });
+
+  it("C17: the shared validator rejects the bare-string sandboxPolicy exactly as real codex does", () => {
+    // Guards against the #163 wire-shape bug. fake-codex enforces this same
+    // validator on every thread/turn start, so a provider regression to the
+    // kebab STRING makes ALL turn tests error out — it can't pass offline again.
+    expect(sandboxPolicyError("danger-full-access")).toContain("SandboxPolicyDeserialize");
+    expect(sandboxPolicyError("workspace-write")).toContain('string "workspace-write"');
+    expect(sandboxPolicyError({ type: "bogusVariant" })).toContain("unknown variant");
+    expect(sandboxPolicyError({ type: "dangerFullAccess" })).toBeNull();
+    expect(sandboxPolicyError({ type: "workspaceWrite", writableRoots: ["/tmp"] })).toBeNull();
+    expect(sandboxPolicyError(undefined)).toBeNull(); // optional field
   });
 
   it("C12: rpc edges — spawn failure, request timeout, request/notify after exit", async () => {
