@@ -123,7 +123,7 @@ describe("translatePiEvent", () => {
 
 describe("renderHistorySeed", () => {
   it("renders user/assistant turns with tool calls inside an envelope", () => {
-    const seed = renderHistorySeed([
+    const { text: seed } = renderHistorySeed([
       { role: "user", content: "fix the bug" },
       {
         role: "assistant",
@@ -153,7 +153,7 @@ describe("renderHistorySeed", () => {
   });
 
   it("truncates oversized serialized tool INPUTS (Write/Edit carry file contents)", () => {
-    const seed = renderHistorySeed([
+    const { text: seed } = renderHistorySeed([
       {
         role: "assistant",
         content: "Writing the file.",
@@ -177,13 +177,14 @@ describe("renderHistorySeed", () => {
   });
 
   it("hard-slices the newest turn when it alone busts the whole budget", () => {
-    const seed = renderHistorySeed(
+    const result = renderHistorySeed(
       [
         { role: "user", content: "earlier turn" },
         { role: "user", content: "y".repeat(50_000) },
       ],
       { maxChars: 5_000 },
     );
+    const seed = result.text;
     // Newest-block-wins used to keep the block WHOLE even over budget —
     // a 3 MB turn rode into the incoming backend's first prompt.
     expect(seed).toContain("…turn truncated for seed…");
@@ -191,10 +192,15 @@ describe("renderHistorySeed", () => {
     // The older turn was dropped with the elision note.
     expect(seed).toContain("earlier turn(s) omitted for length");
     expect(seed).not.toContain("## User\nearlier turn");
+    // Metadata: 2 turns total; newest kept (sliced), oldest omitted.
+    expect(result.totalTurns).toBe(2);
+    expect(result.keptTurns).toBe(1);
+    expect(result.omittedTurns).toBe(1);
+    expect(result.newestTurnSliced).toBe(true);
   });
 
   it("marks failed tool calls and truncates oversized outputs per-tool", () => {
-    const seed = renderHistorySeed([
+    const { text: seed } = renderHistorySeed([
       {
         role: "assistant",
         content: "Ran it.",
@@ -218,7 +224,9 @@ describe("renderHistorySeed", () => {
   });
 
   it("returns empty for empty history", () => {
-    expect(renderHistorySeed([])).toBe("");
+    const empty = renderHistorySeed([]);
+    expect(empty.text).toBe("");
+    expect(empty.totalTurns).toBe(0);
   });
 
   it("drops the OLDEST turns when over budget, with an elision note", () => {
@@ -226,9 +234,13 @@ describe("renderHistorySeed", () => {
       role: "user" as const,
       content: `turn-${i} ${"x".repeat(400)}`,
     }));
-    const seed = renderHistorySeed(turns, { maxChars: 1500 });
+    const result = renderHistorySeed(turns, { maxChars: 1500 });
+    const seed = result.text;
     expect(seed).toContain("earlier turn(s) omitted");
     expect(seed).toContain("turn-9");
     expect(seed).not.toContain("turn-0 ");
+    expect(result.totalTurns).toBe(10);
+    expect(result.omittedTurns).toBeGreaterThan(0);
+    expect(result.keptTurns + result.omittedTurns).toBe(10);
   });
 });

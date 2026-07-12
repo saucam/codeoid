@@ -466,12 +466,32 @@ function toolCallToSeedText(tc: CanonicalToolCall): string {
  * history injection, so a prompt-prefix transcript is the warm-backend
  * ceiling. Oldest turns are dropped first when the budget is exceeded
  * (recent context matters most), with an elision note.
+ *
+ * `maxChars` should be sized to the TARGET model's context window by the
+ * caller (see seedBudgetChars in context-windows.ts) so a fork only truncates
+ * when the history genuinely won't fit. The result reports how many turns were
+ * kept vs omitted so the session can SURFACE truncation to the user.
  */
+export interface HistorySeedResult {
+  /** The rendered <conversation-history> block, or "" for empty history. */
+  text: string;
+  /** Turns in the source history. */
+  totalTurns: number;
+  /** Turns carried into the seed whole (newest-first). */
+  keptTurns: number;
+  /** Oldest turns dropped because they exceeded the budget. */
+  omittedTurns: number;
+  /** True when the single newest turn alone busted the budget and was sliced. */
+  newestTurnSliced: boolean;
+}
+
 export function renderHistorySeed(
   history: readonly CanonicalTurn[],
   opts: { maxChars?: number } = {},
-): string {
-  if (history.length === 0) return "";
+): HistorySeedResult {
+  if (history.length === 0) {
+    return { text: "", totalTurns: 0, keptTurns: 0, omittedTurns: 0, newestTurnSliced: false };
+  }
   const maxChars = opts.maxChars ?? HISTORY_SEED_MAX_CHARS;
 
   const rendered = history.map((turn) => {
@@ -492,21 +512,24 @@ export function renderHistorySeed(
   // backend's first prompt (or the RPC frame) by orders of magnitude.
   const kept: string[] = [];
   let used = 0;
+  let newestTurnSliced = false;
   for (let i = rendered.length - 1; i >= 0; i--) {
     let block = rendered[i]!;
     if (used + block.length > maxChars) {
       if (kept.length > 0) break;
       block = `${block.slice(0, maxChars)}\n…turn truncated for seed…`;
+      newestTurnSliced = true;
     }
     kept.unshift(block);
     used += block.length;
   }
-  const omitted = rendered.length - kept.length;
-  if (omitted > 0) {
-    kept.unshift(`[…${omitted} earlier turn(s) omitted for length…]`);
+  const keptTurns = kept.length;
+  const omittedTurns = rendered.length - keptTurns;
+  if (omittedTurns > 0) {
+    kept.unshift(`[…${omittedTurns} earlier turn(s) omitted for length…]`);
   }
 
-  return [
+  const text = [
     "<conversation-history>",
     "You are taking over an ongoing session from another agent backend.",
     "The conversation so far follows — tool calls appear as structured",
@@ -517,4 +540,6 @@ export function renderHistorySeed(
     kept.join("\n\n"),
     "</conversation-history>",
   ].join("\n");
+
+  return { text, totalTurns: rendered.length, keptTurns, omittedTurns, newestTurnSliced };
 }

@@ -38,7 +38,7 @@ import { rewriteBashToolInput } from "../../compress/index.js";
 import type { CodeoidConfig } from "../../../config.js";
 import type { AuthContext } from "../../../protocol/types.js";
 import type { SessionProvider, ModelInfo, NormalizedTurnResult, ProviderEvent, TurnOpts, TurnRun } from "../interface.js";
-import { renderHistorySeed, type CanonicalTurn } from "../canonical.js";
+import { renderHistorySeed, type CanonicalTurn, type HistorySeedResult } from "../canonical.js";
 import { buildSubprocessEnv } from "../env.js";
 import type { LLMCallUsage } from "../../context-math.js";
 
@@ -196,9 +196,10 @@ export class ClaudeProvider implements SessionProvider {
    * it to the first post-switch prompt (the SDK offers no native history
    * injection). Empty history is a no-op.
    */
-  seedFromHistory(history: readonly CanonicalTurn[]): void {
-    const seed = renderHistorySeed(history);
-    this.#pendingHistorySeed = seed.length > 0 ? seed : null;
+  seedFromHistory(history: readonly CanonicalTurn[], opts?: { maxChars?: number }): HistorySeedResult {
+    const seed = renderHistorySeed(history, { maxChars: opts?.maxChars });
+    this.#pendingHistorySeed = seed.text.length > 0 ? seed.text : null;
+    return seed;
   }
 
   async listModels(): Promise<ModelInfo[]> {

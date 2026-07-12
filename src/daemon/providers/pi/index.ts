@@ -33,7 +33,7 @@ import type {
   UiRequestFn,
 } from "../interface.js";
 import type { ProviderCommand } from "../../../protocol/types.js";
-import { renderHistorySeed, type CanonicalTurn } from "../canonical.js";
+import { renderHistorySeed, type CanonicalTurn, type HistorySeedResult } from "../canonical.js";
 import { buildPiEnv } from "../env.js";
 import {
   APPROVAL_TITLE,
@@ -163,9 +163,10 @@ export class PiProvider implements SessionProvider {
    * post-switch prompt. (Writing a native pi session file would be higher
    * fidelity; deliberately not done — pi's session format is internal.)
    */
-  seedFromHistory(history: readonly CanonicalTurn[]): void {
-    const seed = renderHistorySeed(history);
-    this.#pendingHistorySeed = seed.length > 0 ? seed : null;
+  seedFromHistory(history: readonly CanonicalTurn[], opts?: { maxChars?: number }): HistorySeedResult {
+    const seed = renderHistorySeed(history, { maxChars: opts?.maxChars });
+    this.#pendingHistorySeed = seed.text.length > 0 ? seed.text : null;
+    return seed;
   }
 
   async listCommands(): Promise<ProviderCommand[]> {
