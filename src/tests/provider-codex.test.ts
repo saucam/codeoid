@@ -12,6 +12,9 @@
  *   C7  missing binary surfaces a clear error
  *   C8  model/list maps to ModelInfo
  *   C9  resolveCodexCommand: config → PATH → null (+ registry hint)
+ *   C13 default policies: untrusted + danger-full-access on thread & turn start
+ *   C14 CODEX_APPROVAL_POLICY / CODEX_SANDBOX_POLICY env overrides
+ *   C15 unknown env policy value → safe default fallback
  */
 
 import { describe, it, expect } from "bun:test";
@@ -264,6 +267,63 @@ describe("CodexProvider over fake-codex", () => {
     expect(events.some((e) => e.type === "text_done" && e.content === "server-request-errored")).toBe(true);
   });
 
+  it("C13: pins danger-full-access sandbox + untrusted approval on thread AND turn start by default", async () => {
+    // codeoid is the trust authority; codex must EXECUTE approved actions
+    // (sandbox off) instead of re-sandboxing them via bubblewrap, which fails
+    // wherever unprivileged user namespaces are forbidden.
+    const prev = { a: process.env.CODEX_APPROVAL_POLICY, s: process.env.CODEX_SANDBOX_POLICY };
+    delete process.env.CODEX_APPROVAL_POLICY;
+    delete process.env.CODEX_SANDBOX_POLICY;
+    try {
+      const p = makeProvider();
+      const events = await collect(p.runTurn(turnOpts("echo-policy")));
+      await p.teardown();
+      const done = events.find((e) => e.type === "text_done");
+      expect(done).toBeDefined();
+      const seen = JSON.parse((done as { content: string }).content);
+      const expected = { approvalPolicy: "untrusted", sandboxPolicy: "danger-full-access" };
+      expect(seen.thread).toEqual(expected);
+      expect(seen.turn).toEqual(expected);
+    } finally {
+      restoreEnv("CODEX_APPROVAL_POLICY", prev.a);
+      restoreEnv("CODEX_SANDBOX_POLICY", prev.s);
+    }
+  });
+
+  it("C14: CODEX_APPROVAL_POLICY / CODEX_SANDBOX_POLICY env override the pinned defaults", async () => {
+    const prev = { a: process.env.CODEX_APPROVAL_POLICY, s: process.env.CODEX_SANDBOX_POLICY };
+    process.env.CODEX_APPROVAL_POLICY = "on-request";
+    process.env.CODEX_SANDBOX_POLICY = "workspace-write";
+    try {
+      const p = makeProvider();
+      const events = await collect(p.runTurn(turnOpts("echo-policy")));
+      await p.teardown();
+      const seen = JSON.parse((events.find((e) => e.type === "text_done") as { content: string }).content);
+      const expected = { approvalPolicy: "on-request", sandboxPolicy: "workspace-write" };
+      expect(seen.thread).toEqual(expected);
+      expect(seen.turn).toEqual(expected);
+    } finally {
+      restoreEnv("CODEX_APPROVAL_POLICY", prev.a);
+      restoreEnv("CODEX_SANDBOX_POLICY", prev.s);
+    }
+  });
+
+  it("C15: an unknown env policy value falls back to the safe default (never rejected by codex)", async () => {
+    const prev = { a: process.env.CODEX_APPROVAL_POLICY, s: process.env.CODEX_SANDBOX_POLICY };
+    process.env.CODEX_APPROVAL_POLICY = "yolo-mode";
+    process.env.CODEX_SANDBOX_POLICY = "";
+    try {
+      const p = makeProvider();
+      const events = await collect(p.runTurn(turnOpts("echo-policy")));
+      await p.teardown();
+      const seen = JSON.parse((events.find((e) => e.type === "text_done") as { content: string }).content);
+      expect(seen.turn).toEqual({ approvalPolicy: "untrusted", sandboxPolicy: "danger-full-access" });
+    } finally {
+      restoreEnv("CODEX_APPROVAL_POLICY", prev.a);
+      restoreEnv("CODEX_SANDBOX_POLICY", prev.s);
+    }
+  });
+
   it("C12: rpc edges — spawn failure, request timeout, request/notify after exit", async () => {
     // Spawn failure rejects in-flight requests.
     const dead = new CodexRpcProcess({
@@ -300,6 +360,12 @@ describe("CodexProvider over fake-codex", () => {
     await exited;
   });
 });
+
+/** Restore an env var to a captured prior value (delete if it was unset). */
+function restoreEnv(name: string, prior: string | undefined): void {
+  if (prior === undefined) delete process.env[name];
+  else process.env[name] = prior;
+}
 
 /** Wait until the rpc process reports dead. */
 async function exitedSoon(rpc: CodexRpcProcess): Promise<void> {

@@ -23,6 +23,11 @@ function send(obj: unknown): void {
 let nextServerReqId = 1000;
 const pendingServerReqs = new Map<number, (result: Record<string, unknown>) => void>();
 
+/** Approval/sandbox policy last seen on thread/start + turn/start, echoed by
+ *  the "echo-policy" prompt so the provider's wire params can be asserted. */
+let lastThreadPolicies: Record<string, unknown> = {};
+let lastTurnPolicies: Record<string, unknown> = {};
+
 function serverRequest(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
   const id = nextServerReqId++;
   send({ jsonrpc: "2.0", id, method, params });
@@ -91,6 +96,9 @@ async function runTurn(threadId: string, prompt: string): Promise<void> {
     const resp = await serverRequest("custom/unknownThing", { anything: true });
     const text = resp.__error ? "server-request-errored" : "server-request-oddly-ok";
     send({ method: "item/completed", params: { item: { id: "m1", type: "agentMessage", text } } });
+  } else if (prompt.includes("echo-policy")) {
+    const text = JSON.stringify({ thread: lastThreadPolicies, turn: lastTurnPolicies });
+    send({ method: "item/completed", params: { item: { id: "m1", type: "agentMessage", text } } });
   } else if (prompt.includes("echo-prompt")) {
     send({ method: "item/completed", params: { item: { id: "m1", type: "agentMessage", text: `PROMPT:${prompt}` } } });
   } else {
@@ -151,6 +159,7 @@ async function handle(frame: Record<string, unknown>): Promise<void> {
     case "initialized":
       break;
     case "thread/start":
+      lastThreadPolicies = { approvalPolicy: params.approvalPolicy, sandboxPolicy: params.sandboxPolicy };
       send({ id, result: { thread: { id: "codex-thread-1" } } });
       send({ method: "thread/started", params: { thread: { id: "codex-thread-1" } } });
       break;
@@ -168,6 +177,7 @@ async function handle(frame: Record<string, unknown>): Promise<void> {
       });
       break;
     case "turn/start": {
+      lastTurnPolicies = { approvalPolicy: params.approvalPolicy, sandboxPolicy: params.sandboxPolicy };
       send({ id, result: { turn: { id: "turn-1" } } });
       const input = params.input as Array<{ type: string; text?: string }> | undefined;
       const prompt = input?.find((i) => i.type === "text")?.text ?? "";

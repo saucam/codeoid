@@ -88,10 +88,23 @@ stays as the API-key chat tier.
    confirm which one `app-server` speaks by default and whether `initialize`
    negotiates.
 2. Interrupt semantics — find the turn-abort request; map `TurnRun.interrupt()`.
-3. Sandbox interplay — codex has its own sandbox (`codex sandbox`,
-   `sandbox_permissions` config). Decide default: disable codex sandboxing and
-   rely on codeoid approvals (pi parity), or keep both layers. Start with both
-   (defense in depth), document.
+3. Sandbox interplay — **RESOLVED (2026-07-12): rely on codeoid approvals
+   (pi parity); codex's own sandbox is disabled by default.** codeoid pins
+   `sandboxPolicy: "danger-full-access"` + `approvalPolicy: "untrusted"` on
+   every thread/turn start (see `codexPolicies()` in `providers/codex/index.ts`).
+   codeoid's `canUseTool` gate is the single trust authority — it already
+   implements the session mode (auto-approve in autonomous, prompt in guarded).
+   Keeping codex's own sandbox on top ("both layers") was actively harmful:
+   codex sandboxes commands with bundled **bubblewrap**, which needs
+   unprivileged user namespaces. On containers and hardened hosts
+   (`kernel.apparmor_restrict_unprivileged_userns=1`, most VPSes) bwrap can't
+   initialize — `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`
+   — so even a codeoid-APPROVED command dies inside codex with "command
+   execution rejected / cannot escalate". This was the autonomous-mode failure
+   report of 2026-07-12. Operators on a bwrap-capable host who want
+   defense-in-depth can restore codex's sandbox via
+   `CODEX_SANDBOX_POLICY=workspace-write|read-only` (and `CODEX_APPROVAL_POLICY`
+   to match); unknown values fall back to the safe default.
 4. Model catalog — `listModels()` from config/`Account*` requests, else static.
 
 ## Suggested first PR slice
