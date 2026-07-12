@@ -138,6 +138,18 @@ describe("loadConfig — env precedence", () => {
     ).toThrow(/Expected integer/);
   });
 
+  it("attachTailBytes: defaults to 512 KiB, honors config, rejects sub-1KiB", () => {
+    const { writeFileSync } = require("node:fs") as typeof import("node:fs");
+    expect(loadConfig({ configPath }).session.attachTailBytes).toBe(512 * 1024);
+
+    writeFileSync(configPath, JSON.stringify({ session: { attachTailBytes: 32768 } }));
+    expect(loadConfig({ configPath }).session.attachTailBytes).toBe(32768);
+
+    // A window smaller than one message is a footgun — schema floor 1 KiB.
+    writeFileSync(configPath, JSON.stringify({ session: { attachTailBytes: 16 } }));
+    expect(() => loadConfig({ configPath })).toThrow();
+  });
+
   it("CODEOID_TURN_STALL_TIMEOUT_MS overrides the stall watchdog timeout", () => {
     // 200000 stays above the 120000 MCP-timeout default so the cross-field
     // ordering refinement is satisfied.

@@ -981,7 +981,8 @@ export class Session {
         REPLAY_CHUNK_BYTES,
       ) as SessionMessage[][];
     } else if (paging) {
-      const tail = this.#scrollback.readTailChunked(ATTACH_TAIL_BYTES, REPLAY_CHUNK_BYTES);
+      const tailBytes = this.#config?.session.attachTailBytes ?? ATTACH_TAIL_BYTES;
+      const tail = this.#scrollback.readTailChunked(tailBytes, REPLAY_CHUNK_BYTES);
       chunks = tail.chunks as SessionMessage[][];
       // hasMore covers the on-disk transcript too: the buffer holding its
       // oldest entry doesn't prove disk has nothing older, so only a fully-

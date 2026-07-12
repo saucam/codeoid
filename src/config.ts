@@ -242,8 +242,19 @@ const SessionSchema = z
      * to codeoid's in-process memory server.
      */
     mcpToolTimeoutMs: z.number().min(0).default(120_000),
+    /**
+     * Tail window (bytes) replayed on attach for `scrollback.paging`
+     * clients — enough context to continue instantly; older history is
+     * paged on demand. Larger = more context up front, slower first paint
+     * on big sessions. Legacy clients always get the full buffer.
+     */
+    attachTailBytes: z.number().int().min(1024).default(512 * 1024),
   })
-  .default({ turnStallTimeoutMs: 300_000, mcpToolTimeoutMs: 120_000 })
+  .default({
+    turnStallTimeoutMs: 300_000,
+    mcpToolTimeoutMs: 120_000,
+    attachTailBytes: 512 * 1024,
+  })
   // Enforce the "SDK signals first" contract across BOTH fields — not just the
   // defaults. An env override / config file could otherwise set the MCP timeout
   // at or above the stall timeout, so the coarse watchdog would force-recover
@@ -549,6 +560,8 @@ export interface CodeoidConfig {
     turnStallTimeoutMs?: number;
     /** Per-call timeout (ms) for external MCP servers, surfaced as the SDK's per-server `timeout`. 0 = use SDK default. Defaults to 120000 when omitted. */
     mcpToolTimeoutMs?: number;
+    /** Tail window (bytes) replayed on attach for `scrollback.paging` clients; older history is paged on demand. Defaults to 524288 (512 KiB) when omitted. */
+    attachTailBytes?: number;
   };
   /**
    * The per-tenant conductor session (fleet supervisor). Optional in the
