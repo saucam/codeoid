@@ -112,7 +112,13 @@ const SessionControls: Component = () => {
 const ForkedFromChip: Component<{
   forkedFrom?: { sessionId: string; name: string; atTurn: number };
 }> = (props) => {
-  const parentAlive = () => getSession(props.forkedFrom!.sessionId) !== undefined;
+  // Optional-chain, not force-unwrap: Solid can re-run this binding with
+  // props.forkedFrom already undefined (focus switched to a non-fork) a beat
+  // before <Show> disposes the child — a `!` here would crash the renderer.
+  const parentAlive = () => {
+    const id = props.forkedFrom?.sessionId;
+    return id !== undefined && getSession(id) !== undefined;
+  };
   return (
     <Show when={props.forkedFrom}>
       {(f) => (

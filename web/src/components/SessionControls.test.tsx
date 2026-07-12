@@ -453,4 +453,17 @@ describe("ForkedFromChip — lineage", () => {
     const { queryByText } = render(() => <SessionControls />);
     expect(queryByText(/from/)).toBeNull();
   });
+
+  it("switching from a forked to a non-forked session doesn't crash the chip", () => {
+    // Reactive-disposal hazard: parentAlive() must tolerate forkedFrom going
+    // undefined when focus moves to a non-fork, before <Show> tears down.
+    const plain = { ...sess(), id: "s" } as SessionInfo;
+    ingestSessionList([plain, forkSess("s", 4)]);
+    focusSession("fork-1");
+    const { queryByText } = render(() => <SessionControls />);
+    expect(queryByText("· turn 4")).toBeTruthy();
+    // Switch focus to the non-fork — must not throw as the chip disposes.
+    expect(() => focusSession("s")).not.toThrow();
+    expect(queryByText("· turn 4")).toBeNull();
+  });
 });
