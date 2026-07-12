@@ -7,7 +7,7 @@
  * provider-claude.test.ts; these tests stay SDK-free.
  */
 
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
   createDefaultProviderRegistry,
   ProviderRegistry,
@@ -42,6 +42,24 @@ function makeInit(store: Store): ProviderSessionInit {
 }
 
 describe("ProviderRegistry", () => {
+  // The API backends (openai/gemini) register only when their key is in the
+  // env. Save + restore so tests are hermetic regardless of the CI env.
+  const savedOpenAI = process.env.OPENAI_API_KEY;
+  const savedGoogle = process.env.GOOGLE_API_KEY;
+  beforeEach(() => {
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.GOOGLE_API_KEY;
+  });
+  afterEach(() => {
+    if (savedOpenAI === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = savedOpenAI;
+    if (savedGoogle === undefined) delete process.env.GOOGLE_API_KEY;
+    else process.env.GOOGLE_API_KEY = savedGoogle;
+  });
+  const withApiKeys = () => {
+    process.env.OPENAI_API_KEY = "sk-test";
+    process.env.GOOGLE_API_KEY = "gk-test";
+  };
   it("registers, lists, and resolves factories", () => {
     const registry = new ProviderRegistry("alpha");
     registry.register(mockFactory("alpha"));
@@ -78,6 +96,7 @@ describe("ProviderRegistry", () => {
   });
 
   it("default catalog registers claude, gemini, openai, pi, gemini-cli with claude as default", () => {
+    withApiKeys();
     const registry = createDefaultProviderRegistry();
     // pi + gemini-cli are BUNDLED (always activate); codex is PATH-dependent,
     // so assert membership rather than the exact machine-dependent set.
@@ -88,6 +107,7 @@ describe("ProviderRegistry", () => {
   });
 
   it("config can disable the pi backend", () => {
+    withApiKeys();
     const registry = createDefaultProviderRegistry({
       providers: { pi: { enabled: false, command: "pi" } },
     } as unknown as Parameters<typeof createDefaultProviderRegistry>[0]);
@@ -95,6 +115,34 @@ describe("ProviderRegistry", () => {
     for (const id of ["claude", "gemini", "openai"]) {
       expect(registry.has(id)).toBe(true);
     }
+  });
+
+  it("gates openai/gemini on their API key — marked unavailable with a hint when unset", () => {
+    // Keys deleted by beforeEach.
+    const registry = createDefaultProviderRegistry();
+    expect(registry.has("openai")).toBe(false);
+    expect(registry.has("gemini")).toBe(false);
+    // Not advertised, but the reason is available for the catalog / UI.
+    expect(registry.unavailableHint("openai")).toMatch(/OPENAI_API_KEY/);
+    expect(registry.unavailableHint("gemini")).toMatch(/GOOGLE_API_KEY/);
+    // claude is always available.
+    expect(registry.has("claude")).toBe(true);
+  });
+
+  it("registers openai/gemini once their keys are present", () => {
+    withApiKeys();
+    const registry = createDefaultProviderRegistry();
+    expect(registry.has("openai")).toBe(true);
+    expect(registry.has("gemini")).toBe(true);
+    expect(registry.unavailableHint("openai")).toBeUndefined();
+  });
+
+  it("an unregistered API backend resolves to the default (existing sessions survive resume)", () => {
+    // No keys: openai unavailable. A resumed openai session must fall back
+    // to claude rather than crash.
+    const registry = createDefaultProviderRegistry();
+    const factory = registry.resolve("openai", "test");
+    expect(factory.id).toBe("claude");
   });
 
   it("the pi factory constructs a provider labeled with the codeoid session id", () => {
@@ -114,6 +162,7 @@ describe("ProviderRegistry", () => {
   });
 
   it("stateless factories construct providers with the right ids", () => {
+    withApiKeys();
     const tmp = mkdtempSync(join(tmpdir(), "codeoid-registry-"));
     const store = new Store(join(tmp, "codeoid.db"));
     try {
