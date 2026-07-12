@@ -23,6 +23,7 @@ import {
 import {
   focusSession,
   focusedSession,
+  getSession,
   mergeSession,
   removeSession,
 } from "../state/sessions";
@@ -85,6 +86,7 @@ const SessionControls: Component = () => {
     <Show when={focusedSession()}>
       {(s) => (
         <div class="flex flex-wrap items-center gap-1.5 text-[11px]">
+          <ForkedFromChip forkedFrom={s().forkedFrom} />
           <InterruptButton sessionId={s().id} status={s().status} />
           <RotateButton sessionId={s().id} />
           <ModePicker sessionId={s().id} current={effectiveMode(s())} />
@@ -99,6 +101,43 @@ const SessionControls: Component = () => {
           <span class="ml-auto" />
           <DestroyButton sessionId={s().id} name={s().name} />
         </div>
+      )}
+    </Show>
+  );
+};
+
+/** Lineage chip for a forked session — "⑃ from <parent> · turn N". Clicking
+ *  focuses the parent when it's still in the list; otherwise it's a static
+ *  label (the parent may have been destroyed since). */
+const ForkedFromChip: Component<{
+  forkedFrom?: { sessionId: string; name: string; atTurn: number };
+}> = (props) => {
+  // Optional-chain, not force-unwrap: Solid can re-run this binding with
+  // props.forkedFrom already undefined (focus switched to a non-fork) a beat
+  // before <Show> disposes the child — a `!` here would crash the renderer.
+  const parentAlive = () => {
+    const id = props.forkedFrom?.sessionId;
+    return id !== undefined && getSession(id) !== undefined;
+  };
+  return (
+    <Show when={props.forkedFrom}>
+      {(f) => (
+        <button
+          type="button"
+          disabled={!parentAlive()}
+          onClick={() => parentAlive() && focusSession(f().sessionId)}
+          class="flex items-center gap-1 rounded border border-accent/30 bg-accent/5 px-2 py-1 font-mono text-[11px] text-fg-muted transition enabled:hover:border-accent/50 enabled:hover:text-fg disabled:cursor-default disabled:opacity-70"
+          title={
+            parentAlive()
+              ? `Forked from “${f().name}” after ${f().atTurn} turn(s) — click to open it`
+              : `Forked from “${f().name}” (no longer open) after ${f().atTurn} turn(s)`
+          }
+        >
+          <span class="text-accent">⑃</span>
+          <span class="text-fg-faint">from</span>
+          <span class="max-w-[10rem] truncate">{f().name}</span>
+          <span class="text-fg-faint">· turn {f().atTurn}</span>
+        </button>
       )}
     </Show>
   );

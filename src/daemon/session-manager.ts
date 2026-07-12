@@ -297,6 +297,7 @@ export class SessionManager {
           // selection, and fleet tools all come back across a restart.
           role: meta.role,
           providerId: meta.providerId,
+          forkedFrom: meta.forkedFrom,
           defaultModel:
             meta.role === "conductor" ? this.#config?.conductor?.model : undefined,
           fleet:
@@ -1161,6 +1162,9 @@ export class SessionManager {
       );
     }
 
+    // Branch point = conversation rounds (user turns) carried over — the
+    // human "you forked after N prompts" the lineage chip shows.
+    const atTurn = history.filter((t) => t.role === "user").length;
     const fork = new Session({
       name: msg.name ?? `${parentInfo.name} (fork)`,
       workdir: parent.workdir,
@@ -1170,6 +1174,11 @@ export class SessionManager {
       providers: this.#providers,
       hooks: this.#hooks,
       providerId,
+      forkedFrom: {
+        sessionId: parentInfo.id,
+        name: parentInfo.name,
+        atTurn,
+      },
       identityManager: this.#identityManager,
       memory: this.#memory,
       config: this.#config,

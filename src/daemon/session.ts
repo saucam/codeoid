@@ -183,6 +183,11 @@ export interface SessionCreateOptions {
    */
   providerId?: string;
   /**
+   * Fork lineage — set by SessionManager#fork. Recorded on the session,
+   * persisted in the transcript meta, and surfaced in SessionInfo.
+   */
+  forkedFrom?: { sessionId: string; name: string; atTurn: number };
+  /**
    * Pre-built codeoid_fleet MCP server (conductor sessions only). Built by
    * the SessionManager because its tools close over the manager's tenant-
    * scoped session view; the Session just hands it to the provider.
@@ -247,6 +252,8 @@ export class Session {
   readonly workdir: string;
   /** "conductor" = fleet supervisor; "worker" = dispatch-spawned; undefined = normal. */
   readonly role?: "conductor" | "worker";
+  /** Fork lineage (set from opts / restored from meta). */
+  readonly forkedFrom?: { sessionId: string; name: string; atTurn: number };
   readonly createdBy: string;
   readonly createdAt: string;
   /**
@@ -514,6 +521,7 @@ export class Session {
     this.name = opts.name;
     this.workdir = opts.workdir;
     this.role = opts.role;
+    this.forkedFrom = opts.forkedFrom;
     this.#onStatusChange = opts.onStatusChange;
     this.#workerShape = opts.workerShape;
     if (opts.initialMode) {
@@ -635,6 +643,7 @@ export class Session {
         projectId: opts.auth.projectId,
         role: this.role,
         providerId: this.#provider.id,
+        forkedFrom: this.forkedFrom,
         // Fire-and-forget: saveMeta's write chain owns the failure log; an
         // unconsumed rejection here would be an unhandled-rejection crash.
       }).catch(() => {});
@@ -1927,6 +1936,7 @@ export class Session {
       queuedMessages: this.#provider.queuedMessages,
       model: this.#model ?? undefined,
       fallbackModel: this.#fallbackModel ?? undefined,
+      forkedFrom: this.forkedFrom,
     };
   }
 
@@ -3623,6 +3633,7 @@ export class Session {
       projectId: this.projectId,
       role: this.role,
       providerId: this.#provider.id,
+      forkedFrom: this.forkedFrom,
     }).catch(() => {});
   }
 }
