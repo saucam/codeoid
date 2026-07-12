@@ -13,10 +13,12 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { Store } from "../daemon/store.js";
 import { TranscriptStore } from "../daemon/transcript.js";
 import { Session, type AttachedClient } from "../daemon/session.js";
@@ -335,5 +337,123 @@ describe("SessionManager session.fork", () => {
       client(AUTH),
     );
     expect(resp).toMatchObject({ type: "response.error", code: "not_found" });
+  });
+});
+
+// ── Git worktree isolation (real git) ────────────────────────────────────────
+
+const execFileP = promisify(execFile);
+const gitIn = (args: string[], cwd: string) =>
+  execFileP("git", args, { cwd }).then((r) => r.stdout.trim());
+
+async function makeGitRepoWithDirtyEdit(): Promise<string> {
+  const repo = join(tmp, "repo");
+  await execFileP("git", ["init", "-b", "main", repo]);
+  await gitIn(["config", "user.email", "t@t.dev"], repo);
+  await gitIn(["config", "user.name", "t"], repo);
+  writeFileSync(join(repo, "file.txt"), "committed\n");
+  await gitIn(["add", "."], repo);
+  await gitIn(["commit", "-m", "init"], repo);
+  writeFileSync(join(repo, "file.txt"), "committed\nWIP\n"); // dirty tracked edit
+  return repo;
+}
+
+async function createIn(manager: SessionManager, c: AttachedClient, workdir: string): Promise<string> {
+  const resp = await manager.handle(
+    { type: "session.create", id: randomUUID(), name: "parent", workdir },
+    AUTH,
+    c,
+  );
+  expect(resp.type).toBe("response.ok");
+  return (resp as { data: { id: string } }).data.id;
+}
+
+describe("SessionManager session.fork — git worktree isolation", () => {
+  it("W1: fork of a git-repo session gets its own worktree+branch carrying the parent's dirty edit; parent untouched; destroy cleans up", async () => {
+    const repo = await makeGitRepoWithDirtyEdit();
+    const parentHead = await gitIn(["rev-parse", "HEAD"], repo);
+    const { registry } = makeRegistry();
+    const manager = makeManager(registry);
+    const c = client(AUTH);
+    const parentId = await createIn(manager, c, repo);
+    await sendAndSettle(manager, c, parentId, "hello");
+
+    const resp = await manager.handle(
+      { type: "session.fork", id: "w1", sessionId: parentId },
+      AUTH,
+      c,
+    );
+    expect(resp.type).toBe("response.ok");
+    const fork = (resp as { data: { id: string; workdir: string; worktree?: { path: string; branch: string; createdByCodeoid: boolean } } }).data;
+
+    // The fork runs in its OWN worktree, on a codeoid branch, that codeoid owns.
+    expect(fork.worktree).toBeDefined();
+    expect(fork.worktree!.createdByCodeoid).toBe(true);
+    expect(fork.worktree!.branch).toMatch(/^codeoid\//);
+    expect(fork.workdir).toBe(fork.worktree!.path);
+    expect(fork.workdir).not.toBe(repo);
+    expect(existsSync(fork.workdir)).toBe(true);
+
+    // It carries the parent's UNCOMMITTED edit, as uncommitted work (tip == parent HEAD).
+    expect(readFileSync(join(fork.workdir, "file.txt"), "utf8")).toBe("committed\nWIP\n");
+    expect(await gitIn(["rev-parse", "HEAD"], fork.workdir)).toBe(parentHead);
+    expect(await gitIn(["status", "--porcelain"], fork.workdir)).toContain("file.txt");
+
+    // Parent's checkout is untouched: same HEAD, same branch, same dirty file.
+    expect(await gitIn(["rev-parse", "HEAD"], repo)).toBe(parentHead);
+    expect(await gitIn(["rev-parse", "--abbrev-ref", "HEAD"], repo)).toBe("main");
+    expect(readFileSync(join(repo, "file.txt"), "utf8")).toBe("committed\nWIP\n");
+
+    // Destroy the fork → worktree dir removed, branch KEPT (work recoverable).
+    const wtPath = fork.workdir;
+    const branch = fork.worktree!.branch;
+    await manager.handle({ type: "session.destroy", id: "d1", sessionId: fork.id }, AUTH, c);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(existsSync(wtPath)).toBe(false);
+    expect(await gitIn(["branch", "--list", branch], repo)).toContain(branch);
+  });
+
+  it("W2: isolate:false shares the parent's workdir (no worktree)", async () => {
+    const repo = await makeGitRepoWithDirtyEdit();
+    const { registry } = makeRegistry();
+    const manager = makeManager(registry);
+    const c = client(AUTH);
+    const parentId = await createIn(manager, c, repo);
+    await sendAndSettle(manager, c, parentId, "hello");
+
+    const resp = await manager.handle(
+      { type: "session.fork", id: "w2", sessionId: parentId, isolate: false },
+      AUTH,
+      c,
+    );
+    const fork = (resp as { data: { workdir: string; worktree?: unknown } }).data;
+    expect(fork.worktree).toBeUndefined();
+    expect(fork.workdir).toBe(repo);
+  });
+
+  it("W3: forking a non-git workdir shares it and surfaces a collision warning", async () => {
+    // `tmp` (the beforeEach temp dir) is a plain directory, not a git repo.
+    const { registry } = makeRegistry();
+    const manager = makeManager(registry);
+    const c = client(AUTH);
+    const parentId = await createIn(manager, c, tmp);
+    await sendAndSettle(manager, c, parentId, "hello");
+
+    const resp = await manager.handle(
+      { type: "session.fork", id: "w3", sessionId: parentId },
+      AUTH,
+      c,
+    );
+    const fork = (resp as { data: { id: string; workdir: string; worktree?: unknown } }).data;
+    expect(fork.worktree).toBeUndefined();
+    expect(fork.workdir).toBe(tmp);
+
+    // A visible collision warning is persisted in the fork's own scrollback.
+    await transcript.flush();
+    const rows = await transcript.loadTranscript(fork.id, {});
+    const warn = rows
+      .map((r) => r.message)
+      .find((m) => m.type === "session.message" && (m as { metadata?: { event?: string } }).metadata?.event === "fork.workdir");
+    expect(warn).toBeDefined();
   });
 });

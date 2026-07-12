@@ -87,6 +87,7 @@ const SessionControls: Component = () => {
       {(s) => (
         <div class="flex flex-wrap items-center gap-1.5 text-[11px]">
           <ForkedFromChip forkedFrom={s().forkedFrom} />
+          <WorktreeChip worktree={s().worktree} />
           <InterruptButton sessionId={s().id} status={s().status} />
           <RotateButton sessionId={s().id} />
           <ModePicker sessionId={s().id} current={effectiveMode(s())} />
@@ -142,6 +143,25 @@ const ForkedFromChip: Component<{
     </Show>
   );
 };
+
+/** Isolated-worktree chip — "⎇ <branch>". Present when the session runs in its
+ *  own git worktree (a fork isolated from its parent, or a bound worktree), so
+ *  the user can see at a glance that its file edits won't collide. */
+const WorktreeChip: Component<{
+  worktree?: { path: string; branch: string; createdByCodeoid: boolean };
+}> = (props) => (
+  <Show when={props.worktree}>
+    {(wt) => (
+      <span
+        class="flex items-center gap-1 rounded border border-border bg-bg px-2 py-1 font-mono text-[11px] text-fg-muted"
+        title={`Isolated git worktree — edits here don't touch other sessions.\nbranch: ${wt().branch}\npath: ${wt().path}`}
+      >
+        <span class="text-accent">⎇</span>
+        <span class="max-w-[12rem] truncate">{wt().branch}</span>
+      </span>
+    )}
+  </Show>
+);
 
 const InterruptButton: Component<{
   sessionId: string;

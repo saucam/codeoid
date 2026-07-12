@@ -205,6 +205,27 @@ export interface SessionInfo {
      * point the branch was taken. */
     atTurn: number;
   };
+  /**
+   * Git worktree this session's workdir is (when isolated). Present when the
+   * session runs in a dedicated worktree — a fork isolated from its parent, or
+   * a session bound to an existing worktree. Absent = the session shares its
+   * workdir with no git isolation.
+   */
+  worktree?: SessionWorktree;
+}
+
+/** A git worktree backing a session's workdir (see SessionInfo.worktree). */
+export interface SessionWorktree {
+  /** Absolute path of the worktree directory (the session's workdir). */
+  path: string;
+  /** Branch checked out in the worktree (e.g. "codeoid/fix-login-a1b2c3d4"). */
+  branch: string;
+  /**
+   * True when codeoid created this worktree (fork isolation) and therefore
+   * owns its cleanup on destroy. False when the session was bound to a
+   * worktree the user already had — codeoid never removes those.
+   */
+  createdByCodeoid: boolean;
 }
 
 /**
@@ -804,6 +825,20 @@ export interface SessionForkMsg extends BaseClientMsg {
   name?: string;
   /** Backend for the fork. Absent = the parent's current backend. */
   providerId?: string;
+  /**
+   * Git isolation. When the parent's workdir is a git repo, the fork gets its
+   * OWN worktree + branch, seeded with the parent's current tracked working
+   * state (parent untouched) — so the two sessions never collide on disk.
+   * Defaults to TRUE; pass `false` to share the parent's workdir (no
+   * isolation). Ignored when the workdir isn't a git repo (falls back to
+   * shared with a surfaced warning) or when `workdir` is given (bind mode).
+   */
+  isolate?: boolean;
+  /**
+   * Bind the fork to an EXISTING directory/worktree you manage instead of
+   * creating one. codeoid records its branch but never creates or removes it.
+   */
+  workdir?: string;
 }
 
 /**
