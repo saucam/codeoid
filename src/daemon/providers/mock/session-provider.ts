@@ -32,7 +32,7 @@ import type {
   TurnRun,
 } from "../interface.js";
 import type { ProviderCommand } from "../../../protocol/types.js";
-import type { CanonicalTurn } from "../canonical.js";
+import type { CanonicalTurn, HistorySeedResult } from "../canonical.js";
 
 export { mockResult } from "./index.js";
 
@@ -88,8 +88,13 @@ export class MockSessionProvider implements SessionProvider {
 
   /** History captured by seedFromHistory() — inspect in provider-switch tests. */
   seededHistory: readonly CanonicalTurn[] | null = null;
+  /** maxChars passed to the last seedFromHistory() — inspect window-sizing. */
+  seededMaxChars: number | undefined = undefined;
   /** When set, seedFromHistory() throws it (best-effort degradation tests). */
   seedFromHistoryError: Error | null = null;
+  /** When set, seedFromHistory() returns it — lets tests force a truncation
+   *  result so the session's surfacing path can be exercised. */
+  seedResultOverride: HistorySeedResult | null = null;
 
   /** When true, TurnRuns expose pushMidTurn (recorded in `midTurnPushes`). */
   #midTurn: boolean;
@@ -155,9 +160,14 @@ export class MockSessionProvider implements SessionProvider {
     if (this.partActionHandler) await this.partActionHandler(action, data);
   }
 
-  seedFromHistory(history: readonly CanonicalTurn[]): void {
+  seedFromHistory(
+    history: readonly CanonicalTurn[],
+    opts?: { maxChars?: number },
+  ): HistorySeedResult | undefined {
     if (this.seedFromHistoryError) throw this.seedFromHistoryError;
     this.seededHistory = [...history];
+    this.seededMaxChars = opts?.maxChars;
+    return this.seedResultOverride ?? undefined;
   }
 
   runTurn(opts: TurnOpts): TurnRun {

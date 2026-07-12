@@ -9,7 +9,12 @@
  *   - Scrollback stores merged SessionMessage (not deltas)
  */
 
-import { CanonicalHistoryAccumulator, type CanonicalTurn } from "./providers/canonical.js";
+import {
+  CanonicalHistoryAccumulator,
+  type CanonicalTurn,
+  type HistorySeedResult,
+} from "./providers/canonical.js";
+import { targetContextWindow, seedBudgetChars } from "./providers/context-windows.js";
 import { CONDUCTOR_SYSTEM_PROMPT_APPEND, isFleetSendTool } from "./fleet.js";
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import {
@@ -1813,8 +1818,15 @@ export class Session {
     if (!this.#provider.seedFromHistory || this.#accumulator.history.length === 0) {
       return false;
     }
+    // Size the seed to the TARGET model's context window (per-provider default
+    // when the model isn't chosen yet — the common fork case) so it only
+    // truncates when the history genuinely won't fit, then surface it if it did.
+    const maxChars = seedBudgetChars(this.#provider.id, this.#model);
     try {
-      await this.#provider.seedFromHistory(this.#accumulator.history);
+      const result = await this.#provider.seedFromHistory(this.#accumulator.history, { maxChars });
+      if (result && result.omittedTurns > 0) {
+        this.#surfaceSeedTruncation(result);
+      }
       return true;
     } catch (err) {
       console.error(
@@ -1822,6 +1834,38 @@ export class Session {
       );
       return false;
     }
+  }
+
+  /**
+   * Surface a seed truncation to the user — visibly, in scrollback (not buried
+   * in the seed the model sees). Fires only when the rendered history exceeded
+   * the target model's context-window budget and older turns were dropped.
+   */
+  #surfaceSeedTruncation(result: HistorySeedResult): void {
+    const providerId = this.#provider.id;
+    const model = this.#model ?? `${providerId} default`;
+    const contextWindow = targetContextWindow(providerId, this.#model);
+    const windowK = Math.round(contextWindow / 1000);
+    const msg = this.#makeMessage(
+      "info",
+      `⚠️ Conversation history truncated for ${providerId} (${model}, ~${windowK}k-token window): ` +
+        `${result.omittedTurns} of ${result.totalTurns} earlier turn(s) didn't fit and were dropped. ` +
+        `The ${result.keptTurns} most recent turn(s) were carried over.`,
+      SYSTEM_IDENTITY,
+      undefined,
+      undefined,
+      {
+        event: "history.truncated",
+        provider: providerId,
+        model: this.#model,
+        contextWindow,
+        totalTurns: result.totalTurns,
+        keptTurns: result.keptTurns,
+        omittedTurns: result.omittedTurns,
+      },
+    );
+    this.#persistAndBuffer(msg);
+    this.#broadcastRaw(msg);
   }
 
   /**

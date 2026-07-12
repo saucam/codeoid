@@ -35,7 +35,7 @@ import type {
   TurnOpts,
   TurnRun,
 } from "../interface.js";
-import { renderHistorySeed, type CanonicalTurn } from "../canonical.js";
+import { renderHistorySeed, type CanonicalTurn, type HistorySeedResult } from "../canonical.js";
 import { buildGeminiCliEnv } from "../env.js";
 import { StdioJsonRpcProcess } from "../jsonrpc-stdio.js";
 
@@ -103,9 +103,10 @@ export class GeminiAcpProvider implements SessionProvider {
     this.#hasQueried = value;
   }
 
-  seedFromHistory(history: readonly CanonicalTurn[]): void {
-    const seed = renderHistorySeed(history);
-    this.#pendingHistorySeed = seed.length > 0 ? seed : null;
+  seedFromHistory(history: readonly CanonicalTurn[], opts?: { maxChars?: number }): HistorySeedResult {
+    const seed = renderHistorySeed(history, { maxChars: opts?.maxChars });
+    this.#pendingHistorySeed = seed.text.length > 0 ? seed.text : null;
+    return seed;
   }
 
   runTurn(opts: TurnOpts): TurnRun {

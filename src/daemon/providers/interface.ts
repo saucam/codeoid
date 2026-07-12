@@ -16,7 +16,7 @@ import type {
   ProviderCommand,
   UiRequestMethod,
 } from "../../protocol/types.js";
-import type { CanonicalTurn } from "./canonical.js";
+import type { CanonicalTurn, HistorySeedResult } from "./canonical.js";
 import type { LLMCallUsage } from "../context-math.js";
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -256,15 +256,25 @@ export interface AgentProvider {
   ): void | Promise<void>;
   /**
    * Seed a FRESH provider with the session's canonical history — called
-   * once by `session.set_provider` on the incoming backend, before its
-   * first turn. Provider-owned fidelity: stateless backends no-op (they
-   * consume `TurnOpts.history` natively every turn); warm backends
+   * once by `session.set_provider` / `session.fork` on the incoming backend,
+   * before its first turn. Provider-owned fidelity: stateless backends no-op
+   * (they consume `TurnOpts.history` natively every turn); warm backends
    * implement their best strategy (typically prepending a rendered
    * transcript — see `renderHistorySeed` — to their first prompt).
+   *
+   * `opts.maxChars` is sized by the session to the TARGET model's context
+   * window (see seedBudgetChars) so the seed only truncates when the history
+   * won't fit. Warm backends return the {@link HistorySeedResult} so the
+   * session can surface truncation to the user; a `void`/`undefined` return
+   * means "not seeded / nothing to report" (e.g. stateless no-op).
+   *
    * Optional and best-effort: a throw degrades to an unseeded switch, it
    * must never wedge the session.
    */
-  seedFromHistory?(history: readonly CanonicalTurn[]): void | Promise<void>;
+  seedFromHistory?(
+    history: readonly CanonicalTurn[],
+    opts?: { maxChars?: number },
+  ): HistorySeedResult | undefined | Promise<HistorySeedResult | undefined>;
   dispose(): Promise<void>;
 }
 

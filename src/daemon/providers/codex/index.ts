@@ -50,7 +50,7 @@ import type {
   TurnRun,
   UiRequestFn,
 } from "../interface.js";
-import { renderHistorySeed, type CanonicalTurn } from "../canonical.js";
+import { renderHistorySeed, type CanonicalTurn, type HistorySeedResult } from "../canonical.js";
 import { buildCodexEnv } from "../env.js";
 import { CodexRpcProcess } from "./rpc.js";
 
@@ -209,9 +209,10 @@ export class CodexProvider implements SessionProvider {
     this.#hasQueried = value;
   }
 
-  seedFromHistory(history: readonly CanonicalTurn[]): void {
-    const seed = renderHistorySeed(history);
-    this.#pendingHistorySeed = seed.length > 0 ? seed : null;
+  seedFromHistory(history: readonly CanonicalTurn[], opts?: { maxChars?: number }): HistorySeedResult {
+    const seed = renderHistorySeed(history, { maxChars: opts?.maxChars });
+    this.#pendingHistorySeed = seed.text.length > 0 ? seed.text : null;
+    return seed;
   }
 
   runTurn(opts: TurnOpts): TurnRun {

@@ -175,6 +175,74 @@ describe("Session.switchProvider", () => {
     await session.destroy(AUTH);
   });
 
+  it("S8: surfaces a visible warning when the seed is truncated for the target window", async () => {
+    // The incoming backend reports a truncated seed (older turns didn't fit
+    // its context window); the session must tell the user in scrollback.
+    const created: MockSessionProvider[] = [];
+    const registry = new ProviderRegistry("mock-a");
+    registry.register({
+      id: "mock-a",
+      displayName: "mock-a",
+      create: () => new MockSessionProvider("mock-a", [textTurn("from A")]),
+    });
+    registry.register({
+      id: "mock-b",
+      displayName: "mock-b",
+      create: () => {
+        const p = new MockSessionProvider("mock-b", [textTurn("from B")]);
+        p.seedResultOverride = {
+          text: "<conversation-history>…</conversation-history>",
+          totalTurns: 40,
+          keptTurns: 12,
+          omittedTurns: 28,
+          newestTurnSliced: false,
+        };
+        created.push(p);
+        return p;
+      },
+    });
+    const session = makeSession(registry, "mock-a");
+    const client = recordingClient();
+    session.attach(client);
+    await session.send("hello", AUTH);
+    await waitFor(() => session.status === "idle" && session.lastAssistantText === "from A");
+
+    await session.switchProvider("mock-b", AUTH);
+
+    // The incoming provider got a window-sized budget (not the old fixed 24k).
+    expect(created[0]!.seededMaxChars).toBeGreaterThan(0);
+
+    const warn = client.received.find(
+      (m): m is SessionMessage =>
+        m.type === "session.message" &&
+        m.role === "info" &&
+        m.metadata?.event === "history.truncated",
+    );
+    expect(warn).toBeDefined();
+    expect(warn!.metadata?.provider).toBe("mock-b");
+    expect(warn!.metadata?.totalTurns).toBe(40);
+    expect(warn!.metadata?.keptTurns).toBe(12);
+    expect(warn!.metadata?.omittedTurns).toBe(28);
+
+    await session.destroy(AUTH);
+  });
+
+  it("S9: no truncation warning when the whole history fits", async () => {
+    // Default mock seed (no override) reports omittedTurns=0 → silence.
+    const { registry } = makeRegistry({ a: [textTurn("from A")], b: [textTurn("from B")] });
+    const session = makeSession(registry);
+    const client = recordingClient();
+    session.attach(client);
+    await session.send("hello", AUTH);
+    await waitFor(() => session.status === "idle" && session.lastAssistantText === "from A");
+    await session.switchProvider("mock-b", AUTH);
+    const warn = client.received.find(
+      (m) => m.type === "session.message" && (m as SessionMessage).metadata?.event === "history.truncated",
+    );
+    expect(warn).toBeUndefined();
+    await session.destroy(AUTH);
+  });
+
   it("S2: unknown provider fails closed and keeps the current backend", async () => {
     const { registry, created } = makeRegistry();
     const session = makeSession(registry);
