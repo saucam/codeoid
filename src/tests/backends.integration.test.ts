@@ -81,7 +81,8 @@ beforeAll(() => {
 
 afterAll(async () => {
   if (!RUN) return;
-  await new Promise((r) => setTimeout(r, 50));
+  // No arbitrary settle delay: every turn was awaited to idle via
+  // sendAndSettle, and flush() drains queued transcript writes.
   try {
     await transcript.flush();
   } catch {}
