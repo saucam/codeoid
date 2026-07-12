@@ -410,3 +410,47 @@ describe("ModelPicker — catalog follows the backend", () => {
     await waitFor(() => expect(fetchModelsMock).toHaveBeenCalledWith("codex"));
   });
 });
+
+describe("ForkedFromChip — lineage", () => {
+  function forkSess(parentId: string, atTurn: number): SessionInfo {
+    return {
+      ...sess(),
+      id: "fork-1",
+      name: "parent (fork)",
+      forkedFrom: { sessionId: parentId, name: "Sandbox", atTurn },
+    } as SessionInfo;
+  }
+
+  it("renders 'from <parent> · turn N' and focuses the parent on click", async () => {
+    const parent = { ...sess(), id: "p", name: "Sandbox" } as SessionInfo;
+    ingestSessionList([parent, forkSess("p", 12)]);
+    focusSession("fork-1");
+    const { getByTitle, getByText } = render(() => <SessionControls />);
+
+    // Chip shows the parent name + branch point.
+    expect(getByText("Sandbox")).toBeTruthy();
+    expect(getByText("· turn 12")).toBeTruthy();
+    const chip = getByTitle(/Forked from “Sandbox” after 12 turn/);
+
+    // Clicking focuses the parent.
+    fireEvent.click(chip);
+    const { focusedSessionId } = await import("../state/sessions");
+    expect(focusedSessionId()).toBe("p");
+  });
+
+  it("is a static (disabled) label when the parent is no longer open", () => {
+    // Only the fork is in the list — the parent was destroyed.
+    ingestSessionList([forkSess("gone", 3)]);
+    focusSession("fork-1");
+    const { getByTitle } = render(() => <SessionControls />);
+    const chip = getByTitle(/Forked from “Sandbox” \(no longer open\)/) as HTMLButtonElement;
+    expect(chip.disabled).toBe(true);
+  });
+
+  it("no chip for a non-forked session", () => {
+    ingestSessionList([sess()]);
+    focusSession("s");
+    const { queryByText } = render(() => <SessionControls />);
+    expect(queryByText(/from/)).toBeNull();
+  });
+});

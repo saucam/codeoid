@@ -216,6 +216,17 @@ describe("SessionManager session.fork", () => {
     expect(fork.name).toBe("parent (fork)");
     expect(fork.providerId).toBe("mock-a"); // inherits parent's backend
 
+    // Lineage: the fork knows its parent + the branch point (1 user turn
+    // "hello parent" was carried over).
+    const forkInfo = fork as unknown as {
+      forkedFrom?: { sessionId: string; name: string; atTurn: number };
+    };
+    expect(forkInfo.forkedFrom).toEqual({
+      sessionId: parentId,
+      name: "parent",
+      atTurn: 1,
+    });
+
     // The fork's history matches the parent's [user, assistant] turn.
     const info = await manager.handle({ type: "session.list", id: "l1" }, AUTH, c);
     const ids = (info as { sessions: Array<{ id: string }> }).sessions.map((s) => s.id);
@@ -230,6 +241,33 @@ describe("SessionManager session.fork", () => {
     expect(msgs.length).toBeGreaterThan(0);
     for (const m of msgs) expect((m as { sessionId: string }).sessionId).toBe(fork.id);
     expect(msgs.some((m) => (m as { role: string }).role === "user")).toBe(true);
+  });
+
+  it("F1b: fork lineage is persisted in the transcript meta (survives restart)", async () => {
+    const { registry } = makeRegistry();
+    const manager = makeManager(registry);
+    const c = client(AUTH);
+    const parentId = await createSession(manager, c);
+    await sendAndSettle(manager, c, parentId, "one");
+
+    const resp = await manager.handle(
+      { type: "session.fork", id: "f1b", sessionId: parentId },
+      AUTH,
+      c,
+    );
+    const fork = (resp as { data: { id: string; forkedFrom?: { atTurn: number } } }).data;
+    await transcript.flush();
+
+    // The fork's meta on disk carries the lineage — this is what a restart
+    // reads back to repopulate SessionInfo.forkedFrom. It must round-trip
+    // exactly what the live SessionInfo reported.
+    const metas = await transcript.loadAllMeta();
+    const meta = metas.find((m) => m.sessionId === fork.id);
+    expect(meta?.forkedFrom).toBeDefined();
+    expect(meta?.forkedFrom?.sessionId).toBe(parentId);
+    expect(meta?.forkedFrom?.name).toBe("parent");
+    expect(meta?.forkedFrom?.atTurn).toBe(fork.forkedFrom?.atTurn);
+    expect(meta?.forkedFrom?.atTurn).toBeGreaterThanOrEqual(1);
   });
 
   it("F2: forks onto a DIFFERENT backend in one call, parent untouched", async () => {

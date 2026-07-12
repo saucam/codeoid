@@ -93,6 +93,8 @@ export interface TranscriptMeta {
   role?: "conductor" | "worker";
   /** Provider id backing the session; absent = claude (pre-upgrade metas). */
   providerId?: string;
+  /** Fork lineage (session.fork). Absent = not a fork. */
+  forkedFrom?: { sessionId: string; name: string; atTurn: number };
 }
 
 /** Types we persist. Skip ephemeral events like heartbeats. */

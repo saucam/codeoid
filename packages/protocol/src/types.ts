@@ -189,6 +189,22 @@ export interface SessionInfo {
   model?: string;
   /** Fallback model id used on 429/529 capacity errors. */
   fallbackModel?: string;
+  /**
+   * Lineage for a session created via `session.fork`. Absent = not a fork.
+   * Frontends surface it as a chip ("⑃ forked from <name> · turn <atTurn>")
+   * that links back to the parent. Recorded at fork time and persisted, so
+   * it survives restarts (and a later parent rename/deletion — `name` is a
+   * snapshot).
+   */
+  forkedFrom?: {
+    /** Parent session id — focus it when the chip is clicked. */
+    sessionId: string;
+    /** Parent's name at fork time (snapshot; parent may rename/vanish). */
+    name: string;
+    /** Conversation rounds (user turns) carried over from the parent — the
+     * point the branch was taken. */
+    atTurn: number;
+  };
 }
 
 /**
