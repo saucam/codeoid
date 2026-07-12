@@ -26,12 +26,12 @@ import {
 } from "../state/sessions";
 import type { SessionInfo } from "../protocol/types";
 
-function sess(providerId?: string): SessionInfo {
+function sess(providerId?: string, status: SessionInfo["status"] = "idle"): SessionInfo {
   return {
     id: "s",
     name: "s",
     workdir: "/tmp",
-    status: "idle",
+    status,
     mode: "guarded",
     createdBy: "u",
     createdAt: "2026-05-04T08:00:00Z",
@@ -353,6 +353,29 @@ describe("ForkButton", () => {
     );
     // The plain fork carries NO providerId (same backend).
     expect(requestMock.mock.calls[0]![0]).not.toHaveProperty("providerId");
+  });
+
+  it("forks WHILE the session is mid-turn (status=thinking) — not gated on the turn", async () => {
+    // Repro guard for "clicked fork while the model was streaming and nothing
+    // happened". The daemon accepts fork mid-turn (snapshots history-so-far,
+    // parent keeps streaming); the button must fire regardless of status.
+    requestMock.mockResolvedValueOnce({ id: "fork-mid", name: "s (fork)", providerId: "claude" });
+    mockAuth(["claude"]);
+    ingestSessionList([sess("claude", "thinking")]);
+    focusSession("s");
+    const { getByTitle } = render(() => <SessionControls />);
+    // Sanity: the session really is mid-turn — the interrupt button is enabled.
+    const interrupt = getByTitle(/Interrupt the running turn/) as HTMLButtonElement;
+    expect(interrupt.disabled).toBe(false);
+    // Fork must still fire (button is not gated on turn status).
+    const fork = getByTitle(PLAIN_TITLE) as HTMLButtonElement;
+    expect(fork.disabled).toBe(false);
+    fireEvent.click(fork);
+    await waitFor(() =>
+      expect(requestMock).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "session.fork", sessionId: "s" }),
+      ),
+    );
   });
 
   it("multi-backend daemon: dropdown offers fork-onto each OTHER backend", async () => {
