@@ -12,6 +12,17 @@
  *     before privileged actions; each server-side approval request routes
  *     through codeoid's canUseTool — approve/deny round-trips natively (no
  *     injected bridge, unlike pi)
+ *   - `sandboxPolicy: "danger-full-access"` is pinned so codex EXECUTES the
+ *     commands codeoid approves instead of re-sandboxing them. codeoid's
+ *     canUseTool gate is the single trust authority (it implements the
+ *     session mode — auto-approve in autonomous, prompt in guarded); codex's
+ *     own bundled-bubblewrap sandbox is redundant with it AND non-portable —
+ *     it needs unprivileged user namespaces that containers and hardened
+ *     hosts (`apparmor_restrict_unprivileged_userns=1`) forbid, and when
+ *     bwrap can't initialize even an APPROVED command dies inside codex with
+ *     "command execution rejected / cannot escalate". Operators on a
+ *     bwrap-capable host who want defense-in-depth can restore it via
+ *     CODEX_SANDBOX_POLICY / CODEX_APPROVAL_POLICY (see codexPolicies()).
  *   - `item/tool/requestUserInput` → requestUserInput (session.ui_request)
  *   - text/reasoning deltas stream; command/fileChange/mcp items surface
  *     as tool records; usage from turn/completed
@@ -71,6 +82,32 @@ const TOOL_ITEM_TYPES = new Set([
   "webSearch",
   "tool",
 ]);
+
+/** codex `approvalPolicy` enum (app-server v2 turn params). */
+const APPROVAL_POLICIES = new Set(["untrusted", "on-request", "on-failure", "never"]);
+/** codex `sandboxPolicy` enum (app-server v2 turn params). */
+const SANDBOX_POLICIES = new Set(["read-only", "workspace-write", "danger-full-access"]);
+
+/**
+ * The approval + sandbox policy codeoid pins on codex thread/turn starts.
+ *
+ * Defaults (see the file header for the full rationale): codeoid's canUseTool
+ * gate is the trust authority, so codex ASKS before every non-trivial action
+ * (`untrusted`) and runs approved actions with its own sandbox DISABLED
+ * (`danger-full-access`) — portable, and non-redundant with codeoid's gate.
+ *
+ * Both are overridable via env for operators on a bubblewrap-capable host who
+ * want codex's sandbox as defense-in-depth. An unknown value falls back to the
+ * default rather than letting codex reject the turn/start.
+ */
+function codexPolicies(): { approvalPolicy: string; sandboxPolicy: string } {
+  const approval = process.env.CODEX_APPROVAL_POLICY?.trim();
+  const sandbox = process.env.CODEX_SANDBOX_POLICY?.trim();
+  return {
+    approvalPolicy: approval && APPROVAL_POLICIES.has(approval) ? approval : "untrusted",
+    sandboxPolicy: sandbox && SANDBOX_POLICIES.has(sandbox) ? sandbox : "danger-full-access",
+  };
+}
 
 export class CodexProvider implements SessionProvider {
   readonly id = "codex";
@@ -213,13 +250,17 @@ export class CodexProvider implements SessionProvider {
     this.#pendingHistorySeed = null;
     const text = seed ? `${seed}\n\n${opts.userMessage}` : opts.userMessage;
 
+    const { approvalPolicy, sandboxPolicy } = codexPolicies();
     const result = (await this.#proc!.request("turn/start", {
       threadId: this.#threadId,
       input: [{ type: "text", text, text_elements: [] }],
       cwd: opts.workdir,
-      // Fail-closed parity with the pi bridge: codex must ASK for every
-      // privileged action so codeoid's approval gate is authoritative.
-      approvalPolicy: "untrusted",
+      // Fail-closed parity with the pi bridge: codex ASKS for every
+      // privileged action so codeoid's gate is authoritative, and EXECUTES
+      // approved actions (sandbox off) instead of re-sandboxing them (which
+      // fails wherever bubblewrap can't init). See codexPolicies().
+      approvalPolicy,
+      sandboxPolicy,
       ...(opts.model ? { model: opts.model } : {}),
     })) as { turn?: { id?: string } };
     this.#currentTurnId = result.turn?.id ?? null;
@@ -269,8 +310,11 @@ export class CodexProvider implements SessionProvider {
         /* fall through to thread/start */
       }
     }
+    const { approvalPolicy, sandboxPolicy } = codexPolicies();
     const started = (await this.#proc.request("thread/start", {
       cwd: opts.workdir,
+      approvalPolicy,
+      sandboxPolicy,
       ...(opts.systemPromptAppend ? { developerInstructions: opts.systemPromptAppend } : {}),
     })) as { thread?: { id?: string } };
     if (!started.thread?.id) throw new Error("codex thread/start returned no thread id");
