@@ -167,24 +167,45 @@ export function createDefaultProviderRegistry(config?: CodeoidConfig): ProviderR
         onModels: init.onModels,
       }),
   });
-  registry.register({
-    id: "gemini",
-    displayName: "Gemini (Google)",
-    create: (init) =>
-      new StatelessSessionProvider(
-        new GeminiProvider({ defaultModel: init.model ?? undefined }),
-        init.sessionId,
-      ),
-  });
-  registry.register({
-    id: "openai",
-    displayName: "OpenAI",
-    create: (init) =>
-      new StatelessSessionProvider(
-        new OpenAIProvider({ defaultModel: init.model ?? undefined }),
-        init.sessionId,
-      ),
-  });
+  // Stateless API backends: usable only with their key in the environment
+  // (the daemon loads ~/.codeoid/.env into process.env at startup). Gate
+  // registration on the key so a backend that would 401 on its first turn
+  // isn't advertised as pickable — same contract as the pi/codex/gemini-cli
+  // binary checks below. Without this, forking onto e.g. openai created a
+  // session that failed cryptically ("401 Incorrect API key: missing")
+  // instead of the option simply not appearing.
+  if (process.env.GOOGLE_API_KEY) {
+    registry.register({
+      id: "gemini",
+      displayName: "Gemini (Google)",
+      create: (init) =>
+        new StatelessSessionProvider(
+          new GeminiProvider({ defaultModel: init.model ?? undefined }),
+          init.sessionId,
+        ),
+    });
+  } else {
+    registry.markUnavailable(
+      "gemini",
+      "GOOGLE_API_KEY is not set — add it to ~/.codeoid/.env to use the Gemini backend",
+    );
+  }
+  if (process.env.OPENAI_API_KEY) {
+    registry.register({
+      id: "openai",
+      displayName: "OpenAI",
+      create: (init) =>
+        new StatelessSessionProvider(
+          new OpenAIProvider({ defaultModel: init.model ?? undefined }),
+          init.sessionId,
+        ),
+    });
+  } else {
+    registry.markUnavailable(
+      "openai",
+      "OPENAI_API_KEY is not set — add it to ~/.codeoid/.env to use the OpenAI backend",
+    );
+  }
   if (config?.providers?.pi?.enabled !== false) {
     // Resolve once at startup: explicit config command → system PATH →
     // the bundled optionalDependency (see pi/resolve.ts). A verified

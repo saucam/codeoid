@@ -40,6 +40,11 @@ let store: Store;
 let transcriptStore: TranscriptStore;
 
 beforeEach(() => {
+  // These tests use gemini/openai as generic non-claude backends; the API
+  // backends now register only with their key present. Fake keys are fine —
+  // the StatelessSessionProvider doesn't call the API at construction.
+  process.env.OPENAI_API_KEY = "sk-test";
+  process.env.GOOGLE_API_KEY = "gk-test";
   tmp = mkdtempSync(join(tmpdir(), "codeoid-switch-"));
   store = new Store(join(tmp, "codeoid.db"));
   transcriptStore = new TranscriptStore(join(tmp, "transcripts"));

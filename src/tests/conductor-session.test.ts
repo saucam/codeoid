@@ -95,6 +95,11 @@ async function createConductor(mgr: SessionManager, a = AUTH_A): Promise<Session
 }
 
 beforeEach(() => {
+  // The conductor tests select "gemini" as a provider-agnostic backend; it
+  // registers only with GOOGLE_API_KEY present (fake is fine — construction
+  // doesn't hit the API).
+  process.env.OPENAI_API_KEY = "sk-test";
+  process.env.GOOGLE_API_KEY = "gk-test";
   tmp = mkdtempSync(join(tmpdir(), "codeoid-conductor-sess-"));
   store = new Store(join(tmp, "codeoid.db"));
   transcript = new TranscriptStore(join(tmp, "transcripts"));
