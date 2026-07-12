@@ -12,7 +12,7 @@
  * silently doing nothing (or worse, desyncing the local store).
  */
 
-import { Component, For, Show, createEffect, createSignal, onCleanup } from "solid-js";
+import { Component, For, Show, createEffect, createSignal, on, onCleanup } from "solid-js";
 
 import {
   authIdentity,
@@ -88,7 +88,11 @@ const SessionControls: Component = () => {
           <InterruptButton sessionId={s().id} status={s().status} />
           <RotateButton sessionId={s().id} />
           <ModePicker sessionId={s().id} current={effectiveMode(s())} />
-          <ModelPicker sessionId={s().id} current={s().model} />
+          <ModelPicker
+            sessionId={s().id}
+            current={s().model}
+            provider={s().providerId}
+          />
           <ProviderPicker sessionId={s().id} current={s().providerId} />
           <ForkButton sessionId={s().id} current={s().providerId} />
           <ExportButton />
@@ -256,15 +260,17 @@ const ModePicker: Component<{
 
 // Module-level so `/model` (bare) can open the picker programmatically.
 const [modelPickerOpen, setModelPickerOpen] = createSignal(false);
-/** Open the focused session's model picker (wired to the bare `/model` slash). */
+/** Open the focused session's model picker (wired to the bare `/model` slash).
+ *  Fetches the FOCUSED session's backend catalog — not the daemon default. */
 export function openModelPicker(): void {
   setModelPickerOpen(true);
-  void fetchModels();
+  void fetchModels(focusedSession()?.providerId);
 }
 
 const ModelPicker: Component<{
   sessionId: string;
   current?: string;
+  provider?: string;
 }> = (props) => {
   const open = modelPickerOpen;
   const setOpen = setModelPickerOpen;
@@ -272,6 +278,20 @@ const ModelPicker: Component<{
   const act = createAction();
   let rootEl: HTMLDivElement | undefined;
   useDismissable(() => rootEl, open, () => setOpen(false));
+  // Track the session's backend — the catalog is per-backend, so a
+  // `/provider` switch (or tabbing to a session on another backend) must
+  // swap the list (the reported bug: switching to codex kept showing
+  // claude's models). NOT forced: a backend already fetched live serves
+  // from cache instantly (no daemon round-trip while navigating sessions),
+  // and a not-yet-live backend still refetches. This must run regardless of
+  // whether the picker is open — the `/model` slash and the help modal read
+  // the same catalog.
+  createEffect(
+    on(
+      () => props.provider,
+      (provider) => void fetchModels(provider),
+    ),
+  );
   return (
     <div class="relative" ref={rootEl}>
       <button
@@ -280,7 +300,7 @@ const ModelPicker: Component<{
           const next = !open();
           setOpen(next);
           act.clearError();
-          if (next) void fetchModels();
+          if (next) void fetchModels(props.provider);
         }}
         class="flex items-center gap-1 rounded border border-border bg-bg px-2 py-1 font-mono uppercase tracking-wider text-fg-muted hover:border-accent/40 hover:text-fg"
         title="Switch model (next turn applies)"

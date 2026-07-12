@@ -19,24 +19,54 @@ export const modelCatalog = models;
 /** True once the catalog reflects the live backend list, not a fallback. */
 export const modelsLive = live;
 
-let fetched = false;
+/** Catalogs are per-backend ("opus" means nothing to codex), so cache by
+ *  provider and remember which one the visible catalog currently reflects —
+ *  a backend switch must refetch, never show the old backend's models. */
+const cache = new Map<string, { models: ModelInfo[]; live: boolean }>();
+const DEFAULT_KEY = "__default__";
+let catalogProvider = DEFAULT_KEY;
 
-/** Fetch the model catalog from the daemon. Safe to call repeatedly. */
-export async function fetchModels(force = false): Promise<void> {
-  if (fetched && !force && live()) return;
+/**
+ * Fetch the model catalog for a backend and make it the visible catalog.
+ * Pass the focused session's `providerId`; omit it only before a session is
+ * focused (the daemon then serves its default backend). Cached live lists are
+ * served instantly; a not-yet-live backend is refetched. `force` refetches
+ * even a cached live list (used on an explicit backend switch).
+ */
+export async function fetchModels(provider?: string, force = false): Promise<void> {
+  const key = provider ?? DEFAULT_KEY;
+  catalogProvider = key;
+
+  const cached = cache.get(key);
+  if (cached) {
+    // Show the cached list immediately (no stale-other-backend flash).
+    setModels(cached.models);
+    setLive(cached.live);
+    if (cached.live && !force) return;
+  } else {
+    // Switching to a backend we haven't fetched: clear the previous
+    // backend's list so the picker never shows the wrong models.
+    setModels([]);
+    setLive(false);
+  }
+
   try {
     const id = newRequestId();
     const result = await getClient().request<ModelsListResultMsg>(
-      { type: "models.list", id },
+      { type: "models.list", id, ...(provider ? { provider } : {}) },
       {
         waitForResult: (m) =>
           m.type === "models.list.result" && m.requestId === id ? m : undefined,
         timeoutMs: 8_000,
       },
     );
-    fetched = true;
-    setModels(result.models);
-    setLive(result.live);
+    cache.set(key, { models: result.models, live: result.live });
+    // A faster switch may have moved the focus to another backend while we
+    // awaited — only apply if this backend is still the visible one.
+    if (catalogProvider === key) {
+      setModels(result.models);
+      setLive(result.live);
+    }
   } catch {
     // Non-fatal — the prompt/picker fall back to whatever is cached (possibly
     // empty), and the daemon still validates /model server-side.
@@ -66,7 +96,8 @@ export function resolveModelInput(input: string): string | null {
 }
 
 export function _resetModelsForTest(): void {
-  fetched = false;
+  cache.clear();
+  catalogProvider = DEFAULT_KEY;
   setModels([]);
   setLive(false);
 }
