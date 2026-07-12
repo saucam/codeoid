@@ -12,10 +12,12 @@
  *     before privileged actions; each server-side approval request routes
  *     through codeoid's canUseTool — approve/deny round-trips natively (no
  *     injected bridge, unlike pi)
- *   - `sandboxPolicy: "danger-full-access"` is pinned so codex EXECUTES the
- *     commands codeoid approves instead of re-sandboxing them. codeoid's
- *     canUseTool gate is the single trust authority (it implements the
- *     session mode — auto-approve in autonomous, prompt in guarded); codex's
+ *   - the sandbox mode `danger-full-access` is pinned (as codex's
+ *     internally-tagged `{type:"dangerFullAccess"}` wire value, via
+ *     sandboxPolicyWire()) so codex EXECUTES the commands codeoid approves
+ *     instead of re-sandboxing them. codeoid's canUseTool gate is the single
+ *     trust authority (it implements the session mode — auto-approve in
+ *     autonomous, prompt in guarded); codex's
  *     own bundled-bubblewrap sandbox is redundant with it AND non-portable —
  *     it needs unprivileged user namespaces that containers and hardened
  *     hosts (`apparmor_restrict_unprivileged_userns=1`) forbid, and when
@@ -83,13 +85,23 @@ const TOOL_ITEM_TYPES = new Set([
   "tool",
 ]);
 
-/** codex `approvalPolicy` enum (app-server v2 turn params). */
-const APPROVAL_POLICIES = new Set(["untrusted", "on-request", "on-failure", "never"]);
-/** codex `sandboxPolicy` enum (app-server v2 turn params). */
-const SANDBOX_POLICIES = new Set(["read-only", "workspace-write", "danger-full-access"]);
+/**
+ * codex `approvalPolicy` (AskForApproval) — the string variants of the
+ * app-server v2 enum. `on-failure` is NOT one of them (verified against
+ * @openai/codex@0.144.1 `generate-ts`: it's `"untrusted" | "on-request" |
+ * {granular} | "never"`); the object `granular` form is not exposed via env.
+ */
+const APPROVAL_POLICIES = new Set(["untrusted", "on-request", "never"]);
 
 /**
- * The approval + sandbox policy codeoid pins on codex thread/turn starts.
+ * Operator-facing sandbox modes (config.toml / CLI spelling). Mapped to
+ * codex's internally-tagged `SandboxPolicy` wire enum by sandboxPolicyWire().
+ */
+type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
+const SANDBOX_MODES = new Set<SandboxMode>(["read-only", "workspace-write", "danger-full-access"]);
+
+/**
+ * The approval policy + sandbox MODE codeoid pins on codex thread/turn starts.
  *
  * Defaults (see the file header for the full rationale): codeoid's canUseTool
  * gate is the trust authority, so codex ASKS before every non-trivial action
@@ -100,13 +112,38 @@ const SANDBOX_POLICIES = new Set(["read-only", "workspace-write", "danger-full-a
  * want codex's sandbox as defense-in-depth. An unknown value falls back to the
  * default rather than letting codex reject the turn/start.
  */
-function codexPolicies(): { approvalPolicy: string; sandboxPolicy: string } {
+function codexPolicies(): { approvalPolicy: string; sandboxMode: SandboxMode } {
   const approval = process.env.CODEX_APPROVAL_POLICY?.trim();
-  const sandbox = process.env.CODEX_SANDBOX_POLICY?.trim();
+  const sandbox = process.env.CODEX_SANDBOX_POLICY?.trim() as SandboxMode | undefined;
   return {
     approvalPolicy: approval && APPROVAL_POLICIES.has(approval) ? approval : "untrusted",
-    sandboxPolicy: sandbox && SANDBOX_POLICIES.has(sandbox) ? sandbox : "danger-full-access",
+    sandboxMode: sandbox && SANDBOX_MODES.has(sandbox) ? sandbox : "danger-full-access",
   };
+}
+
+/**
+ * Map an operator-facing {@link SandboxMode} to codex's `SandboxPolicy` wire
+ * value — an INTERNALLY-TAGGED enum (`{type: "..."}`, camelCase variants), NOT
+ * the bare kebab string. Sending the string trips codex with
+ * `invalid type: string "...", expected internally tagged enum
+ * SandboxPolicyDeserialize` at turn/start. Shapes verified live against
+ * @openai/codex@0.144.1 `generate-ts` + a real turn.
+ */
+function sandboxPolicyWire(mode: SandboxMode, workdir: string): Record<string, unknown> {
+  switch (mode) {
+    case "read-only":
+      return { type: "readOnly", networkAccess: false };
+    case "workspace-write":
+      return {
+        type: "workspaceWrite",
+        writableRoots: [workdir],
+        networkAccess: false,
+        excludeTmpdirEnvVar: false,
+        excludeSlashTmp: false,
+      };
+    default: // "danger-full-access" — codeoid is the trust authority.
+      return { type: "dangerFullAccess" };
+  }
 }
 
 export class CodexProvider implements SessionProvider {
@@ -250,7 +287,7 @@ export class CodexProvider implements SessionProvider {
     this.#pendingHistorySeed = null;
     const text = seed ? `${seed}\n\n${opts.userMessage}` : opts.userMessage;
 
-    const { approvalPolicy, sandboxPolicy } = codexPolicies();
+    const { approvalPolicy, sandboxMode } = codexPolicies();
     const result = (await this.#proc!.request("turn/start", {
       threadId: this.#threadId,
       input: [{ type: "text", text, text_elements: [] }],
@@ -260,7 +297,7 @@ export class CodexProvider implements SessionProvider {
       // approved actions (sandbox off) instead of re-sandboxing them (which
       // fails wherever bubblewrap can't init). See codexPolicies().
       approvalPolicy,
-      sandboxPolicy,
+      sandboxPolicy: sandboxPolicyWire(sandboxMode, opts.workdir),
       ...(opts.model ? { model: opts.model } : {}),
     })) as { turn?: { id?: string } };
     this.#currentTurnId = result.turn?.id ?? null;
@@ -310,11 +347,11 @@ export class CodexProvider implements SessionProvider {
         /* fall through to thread/start */
       }
     }
-    const { approvalPolicy, sandboxPolicy } = codexPolicies();
+    const { approvalPolicy, sandboxMode } = codexPolicies();
     const started = (await this.#proc.request("thread/start", {
       cwd: opts.workdir,
       approvalPolicy,
-      sandboxPolicy,
+      sandboxPolicy: sandboxPolicyWire(sandboxMode, opts.workdir),
       ...(opts.systemPromptAppend ? { developerInstructions: opts.systemPromptAppend } : {}),
     })) as { thread?: { id?: string } };
     if (!started.thread?.id) throw new Error("codex thread/start returned no thread id");

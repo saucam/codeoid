@@ -9,11 +9,19 @@
  *                  then runs or skips the item based on the decision
  *   "auto-tool"  → item/completed for a command codex ran WITHOUT asking
  *   "ask-user"   → server→client item/tool/requestUserInput (select)
+ *   "echo-policy"→ agentMessage with the approval/sandbox policies received
  *   "echo-prompt"→ agentMessage containing the full received prompt
  *   default      → two agentMessage deltas + completed message
  *
  * Every turn ends with turn/completed carrying usage.
+ *
+ * thread/start + turn/start enforce the same `SandboxPolicy` shape the REAL
+ * codex does (see fake-codex-validate.ts) — a bare-kebab-string sandboxPolicy
+ * is rejected with codex's own serde error, so the #163 wire-shape regression
+ * can't slip through offline again.
  */
+
+import { sandboxPolicyError } from "./fake-codex-validate.js";
 
 const enc = new TextEncoder();
 function send(obj: unknown): void {
@@ -158,11 +166,14 @@ async function handle(frame: Record<string, unknown>): Promise<void> {
       break;
     case "initialized":
       break;
-    case "thread/start":
+    case "thread/start": {
+      const bad = sandboxPolicyError(params.sandboxPolicy);
+      if (bad) return void send({ id, error: { code: -32602, message: bad } });
       lastThreadPolicies = { approvalPolicy: params.approvalPolicy, sandboxPolicy: params.sandboxPolicy };
       send({ id, result: { thread: { id: "codex-thread-1" } } });
       send({ method: "thread/started", params: { thread: { id: "codex-thread-1" } } });
       break;
+    }
     case "thread/resume":
       send({ id, result: { thread: { id: String(params.threadId ?? "codex-thread-1") } } });
       break;
@@ -177,6 +188,8 @@ async function handle(frame: Record<string, unknown>): Promise<void> {
       });
       break;
     case "turn/start": {
+      const bad = sandboxPolicyError(params.sandboxPolicy);
+      if (bad) return void send({ id, error: { code: -32602, message: bad } });
       lastTurnPolicies = { approvalPolicy: params.approvalPolicy, sandboxPolicy: params.sandboxPolicy };
       send({ id, result: { turn: { id: "turn-1" } } });
       const input = params.input as Array<{ type: string; text?: string }> | undefined;
@@ -195,6 +208,5 @@ async function handle(frame: Record<string, unknown>): Promise<void> {
       break;
   }
 }
-
-// Module scope (avoids global-script collisions with other fixtures under tsc).
-export {};
+// This file is a module (see the import above), so no explicit `export {}`
+// is needed to avoid global-script collisions with other fixtures under tsc.
