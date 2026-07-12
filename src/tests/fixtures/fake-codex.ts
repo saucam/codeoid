@@ -208,6 +208,5 @@ async function handle(frame: Record<string, unknown>): Promise<void> {
       break;
   }
 }
-
-// Module scope (avoids global-script collisions with other fixtures under tsc).
-export {};
+// This file is a module (see the import above), so no explicit `export {}`
+// is needed to avoid global-script collisions with other fixtures under tsc.

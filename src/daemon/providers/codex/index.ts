@@ -141,8 +141,7 @@ function sandboxPolicyWire(mode: SandboxMode, workdir: string): Record<string, u
         excludeTmpdirEnvVar: false,
         excludeSlashTmp: false,
       };
-    case "danger-full-access":
-    default:
+    default: // "danger-full-access" — codeoid is the trust authority.
       return { type: "dangerFullAccess" };
   }
 }
