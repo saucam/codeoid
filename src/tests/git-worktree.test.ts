@@ -7,7 +7,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { execFile } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -100,6 +100,31 @@ describe("createForkWorktree", () => {
     // Neither stomped the other — physically separate directories.
     expect(readFileSync(join(wt.path, "file.txt"), "utf8")).toBe("fork-only change\n");
     expect(readFileSync(join(repo, "file.txt"), "utf8")).toBe("parent-only change\n");
+  });
+
+  it("preserves the parent's subdirectory in the fork's workdir (path stays the root)", async () => {
+    mkdirSync(join(repo, "packages", "api"), { recursive: true });
+    writeFileSync(join(repo, "packages", "api", "x.txt"), "a\n");
+    await g(["add", "."], repo);
+    await g(["commit", "-m", "subdir"], repo);
+    writeFileSync(join(repo, "packages", "api", "x.txt"), "a\nWIP\n"); // dirty edit in the subdir
+
+    const wt = await createForkWorktree({
+      workdir: join(repo, "packages", "api"),
+      label: "sub",
+      shortId: "55556666",
+    });
+
+    // path = worktree ROOT (for git ops); workdir = root + the parent's subdir.
+    expect(wt.workdir).toBe(join(wt.path, "packages", "api"));
+    expect(existsSync(wt.workdir)).toBe(true);
+    // The carried edit is present at the subdir path.
+    expect(readFileSync(join(wt.workdir, "x.txt"), "utf8")).toBe("a\nWIP\n");
+  });
+
+  it("workdir equals path when the parent is at the checkout root", async () => {
+    const wt = await createForkWorktree({ workdir: repo, label: "root", shortId: "77778888" });
+    expect(wt.workdir).toBe(wt.path);
   });
 
   it("rejects an unborn repo (no commits)", async () => {

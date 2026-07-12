@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -455,5 +455,28 @@ describe("SessionManager session.fork — git worktree isolation", () => {
       .map((r) => r.message)
       .find((m) => m.type === "session.message" && (m as { metadata?: { event?: string } }).metadata?.event === "fork.workdir");
     expect(warn).toBeDefined();
+  });
+
+  it("W4: a fork of a session working in a repo SUBDIR opens in the equivalent worktree subdir", async () => {
+    const repo = await makeGitRepoWithDirtyEdit();
+    const sub = join(repo, "packages", "api");
+    mkdirSync(sub, { recursive: true });
+    writeFileSync(join(sub, "x.txt"), "a\n");
+    await gitIn(["add", "."], repo);
+    await gitIn(["commit", "-m", "subdir"], repo);
+
+    const { registry } = makeRegistry();
+    const manager = makeManager(registry);
+    const c = client(AUTH);
+    const parentId = await createIn(manager, c, sub); // parent runs in the subdir
+    await sendAndSettle(manager, c, parentId, "hello");
+
+    const resp = await manager.handle({ type: "session.fork", id: "w4", sessionId: parentId }, AUTH, c);
+    const fork = (resp as { data: { workdir: string; worktree?: { path: string } } }).data;
+    expect(fork.worktree).toBeDefined();
+    // Fork opens in <worktree-root>/packages/api; the stored worktree path is the ROOT.
+    expect(fork.workdir).toBe(join(fork.worktree!.path, "packages", "api"));
+    expect(fork.workdir).not.toBe(fork.worktree!.path);
+    expect(existsSync(fork.workdir)).toBe(true);
   });
 });

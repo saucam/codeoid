@@ -101,8 +101,17 @@ async function mainWorktreeRoot(workdir: string): Promise<string> {
 }
 
 export interface ForkWorktree {
-  /** Absolute path of the created worktree directory. */
+  /** Absolute path of the created worktree ROOT — used for git ops (removal). */
   path: string;
+  /**
+   * The fork's ACTIVE working directory: the worktree root joined with the
+   * parent's subdirectory within its own checkout. When the parent session
+   * worked in a repo subdir (e.g. `packages/api`), the fork opens in the
+   * equivalent subdir of the new worktree, not its root — so relative paths,
+   * tooling, and scripts keep working. Equals `path` when the parent was at
+   * the checkout root.
+   */
+  workdir: string;
   /** Branch checked out in the worktree (e.g. "codeoid/fix-login-a1b2c3"). */
   branch: string;
 }
@@ -164,7 +173,22 @@ export async function createForkWorktree(opts: {
     }
   }
 
-  return { path: worktreePath, branch };
+  // Preserve the parent's subdirectory within its checkout: if the session was
+  // working in `<repo>/packages/api`, the fork should open in
+  // `<worktree>/packages/api`, not the worktree root. Relative to the PARENT's
+  // OWN worktree top (handles a parent that is itself a linked worktree).
+  let workdir = worktreePath;
+  try {
+    const parentTop = (await git(["rev-parse", "--show-toplevel"], opts.workdir)).trim();
+    const rel = path.relative(parentTop, opts.workdir);
+    if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) {
+      workdir = path.join(worktreePath, rel);
+    }
+  } catch {
+    // Fall back to the worktree root — never fail the fork over a subdir hint.
+  }
+
+  return { path: worktreePath, workdir, branch };
 }
 
 /**

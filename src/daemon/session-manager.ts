@@ -1203,7 +1203,9 @@ export class SessionManager {
             label: msg.name ?? parentInfo.name,
             shortId: worktreeShortId,
           });
-          forkWorkdir = wt.path;
+          // Fork runs in the parent's equivalent subdir of the worktree; the
+          // worktree ROOT (wt.path) is what we remove on destroy.
+          forkWorkdir = wt.workdir;
           worktree = { path: wt.path, branch: wt.branch, createdByCodeoid: true };
         } catch (err) {
           const reason = err instanceof Error ? err.message : String(err);
