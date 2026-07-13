@@ -617,7 +617,13 @@ const ForkButton: Component<{
               <input
                 type="checkbox"
                 checked={fromCurrentState()}
-                onChange={(e) => setFromCurrentState(e.currentTarget.checked)}
+                onChange={(e) => {
+                  const on = e.currentTarget.checked;
+                  setFromCurrentState(on);
+                  // Switching to base mode → default the branch to "main" so the
+                  // common "fork off main" is one step (still editable/clearable).
+                  if (!on && baseBranch().trim() === "") setBaseBranch("main");
+                }}
                 title="Carry the parent's current uncommitted changes into the fork. Off = branch clean from a base."
               />
               <span>Fork from current state</span>

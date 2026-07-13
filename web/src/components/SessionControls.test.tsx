@@ -429,15 +429,15 @@ describe("ForkButton", () => {
     expect(requestMock.mock.calls[0]![0]).not.toHaveProperty("baseBranch");
   });
 
-  it("sends baseBranch after turning off 'Fork from current state' and entering a branch", async () => {
+  it("toggling off 'Fork from current state' prefills the branch with 'main' and forks from it", async () => {
     requestMock.mockResolvedValueOnce({ id: "fork-base", name: "s (fork)", providerId: "claude" });
     mockAuth(["claude"]);
     ingestSessionList([sess("claude")]);
     focusSession("s");
     const { getByTitle, getByText, getByPlaceholderText } = render(() => <SessionControls />);
     fireEvent.click(getByTitle(FORK_TITLE));
-    fireEvent.click(getByText("Fork from current state")); // off → base input enabled
-    fireEvent.input(getByPlaceholderText(/base branch/), { target: { value: "main" } });
+    fireEvent.click(getByText("Fork from current state")); // off → input enabled + prefilled "main"
+    expect((getByPlaceholderText(/base branch/) as HTMLInputElement).value).toBe("main");
     fireEvent.click(getByText("fork (same backend)"));
     await waitFor(() =>
       expect(requestMock).toHaveBeenCalledWith(
@@ -446,13 +446,14 @@ describe("ForkButton", () => {
     );
   });
 
-  it("blocks the fork action when 'from a base' is selected but no branch is entered", async () => {
+  it("blocks the fork action when 'from a base' is selected but the branch is cleared", async () => {
     mockAuth(["claude"]);
     ingestSessionList([sess("claude")]);
     focusSession("s");
-    const { getByTitle, getByText } = render(() => <SessionControls />);
+    const { getByTitle, getByText, getByPlaceholderText } = render(() => <SessionControls />);
     fireEvent.click(getByTitle(FORK_TITLE));
-    fireEvent.click(getByText("Fork from current state")); // off → base required
+    fireEvent.click(getByText("Fork from current state")); // off → prefilled "main"
+    fireEvent.input(getByPlaceholderText(/base branch/), { target: { value: "" } }); // clear it
     const forkBtn = getByText("fork (same backend)").closest("button") as HTMLButtonElement;
     expect(forkBtn.disabled).toBe(true);
     fireEvent.click(forkBtn);
