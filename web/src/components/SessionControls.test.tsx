@@ -361,24 +361,26 @@ describe("WorktreeChip", () => {
 describe("ForkButton", () => {
   const FORK_TITLE = "Fork this conversation into a new session (/fork)";
 
-  it("forks in place (same backend) — no providerId; isolate on by default", async () => {
+  it("forks in place (same backend) — no providerId; isolate on, base defaults to main", async () => {
     requestMock.mockResolvedValueOnce({ id: "fork-1", name: "s (fork)", providerId: "claude" });
     mockAuth(["claude"]);
     ingestSessionList([sess("claude")]);
     focusSession("s");
-    const { getByTitle, getByText } = render(() => <SessionControls />);
+    const { getByTitle, getByText, getByDisplayValue } = render(() => <SessionControls />);
     fireEvent.click(getByTitle(FORK_TITLE)); // open the dropdown
+    expect(getByDisplayValue("main")).toBeTruthy(); // base branch prefilled with main
     fireEvent.click(getByText("fork (same backend)"));
     await waitFor(() =>
       expect(requestMock).toHaveBeenCalledWith(
         expect.objectContaining({ type: "session.fork", sessionId: "s" }),
       ),
     );
-    const call = requestMock.mock.calls[0]![0];
+    const call = requestMock.mock.calls[0]![0] as { baseBranch?: string };
     expect(call).not.toHaveProperty("providerId");
-    // isolate defaults on → we DON'T send isolate:false, and no baseBranch.
+    // isolate defaults on → we DON'T send isolate:false.
     expect(call).not.toHaveProperty("isolate");
-    expect(call).not.toHaveProperty("baseBranch");
+    // Base branch is prefilled with "main", so a default fork branches off main.
+    expect(call.baseBranch).toBe("main");
   });
 
   it("forks WHILE the session is mid-turn (status=thinking) — not gated on the turn", async () => {

@@ -544,7 +544,11 @@ const ForkButton: Component<{
   const [error, setError] = createSignal<string | null>(null);
   // Fork options (apply to whichever action the user clicks).
   const [isolate, setIsolate] = createSignal(true);
-  const [baseBranch, setBaseBranch] = createSignal("");
+  // Prefilled with "main" so the common "branch a fresh worktree off main"
+  // flow is one click. Note: with a base set, the fork is a CLEAN checkout of
+  // that ref — it does NOT carry the parent's uncommitted changes (clear the
+  // box to fork from the parent's current state instead).
+  const [baseBranch, setBaseBranch] = createSignal("main");
   let rootEl: HTMLDivElement | undefined;
   useDismissable(() => rootEl, open, () => setOpen(false));
   const providers = () => authIdentity()?.providers ?? [];
@@ -644,9 +648,11 @@ const ForkButton: Component<{
             <div class="border-t border-danger/40 px-3 py-1.5 text-[11px] text-danger">{error()}</div>
           </Show>
           <div class="border-t border-border px-3 py-1.5 text-[10px] text-fg-faint">
-            {isolate()
-              ? "Runs in its own git worktree + branch — the original is untouched."
-              : "⚠️ Shares the parent's working directory — concurrent edits can collide."}
+            {!isolate()
+              ? "⚠️ Shares the parent's working directory — concurrent edits can collide."
+              : baseBranch().trim()
+                ? `Clean branch off \`${baseBranch().trim()}\` in its own worktree — parent untouched.`
+                : "Its own worktree carrying your current changes — parent untouched."}
           </div>
         </div>
       </Show>
