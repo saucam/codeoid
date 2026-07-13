@@ -55,7 +55,15 @@ import type {
   DaemonMessage,
   ModelInfo,
   SessionInfo,
+  SessionWorktree,
 } from "../protocol/types.js";
+import { randomUUID } from "node:crypto";
+import {
+  createForkWorktree,
+  currentBranch,
+  isGitRepo,
+  removeForkWorktree,
+} from "./git-worktree.js";
 import type { DailyUsageBucket, LifetimeUsageTotals } from "./memory/store.js";
 
 /**
@@ -298,6 +306,7 @@ export class SessionManager {
           role: meta.role,
           providerId: meta.providerId,
           forkedFrom: meta.forkedFrom,
+          worktree: meta.worktree,
           defaultModel:
             meta.role === "conductor" ? this.#config?.conductor?.model : undefined,
           fleet:
@@ -1165,30 +1174,100 @@ export class SessionManager {
     // Branch point = conversation rounds (user turns) carried over — the
     // human "you forked after N prompts" the lineage chip shows.
     const atTurn = history.filter((t) => t.role === "user").length;
-    const fork = new Session({
-      name: msg.name ?? `${parentInfo.name} (fork)`,
-      workdir: parent.workdir,
-      auth,
-      store: this.#store,
-      transcriptStore: this.#transcriptStore,
-      providers: this.#providers,
-      hooks: this.#hooks,
-      providerId,
-      forkedFrom: {
-        sessionId: parentInfo.id,
-        name: parentInfo.name,
-        atTurn,
-      },
-      identityManager: this.#identityManager,
-      memory: this.#memory,
-      config: this.#config,
-      compressionRegistry: this.#compressionRegistry,
-      _testProvider: this.#testProviderFactory?.(),
-      onStatusChange: this.#statusObserver,
-      onModels: (pid, m) => this._cacheModels(pid, m),
-    });
 
-    await fork.primeFromFork(history, transcriptRows, sizeHints);
+    // Git isolation: a fork must not share the parent's working tree, or two
+    // agents editing the same files collide. Default: give the fork its OWN
+    // worktree + branch carrying the parent's CURRENT tracked state (parent
+    // untouched — see git-worktree.ts). Opt out with isolate:false; bind an
+    // existing dir with workdir; degrade to shared (with a surfaced note) when
+    // the workdir isn't a git repo or worktree creation fails.
+    // Uniqueness suffix for the worktree branch/dir. Independent of the fork's
+    // session id — the Session mints its own id, and passing existingId would
+    // make the constructor treat the fork as a RESUME and skip its initial
+    // meta write (dropping forkedFrom/worktree).
+    const worktreeShortId = randomUUID().slice(0, 8);
+    let forkWorkdir = parent.workdir;
+    let worktree: SessionWorktree | undefined;
+    let workdirNote: string | undefined;
+    if (msg.workdir) {
+      // Bind mode: run in a dir/worktree the user manages; record its branch
+      // but never create or (later) remove it. Normalize + validate exactly
+      // like session.create — expand ~, canonicalize, and reject a missing,
+      // protected, or out-of-safe-root path (this bypassed those checks).
+      const bound = normalizeWorkdir(msg.workdir);
+      if (!bound) {
+        return {
+          type: "response.error",
+          requestId: msg.id,
+          error: `Working directory not found: ${msg.workdir}`,
+          code: "invalid_request",
+        };
+      }
+      forkWorkdir = bound;
+      const branch = await currentBranch(bound);
+      if (branch) worktree = { path: bound, branch, createdByCodeoid: false };
+    } else if (msg.isolate !== false) {
+      if (await isGitRepo(parent.workdir)) {
+        try {
+          const wt = await createForkWorktree({
+            workdir: parent.workdir,
+            label: msg.name ?? parentInfo.name,
+            shortId: worktreeShortId,
+          });
+          // Fork runs in the parent's equivalent subdir of the worktree; the
+          // worktree ROOT (wt.path) is what we remove on destroy.
+          forkWorkdir = wt.workdir;
+          worktree = { path: wt.path, branch: wt.branch, createdByCodeoid: true };
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          workdirNote = `⚠️ Could not create an isolated git worktree (${reason}). This fork SHARES the parent's working directory — concurrent file edits in both sessions will collide.`;
+        }
+      } else {
+        workdirNote =
+          "⚠️ The parent's workdir isn't a git repo, so this fork SHARES it — " +
+          "concurrent file edits in both sessions will collide.";
+      }
+    }
+
+    let fork: Session;
+    try {
+      fork = new Session({
+        name: msg.name ?? `${parentInfo.name} (fork)`,
+        workdir: forkWorkdir,
+        auth,
+        store: this.#store,
+        transcriptStore: this.#transcriptStore,
+        providers: this.#providers,
+        hooks: this.#hooks,
+        providerId,
+        forkedFrom: {
+          sessionId: parentInfo.id,
+          name: parentInfo.name,
+          atTurn,
+        },
+        worktree,
+        identityManager: this.#identityManager,
+        memory: this.#memory,
+        config: this.#config,
+        compressionRegistry: this.#compressionRegistry,
+        _testProvider: this.#testProviderFactory?.(),
+        onStatusChange: this.#statusObserver,
+        onModels: (pid, m) => this._cacheModels(pid, m),
+      });
+      await fork.primeFromFork(history, transcriptRows, sizeHints, workdirNote);
+    } catch (err) {
+      // Orphan cleanup: if building the fork failed after we created its
+      // worktree, remove it so no dangling worktree + branch is left behind.
+      if (worktree?.createdByCodeoid) {
+        await removeForkWorktree({
+          workdir: parent.workdir,
+          worktreePath: worktree.path,
+          branch: worktree.branch,
+          deleteBranch: true,
+        }).catch(() => {});
+      }
+      throw err;
+    }
 
     this.#sessions.set(fork.id, fork);
     this.#rateLimiter.recordCreation(auth.sub);
@@ -1196,7 +1275,7 @@ export class SessionManager {
       auth.sub,
       "session.fork",
       fork.id,
-      `from=${msg.sessionId} provider=${providerId ?? "default"} turns=${history.length}`,
+      `from=${msg.sessionId} provider=${providerId ?? "default"} turns=${history.length} worktree=${worktree?.branch ?? "shared"}`,
     );
 
     return { type: "response.ok", requestId: msg.id, data: fork.toInfo() };

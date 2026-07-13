@@ -47,7 +47,9 @@ import type {
   ContentPart,
   ProviderCommand,
   ToolState,
+  SessionWorktree,
 } from "../protocol/types.js";
+import { removeForkWorktree } from "./git-worktree.js";
 import { authToIdentity, CAPABILITIES, isActiveStatus, SYSTEM_IDENTITY } from "../protocol/types.js";
 import type { Store } from "./store.js";
 import type { AgentIdentityManager } from "./agent-identity.js";
@@ -193,6 +195,11 @@ export interface SessionCreateOptions {
    */
   forkedFrom?: { sessionId: string; name: string; atTurn: number };
   /**
+   * Git worktree backing this session's workdir (fork isolation / bind).
+   * Set by SessionManager#fork, persisted in meta, surfaced in SessionInfo.
+   */
+  worktree?: SessionWorktree;
+  /**
    * Pre-built codeoid_fleet MCP server (conductor sessions only). Built by
    * the SessionManager because its tools close over the manager's tenant-
    * scoped session view; the Session just hands it to the provider.
@@ -259,6 +266,8 @@ export class Session {
   readonly role?: "conductor" | "worker";
   /** Fork lineage (set from opts / restored from meta). */
   readonly forkedFrom?: { sessionId: string; name: string; atTurn: number };
+  /** Git worktree backing workdir, when isolated (set from opts / meta). */
+  readonly worktree?: SessionWorktree;
   readonly createdBy: string;
   readonly createdAt: string;
   /**
@@ -527,6 +536,7 @@ export class Session {
     this.workdir = opts.workdir;
     this.role = opts.role;
     this.forkedFrom = opts.forkedFrom;
+    this.worktree = opts.worktree;
     this.#onStatusChange = opts.onStatusChange;
     this.#workerShape = opts.workerShape;
     if (opts.initialMode) {
@@ -649,6 +659,7 @@ export class Session {
         role: this.role,
         providerId: this.#provider.id,
         forkedFrom: this.forkedFrom,
+        worktree: this.worktree,
         // Fire-and-forget: saveMeta's write chain owns the failure log; an
         // unconsumed rejection here would be an unhandled-rejection crash.
       }).catch(() => {});
@@ -1804,6 +1815,17 @@ export class Session {
     await this.#identityManager?.deactivateSessionAgent(this.id);
     this.#store.deleteSession(this.id);
     await this.#transcriptStore.delete(this.id);
+    // Remove the isolated worktree codeoid created for this fork (best-effort,
+    // never blocks destroy). Ownership-gated: only worktrees WE created
+    // (createdByCodeoid) are removed; a user-bound worktree is left alone. The
+    // branch is KEPT by default so any work committed in the fork survives.
+    if (this.worktree?.createdByCodeoid) {
+      await removeForkWorktree({
+        workdir: this.worktree.path,
+        worktreePath: this.worktree.path,
+        branch: this.worktree.branch,
+      }).catch(() => {});
+    }
   }
 
   /**
@@ -1891,6 +1913,9 @@ export class Session {
     history: readonly CanonicalTurn[],
     transcript: DaemonMessage[],
     sizeHints?: ReadonlyArray<number | undefined>,
+    /** Optional system note to surface in the fork's scrollback (e.g. a
+     *  "shares the parent's workdir — no isolation" warning). */
+    note?: string,
   ): Promise<void> {
     this.#accumulator.seed(history);
     // Replay the parent's transcript into the fork for visibility (reusing
@@ -1917,6 +1942,13 @@ export class Session {
       });
     }
     await this.#seedProviderFromHistory();
+    if (note) {
+      const msg = this.#makeMessage("info", note, SYSTEM_IDENTITY, undefined, undefined, {
+        event: "fork.workdir",
+      });
+      this.#persistAndBuffer(msg);
+      this.#broadcastRaw(msg);
+    }
   }
 
   restoreScrollback(
@@ -1981,6 +2013,7 @@ export class Session {
       model: this.#model ?? undefined,
       fallbackModel: this.#fallbackModel ?? undefined,
       forkedFrom: this.forkedFrom,
+      worktree: this.worktree,
     };
   }
 
@@ -3678,6 +3711,7 @@ export class Session {
       role: this.role,
       providerId: this.#provider.id,
       forkedFrom: this.forkedFrom,
+      worktree: this.worktree,
     }).catch(() => {});
   }
 }

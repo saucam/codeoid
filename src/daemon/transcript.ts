@@ -16,7 +16,7 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { appendFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { DaemonMessage, SessionMessage, SessionStatus } from "../protocol/types.js";
+import type { DaemonMessage, SessionMessage, SessionStatus, SessionWorktree } from "../protocol/types.js";
 
 /** Persistent entry in the transcript. */
 export interface TranscriptEntry {
@@ -95,6 +95,8 @@ export interface TranscriptMeta {
   providerId?: string;
   /** Fork lineage (session.fork). Absent = not a fork. */
   forkedFrom?: { sessionId: string; name: string; atTurn: number };
+  /** Git worktree backing workdir (fork isolation / bind). Absent = shared. */
+  worktree?: SessionWorktree;
 }
 
 /** Types we persist. Skip ephemeral events like heartbeats. */

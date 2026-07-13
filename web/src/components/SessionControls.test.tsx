@@ -334,6 +334,30 @@ describe("ProviderPicker", () => {
   });
 });
 
+describe("WorktreeChip", () => {
+  it("shows the isolated worktree branch when the session has one", async () => {
+    mockAuth(["claude"]);
+    ingestSessionList([
+      {
+        ...sess("claude"),
+        worktree: { path: "/repo-worktrees/fix-a1b2", branch: "codeoid/fix-a1b2", createdByCodeoid: true },
+      } as SessionInfo,
+    ]);
+    focusSession("s");
+    const { getByText, getByTitle } = render(() => <SessionControls />);
+    expect(getByText("codeoid/fix-a1b2")).toBeTruthy();
+    expect(getByTitle(/Isolated git worktree/)).toBeTruthy();
+  });
+
+  it("renders no chip when the session shares its workdir (no worktree)", async () => {
+    mockAuth(["claude"]);
+    ingestSessionList([sess("claude")]);
+    focusSession("s");
+    const { queryByTitle } = render(() => <SessionControls />);
+    expect(queryByTitle(/Isolated git worktree/)).toBeNull();
+  });
+});
+
 describe("ForkButton", () => {
   const PLAIN_TITLE = "Branch this conversation into a new session (/fork)";
   const MENU_TITLE =
