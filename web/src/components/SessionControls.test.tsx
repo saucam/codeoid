@@ -359,45 +359,81 @@ describe("WorktreeChip", () => {
 });
 
 describe("ForkButton", () => {
-  const PLAIN_TITLE = "Branch this conversation into a new session (/fork)";
-  const MENU_TITLE =
-    "Branch this conversation — same backend, or continue it on another (/fork [backend])";
+  const FORK_TITLE = "Fork this conversation into a new session (/fork)";
 
-  it("single-backend daemon: a plain fork button that forks in place", async () => {
+  it("forks in place (same backend) — no providerId; isolate on by default", async () => {
     requestMock.mockResolvedValueOnce({ id: "fork-1", name: "s (fork)", providerId: "claude" });
     mockAuth(["claude"]);
     ingestSessionList([sess("claude")]);
     focusSession("s");
-    const { getByTitle } = render(() => <SessionControls />);
-    fireEvent.click(getByTitle(PLAIN_TITLE));
+    const { getByTitle, getByText } = render(() => <SessionControls />);
+    fireEvent.click(getByTitle(FORK_TITLE)); // open the dropdown
+    fireEvent.click(getByText("fork (same backend)"));
     await waitFor(() =>
       expect(requestMock).toHaveBeenCalledWith(
         expect.objectContaining({ type: "session.fork", sessionId: "s" }),
       ),
     );
-    // The plain fork carries NO providerId (same backend).
-    expect(requestMock.mock.calls[0]![0]).not.toHaveProperty("providerId");
+    const call = requestMock.mock.calls[0]![0];
+    expect(call).not.toHaveProperty("providerId");
+    // isolate defaults on → we DON'T send isolate:false, and no baseBranch.
+    expect(call).not.toHaveProperty("isolate");
+    expect(call).not.toHaveProperty("baseBranch");
   });
 
   it("forks WHILE the session is mid-turn (status=thinking) — not gated on the turn", async () => {
     // Repro guard for "clicked fork while the model was streaming and nothing
-    // happened". The daemon accepts fork mid-turn (snapshots history-so-far,
-    // parent keeps streaming); the button must fire regardless of status.
+    // happened". The daemon accepts fork mid-turn; the control must work
+    // regardless of status.
     requestMock.mockResolvedValueOnce({ id: "fork-mid", name: "s (fork)", providerId: "claude" });
     mockAuth(["claude"]);
     ingestSessionList([sess("claude", "thinking")]);
     focusSession("s");
-    const { getByTitle } = render(() => <SessionControls />);
+    const { getByTitle, getByText } = render(() => <SessionControls />);
     // Sanity: the session really is mid-turn — the interrupt button is enabled.
     const interrupt = getByTitle(/Interrupt the running turn/) as HTMLButtonElement;
     expect(interrupt.disabled).toBe(false);
-    // Fork must still fire (button is not gated on turn status).
-    const fork = getByTitle(PLAIN_TITLE) as HTMLButtonElement;
+    const fork = getByTitle(FORK_TITLE) as HTMLButtonElement;
     expect(fork.disabled).toBe(false);
     fireEvent.click(fork);
+    fireEvent.click(getByText("fork (same backend)"));
     await waitFor(() =>
       expect(requestMock).toHaveBeenCalledWith(
         expect.objectContaining({ type: "session.fork", sessionId: "s" }),
+      ),
+    );
+  });
+
+  it("sends isolate:false and a baseBranch when the controls are set", async () => {
+    requestMock.mockResolvedValueOnce({ id: "fork-opt", name: "s (fork)", providerId: "claude" });
+    mockAuth(["claude"]);
+    ingestSessionList([sess("claude")]);
+    focusSession("s");
+    const { getByTitle, getByText, getByPlaceholderText } = render(() => <SessionControls />);
+    fireEvent.click(getByTitle(FORK_TITLE));
+    // Set a base branch, then turn isolation OFF (base is ignored when off).
+    fireEvent.input(getByPlaceholderText(/base branch/), { target: { value: "main" } });
+    fireEvent.click(getByText("Isolated git worktree")); // toggle checkbox off via label
+    fireEvent.click(getByText("fork (same backend)"));
+    await waitFor(() =>
+      expect(requestMock).toHaveBeenCalledWith(expect.objectContaining({ type: "session.fork", isolate: false })),
+    );
+    // baseBranch is dropped when isolation is off.
+    expect(requestMock.mock.calls[0]![0]).not.toHaveProperty("baseBranch");
+  });
+
+  it("sends baseBranch when isolating from a base ref", async () => {
+    requestMock.mockResolvedValueOnce({ id: "fork-base", name: "s (fork)", providerId: "claude" });
+    mockAuth(["claude"]);
+    ingestSessionList([sess("claude")]);
+    focusSession("s");
+    const { getByTitle, getByText, getByPlaceholderText } = render(() => <SessionControls />);
+    fireEvent.click(getByTitle(FORK_TITLE));
+    fireEvent.input(getByPlaceholderText(/base branch/), { target: { value: "main" } });
+    fireEvent.click(getByText("fork (same backend)"));
+    await waitFor(() =>
+      expect(requestMock).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "session.fork", baseBranch: "main" }),
       ),
     );
   });
@@ -408,8 +444,7 @@ describe("ForkButton", () => {
     ingestSessionList([sess("claude")]);
     focusSession("s");
     const { getByTitle, getByText } = render(() => <SessionControls />);
-    fireEvent.click(getByTitle(MENU_TITLE));
-    // The "continue on" section lists the OTHER backends.
+    fireEvent.click(getByTitle(FORK_TITLE));
     expect(getByText("continue on")).toBeTruthy();
     expect(getByText("codex")).toBeTruthy();
     fireEvent.click(getByText("codex"));
@@ -428,7 +463,7 @@ describe("ForkButton", () => {
     ingestSessionList([sess("claude")]);
     focusSession("s");
     const { getByTitle, getByText, findByText } = render(() => <SessionControls />);
-    fireEvent.click(getByTitle(MENU_TITLE));
+    fireEvent.click(getByTitle(FORK_TITLE));
     fireEvent.click(getByText("fork (same backend)"));
     expect(await findByText(/Cannot fork/)).toBeTruthy();
   });

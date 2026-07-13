@@ -30,6 +30,7 @@
  */
 
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -117,10 +118,32 @@ export interface ForkWorktree {
 }
 
 /**
- * Create an isolated worktree for a fork, carrying the parent's current tracked
- * working state. `workdir` is the PARENT's workdir (any worktree of the repo).
- * The parent is left untouched. Throws {@link WorktreeError} on any git failure
- * so the caller can fall back to a shared workdir.
+ * Resolve a caller-supplied base ref to a commit, fetching once if it isn't
+ * locally resolvable. Rejects a ref that looks like a git flag. Returns the ref
+ * (validated to resolve) to hand to `worktree add`.
+ */
+async function resolveBaseRef(mainRoot: string, ref: string): Promise<string> {
+  if (!ref || ref.startsWith("-")) throw new WorktreeError(`invalid base ref: ${JSON.stringify(ref)}`);
+  const resolves = async (): Promise<boolean> => {
+    try {
+      await git(["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`], mainRoot);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (await resolves()) return ref;
+  await git(["fetch"], mainRoot).catch(() => {}); // best-effort: base may be remote-only
+  if (await resolves()) return ref;
+  throw new WorktreeError(`base ref not found: ${JSON.stringify(ref)}`);
+}
+
+/**
+ * Create an isolated worktree for a fork. By default it carries the parent's
+ * current tracked working state (parent untouched); with `baseBranch` it's a
+ * CLEAN checkout of that ref instead. `workdir` is the PARENT's workdir (any
+ * worktree of the repo). Throws {@link WorktreeError} on any git failure so the
+ * caller can fall back to a shared workdir.
  */
 export async function createForkWorktree(opts: {
   workdir: string;
@@ -128,37 +151,49 @@ export async function createForkWorktree(opts: {
   label: string;
   /** Short unique suffix (e.g. first 8 of the fork's id). */
   shortId: string;
+  /** Branch clean from this ref instead of carrying the parent's state. */
+  baseBranch?: string;
 }): Promise<ForkWorktree> {
   const mainRoot = await mainWorktreeRoot(opts.workdir);
-
-  // Parent HEAD must exist (a repo with no commits can't be worktree'd).
-  let parentHead: string;
-  try {
-    parentHead = (await git(["rev-parse", "HEAD"], opts.workdir)).trim();
-  } catch {
-    throw new WorktreeError("repository has no commits yet (unborn HEAD)");
-  }
 
   const name = `${slug(opts.label)}-${opts.shortId}`;
   const branch = `codeoid/${name}`;
   validateBranchName(branch);
   const worktreePath = path.join(path.dirname(mainRoot), `${path.basename(mainRoot)}-worktrees`, name);
 
-  // Snapshot the parent's dirty tracked state WITHOUT touching it. Empty when
-  // the tree is clean → base the worktree on HEAD directly.
-  const snapshot = (await git(["stash", "create"], opts.workdir)).trim();
-  const base = snapshot || parentHead;
+  // Choose the base commit for the new worktree:
+  //  - baseBranch given → CLEAN checkout of that ref (no parent state carried).
+  //  - otherwise → snapshot the parent's dirty tracked state (mutates nothing);
+  //    empty when clean → base on HEAD.
+  let base: string;
+  let parentHead: string | null = null;
+  let carriedSnapshot = false;
+  if (opts.baseBranch) {
+    base = await resolveBaseRef(mainRoot, opts.baseBranch);
+  } else {
+    try {
+      parentHead = (await git(["rev-parse", "HEAD"], opts.workdir)).trim();
+    } catch {
+      throw new WorktreeError("repository has no commits yet (unborn HEAD)");
+    }
+    const snapshot = (await git(["stash", "create"], opts.workdir)).trim();
+    base = snapshot || parentHead;
+    carriedSnapshot = snapshot.length > 0;
+  }
 
   try {
-    await git(["worktree", "add", "-b", branch, worktreePath, base], mainRoot);
+    // --end-of-options: treat `base` as a rev, never a flag, so a value
+    // starting with '-' can't inject a git option.
+    await git(["worktree", "add", "-b", branch, worktreePath, "--end-of-options", base], mainRoot);
   } catch (err) {
     throw new WorktreeError(
       `git worktree add failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 
-  // Re-materialize the carried changes as uncommitted edits on top of HEAD.
-  if (snapshot) {
+  // Carried-state mode: move the branch tip back to HEAD so the carried changes
+  // show as UNCOMMITTED edits (not a snapshot commit).
+  if (carriedSnapshot && parentHead) {
     try {
       await git(["reset", "--mixed", parentHead], worktreePath);
     } catch (err) {
@@ -176,13 +211,15 @@ export async function createForkWorktree(opts: {
   // Preserve the parent's subdirectory within its checkout: if the session was
   // working in `<repo>/packages/api`, the fork should open in
   // `<worktree>/packages/api`, not the worktree root. Relative to the PARENT's
-  // OWN worktree top (handles a parent that is itself a linked worktree).
+  // OWN worktree top (handles a parent that is itself a linked worktree). The
+  // existsSync guard matters for baseBranch: the base may not have that subdir.
   let workdir = worktreePath;
   try {
     const parentTop = (await git(["rev-parse", "--show-toplevel"], opts.workdir)).trim();
     const rel = path.relative(parentTop, opts.workdir);
     if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) {
-      workdir = path.join(worktreePath, rel);
+      const candidate = path.join(worktreePath, rel);
+      if (existsSync(candidate)) workdir = candidate;
     }
   } catch {
     // Fall back to the worktree root — never fail the fork over a subdir hint.

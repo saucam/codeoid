@@ -50,6 +50,12 @@ import type {
   SessionWorktree,
 } from "../protocol/types.js";
 import { removeForkWorktree } from "./git-worktree.js";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileP = promisify(execFile);
+/** Max wall-clock for a fork.setup command (deps install can be slow). */
+const FORK_SETUP_TIMEOUT_MS = 600_000;
 import { authToIdentity, CAPABILITIES, isActiveStatus, SYSTEM_IDENTITY } from "../protocol/types.js";
 import type { Store } from "./store.js";
 import type { AgentIdentityManager } from "./agent-identity.js";
@@ -1361,6 +1367,13 @@ export class Session {
    */
   #sendChain: Promise<void> = Promise.resolve();
 
+  /**
+   * Completion promise of a running fork.setup command (or null). The fork's
+   * first turn awaits it in #sendInner so the agent never builds before the
+   * worktree's dependencies are ready. Cleared once awaited.
+   */
+  #pendingSetup: Promise<void> | null = null;
+
   async send(
     text: string,
     sender: AuthContext,
@@ -1415,6 +1428,16 @@ export class Session {
     priority?: "now" | "next" | "later",
   ): Promise<void> {
     this.#store.audit(sender.sub, "session.send", this.id);
+
+    // Fork-setup gate: on a freshly-forked worktree the first turn must wait
+    // for `fork.setup` (e.g. `bun install`) to finish, so the agent never
+    // builds before dependencies are ready. Awaited once; setup failure is
+    // already surfaced as a message, so we don't block the turn on it.
+    if (this.#pendingSetup) {
+      const p = this.#pendingSetup;
+      await p.catch(() => {});
+      if (this.#pendingSetup === p) this.#pendingSetup = null;
+    }
 
     // Snapshot status BEFORE we do anything that might change it. If the
     // session was already working when this send arrived, the user wants
@@ -1888,6 +1911,66 @@ export class Session {
     );
     this.#persistAndBuffer(msg);
     this.#broadcastRaw(msg);
+  }
+
+  /**
+   * Run a `fork.setup` command in this session's (worktree) workdir to make a
+   * freshly-forked worktree buildable — its dependencies (node_modules, .venv,
+   * …) aren't present in a new worktree. Runs in the BACKGROUND (fork stays
+   * cheap); the first turn waits on it via {@link #pendingSetup}. Start,
+   * success, and failure are surfaced as system messages. Best-effort: a failed
+   * setup is reported but never wedges the session. The command comes from
+   * operator config (not the request), so shelling out is trusted.
+   */
+  beginSetup(command: string): void {
+    const start = this.#makeMessage(
+      "info",
+      `⚙️ Preparing the fork's worktree — running setup: ${command}`,
+      SYSTEM_IDENTITY,
+      undefined,
+      undefined,
+      { event: "fork.setup.start", command },
+    );
+    this.#persistAndBuffer(start);
+    this.#broadcastRaw(start);
+
+    const t0 = Date.now();
+    this.#pendingSetup = (async () => {
+      try {
+        await execFileP("sh", ["-c", command], {
+          cwd: this.workdir,
+          timeout: FORK_SETUP_TIMEOUT_MS,
+          maxBuffer: 8 * 1024 * 1024,
+        });
+        const secs = ((Date.now() - t0) / 1000).toFixed(1);
+        const done = this.#makeMessage(
+          "info",
+          `✓ Fork setup finished in ${secs}s — the worktree is ready.`,
+          SYSTEM_IDENTITY,
+          undefined,
+          undefined,
+          { event: "fork.setup.done", durationMs: Date.now() - t0 },
+        );
+        this.#persistAndBuffer(done);
+        this.#broadcastRaw(done);
+      } catch (err) {
+        const e = err as { stderr?: string; message?: string };
+        const detail = (e.stderr && e.stderr.length > 0 ? e.stderr : (e.message ?? String(err)))
+          .toString()
+          .trim()
+          .slice(-600);
+        const fail = this.#makeMessage(
+          "info",
+          `✗ Fork setup failed (\`${command}\`). Build/run may not work until you fix it:\n${detail}`,
+          SYSTEM_IDENTITY,
+          undefined,
+          undefined,
+          { event: "fork.setup.failed" },
+        );
+        this.#persistAndBuffer(fail);
+        this.#broadcastRaw(fail);
+      }
+    })();
   }
 
   /**

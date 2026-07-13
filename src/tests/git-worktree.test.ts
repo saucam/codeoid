@@ -127,6 +127,42 @@ describe("createForkWorktree", () => {
     expect(wt.workdir).toBe(wt.path);
   });
 
+  it("baseBranch: CLEAN checkout of the base ref, ignoring the parent's dirty state; parent untouched", async () => {
+    // Build a divergent base branch 'release' with different content.
+    await g(["checkout", "-b", "release"], repo);
+    writeFileSync(join(repo, "file.txt"), "release-content\n");
+    await g(["commit", "-am", "release commit"], repo);
+    await g(["checkout", "main"], repo); // back to main (clean at init)
+    writeFileSync(join(repo, "file.txt"), "main dirty\n"); // parent dirty state
+
+    const wt = await createForkWorktree({
+      workdir: repo,
+      label: "base",
+      shortId: "basebrnc",
+      baseBranch: "release",
+    });
+
+    // The fork is a clean checkout of 'release' — NOT the parent's dirty state.
+    expect(readFileSync(join(wt.path, "file.txt"), "utf8")).toBe("release-content\n");
+    expect(await g(["status", "--porcelain"], wt.path)).toBe("");
+    expect(await currentBranch(wt.path)).toBe("codeoid/base-basebrnc");
+    // Parent (main) still holds its own dirty edit, untouched.
+    expect(readFileSync(join(repo, "file.txt"), "utf8")).toBe("main dirty\n");
+    expect(await currentBranch(repo)).toBe("main");
+  });
+
+  it("baseBranch: an unknown base ref is rejected", async () => {
+    expect(
+      createForkWorktree({ workdir: repo, label: "x", shortId: "nobrnch0", baseBranch: "no-such-ref" }),
+    ).rejects.toThrow(WorktreeError);
+  });
+
+  it("baseBranch: a ref that looks like a flag is rejected (no injection)", async () => {
+    expect(
+      createForkWorktree({ workdir: repo, label: "x", shortId: "flaginj0", baseBranch: "--upload-pack=evil" }),
+    ).rejects.toThrow(WorktreeError);
+  });
+
   it("rejects an unborn repo (no commits)", async () => {
     const empty = join(tmp, "empty");
     await execFileP("git", ["init", "-b", "main", empty]);

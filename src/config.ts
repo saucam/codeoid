@@ -482,6 +482,15 @@ const RootSchema = z.object({
   dispatch: DispatchSchema,
   providers: ProvidersSchema,
   hooks: HooksSchema,
+  fork: z
+    .object({
+      /** Shell command run once in a freshly-created fork worktree to make it
+       *  buildable (e.g. "bun install", "./gradlew assemble", "make setup").
+       *  Runs asynchronously; the fork's first turn waits for it. Empty = the
+       *  agent bootstraps the worktree itself. */
+      setup: z.string().optional(),
+    })
+    .default({}),
 });
 
 type ParsedConfig = z.infer<typeof RootSchema>;
@@ -573,6 +582,14 @@ export interface CodeoidConfig {
     name: string;
     provider: string;
     model?: string;
+  };
+  /**
+   * session.fork behavior. `setup` is a shell command run once in a new fork
+   * worktree to make it buildable (deps aren't present in a fresh worktree).
+   * Optional; absent = the forked agent bootstraps the worktree itself.
+   */
+  fork?: {
+    setup?: string;
   };
   /**
    * Send-class dispatch queue (P4). Optional in the type so hand-built test
@@ -849,6 +866,7 @@ export function loadConfig(opts: LoadOptions = {}): CodeoidConfig {
     dispatch: parsed.dispatch,
     providers: parsed.providers,
     hooks: parsed.hooks,
+    fork: parsed.fork,
   };
 }
 
