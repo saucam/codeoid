@@ -34,6 +34,11 @@ const SearchModal: Component = () => {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [highlight, setHighlight] = createSignal(0);
+  // Search ACROSS all sessions by default. Previously the modal always scoped
+  // to the focused session's workspace, so content in other sessions never
+  // surfaced ("No matches" despite expecting hits). Toggle narrows to the
+  // current workspace when a session is focused.
+  const [scopeAll, setScopeAll] = createSignal(true);
 
   let inputRef: HTMLInputElement | undefined;
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -71,9 +76,9 @@ const SearchModal: Component = () => {
     }),
   );
 
-  // Debounce + dispatch search on every query change.
+  // Debounce + dispatch search on every query OR scope change.
   createEffect(
-    on(query, async (q) => {
+    on([query, scopeAll], async ([q]) => {
       if (debounceTimer) clearTimeout(debounceTimer);
       const trimmed = q.trim();
       if (trimmed.length < 2) {
@@ -97,7 +102,9 @@ const SearchModal: Component = () => {
               id,
               query: trimmed,
               limit: 10,
-              ...(focusedSession()?.workdir
+              // Cross-session by default; narrow to the focused session's
+              // workspace only when the user toggles it off.
+              ...(!scopeAll() && focusedSession()?.workdir
                 ? { workdir: focusedSession()!.workdir, scope: "workspace" }
                 : { scope: "all" }),
             },
@@ -172,6 +179,24 @@ const SearchModal: Component = () => {
               autocomplete="off"
               spellcheck={false}
             />
+            <Show when={focusedSession()?.workdir}>
+              <button
+                type="button"
+                onClick={() => setScopeAll((v) => !v)}
+                class={`rounded border px-1.5 py-0.5 text-[10px] transition ${
+                  scopeAll()
+                    ? "border-border text-fg-faint hover:text-fg"
+                    : "border-accent/50 text-accent"
+                }`}
+                title={
+                  scopeAll()
+                    ? "Searching all sessions — click to scope to this workspace"
+                    : "Scoped to this workspace — click to search all sessions"
+                }
+              >
+                {scopeAll() ? "all sessions" : "this workspace"}
+              </button>
+            </Show>
             <span class="rounded border border-border px-1.5 py-0.5 text-[10px] text-fg-faint">
               Ctrl+K
             </span>

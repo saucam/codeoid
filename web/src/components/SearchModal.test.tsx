@@ -11,7 +11,21 @@ vi.mock("../state/connection", () => ({
 }));
 
 import SearchModal from "./SearchModal";
-import { _resetSessionsForTest } from "../state/sessions";
+import { _resetSessionsForTest, ingestSessionList, focusSession } from "../state/sessions";
+import type { SessionInfo } from "../protocol/types";
+
+function sess(id: string, name: string, workdir: string): SessionInfo {
+  return {
+    id,
+    name,
+    workdir,
+    status: "idle",
+    mode: "guarded",
+    createdBy: "u",
+    createdAt: "2026-05-04T08:00:00Z",
+    attachedClients: 0,
+  } as SessionInfo;
+}
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -83,5 +97,32 @@ describe("SearchModal stale in-flight results", () => {
     fireEvent.input(input, { target: { value: "s" } });
     await vi.advanceTimersByTimeAsync(10);
     expect(queryByText(/search exploded/)).toBeNull();
+  });
+});
+
+describe("SearchModal scope", () => {
+  it("defaults to searching ALL sessions even when a session is focused", async () => {
+    ingestSessionList([sess("s1", "forge", "/repo/forge")]);
+    focusSession("s1");
+    const { input } = openModal();
+    fireEvent.input(input, { target: { value: "keyword" } });
+    await vi.advanceTimersByTimeAsync(250);
+    expect(requestMock).toHaveBeenCalled();
+    const arg = requestMock.mock.calls.at(-1)![0] as { scope?: string; workdir?: string };
+    expect(arg.scope).toBe("all");
+    expect(arg).not.toHaveProperty("workdir");
+  });
+
+  it("narrows to the focused session's workspace when the scope is toggled", async () => {
+    ingestSessionList([sess("s1", "forge", "/repo/forge")]);
+    focusSession("s1");
+    const { input, getByText } = openModal();
+    // Toggle "all sessions" → "this workspace".
+    fireEvent.click(getByText("all sessions"));
+    fireEvent.input(input, { target: { value: "keyword" } });
+    await vi.advanceTimersByTimeAsync(250);
+    const arg = requestMock.mock.calls.at(-1)![0] as { scope?: string; workdir?: string };
+    expect(arg.scope).toBe("workspace");
+    expect(arg.workdir).toBe("/repo/forge");
   });
 });
