@@ -29,6 +29,7 @@ import { ProviderRegistry } from "../daemon/providers/registry.js";
 import type { CanonicalTurn } from "../daemon/providers/canonical.js";
 import type { AuthContext, DaemonMessage } from "../protocol/types.js";
 import { ALL_SCOPES } from "../protocol/scopes.js";
+import { loadConfig } from "../config.js";
 
 const AUTH: AuthContext = {
   sub: "user:fork",
@@ -184,13 +185,18 @@ async function sendAndSettle(
 ): Promise<void> {
   // Attach so the session's status broadcasts reach this client.
   await manager.handle({ type: "session.attach", id: "a1", sessionId }, AUTH, c);
+  // Only count settles AFTER this send — otherwise a second turn on the same
+  // client returns instantly on a PRIOR turn's stale `idle` (missing the gate).
+  const start = c.received.length;
   await manager.handle({ type: "session.send", id: "s1", sessionId, text }, AUTH, c);
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
     if (
-      c.received.some(
-        (m) => m.type === "session.status_change" && (m.status === "idle" || m.status === "error"),
-      )
+      c.received
+        .slice(start)
+        .some(
+          (m) => m.type === "session.status_change" && (m.status === "idle" || m.status === "error"),
+        )
     ) {
       return;
     }
@@ -506,5 +512,72 @@ describe("SessionManager session.fork — git worktree isolation", () => {
     const fork = (ok as { data: { worktree?: { createdByCodeoid: boolean; branch: string } } }).data;
     expect(fork.worktree?.createdByCodeoid).toBe(false);
     expect(fork.worktree?.branch).toBe("main");
+  });
+
+  it("W6: baseBranch forks CLEAN from the base via the manager; unknown base errors", async () => {
+    const repo = await makeGitRepoWithDirtyEdit();
+    // Divergent base branch with different content.
+    await gitIn(["checkout", "-b", "release"], repo);
+    writeFileSync(join(repo, "file.txt"), "release-content\n");
+    await gitIn(["commit", "-am", "release"], repo);
+    await gitIn(["checkout", "main"], repo);
+
+    const { registry } = makeRegistry();
+    const manager = makeManager(registry);
+    const c = client(AUTH);
+    const parentId = await createIn(manager, c, repo);
+    await sendAndSettle(manager, c, parentId, "hello");
+
+    const ok = await manager.handle(
+      { type: "session.fork", id: "w6", sessionId: parentId, baseBranch: "release" },
+      AUTH,
+      c,
+    );
+    expect(ok.type).toBe("response.ok");
+    const fork = (ok as { data: { workdir: string; worktree?: { branch: string; createdByCodeoid: boolean } } }).data;
+    expect(fork.worktree?.createdByCodeoid).toBe(true);
+    expect(fork.worktree?.branch).toMatch(/^codeoid\//);
+    // Clean checkout of the base, not the parent's state.
+    expect(readFileSync(join(fork.workdir, "file.txt"), "utf8")).toBe("release-content\n");
+
+    // Unknown base ref is a user error.
+    const bad = await manager.handle(
+      { type: "session.fork", id: "w6b", sessionId: parentId, baseBranch: "no-such-branch" },
+      AUTH,
+      c,
+    );
+    expect(bad).toMatchObject({ type: "response.error", code: "invalid_request" });
+  });
+
+  it("W7: fork.setup runs in the new worktree and the first turn WAITS for it", async () => {
+    const repo = await makeGitRepoWithDirtyEdit();
+    const { registry } = makeRegistry();
+    // A full defaults config (loadConfig applies schema defaults) with only
+    // fork.setup overridden — a partial config would break other config reads.
+    const config = { ...loadConfig(), fork: { setup: "touch .setup-ran" } };
+    const manager = new SessionManager(store, transcript, undefined, undefined, undefined, {
+      providers: registry,
+      config,
+    } as never);
+    const c = client(AUTH);
+    const parentId = await createIn(manager, c, repo);
+    await sendAndSettle(manager, c, parentId, "hello");
+
+    const resp = await manager.handle({ type: "session.fork", id: "w7", sessionId: parentId }, AUTH, c);
+    const fork = (resp as { data: { id: string; workdir: string } }).data;
+
+    // The first turn gates on setup; once it settles, setup has finished →
+    // the marker exists (proving both that setup ran AND that the turn waited).
+    await sendAndSettle(manager, c, fork.id, "go");
+    expect(existsSync(join(fork.workdir, ".setup-ran"))).toBe(true);
+
+    // Setup start + completion are surfaced in the fork's scrollback.
+    await transcript.flush();
+    const events = (await transcript.loadTranscript(fork.id, {}))
+      .map((r) => r.message)
+      .filter((m) => m.type === "session.message")
+      .map((m) => (m as { metadata?: { event?: string } }).metadata?.event);
+    expect(events).toContain("fork.setup.start");
+    expect(events).toContain("fork.setup.done");
   });
 });

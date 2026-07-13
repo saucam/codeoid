@@ -839,6 +839,14 @@ export interface SessionForkMsg extends BaseClientMsg {
    * creating one. codeoid records its branch but never creates or removes it.
    */
   workdir?: string;
+  /**
+   * Fork the isolated worktree from THIS base ref (e.g. "main") instead of the
+   * parent's current state. With a base, the worktree is a CLEAN checkout of
+   * `baseBranch` — the parent's uncommitted changes are NOT carried (use the
+   * default, no base, to continue from where the parent is). Implies isolation
+   * (a base needs its own worktree). Ignored in bind mode (`workdir`).
+   */
+  baseBranch?: string;
 }
 
 /**

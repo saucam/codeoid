@@ -1206,22 +1206,50 @@ export class SessionManager {
       forkWorkdir = bound;
       const branch = await currentBranch(bound);
       if (branch) worktree = { path: bound, branch, createdByCodeoid: false };
-    } else if (msg.isolate !== false) {
+    } else if (msg.isolate !== false || msg.baseBranch) {
+      // baseBranch implies isolation (a base needs its own worktree).
       if (await isGitRepo(parent.workdir)) {
         try {
           const wt = await createForkWorktree({
             workdir: parent.workdir,
             label: msg.name ?? parentInfo.name,
             shortId: worktreeShortId,
+            ...(msg.baseBranch ? { baseBranch: msg.baseBranch } : {}),
           });
           // Fork runs in the parent's equivalent subdir of the worktree; the
           // worktree ROOT (wt.path) is what we remove on destroy.
           forkWorkdir = wt.workdir;
           worktree = { path: wt.path, branch: wt.branch, createdByCodeoid: true };
+          // Surface that this is a fresh isolated worktree (deps aren't
+          // present) — previously the isolated path was silent.
+          const origin = msg.baseBranch
+            ? `forked clean from \`${msg.baseBranch}\``
+            : "carrying your uncommitted changes";
+          const setupHint = this.#config?.fork?.setup
+            ? " Running the configured fork setup now — the first turn will wait for it."
+            : " Build dependencies (e.g. node_modules) aren't present in a fresh worktree — run your project's setup before building.";
+          workdirNote = `🌿 Isolated in a new git worktree on branch \`${wt.branch}\` (${origin}).${setupHint}`;
         } catch (err) {
           const reason = err instanceof Error ? err.message : String(err);
+          // An explicit baseBranch that can't be honored is a user error
+          // (bad ref) — fail loudly rather than silently sharing the dir.
+          if (msg.baseBranch) {
+            return {
+              type: "response.error",
+              requestId: msg.id,
+              error: `Cannot fork from base "${msg.baseBranch}": ${reason}`,
+              code: "invalid_request",
+            };
+          }
           workdirNote = `⚠️ Could not create an isolated git worktree (${reason}). This fork SHARES the parent's working directory — concurrent file edits in both sessions will collide.`;
         }
+      } else if (msg.baseBranch) {
+        return {
+          type: "response.error",
+          requestId: msg.id,
+          error: `Cannot fork from base "${msg.baseBranch}": the working directory is not a git repository`,
+          code: "invalid_request",
+        };
       } else {
         workdirNote =
           "⚠️ The parent's workdir isn't a git repo, so this fork SHARES it — " +
@@ -1277,6 +1305,12 @@ export class SessionManager {
       fork.id,
       `from=${msg.sessionId} provider=${providerId ?? "default"} turns=${history.length} worktree=${worktree?.branch ?? "shared"}`,
     );
+
+    // Make the new worktree buildable in the background (fork stays cheap; the
+    // fork's first turn waits for it). Only for worktrees WE created.
+    if (worktree?.createdByCodeoid && this.#config?.fork?.setup) {
+      fork.beginSetup(this.#config.fork.setup);
+    }
 
     return { type: "response.ok", requestId: msg.id, data: fork.toInfo() };
   }
