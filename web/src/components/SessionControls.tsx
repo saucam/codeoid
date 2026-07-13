@@ -542,6 +542,9 @@ const ForkButton: Component<{
   const [open, setOpen] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  // Fork options (apply to whichever action the user clicks).
+  const [isolate, setIsolate] = createSignal(true);
+  const [baseBranch, setBaseBranch] = createSignal("");
   let rootEl: HTMLDivElement | undefined;
   useDismissable(() => rootEl, open, () => setOpen(false));
   const providers = () => authIdentity()?.providers ?? [];
@@ -551,11 +554,16 @@ const ForkButton: Component<{
   const doFork = (providerId?: string) => {
     setError(null);
     setBusy(true);
+    const base = baseBranch().trim();
     request({
       type: "session.fork",
       id: newRequestId(),
       sessionId: props.sessionId,
       ...(providerId ? { providerId } : {}),
+      // Default is isolate=true; only send when the user opts OUT.
+      ...(isolate() ? {} : { isolate: false }),
+      // Base branch only when isolating (a base needs its own worktree).
+      ...(isolate() && base ? { baseBranch: base } : {}),
     })
       .then((data) => {
         if (data && typeof data === "object" && "id" in data) {
@@ -572,44 +580,51 @@ const ForkButton: Component<{
   };
 
   return (
-    <Show
-      when={otherBackends().length > 0}
-      fallback={
-        // Single-backend daemon: a plain fork button, no menu.
-        <button
-          type="button"
-          disabled={busy()}
-          onClick={() => doFork()}
-          class="rounded border border-border px-2 py-1 font-mono uppercase tracking-wider text-fg-muted transition hover:border-accent/40 hover:bg-accent/5 hover:text-fg disabled:opacity-50"
-          title="Branch this conversation into a new session (/fork)"
-        >
-          ⑃ fork
-        </button>
-      }
-    >
-      <div class="relative" ref={rootEl}>
-        <button
-          type="button"
-          disabled={busy()}
-          onClick={() => {
-            setOpen(!open());
-            setError(null);
-          }}
-          class="flex items-center gap-1 rounded border border-border bg-bg px-2 py-1 font-mono uppercase tracking-wider text-fg-muted hover:border-accent/40 hover:text-fg disabled:opacity-50"
-          title="Branch this conversation — same backend, or continue it on another (/fork [backend])"
-        >
-          ⑃ fork ▾
-        </button>
-        <Show when={open()}>
-          <div class="absolute right-0 top-full z-30 mt-1 w-64 rounded border border-border bg-bg-elev shadow-xl">
-            <button
-              type="button"
-              onClick={() => doFork()}
-              class="flex w-full items-center justify-between px-3 py-1.5 text-left text-[12px] text-fg-muted transition hover:bg-bg-hover"
-            >
-              <span>fork (same backend)</span>
-              <span class="font-mono text-fg-faint">{props.current ?? providers()[0]}</span>
-            </button>
+    <div class="relative" ref={rootEl}>
+      <button
+        type="button"
+        disabled={busy()}
+        onClick={() => {
+          setOpen(!open());
+          setError(null);
+        }}
+        class="flex items-center gap-1 rounded border border-border bg-bg px-2 py-1 font-mono uppercase tracking-wider text-fg-muted hover:border-accent/40 hover:text-fg disabled:opacity-50"
+        title="Fork this conversation into a new session (/fork)"
+      >
+        ⑃ fork ▾
+      </button>
+      <Show when={open()}>
+        <div class="absolute right-0 top-full z-30 mt-1 w-72 rounded border border-border bg-bg-elev shadow-xl">
+          {/* Isolation controls — apply to every fork action below. */}
+          <label class="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-[12px] text-fg-muted">
+            <input
+              type="checkbox"
+              checked={isolate()}
+              onChange={(e) => setIsolate(e.currentTarget.checked)}
+              title="Give the fork its own git worktree + branch (parent untouched). Off = share the parent's working directory."
+            />
+            <span>Isolated git worktree</span>
+          </label>
+          <div class="px-3 pb-1.5">
+            <input
+              type="text"
+              value={baseBranch()}
+              onInput={(e) => setBaseBranch(e.currentTarget.value)}
+              disabled={!isolate()}
+              placeholder="base branch (optional — default: current state)"
+              title="Fork the worktree clean from this ref (e.g. main) instead of carrying the parent's uncommitted changes."
+              class="w-full rounded border border-border bg-bg px-2 py-1 text-[12px] text-fg placeholder:text-fg-faint disabled:opacity-50"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={() => doFork()}
+            class="flex w-full items-center justify-between border-t border-border px-3 py-1.5 text-left text-[12px] text-fg-muted transition hover:bg-bg-hover"
+          >
+            <span>fork (same backend)</span>
+            <span class="font-mono text-fg-faint">{props.current ?? providers()[0]}</span>
+          </button>
+          <Show when={otherBackends().length > 0}>
             <div class="border-t border-border px-3 py-1 text-[10px] uppercase tracking-wider text-fg-faint">
               continue on
             </div>
@@ -624,19 +639,18 @@ const ForkButton: Component<{
                 </button>
               )}
             </For>
-            <Show when={error()}>
-              <div class="border-t border-danger/40 px-3 py-1.5 text-[11px] text-danger">
-                {error()}
-              </div>
-            </Show>
-            <div class="border-t border-border px-3 py-1.5 text-[10px] text-fg-faint">
-              Branches the conversation into a new session. The original is
-              untouched; both continue independently.
-            </div>
+          </Show>
+          <Show when={error()}>
+            <div class="border-t border-danger/40 px-3 py-1.5 text-[11px] text-danger">{error()}</div>
+          </Show>
+          <div class="border-t border-border px-3 py-1.5 text-[10px] text-fg-faint">
+            {isolate()
+              ? "Runs in its own git worktree + branch — the original is untouched."
+              : "⚠️ Shares the parent's working directory — concurrent edits can collide."}
           </div>
-        </Show>
-      </div>
-    </Show>
+        </div>
+      </Show>
+    </div>
   );
 };
 
