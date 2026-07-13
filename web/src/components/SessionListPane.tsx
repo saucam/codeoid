@@ -45,6 +45,17 @@ function newSession(): void {
 
 const SessionListPane: Component = () => {
   const [showAnalytics, setShowAnalytics] = createSignal(false);
+  // Instant client-side filter by session name/workdir. Complements the
+  // semantic cross-session content search (Ctrl+K) — this is the fast
+  // "find the session called X" pass, and it works without the memory engine.
+  const [filter, setFilter] = createSignal("");
+  const filtered = (): SessionInfo[] => {
+    const q = filter().trim().toLowerCase();
+    if (!q) return sessionList();
+    return sessionList().filter(
+      (s) => s.name.toLowerCase().includes(q) || s.workdir.toLowerCase().includes(q),
+    );
+  };
 
   return (
     <Show
@@ -77,11 +88,14 @@ const SessionListPane: Component = () => {
           when={sessionList().length > 0}
           fallback={<EmptyState />}
         >
-          <ul class="flex flex-col py-1">
-            <For each={sessionList()}>
-              {(s) => <SessionRow session={s} />}
-            </For>
-          </ul>
+          <SessionFilter value={filter()} onInput={setFilter} />
+          <Show when={filtered().length > 0} fallback={<NoMatch query={filter()} />}>
+            <ul class="flex flex-col py-1">
+              <For each={filtered()}>
+                {(s) => <SessionRow session={s} />}
+              </For>
+            </ul>
+          </Show>
         </Show>
         <Show when={focusedSessionId()}>
           <div class="mt-2 border-t border-border pt-1">
@@ -168,6 +182,48 @@ const EmptyState: Component = () => (
     <p class="mb-2">No sessions yet.</p>
     <p class="text-xs text-fg-faint">
       Create one from the prompt with <code class="font-mono">/new &lt;name&gt; [workdir]</code>.
+    </p>
+  </div>
+);
+
+/** Instant name/workdir filter for the session list. */
+const SessionFilter: Component<{ value: string; onInput: (v: string) => void }> = (props) => (
+  <div class="mx-3 mt-1 flex items-center gap-1.5 rounded border border-border bg-bg px-2 py-1 focus-within:border-accent/40">
+    <span class="text-xs text-fg-faint" aria-hidden="true">
+      ⌕
+    </span>
+    <input
+      type="text"
+      value={props.value}
+      onInput={(e) => props.onInput(e.currentTarget.value)}
+      placeholder="Filter sessions by name…"
+      aria-label="Filter sessions by name"
+      class="flex-1 bg-transparent text-xs text-fg outline-none placeholder:text-fg-faint"
+    />
+    <Show when={props.value.length > 0}>
+      <button
+        type="button"
+        onClick={() => props.onInput("")}
+        class="text-fg-faint transition hover:text-fg"
+        title="Clear filter"
+        aria-label="Clear filter"
+      >
+        ✕
+      </button>
+    </Show>
+  </div>
+);
+
+/** Shown when the name filter matches nothing — points at semantic search. */
+const NoMatch: Component<{ query: string }> = (props) => (
+  <div class="px-3 py-4 text-xs text-fg-muted">
+    <p class="mb-1">
+      No session name matches “<span class="text-fg">{props.query}</span>”.
+    </p>
+    <p class="text-fg-faint">
+      Press{" "}
+      <kbd class="rounded border border-border bg-bg px-1 font-mono">Ctrl+K</kbd> to search message
+      content across sessions.
     </p>
   </div>
 );
