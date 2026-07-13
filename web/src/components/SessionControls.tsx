@@ -544,11 +544,14 @@ const ForkButton: Component<{
   const [error, setError] = createSignal<string | null>(null);
   // Fork options (apply to whichever action the user clicks).
   const [isolate, setIsolate] = createSignal(true);
-  // Prefilled with "main" so the common "branch a fresh worktree off main"
-  // flow is one click. Note: with a base set, the fork is a CLEAN checkout of
-  // that ref — it does NOT carry the parent's uncommitted changes (clear the
-  // box to fork from the parent's current state instead).
-  const [baseBranch, setBaseBranch] = createSignal("main");
+  // Fork from the parent's CURRENT working state (carry uncommitted changes)
+  // vs a clean base branch. Default on. When on, the base-branch input is
+  // disabled — there's no base to pick, you're branching from where you are.
+  const [fromCurrentState, setFromCurrentState] = createSignal(true);
+  const [baseBranch, setBaseBranch] = createSignal("");
+  // A base-branch fork needs a branch; block the action until one is entered.
+  const forkFromBase = () => isolate() && !fromCurrentState();
+  const canFork = () => !(forkFromBase() && baseBranch().trim().length === 0);
   let rootEl: HTMLDivElement | undefined;
   useDismissable(() => rootEl, open, () => setOpen(false));
   const providers = () => authIdentity()?.providers ?? [];
@@ -566,8 +569,8 @@ const ForkButton: Component<{
       ...(providerId ? { providerId } : {}),
       // Default is isolate=true; only send when the user opts OUT.
       ...(isolate() ? {} : { isolate: false }),
-      // Base branch only when isolating (a base needs its own worktree).
-      ...(isolate() && base ? { baseBranch: base } : {}),
+      // Base branch only when forking from a base (not current state).
+      ...(forkFromBase() && base ? { baseBranch: base } : {}),
     })
       .then((data) => {
         if (data && typeof data === "object" && "id" in data) {
@@ -599,7 +602,7 @@ const ForkButton: Component<{
       </button>
       <Show when={open()}>
         <div class="absolute right-0 top-full z-30 mt-1 w-72 rounded border border-border bg-bg-elev shadow-xl">
-          {/* Isolation controls — apply to every fork action below. */}
+          {/* Fork options — apply to every fork action below. */}
           <label class="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-[12px] text-fg-muted">
             <input
               type="checkbox"
@@ -609,21 +612,33 @@ const ForkButton: Component<{
             />
             <span>Isolated git worktree</span>
           </label>
-          <div class="px-3 pb-1.5">
-            <input
-              type="text"
-              value={baseBranch()}
-              onInput={(e) => setBaseBranch(e.currentTarget.value)}
-              disabled={!isolate()}
-              placeholder="base branch (optional — default: current state)"
-              title="Fork the worktree clean from this ref (e.g. main) instead of carrying the parent's uncommitted changes."
-              class="w-full rounded border border-border bg-bg px-2 py-1 text-[12px] text-fg placeholder:text-fg-faint disabled:opacity-50"
-            />
-          </div>
+          <Show when={isolate()}>
+            <label class="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-[12px] text-fg-muted">
+              <input
+                type="checkbox"
+                checked={fromCurrentState()}
+                onChange={(e) => setFromCurrentState(e.currentTarget.checked)}
+                title="Carry the parent's current uncommitted changes into the fork. Off = branch clean from a base."
+              />
+              <span>Fork from current state</span>
+            </label>
+            <div class="px-3 pb-1.5">
+              <input
+                type="text"
+                value={baseBranch()}
+                onInput={(e) => setBaseBranch(e.currentTarget.value)}
+                disabled={fromCurrentState()}
+                placeholder={fromCurrentState() ? "— using current state —" : "base branch (e.g. main)"}
+                title="Branch to fork the worktree from (only when not forking from current state)."
+                class="w-full rounded border border-border bg-bg px-2 py-1 text-[12px] text-fg placeholder:text-fg-faint disabled:opacity-50"
+              />
+            </div>
+          </Show>
           <button
             type="button"
             onClick={() => doFork()}
-            class="flex w-full items-center justify-between border-t border-border px-3 py-1.5 text-left text-[12px] text-fg-muted transition hover:bg-bg-hover"
+            disabled={!canFork()}
+            class="flex w-full items-center justify-between border-t border-border px-3 py-1.5 text-left text-[12px] text-fg-muted transition hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
           >
             <span>fork (same backend)</span>
             <span class="font-mono text-fg-faint">{props.current ?? providers()[0]}</span>
@@ -637,7 +652,8 @@ const ForkButton: Component<{
                 <button
                   type="button"
                   onClick={() => doFork(id)}
-                  class="flex w-full items-center px-3 py-1.5 text-left text-[12px] text-fg-muted transition hover:bg-bg-hover"
+                  disabled={!canFork()}
+                  class="flex w-full items-center px-3 py-1.5 text-left text-[12px] text-fg-muted transition hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
                 >
                   <span class="font-mono">{id}</span>
                 </button>
@@ -650,9 +666,11 @@ const ForkButton: Component<{
           <div class="border-t border-border px-3 py-1.5 text-[10px] text-fg-faint">
             {!isolate()
               ? "⚠️ Shares the parent's working directory — concurrent edits can collide."
-              : baseBranch().trim()
-                ? `Clean branch off \`${baseBranch().trim()}\` in its own worktree — parent untouched.`
-                : "Its own worktree carrying your current changes — parent untouched."}
+              : fromCurrentState()
+                ? "Its own worktree carrying your current changes — parent untouched."
+                : baseBranch().trim()
+                  ? `Clean branch off \`${baseBranch().trim()}\` in its own worktree — parent untouched.`
+                  : "Enter a base branch to fork from."}
           </div>
         </div>
       </Show>

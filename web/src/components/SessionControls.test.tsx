@@ -361,26 +361,34 @@ describe("WorktreeChip", () => {
 describe("ForkButton", () => {
   const FORK_TITLE = "Fork this conversation into a new session (/fork)";
 
-  it("forks in place (same backend) — no providerId; isolate on, base defaults to main", async () => {
+  it("default fork: same backend, isolated, from current state (no providerId/isolate/baseBranch)", async () => {
     requestMock.mockResolvedValueOnce({ id: "fork-1", name: "s (fork)", providerId: "claude" });
     mockAuth(["claude"]);
     ingestSessionList([sess("claude")]);
     focusSession("s");
-    const { getByTitle, getByText, getByDisplayValue } = render(() => <SessionControls />);
+    const { getByTitle, getByText } = render(() => <SessionControls />);
     fireEvent.click(getByTitle(FORK_TITLE)); // open the dropdown
-    expect(getByDisplayValue("main")).toBeTruthy(); // base branch prefilled with main
     fireEvent.click(getByText("fork (same backend)"));
     await waitFor(() =>
       expect(requestMock).toHaveBeenCalledWith(
         expect.objectContaining({ type: "session.fork", sessionId: "s" }),
       ),
     );
-    const call = requestMock.mock.calls[0]![0] as { baseBranch?: string };
+    const call = requestMock.mock.calls[0]![0];
+    // Defaults: same backend, isolated, current state → none of these sent.
     expect(call).not.toHaveProperty("providerId");
-    // isolate defaults on → we DON'T send isolate:false.
     expect(call).not.toHaveProperty("isolate");
-    // Base branch is prefilled with "main", so a default fork branches off main.
-    expect(call.baseBranch).toBe("main");
+    expect(call).not.toHaveProperty("baseBranch");
+  });
+
+  it("the base-branch input is disabled while 'Fork from current state' is on", async () => {
+    mockAuth(["claude"]);
+    ingestSessionList([sess("claude")]);
+    focusSession("s");
+    const { getByTitle, getByPlaceholderText } = render(() => <SessionControls />);
+    fireEvent.click(getByTitle(FORK_TITLE));
+    const base = getByPlaceholderText(/using current state/) as HTMLInputElement;
+    expect(base.disabled).toBe(true);
   });
 
   it("forks WHILE the session is mid-turn (status=thinking) — not gated on the turn", async () => {
@@ -406,31 +414,29 @@ describe("ForkButton", () => {
     );
   });
 
-  it("sends isolate:false and a baseBranch when the controls are set", async () => {
+  it("sends isolate:false when 'Isolated git worktree' is turned off (no base controls)", async () => {
     requestMock.mockResolvedValueOnce({ id: "fork-opt", name: "s (fork)", providerId: "claude" });
     mockAuth(["claude"]);
     ingestSessionList([sess("claude")]);
     focusSession("s");
-    const { getByTitle, getByText, getByPlaceholderText } = render(() => <SessionControls />);
+    const { getByTitle, getByText } = render(() => <SessionControls />);
     fireEvent.click(getByTitle(FORK_TITLE));
-    // Set a base branch, then turn isolation OFF (base is ignored when off).
-    fireEvent.input(getByPlaceholderText(/base branch/), { target: { value: "main" } });
-    fireEvent.click(getByText("Isolated git worktree")); // toggle checkbox off via label
+    fireEvent.click(getByText("Isolated git worktree")); // toggle isolation off
     fireEvent.click(getByText("fork (same backend)"));
     await waitFor(() =>
       expect(requestMock).toHaveBeenCalledWith(expect.objectContaining({ type: "session.fork", isolate: false })),
     );
-    // baseBranch is dropped when isolation is off.
     expect(requestMock.mock.calls[0]![0]).not.toHaveProperty("baseBranch");
   });
 
-  it("sends baseBranch when isolating from a base ref", async () => {
+  it("sends baseBranch after turning off 'Fork from current state' and entering a branch", async () => {
     requestMock.mockResolvedValueOnce({ id: "fork-base", name: "s (fork)", providerId: "claude" });
     mockAuth(["claude"]);
     ingestSessionList([sess("claude")]);
     focusSession("s");
     const { getByTitle, getByText, getByPlaceholderText } = render(() => <SessionControls />);
     fireEvent.click(getByTitle(FORK_TITLE));
+    fireEvent.click(getByText("Fork from current state")); // off → base input enabled
     fireEvent.input(getByPlaceholderText(/base branch/), { target: { value: "main" } });
     fireEvent.click(getByText("fork (same backend)"));
     await waitFor(() =>
@@ -438,6 +444,19 @@ describe("ForkButton", () => {
         expect.objectContaining({ type: "session.fork", baseBranch: "main" }),
       ),
     );
+  });
+
+  it("blocks the fork action when 'from a base' is selected but no branch is entered", async () => {
+    mockAuth(["claude"]);
+    ingestSessionList([sess("claude")]);
+    focusSession("s");
+    const { getByTitle, getByText } = render(() => <SessionControls />);
+    fireEvent.click(getByTitle(FORK_TITLE));
+    fireEvent.click(getByText("Fork from current state")); // off → base required
+    const forkBtn = getByText("fork (same backend)").closest("button") as HTMLButtonElement;
+    expect(forkBtn.disabled).toBe(true);
+    fireEvent.click(forkBtn);
+    expect(requestMock).not.toHaveBeenCalled();
   });
 
   it("multi-backend daemon: dropdown offers fork-onto each OTHER backend", async () => {
