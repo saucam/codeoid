@@ -1191,10 +1191,21 @@ export class SessionManager {
     let workdirNote: string | undefined;
     if (msg.workdir) {
       // Bind mode: run in a dir/worktree the user manages; record its branch
-      // but never create or (later) remove it.
-      forkWorkdir = msg.workdir;
-      const branch = await currentBranch(msg.workdir);
-      if (branch) worktree = { path: msg.workdir, branch, createdByCodeoid: false };
+      // but never create or (later) remove it. Normalize + validate exactly
+      // like session.create — expand ~, canonicalize, and reject a missing,
+      // protected, or out-of-safe-root path (this bypassed those checks).
+      const bound = normalizeWorkdir(msg.workdir);
+      if (!bound) {
+        return {
+          type: "response.error",
+          requestId: msg.id,
+          error: `Working directory not found: ${msg.workdir}`,
+          code: "invalid_request",
+        };
+      }
+      forkWorkdir = bound;
+      const branch = await currentBranch(bound);
+      if (branch) worktree = { path: bound, branch, createdByCodeoid: false };
     } else if (msg.isolate !== false) {
       if (await isGitRepo(parent.workdir)) {
         try {

@@ -204,6 +204,38 @@ export async function removeForkWorktree(opts: {
   deleteBranch?: boolean;
 }): Promise<void> {
   const mainRoot = await mainWorktreeRoot(opts.workdir).catch(() => opts.workdir);
+
+  // Preserve uncommitted work on the KEPT branch before the forced removal —
+  // otherwise `worktree remove --force` silently discards it, and "the branch
+  // is kept so work survives" would only be true for already-committed work.
+  // Skipped when we're deleting the branch anyway (orphan cleanup). Best-effort
+  // and hermetic: a pinned identity means it works with no user git config;
+  // `add -A` also sweeps in untracked files. On any failure we just proceed to
+  // remove (no worse than before).
+  if (!opts.deleteBranch) {
+    try {
+      const dirty = (await git(["status", "--porcelain"], opts.worktreePath)).trim();
+      if (dirty) {
+        await git(["add", "-A"], opts.worktreePath);
+        await git(
+          [
+            "-c",
+            "user.email=codeoid@localhost",
+            "-c",
+            "user.name=codeoid",
+            "commit",
+            "--no-verify",
+            "-m",
+            "codeoid: WIP snapshot saved on session destroy",
+          ],
+          opts.worktreePath,
+        );
+      }
+    } catch {
+      // No commit identity / hook refusal / already-clean race — fall through.
+    }
+  }
+
   await git(["worktree", "remove", "--force", opts.worktreePath], mainRoot).catch(() => {});
   // Prune any dangling administrative entry even if the dir was already gone.
   await git(["worktree", "prune"], mainRoot).catch(() => {});

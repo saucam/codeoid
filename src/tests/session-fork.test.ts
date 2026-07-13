@@ -479,4 +479,32 @@ describe("SessionManager session.fork — git worktree isolation", () => {
     expect(fork.workdir).not.toBe(fork.worktree!.path);
     expect(existsSync(fork.workdir)).toBe(true);
   });
+
+  it("W5: bind mode (workdir) validates the path like session.create", async () => {
+    const repo = await makeGitRepoWithDirtyEdit();
+    const { registry } = makeRegistry();
+    const manager = makeManager(registry);
+    const c = client(AUTH);
+    const parentId = await createIn(manager, c, repo);
+    await sendAndSettle(manager, c, parentId, "hello");
+
+    // A non-existent bind workdir is REJECTED (was previously accepted raw).
+    const bad = await manager.handle(
+      { type: "session.fork", id: "w5a", sessionId: parentId, workdir: join(tmp, "does-not-exist") },
+      AUTH,
+      c,
+    );
+    expect(bad).toMatchObject({ type: "response.error", code: "invalid_request" });
+
+    // A valid dir binds: branch recorded, createdByCodeoid false (never removed).
+    const ok = await manager.handle(
+      { type: "session.fork", id: "w5b", sessionId: parentId, workdir: repo },
+      AUTH,
+      c,
+    );
+    expect(ok.type).toBe("response.ok");
+    const fork = (ok as { data: { worktree?: { createdByCodeoid: boolean; branch: string } } }).data;
+    expect(fork.worktree?.createdByCodeoid).toBe(false);
+    expect(fork.worktree?.branch).toBe("main");
+  });
 });

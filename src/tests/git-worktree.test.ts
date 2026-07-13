@@ -155,4 +155,28 @@ describe("removeForkWorktree", () => {
   it("is a no-op (never throws) on an already-gone worktree", async () => {
     await removeForkWorktree({ workdir: repo, worktreePath: join(tmp, "nope"), branch: "codeoid/none" });
   });
+
+  it("preserves uncommitted work (tracked + untracked) as a WIP commit on the KEPT branch", async () => {
+    const wt = await createForkWorktree({ workdir: repo, label: "wip", shortId: "99990000" });
+    // Add a further uncommitted tracked edit + an untracked file in the fork.
+    writeFileSync(join(wt.path, "file.txt"), "committed\nWIP\nmore\n");
+    writeFileSync(join(wt.path, "new.txt"), "untracked\n");
+
+    await removeForkWorktree({ workdir: repo, worktreePath: wt.path, branch: wt.branch });
+    expect(existsSync(wt.path)).toBe(false);
+
+    // The kept branch now carries a WIP commit with BOTH the tracked edit and
+    // the untracked file — nothing was silently discarded by --force.
+    expect(await g(["show", "--stat", wt.branch], repo)).toContain("codeoid: WIP snapshot");
+    expect(await g(["show", `${wt.branch}:file.txt`], repo)).toBe("committed\nWIP\nmore");
+    expect(await g(["show", `${wt.branch}:new.txt`], repo)).toBe("untracked");
+  });
+
+  it("does NOT create a WIP commit when deleting the branch (orphan cleanup)", async () => {
+    const wt = await createForkWorktree({ workdir: repo, label: "orphan", shortId: "aaaabbbb" });
+    writeFileSync(join(wt.path, "file.txt"), "throwaway\n");
+    await removeForkWorktree({ workdir: repo, worktreePath: wt.path, branch: wt.branch, deleteBranch: true });
+    expect(existsSync(wt.path)).toBe(false);
+    expect(await g(["branch", "--list", wt.branch], repo)).toBe(""); // branch gone
+  });
 });
