@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-14
+
 ### Added
 
 - **Mid-session provider switching** (`session.set_provider`, `/provider
@@ -76,6 +78,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     to a hardcoded `switch`); adding a backend is one `register()` call.
     Unknown provider ids still fall back to the default so resume survives
     metas written by newer codeoids.
+
+### Fixed
+
+- Forked sessions now appear in the sidebar and are focused immediately. `request()` resolves to the daemon's `response.ok` envelope, so the fork handler must unwrap `.data`; reading the envelope directly meant the new fork never entered the store (also affected forking an already-forked session).
+- `codeoid --version` is now sourced from `package.json` instead of a hardcoded string, which had drifted (reported `0.1.0` while the package was `0.2.0`).
+
+### Changed
+
+- Added `bun run smoke` — a pre-release gate that mirrors CI (lint / typecheck / test / build for the daemon and web) and adds a version-coherence check, a daemon boot probe against the built bundle, and an opt-in real-backend journey suite (`CODEOID_SMOKE_INTEGRATION=1`).
+- Restructured the README into a slim overview with detail moved to `docs/` (`FEATURES.md`, `CONFIGURATION.md`, `COMPARISON.md`), and corrected the positioning throughout to reflect that codeoid is a multi-harness control plane (Claude, Codex, Gemini, OpenAI, pi, Gemini CLI), not Claude-only.
 
 ## [0.2.0] - 2026-07-06
 

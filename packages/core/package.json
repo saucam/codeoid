@@ -1,6 +1,6 @@
 {
   "name": "@codeoid/core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Framework-agnostic Codeoid client core — WebSocket transport (auth handshake, reconnect, heartbeat), message store semantics, resume cursors, and display helpers. Shared by the web UI and the mobile client.",
   "license": "MIT",
   "type": "module",
@@ -23,6 +23,6 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@codeoid/protocol": "^0.1.0"
+    "@codeoid/protocol": "^0.2.0"
   }
 }
