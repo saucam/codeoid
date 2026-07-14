@@ -15,8 +15,11 @@ Run N parallel Claude Code sessions across repos. Switch between them from a ter
 > **Terminal client lives in its own repo.** The recommended cockpit is [**codeoid-tui**](https://github.com/saucam/codeoid-ui) — a native Rust/[Ratatui](https://ratatui.rs) client that speaks the daemon's WebSocket protocol. A built-in `codeoid tui` (Ink/React) ships in this repo as a zero-install fallback. See [Terminal client](#terminal-client).
 
 <p align="center">
-  <img src="docs/architecture.png" width="840"
-       alt="Codeoid architecture: stateless clients (Terminal TUI, Web UI, Telegram) attach to one Bun daemon that owns every session — Session Manager, Memory Engine, MCP server and ZeroID client — driving a Claude Agent SDK query per session over SQLite memory, with a ZeroID identity stamped on every action.">
+  <img src="docs/screenshots/tui.webp" width="860"
+       alt="codeoid-ui, the Rust/Ratatui terminal cockpit: a top tab bar of 12 running sessions with the active one boxed, a live session log in the center, a usage and cost readout on the right, a prompt box, and a keybinding bar along the bottom.">
+</p>
+<p align="center">
+  <sub><b>codeoid-tui</b>, the native Rust cockpit, tracking 12 parallel sessions at once. The same sessions open in a <a href="#web-ui">browser</a> and on <a href="#telegram">Telegram</a> — one daemon, one source of truth.</sub>
 </p>
 
 ## Contents
@@ -48,33 +51,11 @@ You're orchestrating AI coding agents. Codeoid solves the things Claude Code's s
 
 ## How Codeoid compares
 
-Codeoid is not a general-purpose IDE assistant — it's aimed at **long-horizon multi-session agent work** where context continuity and token economics matter more than inline code actions. Here's where it differs from the tools you're probably already using:
+Codeoid isn't a general-purpose IDE assistant. It's built for **long-horizon, multi-session agent work**, where context continuity and token economics matter more than inline code actions — so it optimizes for what the tools you already use don't: verbatim cross-session memory, parallel sessions on one control plane, a cryptographic identity per agent and sub-agent, and per-turn token economics.
 
-| Capability | Claude Code CLI | VSCode Extension | Cursor | Aider | **Omnigent** | **Codeoid** |
-|---|:-:|:-:|:-:|:-:|:-:|:-:|
-| **Cross-session verbatim memory** | ❌ `/compact` is lossy | ❌ session-scoped | ❌ | ❌ | ❌ state syncs, no episodic recall | ✅ SQLite + FTS5 + vectors, workspace-scoped |
-| **Parallel sessions, one control plane** | ❌ one terminal | ❌ one window per repo | ~ tabs | ❌ | ✅ Polly delegates to parallel agents | ✅ N sessions, switch with Ctrl-G |
-| **Git-worktree-aware memory sharing** | ❌ | ❌ | ❌ | ❌ | ~ worktrees for isolation, not shared memory | ✅ anchored on `git-common-dir` |
-| **Workspace memory index** injected into system prompt | ❌ | ❌ | ❌ | ~ repo map | ❌ | ✅ hot files + topic clusters + recent sessions, auto-regenerated |
-| **Pre-entry CLI output compression** (git diff, test runners, etc.) with recall recovery | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ declarative rules, 60-90% reduction with tee-cache |
-| **Auto-rotation of backing context** near compaction ceiling | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ lossless via memory recall seed |
-| **Mid-turn user input (stream)** | ❌ interactive CLI is turn-based | ✅ | ~ | ❌ | ~ real-time collab | ✅ with `now`/`next`/`later` priority |
-| **Per-turn token / cost / cache telemetry** | ~ `/cost` total only | ❌ | ❌ | ~ | ~ spend caps + routing | ✅ persistent SQLite, StatusBar, Δ per turn |
-| **Current context occupancy visible** | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ `ctx 65k/1.0M (7%)` live in StatusBar |
-| **Cryptographic identity per agent + sub-agent** (SPIFFE) | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ ZeroID WIMSE URIs |
-| **Autonomous mode with write-action budget** | ❌ | ~ | ~ | ❌ | ✅ stateful spend caps + risk escalation | ✅ budget tracked per session |
-| **Multi-frontend** (terminal + web + mobile) | ❌ CLI only | ❌ IDE only | ❌ IDE only | ❌ | ✅ terminal → browser → phone | ✅ TUI + Web + Telegram, same session |
-| **Device handoff** (start laptop, continue phone) | ❌ | ❌ | ❌ | ❌ | ✅ sessions follow you | ✅ WS re-attach with scrollback replay |
-| **Multi-harness** (Claude + Codex + Cursor + Pi + custom) | ❌ Claude only | ❌ | ❌ | ❌ | ✅ swap/combine harnesses in one session | ❌ Claude Agent SDK only |
-| **OS-level sandbox** (filesystem + network isolation) | ~ permission modes | ❌ | ❌ | ❌ | ✅ secure OS sandbox | ~ approval + autonomous budget, not OS-level |
-| **Credential brokering** (hide secrets from the agent) | ❌ | ❌ | ❌ | ❌ | ✅ broker access, hide creds | ~ scoped ZeroID identity tokens |
-| **Inline IDE code actions** | ❌ | ✅ | ✅ | ~ | ❌ orchestrates, not inline | ❌ not our niche |
-| **SWE-bench / automated coding benchmark score** | — | — | ✅ | ✅ | — meta-harness | ❌ not yet benchmarked |
-| **Multi-model routing** (Opus for plan, Haiku for cheap subtasks) | ~ recent | ~ | ✅ | ✅ | ✅ model routing across harnesses | ❌ roadmap |
+Its closest peer is **[Omnigent](https://github.com/omnigent-ai/omnigent)**, a *meta-harness* that puts many different agents (Claude Code, Codex, Cursor, Pi) behind one governance layer with an OS-level sandbox and cross-harness model routing. Codeoid trades that breadth for depth on a single harness — workspace-scoped verbatim memory, per-agent identity, and per-turn token economics. Rule of thumb: reach for Omnigent to orchestrate *many different* agents with OS isolation; reach for Codeoid if you live in Claude Code across weeks and devices and want memory that returns the exact bytes it saw last time.
 
-Legend: ✅ first-class · ~ partial · ❌ not supported · — not a meaningful comparison
-
-**Where each tool fits:** **[Omnigent](https://github.com/omnigent-ai/omnigent)** (open-sourced by Databricks) is Codeoid's closest peer — a *meta-harness* that puts Claude Code, Codex, Cursor, and Pi behind one governance layer with an OS sandbox and credential brokering. Codeoid trades that multi-harness breadth for depth on a single harness: verbatim cross-session memory, a cryptographic identity per agent and sub-agent (ZeroID), pre-entry output compression, and per-turn token economics. So: if you need to orchestrate *many different* agents with OS-level isolation, reach for Omnigent; if you live in Claude Code across weeks and devices and care that it *remembers* rather than re-summarizes, Codeoid is the frontier; and if you just want "fix this function I'm looking at right now," Cursor is still sharper.
+📊 **[Full capability matrix →](docs/COMPARISON.md)** — feature by feature against Claude Code CLI, the VSCode extension, Cursor, Aider, and Omnigent.
 
 ## Quick start
 
@@ -151,13 +132,18 @@ Or browse to http://localhost:7400/ui/ for the web UI.
 
 ## Architecture
 
+<p align="center">
+  <img src="docs/architecture.png" width="840"
+       alt="Codeoid architecture: stateless clients (Terminal TUI, Web UI, Telegram) attach to one Bun daemon that owns every session — Session Manager, Memory Engine, MCP server and ZeroID client — driving a Claude Agent SDK query per session over SQLite memory, with a ZeroID identity stamped on every action.">
+</p>
+
 In one Bun process the daemon brokers everything between your clients and Claude, and owns three subsystems:
 
 - **Session Manager** — per-session mode + write/exec budget, pinned files, the sub-agent tree, scrollback, and a JSONL transcript for crash-safe resume.
 - **Memory Engine** — a chunker turns every tool call into a verbatim *episode*; a hybrid ranker (vectors + FTS5 BM25 + recency + path overlap) serves it back. Backed by SQLite (FTS5 + embeddings + file-read cache) and exposed to Claude as an **in-process MCP server** — `recall()`, `recall_file()`, `timeline()`.
 - **ZeroID client** — registers the session's SPIFFE identity and mints attenuated tokens for each sub-agent.
 
-Each session drives its own **Claude Agent SDK** query. The [diagram at the top](#codeoid) shows how the pieces fit.
+Each session drives its own **Claude Agent SDK** query. The diagram above shows how the pieces fit.
 
 Sessions are daemon-owned. Clients are stateless; they attach, receive scrollback replay, and stream live deltas. Detach and re-attach from anywhere.
 
@@ -484,6 +470,14 @@ Mobile-first SolidJS SPA at `http://localhost:7400/ui/`. Also works as a Telegra
 - Markdown rendering for assistant replies
 - Real-time thinking display
 
+<p align="center">
+  <img src="docs/screenshots/web-ui.webp" width="820"
+       alt="Codeoid web UI in a browser: a session list down the left, the live log of the active session in the center, and a metrics bar across the top showing turns, tokens, cache reads, and cumulative cost.">
+</p>
+<p align="center">
+  <sub>The SolidJS web UI at <code>localhost:7400/ui</code> — session list on the left, live log in the center, and a metrics strip across the top (turns, tokens, cache reads, cumulative cost).</sub>
+</p>
+
 ### Telegram
 
 Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_USER_IDS` (put them in
@@ -506,6 +500,14 @@ While a turn is running, a one-tap **⏹ Stop** button appears on the chat —
 the mobile equivalent of `Esc` / `/interrupt`.
 
 Thinking content and sub-agent tool calls surface as separate italic messages. Streamed assistant text is buffered per message and flushed when Claude finishes (Telegram's rate limits make per-token streaming infeasible).
+
+<p align="center">
+  <img src="docs/screenshots/telegram.webp" width="360"
+       alt="Codeoid Telegram mini app on a phone showing a live session log, a header with uptime, context occupancy, and cost, and a command input at the bottom.">
+</p>
+<p align="center">
+  <sub>The same session on a phone, in the Telegram mini app — identical scrollback and a live header (uptime, context occupancy, cumulative cost), served by the bot over the same WebSocket. Detach from the browser, pick it up here.</sub>
+</p>
 
 ### Production resilience
 
