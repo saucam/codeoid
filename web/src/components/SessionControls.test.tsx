@@ -56,6 +56,7 @@ afterEach(() => {
   cleanup();
   _resetSessionsForTest();
   fetchModelsMock.mockClear();
+  refreshSessionsMock.mockClear();
   requestMock.mockReset();
   requestMock.mockImplementation(() => Promise.resolve(undefined));
   authMock.mockReset();
@@ -394,6 +395,19 @@ describe("ForkButton", () => {
     await waitFor(() => expect(getSession("fork-1")).toBeTruthy());
     expect(focusedSession()?.id).toBe("fork-1");
     expect(refreshSessionsMock).not.toHaveBeenCalled(); // took the .data path
+  });
+
+  it("falls back to refreshSessions() when the daemon returns no data payload", async () => {
+    // Older daemon: response.ok with no `.data`. doFork can't merge a fork it
+    // wasn't handed, so it must refresh the list rather than silently no-op.
+    requestMock.mockResolvedValueOnce({ type: "response.ok", requestId: "r" });
+    mockAuth(["claude"]);
+    ingestSessionList([sess("claude")]);
+    focusSession("s");
+    const { getByTitle, getByText } = render(() => <SessionControls />);
+    fireEvent.click(getByTitle(FORK_TITLE));
+    fireEvent.click(getByText("fork (same backend)"));
+    await waitFor(() => expect(refreshSessionsMock).toHaveBeenCalledTimes(1));
   });
 
   it("the base-branch input is disabled while 'Fork from current state' is on", async () => {
