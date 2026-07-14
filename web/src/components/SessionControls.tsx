@@ -17,6 +17,7 @@ import { Component, For, Show, createEffect, createSignal, on, onCleanup } from 
 import {
   authIdentity,
   newRequestId,
+  refreshSessions,
   request,
   send,
 } from "../state/connection";
@@ -572,10 +573,20 @@ const ForkButton: Component<{
       // Base branch only when forking from a base (not current state).
       ...(forkFromBase() && base ? { baseBranch: base } : {}),
     })
-      .then((data) => {
-        if (data && typeof data === "object" && "id" in data) {
-          mergeSession(data as SessionInfo);
-          focusSession((data as SessionInfo).id);
+      .then(async (res) => {
+        // request() resolves to the daemon's `response.ok` envelope
+        // ({type, requestId, data}), so the fork's SessionInfo lives at
+        // `.data` — reading `res` directly missed it, so the fork never
+        // merged into the store or got focused and the sidebar looked
+        // unchanged (incl. forking an already-forked session).
+        const info = (res as { data?: unknown } | null)?.data;
+        if (info && typeof info === "object" && "id" in info) {
+          mergeSession(info as SessionInfo);
+          focusSession((info as SessionInfo).id);
+        } else {
+          // Older daemon / unexpected shape: refresh the list so the fork
+          // still shows up (mirrors NewSessionModal's fallback).
+          await refreshSessions().catch(() => {});
         }
         setBusy(false);
         setOpen(false);
