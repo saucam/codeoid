@@ -6,9 +6,11 @@ const requestMock = vi.hoisted(() =>
   vi.fn<(msg: unknown) => Promise<unknown>>(() => Promise.resolve(undefined)),
 );
 const authMock = vi.hoisted(() => vi.fn(() => undefined as unknown));
+const refreshSessionsMock = vi.hoisted(() => vi.fn(() => Promise.resolve([])));
 vi.mock("../state/connection", () => ({
   send: vi.fn(),
   request: requestMock,
+  refreshSessions: refreshSessionsMock,
   newRequestId: () => "r",
   authIdentity: authMock,
 }));
@@ -21,6 +23,7 @@ import {
   getSession,
   ingestSessionList,
   focusSession,
+  focusedSession,
   mergeSession,
   _resetSessionsForTest,
 } from "../state/sessions";
@@ -362,7 +365,14 @@ describe("ForkButton", () => {
   const FORK_TITLE = "Fork this conversation into a new session (/fork)";
 
   it("default fork: same backend, isolated, from current state (no providerId/isolate/baseBranch)", async () => {
-    requestMock.mockResolvedValueOnce({ id: "fork-1", name: "s (fork)", providerId: "claude" });
+    // request() resolves to the daemon's response.ok envelope, not the bare
+    // SessionInfo — doFork must unwrap `.data` (regression guard for the fork
+    // never appearing in the sidebar).
+    requestMock.mockResolvedValueOnce({
+      type: "response.ok",
+      requestId: "r",
+      data: { id: "fork-1", name: "s (fork)", providerId: "claude" },
+    });
     mockAuth(["claude"]);
     ingestSessionList([sess("claude")]);
     focusSession("s");
@@ -379,6 +389,11 @@ describe("ForkButton", () => {
     expect(call).not.toHaveProperty("providerId");
     expect(call).not.toHaveProperty("isolate");
     expect(call).not.toHaveProperty("baseBranch");
+    // The fork must land in the store (so the sidebar shows it) and become
+    // focused — this is the regression that left the sidebar unchanged.
+    await waitFor(() => expect(getSession("fork-1")).toBeTruthy());
+    expect(focusedSession()?.id).toBe("fork-1");
+    expect(refreshSessionsMock).not.toHaveBeenCalled(); // took the .data path
   });
 
   it("the base-branch input is disabled while 'Fork from current state' is on", async () => {
@@ -395,7 +410,11 @@ describe("ForkButton", () => {
     // Repro guard for "clicked fork while the model was streaming and nothing
     // happened". The daemon accepts fork mid-turn; the control must work
     // regardless of status.
-    requestMock.mockResolvedValueOnce({ id: "fork-mid", name: "s (fork)", providerId: "claude" });
+    requestMock.mockResolvedValueOnce({
+      type: "response.ok",
+      requestId: "r",
+      data: { id: "fork-mid", name: "s (fork)", providerId: "claude" },
+    });
     mockAuth(["claude"]);
     ingestSessionList([sess("claude", "thinking")]);
     focusSession("s");
@@ -415,7 +434,11 @@ describe("ForkButton", () => {
   });
 
   it("sends isolate:false when 'Isolated git worktree' is turned off (no base controls)", async () => {
-    requestMock.mockResolvedValueOnce({ id: "fork-opt", name: "s (fork)", providerId: "claude" });
+    requestMock.mockResolvedValueOnce({
+      type: "response.ok",
+      requestId: "r",
+      data: { id: "fork-opt", name: "s (fork)", providerId: "claude" },
+    });
     mockAuth(["claude"]);
     ingestSessionList([sess("claude")]);
     focusSession("s");
@@ -430,7 +453,11 @@ describe("ForkButton", () => {
   });
 
   it("toggling off 'Fork from current state' prefills the branch with 'main' and forks from it", async () => {
-    requestMock.mockResolvedValueOnce({ id: "fork-base", name: "s (fork)", providerId: "claude" });
+    requestMock.mockResolvedValueOnce({
+      type: "response.ok",
+      requestId: "r",
+      data: { id: "fork-base", name: "s (fork)", providerId: "claude" },
+    });
     mockAuth(["claude"]);
     ingestSessionList([sess("claude")]);
     focusSession("s");
@@ -461,7 +488,11 @@ describe("ForkButton", () => {
   });
 
   it("multi-backend daemon: dropdown offers fork-onto each OTHER backend", async () => {
-    requestMock.mockResolvedValueOnce({ id: "fork-2", name: "s (fork)", providerId: "codex" });
+    requestMock.mockResolvedValueOnce({
+      type: "response.ok",
+      requestId: "r",
+      data: { id: "fork-2", name: "s (fork)", providerId: "codex" },
+    });
     mockAuth(["claude", "codex", "pi"]);
     ingestSessionList([sess("claude")]);
     focusSession("s");
