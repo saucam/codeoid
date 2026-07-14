@@ -10,7 +10,7 @@
 
 **Identity-first control plane for AI coding agents — multi-session, multi-frontend, with cross-session memory.**
 
-Run N parallel Claude Code sessions across repos. Switch between them from a terminal cockpit, a web UI, or Telegram. Every action auditable; every agent (and sub-agent) has a cryptographic identity via [ZeroID](https://github.com/highflame-ai/zeroid). Memory persists across sessions so Claude inherits what it learned last time.
+Run N parallel coding-agent sessions across repos — Claude Code by default, with Codex, Gemini, OpenAI, and pi as drop-in backends. Switch between them from a terminal cockpit, a web UI, or Telegram. Every action auditable; every agent (and sub-agent) has a cryptographic identity via [ZeroID](https://github.com/highflame-ai/zeroid). Memory persists across sessions, so each agent inherits what the last one learned.
 
 > **Terminal client lives in its own repo.** The recommended cockpit is [**codeoid-tui**](https://github.com/saucam/codeoid-ui) — a native Rust/[Ratatui](https://ratatui.rs) client that speaks the daemon's WebSocket protocol. A built-in `codeoid tui` (Ink/React) ships in this repo as a zero-install fallback. See [Terminal client](docs/FEATURES.md#terminal-client).
 
@@ -52,7 +52,7 @@ You're orchestrating AI coding agents. Codeoid solves the things Claude Code's s
 
 Codeoid isn't a general-purpose IDE assistant. It's built for **long-horizon, multi-session agent work**, where context continuity and token economics matter more than inline code actions — so it optimizes for what the tools you already use don't: verbatim cross-session memory, parallel sessions on one control plane, a cryptographic identity per agent and sub-agent, and per-turn token economics.
 
-Its closest peer is **[Omnigent](https://github.com/omnigent-ai/omnigent)**, a *meta-harness* that puts many different agents (Claude Code, Codex, Cursor, Pi) behind one governance layer with an OS-level sandbox and cross-harness model routing. Codeoid trades that breadth for depth on a single harness — workspace-scoped verbatim memory, per-agent identity, and per-turn token economics. Rule of thumb: reach for Omnigent to orchestrate *many different* agents with OS isolation; reach for Codeoid if you live in Claude Code across weeks and devices and want memory that returns the exact bytes it saw last time.
+Its closest peer is **[Omnigent](https://github.com/omnigent-ai/omnigent)**, another multi-harness meta-harness — both run Claude, Codex, Gemini, OpenAI, and pi. They optimize for different things. Omnigent leans on **breadth and isolation**: the widest harness set (incl. Cursor, OpenCode, Hermes), an OS-level sandbox, and credential brokering. Codeoid leans on **memory and identity**: workspace-scoped verbatim recall, a cryptographic identity per agent and sub-agent (ZeroID), and per-turn token economics — reachable from a terminal, a browser, or your phone. Rule of thumb: reach for Omnigent when you need OS-level isolation and the broadest harness set; reach for Codeoid when you want persistent cross-session memory and per-agent audit for long-horizon work.
 
 📊 **[Full capability matrix →](docs/COMPARISON.md)** — feature by feature against Claude Code CLI, the VSCode extension, Cursor, Aider, and Omnigent.
 
@@ -61,7 +61,7 @@ Its closest peer is **[Omnigent](https://github.com/omnigent-ai/omnigent)**, a *
 ### Prerequisites
 
 - [Bun](https://bun.sh) v1.0+
-- Claude Code CLI logged in (`claude login`) or `ANTHROPIC_API_KEY` set
+- Claude Code CLI logged in (`claude login`) or `ANTHROPIC_API_KEY` set — the default backend. Other backends are optional: `OPENAI_API_KEY` / `GOOGLE_API_KEY` for the OpenAI/Gemini APIs, or the `codex` / `pi` / `gemini` CLIs on your `PATH`.
 - A ZeroID identity — either the hosted Highflame SaaS (no infra) or a [self-hosted ZeroID](https://github.com/highflame-ai/zeroid)
 
 ### Install
@@ -133,7 +133,10 @@ Or browse to http://localhost:7400/ui/ for the web UI.
 
 <p align="center">
   <img src="docs/architecture.png" width="840"
-       alt="Codeoid architecture: stateless clients (Terminal TUI, Web UI, Telegram) attach to one Bun daemon that owns every session — Session Manager, Memory Engine, MCP server and ZeroID client — driving a Claude Agent SDK query per session over SQLite memory, with a ZeroID identity stamped on every action.">
+       alt="Codeoid architecture: stateless clients (Terminal TUI, Web UI, Telegram) attach to one Bun daemon that owns every session — Session Manager, Memory Engine, MCP server and ZeroID client — driving a provider backend per session over SQLite memory, with a ZeroID identity stamped on every action.">
+</p>
+<p align="center">
+  <sub>Claude is the default backend; Codex, Gemini, OpenAI, pi, and the Gemini CLI plug into the same session interface.</sub>
 </p>
 
 In one Bun process the daemon brokers everything between your clients and Claude, and owns three subsystems:
@@ -142,13 +145,13 @@ In one Bun process the daemon brokers everything between your clients and Claude
 - **Memory Engine** — a chunker turns every tool call into a verbatim *episode*; a hybrid ranker (vectors + FTS5 BM25 + recency + path overlap) serves it back. Backed by SQLite (FTS5 + embeddings + file-read cache) and exposed to Claude as an **in-process MCP server** — `recall()`, `recall_file()`, `timeline()`.
 - **ZeroID client** — registers the session's SPIFFE identity and mints attenuated tokens for each sub-agent.
 
-Each session drives its own **Claude Agent SDK** query. The diagram above shows how the pieces fit.
+Each session drives its own provider backend — the **Claude Agent SDK** by default, or Codex, Gemini, OpenAI, pi, or the Gemini CLI, all behind one `SessionProvider` interface (adding a backend is one factory + one `register()`). The diagram above shows how the pieces fit.
 
 Sessions are daemon-owned. Clients are stateless; they attach, receive scrollback replay, and stream live deltas. Detach and re-attach from anywhere.
 
 ## Features
 
-Codeoid goes deep on a single harness. Full detail — keybindings, slash commands, ranking weights, rotation thresholds — lives in **[docs/FEATURES.md](docs/FEATURES.md)**. The highlights:
+Full detail — keybindings, slash commands, ranking weights, rotation thresholds — lives in **[docs/FEATURES.md](docs/FEATURES.md)**. The highlights:
 
 **Memory & context**
 
@@ -158,6 +161,7 @@ Codeoid goes deep on a single harness. Full detail — keybindings, slash comman
 
 **Sessions & control**
 
+- **[Multiple harnesses](docs/FEATURES.md#harnesses)** — Claude Code by default; Codex, Gemini, OpenAI, pi, and the Gemini CLI drop in behind one provider interface. Fork a session onto a different backend and it resumes with the full conversation.
 - **[Parallel sessions + git worktrees](docs/FEATURES.md#parallel-sessions--git-worktrees)** — run features side by side; branches share one workspace memory, anchored on `git-common-dir`.
 - **[Execution modes](docs/FEATURES.md#execution-modes)** — `guarded` / `interactive` / `autonomous`, the last with a write-action budget that reverts to guarded when spent.
 - **[Mid-turn streaming input](docs/FEATURES.md#mid-turn-streaming-input-vscode-parity)** — send a follow-up while Claude is still responding; `now` / `next` / `later` priority.
@@ -253,4 +257,4 @@ PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). For vulnerabilities, see
 
 ---
 
-Powered by [ZeroID](https://github.com/highflame-ai/zeroid) + [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-typescript). Terminal cockpit: [codeoid-tui](https://github.com/saucam/codeoid-ui).
+Powered by [ZeroID](https://github.com/highflame-ai/zeroid) with pluggable agent backends (default [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-typescript)). Terminal cockpit: [codeoid-tui](https://github.com/saucam/codeoid-ui).

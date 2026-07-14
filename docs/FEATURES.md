@@ -2,6 +2,23 @@
 
 > Full feature reference for Codeoid. For install and a quick tour, start with the [README](../README.md).
 
+### Harnesses
+
+A session's *harness* (the agent backend it drives) is chosen when the session is created and can be changed by forking. Codeoid ships six, all behind one `SessionProvider` interface — adding a backend is one factory plus one `register()` call, and nothing else in the daemon changes.
+
+| Harness (`providerId`) | Backed by | Available when |
+|---|---|---|
+| `claude` (default) | Claude Agent SDK | always |
+| `openai` | OpenAI API | `OPENAI_API_KEY` is set |
+| `gemini` | Google Gemini API | `GOOGLE_API_KEY` is set |
+| `codex` | Codex CLI (app-server) | `codex` resolves on `PATH` (or the bundled binary) |
+| `pi` | pi CLI | `pi` resolves on `PATH` (or the bundled binary) |
+| `gemini-cli` | Gemini CLI (ACP) | `gemini` resolves on `PATH` |
+
+Pick a harness when you create a session — the New Session modal in the web UI or TUI shows the choice whenever more than one backend is registered — or **fork across backends**: fork a Claude session onto Codex and it resumes with the parent's full conversation, so one backend can pick up exactly where another left off. A backend that isn't authenticated or installed simply doesn't appear as an option (no cryptic first-turn 401s).
+
+Memory, identity, attachments, the multi-frontend clients, and device handoff are all provider-agnostic. A few features lean on Claude Code internals and so apply only to the `claude` harness: backing-session [auto-rotation](#context-reduction-stack), Claude Code slash-command [pass-through](#terminal-client), and `.claude/commands` workspace commands.
+
 ### Terminal client
 
 Codeoid has two terminal cockpits, both speaking the daemon's WebSocket protocol:
