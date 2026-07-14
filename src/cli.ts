@@ -16,6 +16,10 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { program } from "commander";
+// Single source of truth for the CLI version — bun inlines this JSON at build,
+// so `codeoid --version` always matches the published package (no hand-synced
+// string to drift). release-smoke asserts these two stay equal.
+import pkg from "../package.json" with { type: "json" };
 import { DaemonServer } from "./daemon/server.js";
 import { TerminalClient } from "./terminal/client.js";
 import {
@@ -29,7 +33,7 @@ import {
 program
   .name("codeoid")
   .description("Identity-first remote control plane for AI coding agents")
-  .version("0.1.0");
+  .version(pkg.version);
 
 // ── Daemon ────────────────────────────────────────────────────────────────────
 
