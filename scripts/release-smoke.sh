@@ -155,7 +155,8 @@ boot_probe() {
     echo "  daemon never logged readiness within 20s:"; sed 's/^/    /' "$log" | tail -20; return 1
   fi
   if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
-    exec 3<&- 3>&-
+    # The subshell opens fd 3 in its own process and closes it on exit, so
+    # there's nothing to close here — we only care about its exit status.
     echo "  daemon is listening and accepting connections"
   else
     echo "  ready logged but port $port refused a connection"; return 1
