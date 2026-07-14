@@ -9,7 +9,8 @@ codeoid start
   ├── Bun.serve() — HTTP + WebSocket server
   ├── ShutdownManager — cleanup registry, signal handlers, 30s grace period
   ├── SessionManager — rate limiting, session resume, scope enforcement
-  │   └── Session × N — each wraps Claude Agent SDK query()
+  │   ├── ProviderRegistry — pluggable backends (claude default; openai, gemini, codex, pi, gemini-cli)
+  │   └── Session × N — each drives one provider backend (Claude Agent SDK by default)
   │       ├── ScrollbackBuffer — circular ring, replayed on device handoff
   │       ├── TranscriptStore — JSONL persistence, survives daemon restart
   │       ├── RetryManager — exponential backoff, fallback model
@@ -50,7 +51,11 @@ src/
 ├── daemon/
 │   ├── server.ts                 # Bun.serve() — HTTP + WebSocket, frontend plugin host
 │   ├── session-manager.ts        # Orchestrates N sessions, rate limiting, resume
-│   ├── session.ts                # Wraps Claude Agent SDK, retry, scrollback, permissions
+│   ├── session.ts                # One session: drives a provider backend, retry, scrollback, permissions
+│   ├── providers/                # Pluggable agent backends behind one SessionProvider interface
+│   │   ├── registry.ts           #   ProviderRegistry + createDefaultProviderRegistry()
+│   │   ├── interface.ts          #   SessionProvider contract
+│   │   └── claude|openai|gemini|codex|pi|acp/  # one dir per backend (acp = Gemini CLI)
 │   ├── store.ts                  # bun:sqlite — sessions + audit_log tables
 │   ├── auth.ts                   # ZeroID JWT verification via @highflame/sdk
 │   ├── agent-identity.ts         # ZeroID identities for coding agents + sub-agents
@@ -76,7 +81,7 @@ src/
 ## Tech Stack
 
 - **Runtime**: Bun (native WebSocket, bun:sqlite, Bun.serve())
-- **Agent**: Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`)
+- **Agent backends**: pluggable via `ProviderRegistry` — Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`, default), plus OpenAI, Gemini, Codex, pi, and the Gemini CLI
 - **Auth**: ZeroID via `@highflame/sdk` (local JWKS verification)
 - **Telegram**: Grammy
 - **CLI**: Commander
@@ -87,7 +92,8 @@ No native addon dependencies. Single `bun build` produces a 1.1MB bundle.
 ## Core Concepts
 
 ### Sessions
-A session = one Claude Agent SDK process working in one directory.
+A session = one agent backend (the Claude Agent SDK by default; also Codex,
+Gemini, OpenAI, pi, or the Gemini CLI) working in one directory.
 Sessions are named, persistent, and daemon-owned. Multiple clients can
 attach/detach simultaneously from any frontend.
 
