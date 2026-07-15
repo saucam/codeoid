@@ -38,6 +38,7 @@ import type {
 import { renderHistorySeed, type CanonicalTurn, type HistorySeedResult } from "../canonical.js";
 import { buildGeminiCliEnv } from "../env.js";
 import { StdioJsonRpcProcess } from "../jsonrpc-stdio.js";
+import { MEMORY_MCP_SERVER_NAME, type MemoryMcpMount } from "../../memory/mcp-http.js";
 
 export interface GeminiAcpProviderInit {
   sessionId: string;
@@ -46,6 +47,14 @@ export interface GeminiAcpProviderInit {
   command: string;
   argsPrefix?: string[];
   store: Store;
+  /** Tenant-scoped memory workspace id — the scope a mounted memory token binds to. */
+  workspaceId?: string;
+  /**
+   * Shared in-daemon memory MCP endpoint + URL. When present (memory enabled),
+   * the provider mounts it on session/new so gemini-cli can page the verbatim
+   * store on demand — the precondition for the Verbatim Working Set strategy.
+   */
+  memoryMcp?: MemoryMcpMount;
   onModels?: (
     models: ReadonlyArray<{ value: string; displayName: string; description?: string }>,
   ) => void;
@@ -57,9 +66,14 @@ export class GeminiAcpProvider implements SessionProvider {
 
   onRecoveryNeeded: ((content: string) => void) | undefined;
 
+  #sessionId: string;
   #backingSessionId: string;
   #command: string;
   #argsPrefix: string[];
+  #workspaceId: string;
+  #memoryMcp: MemoryMcpMount | null;
+  /** Live scoped token for the mounted memory endpoint; revoked on teardown. */
+  #memoryToken: string | null = null;
 
   #proc: StdioJsonRpcProcess | null = null;
   #acpSessionId: string | null = null;
@@ -78,9 +92,22 @@ export class GeminiAcpProvider implements SessionProvider {
   #announcedTools = new Set<string>();
 
   constructor(init: GeminiAcpProviderInit) {
+    this.#sessionId = init.sessionId;
     this.#backingSessionId = init.initialBackingId;
     this.#command = init.command;
     this.#argsPrefix = init.argsPrefix ?? [];
+    this.#workspaceId = init.workspaceId ?? init.sessionId;
+    this.#memoryMcp = init.memoryMcp ?? null;
+  }
+
+  /**
+   * True when the shared memory endpoint is mounted for this session, so
+   * gemini-cli can page the verbatim store on demand. The Verbatim Working Set
+   * strategy seeds a compact session map only when this holds; otherwise the
+   * session falls back to the transcript seed.
+   */
+  get supportsMemoryTools(): boolean {
+    return this.#memoryMcp != null;
   }
 
   get backingSessionId(): string {
@@ -107,6 +134,15 @@ export class GeminiAcpProvider implements SessionProvider {
     const seed = renderHistorySeed(history, { maxChars: opts?.maxChars });
     this.#pendingHistorySeed = seed.text.length > 0 ? seed.text : null;
     return seed;
+  }
+
+  /**
+   * VWS transport: prepend a strategy-built block (the compact session map) to
+   * the next prompt — the same channel seedFromHistory uses. The session decides
+   * transcript vs session map; the provider just stashes the block.
+   */
+  seedText(block: string): void {
+    this.#pendingHistorySeed = block.length > 0 ? block : null;
   }
 
   runTurn(opts: TurnOpts): TurnRun {
@@ -156,6 +192,10 @@ export class GeminiAcpProvider implements SessionProvider {
     this.#proc?.kill();
     this.#proc = null;
     this.#acpSessionId = null;
+    if (this.#memoryToken) {
+      this.#memoryMcp?.endpoint.revoke(this.#memoryToken);
+      this.#memoryToken = null;
+    }
   }
 
   // ── Internal ──────────────────────────────────────────────────────────
@@ -249,7 +289,7 @@ export class GeminiAcpProvider implements SessionProvider {
    * this backend exists for — then retry once.
    */
   async #sessionNew(cwd: string): Promise<{ sessionId?: string }> {
-    const params = { cwd, mcpServers: [] };
+    const params = { cwd, mcpServers: this.#buildMcpServers() };
     try {
       return (await this.#proc!.request("session/new", params)) as { sessionId?: string };
     } catch (err) {
@@ -260,6 +300,33 @@ export class GeminiAcpProvider implements SessionProvider {
       this.#authenticated = true;
       return (await this.#proc!.request("session/new", params)) as { sessionId?: string };
     }
+  }
+
+  /**
+   * MCP servers to mount on session/new. Empty unless memory is enabled, in
+   * which case we mount the shared in-daemon endpoint over ACP's HTTP transport
+   * (`{type:"http"}` → gemini's StreamableHTTPClientTransport), scoped by a
+   * freshly-minted bearer token. gemini-cli then exposes recall/recall_file/
+   * timeline/get_episode as `${MEMORY_MCP_SERVER_NAME}__*` tools it can call.
+   */
+  #buildMcpServers(): Array<Record<string, unknown>> {
+    const mount = this.#memoryMcp;
+    if (!mount) return [];
+    // Re-mint each session/new: the token is the per-session tenant scope, and
+    // resetToNewSession/re-auth-retry may create more than one backing session.
+    if (this.#memoryToken) mount.endpoint.revoke(this.#memoryToken);
+    this.#memoryToken = mount.endpoint.mint({
+      workspaceId: this.#workspaceId,
+      sessionId: this.#sessionId,
+    });
+    return [
+      {
+        type: "http",
+        name: MEMORY_MCP_SERVER_NAME,
+        url: mount.url,
+        headers: [{ name: "Authorization", value: `Bearer ${this.#memoryToken}` }],
+      },
+    ];
   }
 
   #push(event: ProviderEvent): void {

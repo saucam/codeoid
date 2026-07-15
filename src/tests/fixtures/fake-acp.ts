@@ -8,6 +8,7 @@
  *                     runs the tool_call only when allowed
  *   "auto-tool"     → tool_call + tool_call_update without asking
  *   "echo-prompt"   → agent_message_chunk with the full prompt
+ *   "echo-mcp"      → agent_message_chunk with the last session/new mcpServers
  *   "hang-forever"  → never finishes (test sends session/cancel)
  *   "unknown-request" → sends a bogus server→client request first
  *   default         → thought chunk + two message chunks
@@ -22,6 +23,8 @@ let nextServerReqId = 5000;
 const pendingServerReqs = new Map<number, (frame: Record<string, unknown>) => void>();
 let cancelRequested = false;
 let authenticated = "";
+/** Last mcpServers array received on session/new — surfaced via "echo-mcp". */
+let lastMcpServers: unknown = null;
 
 function serverRequest(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
   const id = nextServerReqId++;
@@ -58,6 +61,11 @@ async function runTurn(sessionId: string, prompt: string): Promise<string> {
     update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Read it." } });
     return "end_turn";
   }
+  if (prompt.includes("echo-mcp")) {
+    update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `MCP:${JSON.stringify(lastMcpServers)}` } });
+    return "end_turn";
+  }
+
   if (prompt.includes("echo-prompt")) {
     update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `PROMPT:${prompt}` } });
     return "end_turn";
@@ -145,6 +153,7 @@ async function handle(frame: Record<string, unknown>): Promise<void> {
         send({ id, error: { code: -32000, message: "Gemini API key is missing or not configured." } });
         break;
       }
+      lastMcpServers = params.mcpServers ?? null;
       send({ id, result: { sessionId: "acp-session-1", authMethod: authenticated || null } });
       break;
     case "session/prompt": {

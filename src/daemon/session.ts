@@ -68,7 +68,9 @@ import {
   EpisodeChunker,
   IndexScheduler,
   workspaceIdFromPath,
+  MEMORY_MCP_SERVER_NAME,
   type MemoryEngine,
+  type MemoryMcpMount,
 } from "./memory/index.js";
 import type { Attachment } from "../protocol/types.js";
 import { resolveAttachments } from "./attachments.js";
@@ -173,6 +175,8 @@ export interface SessionCreateOptions {
   ) => void;
   /** Optional memory engine — when provided, episodes are chunked and stored for recall. */
   memory?: MemoryEngine;
+  /** Shared in-daemon memory MCP endpoint + URL, for URL-mounting backends. */
+  memoryMcp?: MemoryMcpMount;
   /**
    * Full parsed config — carries compress / workspaceIndex / telemetry
    * toggles. When absent, compression stays off (safe default).
@@ -345,6 +349,7 @@ export class Session {
   #subagentRegistrations = new Map<string, Promise<void>>();
   #seq = 0;
   #memory?: MemoryEngine;
+  #memoryMcp?: MemoryMcpMount;
   #chunker?: EpisodeChunker;
   // Counts mid-turn messages in flight. When the SDK interrupts the current
   // turn to process a pushMidTurn() injection, it emits a turn_done for the
@@ -563,6 +568,7 @@ export class Session {
     this.#transcriptStore = opts.transcriptStore;
     this.#identityManager = opts.identityManager;
     this.#memory = opts.memory;
+    this.#memoryMcp = opts.memoryMcp;
     this.#config = opts.config;
     // Retained for provider (re-)construction — switchProvider() rebuilds
     // the backend long after the constructor options are gone.
@@ -717,6 +723,7 @@ export class Session {
       store: this.#store,
       identityManager: this.#identityManager,
       memory: this.#memory,
+      memoryMcp: this.#memoryMcp,
       fleet: this.#fleet,
       config: this.#config,
       compressionRegistry: this.#compressionRegistry,
@@ -3823,8 +3830,11 @@ function formatTokenCount(n: number): string {
 
 function isSafeTool(name: string): boolean {
   if (SAFE_TOOLS.has(name)) return true;
-  // All memory recall tools are read-only.
-  if (name.startsWith("mcp__codeoid_memory__")) return true;
+  // All memory recall tools are read-only, however a backend namespaces them:
+  // Claude's in-process MCP → `mcp__codeoid_memory__<tool>`; gemini-cli/codex's
+  // URL mount → `<serverName>__<tool>`. Match on the distinctive server segment
+  // so a read-only recall never prompts, whatever the separator.
+  if (name.includes(MEMORY_MCP_SERVER_NAME)) return true;
   return false;
 }
 

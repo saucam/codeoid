@@ -34,6 +34,7 @@ import { createDefaultProviderRegistry } from "../daemon/providers/registry.js";
 import { MemoryEngine } from "../daemon/memory/engine.js";
 import { SqliteEpisodeStore } from "../daemon/memory/store.js";
 import { createEmbedder } from "../daemon/memory/embedder.js";
+import { MemoryMcpHttp, MEMORY_MCP_PATH } from "../daemon/memory/mcp-http.js";
 import { ALL_SCOPES } from "../protocol/scopes.js";
 import type { AuthContext, DaemonMessage } from "../protocol/types.js";
 
@@ -286,17 +287,29 @@ interface StrategyOutcome {
 
 /**
  * Build an isolated manager+memory, grow a beyond-budget claude session whose
- * first turn holds SECRET, fork onto claude under `strategy` with a tiny seed
+ * first turn holds SECRET, fork onto `target` under `strategy` with a tiny seed
  * budget, then ask the fork for SECRET. Returns whether it was recovered.
+ *
+ * The source is always claude (it ingests every turn into memory); `target` is
+ * the incoming backend under test. For URL-mounting targets (gemini-cli) the
+ * shared MCP endpoint is served on a real loopback port and handed to the
+ * manager, exactly as the daemon does — that is the mount the forked backend
+ * pages the verbatim store through.
  */
-async function runBeyondBudget(strategy: "transcript" | "vws"): Promise<StrategyOutcome> {
+async function runBeyondBudget(strategy: "transcript" | "vws", target = "claude"): Promise<StrategyOutcome> {
   const wd = mkdtempSync(join(tmpdir(), `codeoid-rbb-${strategy}-`));
   const st = new Store(join(wd, "codeoid.db"));
   const tr = new TranscriptStore(join(wd, "transcripts"));
   const memory = new MemoryEngine({ store: new SqliteEpisodeStore(join(wd, "mem.db")), embedder: await createEmbedder() });
   await memory.init();
-  const registry = createDefaultProviderRegistry({} as never); // claude always registered
+  const registry = createDefaultProviderRegistry({ providers: { geminiCli: { enabled: true }, codex: { enabled: true } } } as never);
   const mgr = new SessionManager(st, tr, undefined, undefined, memory, { providers: registry } as never);
+
+  // Serve the shared memory MCP endpoint on a real loopback port, like the
+  // daemon does, so a URL-mounting fork target (gemini-cli) can page memory.
+  const endpoint = new MemoryMcpHttp(memory);
+  const mcpServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => endpoint.handle(req) });
+  mgr.setMemoryMcp({ endpoint, url: `http://127.0.0.1:${mcpServer.port}${MEMORY_MCP_PATH}` });
 
   const prevStrategy = process.env.CODEOID_CONTEXT_STRATEGY;
   const prevBudget = process.env.CODEOID_SEED_BUDGET_CHARS;
@@ -318,12 +331,12 @@ async function runBeyondBudget(strategy: "transcript" | "vws"): Promise<Strategy
     // Filler turns push turn 1 outside the tiny seed budget.
     for (const q of FILLERS) await sendAndSettleOn(mgr, c, sid, q);
 
-    // Fork onto claude under the chosen strategy, with a seed budget so small the
-    // transcript keeps only the last turn or two — dropping the SECRET turn.
+    // Fork onto the target under the chosen strategy, with a seed budget so small
+    // the transcript keeps only the last turn or two — dropping the SECRET turn.
     process.env.CODEOID_CONTEXT_STRATEGY = strategy;
     process.env.CODEOID_SEED_BUDGET_CHARS = "600";
     const fork = await mgr.handle(
-      { type: "session.fork", id: randomUUID(), sessionId: sid, providerId: "claude", isolate: false } as never,
+      { type: "session.fork", id: randomUUID(), sessionId: sid, providerId: target, isolate: false } as never,
       AUTH,
       c as never,
     );
@@ -342,6 +355,7 @@ async function runBeyondBudget(strategy: "transcript" | "vws"): Promise<Strategy
     if (prevStrategy === undefined) delete process.env.CODEOID_CONTEXT_STRATEGY; else process.env.CODEOID_CONTEXT_STRATEGY = prevStrategy;
     if (prevBudget === undefined) delete process.env.CODEOID_SEED_BUDGET_CHARS; else process.env.CODEOID_SEED_BUDGET_CHARS = prevBudget;
     if (prevMem === undefined) delete process.env.CODEOID_MEMORY; else process.env.CODEOID_MEMORY = prevMem;
+    try { mcpServer.stop(true); } catch {}
     try { await memory.close(); } catch {}
     try { await tr.flush(); } catch {}
     try { st.close(); } catch {}
@@ -349,22 +363,40 @@ async function runBeyondBudget(strategy: "transcript" | "vws"): Promise<Strategy
   }
 }
 
-describe("resume-beyond-budget (real, claude)", () => {
+describe("resume-beyond-budget (real)", () => {
   (RUN_VWS ? it : it.skip)(
-    "VWS recovers a dropped early fact that the transcript seed loses",
+    "claude: VWS recovers a dropped early fact that the transcript seed loses",
     async () => {
-      const transcript = await runBeyondBudget("transcript");
-      const vws = await runBeyondBudget("vws");
+      const transcript = await runBeyondBudget("transcript", "claude");
+      const vws = await runBeyondBudget("vws", "claude");
       // eslint-disable-next-line no-console
       console.log(
-        `[resume-beyond-budget] transcript: recalled=${transcript.recalled} incomingInputTokens=${transcript.incomingInputTokens} | ` +
+        `[resume-beyond-budget claude] transcript: recalled=${transcript.recalled} incomingInputTokens=${transcript.incomingInputTokens} | ` +
           `vws: recalled=${vws.recalled} incomingInputTokens=${vws.incomingInputTokens}`,
       );
-      // The flip criterion for turning VWS on for a backend:
-      //   VWS recovers the dropped fact …
+      // The flip criterion: VWS recovers the dropped fact …
       expect(vws.recalled).toBe(true);
-      //   … and the tiny budget genuinely dropped it from the transcript seed,
-      //   so the win is real and not an artifact of a too-generous budget.
+      // … and the tiny budget genuinely dropped it from the transcript seed.
+      expect(transcript.recalled).toBe(false);
+    },
+    600_000,
+  );
+
+  // Phase 2: same case with gemini-cli as the incoming backend — it pages the
+  // verbatim store through the shared HTTP MCP endpoint mounted via ACP. Gated
+  // additionally on gemini-cli being requested + authed.
+  (RUN && BACKENDS.includes("gemini-cli") ? it : it.skip)(
+    "gemini-cli: VWS recovers a dropped early fact via the mounted memory endpoint",
+    async () => {
+      if (!available.includes("gemini-cli")) return;
+      const transcript = await runBeyondBudget("transcript", "gemini-cli");
+      const vws = await runBeyondBudget("vws", "gemini-cli");
+      // eslint-disable-next-line no-console
+      console.log(
+        `[resume-beyond-budget gemini-cli] transcript: recalled=${transcript.recalled} incomingInputTokens=${transcript.incomingInputTokens} | ` +
+          `vws: recalled=${vws.recalled} incomingInputTokens=${vws.incomingInputTokens}`,
+      );
+      expect(vws.recalled).toBe(true);
       expect(transcript.recalled).toBe(false);
     },
     600_000,

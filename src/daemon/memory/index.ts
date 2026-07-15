@@ -22,6 +22,13 @@ export { MemoryEngine, type SessionSearchHit } from "./engine.js";
 export { EpisodeChunker, extractFilePaths } from "./chunker.js";
 export { buildMemoryMcpServer } from "./mcp.js";
 export {
+  MemoryMcpHttp,
+  MEMORY_MCP_PATH,
+  MEMORY_MCP_SERVER_NAME,
+  type MemoryMcpBinding,
+  type MemoryMcpMount,
+} from "./mcp-http.js";
+export {
   memoryToolDefs,
   MEMORY_TOOL_NAMES,
   formatHits,
