@@ -1626,6 +1626,7 @@ export class Session {
           canUseTool: this.#makeCanUseToolFn(recoverySender),
           requestUserInput: (req) => this.requestUserInput(req),
           sender: recoverySender,
+          mode: this.#mode,
         });
         this.#activeRun = recoveryRun;
         this.#eventConsumerTask = this.#consumeEvents(recoveryRun, recoverySender);
@@ -1656,6 +1657,7 @@ export class Session {
       canUseTool: this.#makeCanUseToolFn(sender),
       requestUserInput: (req) => this.requestUserInput(req),
       sender,
+      mode: this.#mode,
     });
     this.#activeRun = run;
     this.#eventConsumerTask = this.#consumeEvents(run, sender);

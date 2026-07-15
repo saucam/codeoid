@@ -367,6 +367,62 @@ describe("CodexProvider over fake-codex", () => {
     expect(sandboxPolicyError(undefined)).toBeNull(); // optional field
   });
 
+  it("C18: autonomous mode pins approvalPolicy 'never' (codex runs unattended) on thread AND turn", async () => {
+    const prev = { a: process.env.CODEX_APPROVAL_POLICY, s: process.env.CODEX_SANDBOX_POLICY };
+    delete process.env.CODEX_APPROVAL_POLICY;
+    delete process.env.CODEX_SANDBOX_POLICY;
+    try {
+      const p = makeProvider();
+      const events = await collect(p.runTurn(turnOpts("echo-policy", { mode: "autonomous" })));
+      await p.teardown();
+      const seen = JSON.parse((events.find((e) => e.type === "text_done") as { content: string }).content);
+      // Full sandbox access stays (network + fs); only the approval policy flips.
+      const expected = { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } };
+      expect(seen.thread).toEqual(expected);
+      expect(seen.turn).toEqual(expected);
+    } finally {
+      restoreEnv("CODEX_APPROVAL_POLICY", prev.a);
+      restoreEnv("CODEX_SANDBOX_POLICY", prev.s);
+    }
+  });
+
+  it("C19: guarded and interactive both pin 'untrusted' (codex asks → codeoid's gate prompts)", async () => {
+    const prev = { a: process.env.CODEX_APPROVAL_POLICY, s: process.env.CODEX_SANDBOX_POLICY };
+    delete process.env.CODEX_APPROVAL_POLICY;
+    delete process.env.CODEX_SANDBOX_POLICY;
+    try {
+      for (const mode of ["guarded", "interactive"] as const) {
+        const p = makeProvider();
+        const events = await collect(p.runTurn(turnOpts("echo-policy", { mode })));
+        await p.teardown();
+        const seen = JSON.parse((events.find((e) => e.type === "text_done") as { content: string }).content);
+        const expected = { approvalPolicy: "untrusted", sandboxPolicy: { type: "dangerFullAccess" } };
+        expect(seen.thread, `mode=${mode}`).toEqual(expected);
+        expect(seen.turn, `mode=${mode}`).toEqual(expected);
+      }
+    } finally {
+      restoreEnv("CODEX_APPROVAL_POLICY", prev.a);
+      restoreEnv("CODEX_SANDBOX_POLICY", prev.s);
+    }
+  });
+
+  it("C20: CODEX_APPROVAL_POLICY env still WINS over the mode (operator escape hatch)", async () => {
+    const prev = { a: process.env.CODEX_APPROVAL_POLICY, s: process.env.CODEX_SANDBOX_POLICY };
+    // Autonomous would derive "never", but an explicit operator pin holds.
+    process.env.CODEX_APPROVAL_POLICY = "untrusted";
+    delete process.env.CODEX_SANDBOX_POLICY;
+    try {
+      const p = makeProvider();
+      const events = await collect(p.runTurn(turnOpts("echo-policy", { mode: "autonomous" })));
+      await p.teardown();
+      const seen = JSON.parse((events.find((e) => e.type === "text_done") as { content: string }).content);
+      expect(seen.turn.approvalPolicy).toBe("untrusted");
+    } finally {
+      restoreEnv("CODEX_APPROVAL_POLICY", prev.a);
+      restoreEnv("CODEX_SANDBOX_POLICY", prev.s);
+    }
+  });
+
   it("C12: rpc edges — spawn failure, request timeout, request/notify after exit", async () => {
     // Spawn failure rejects in-flight requests.
     const dead = new CodexRpcProcess({
