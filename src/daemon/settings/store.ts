@@ -123,7 +123,16 @@ export function applyPatches(patches: SettingPatch[]): ApplyResult {
     if (f.backing === "config") {
       configPatches.push({ field: f, value: p.value });
     } else {
-      envUpdates.set(f.envVar!, formatForEnv(p.value, f.kind));
+      const formatted = formatForEnv(p.value, f.kind);
+      // The .env format is single-line-per-key (matching loadDotEnv, which is
+      // "intentionally minimal — no multiline"). A value carrying a newline
+      // would split into a bogus second line and corrupt the file, so reject
+      // it loudly rather than writing garbage.
+      if (formatted !== null && /[\r\n]/.test(formatted)) {
+        errors.push({ key: p.key, message: "Value must be a single line (no newlines)." });
+        continue;
+      }
+      envUpdates.set(f.envVar!, formatted);
       written.push(f);
     }
   }
@@ -250,10 +259,19 @@ function writeDotEnv(updates: Map<string, string | null>): void {
   atomicWrite(envPath, text, 0o600);
 }
 
-/** Quote an env value when it contains whitespace, `#`, or quotes. */
+/**
+ * Wrap an env value in double quotes when the raw form would be re-trimmed or
+ * misread (surrounding whitespace, a `#`, an embedded quote, or empty).
+ *
+ * Deliberately does NOT escape anything: `loadDotEnv` strips exactly one
+ * surrounding quote pair and never unescapes, so escaping would break the
+ * round-trip (`a"b` → `"a\"b"` → loader yields `a\"b`). Because only the
+ * OUTER pair is stripped, an embedded quote still round-trips as-is
+ * (`a"b` → `"a"b"` → `a"b`). Callers guarantee the value is single-line.
+ */
 function quoteEnv(value: string): string {
   if (value === "") return '""';
-  if (/[\s#"']/.test(value)) return `"${value.replace(/"/g, '\\"')}"`;
+  if (/[\s#"']/.test(value)) return `"${value}"`;
   return value;
 }
 

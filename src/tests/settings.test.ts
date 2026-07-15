@@ -71,6 +71,7 @@ describe("settings store", () => {
     "CODEOID_MEMORY",
     "CODEOID_CONTEXT_STRATEGY",
     "TELEGRAM_ALLOWED_USER_IDS",
+    "CODEOID_FS_BROWSE_ROOT",
   ];
   const saved: Record<string, string | undefined> = {};
 
@@ -203,6 +204,22 @@ describe("settings store", () => {
   it("distinguishes an external secret (real env, not .env) from an env-file one", () => {
     process.env.GOOGLE_API_KEY = "from-the-shell";
     expect(getSnapshot().secrets.GOOGLE_API_KEY).toEqual({ set: true, source: "external" });
+  });
+
+  it("rejects a multi-line env value instead of corrupting .env", () => {
+    const r = applyPatches([{ key: "CODEOID_FS_BROWSE_ROOT", value: "/a\n/b" }]);
+    expect(r.ok).toBe(false);
+    expect(r.errors[0]?.message).toMatch(/single line/i);
+    expect(existsSync(configFilePaths().envPath)).toBe(false); // nothing written
+  });
+
+  it("quotes an env value with spaces (round-trips through the loader)", () => {
+    const r = applyPatches([{ key: "CODEOID_FS_BROWSE_ROOT", value: "/path with space" }]);
+    expect(r.ok).toBe(true);
+    // Wrapped in double quotes, NOT escaped — loadDotEnv strips the pair back.
+    expect(readFileSync(configFilePaths().envPath, "utf8")).toContain(
+      'CODEOID_FS_BROWSE_ROOT="/path with space"',
+    );
   });
 });
 
