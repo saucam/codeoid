@@ -160,3 +160,54 @@ export function renderSessionMap(input: SessionMapInput): string {
   parts.push("");
   return parts.join("\n");
 }
+
+// ── Rotation seed anchor (in-session context rollover) ─────────────────────────
+
+export interface RotationSeedInput {
+  workdir: string;
+  sessionName: string;
+  rotationCount: number;
+  /** The last user turn before the rotation, or null when memory is off. */
+  lastUserTurn: string | null;
+}
+
+/**
+ * Render the `<rotation_context>` anchor for an IN-SESSION context rollover
+ * (distinct from a cross-backend switch/fork, which uses the transcript seed or
+ * the session map). Same task-anchor shape: a continuation notice, the recall
+ * tool advertisement (including get_episode for verbatim by-id paging), and the
+ * last user turn. Pure + exported so the tests exercise the real renderer
+ * instead of a hand-mirrored copy.
+ */
+export function renderRotationSeed(input: RotationSeedInput): string {
+  const parts: string[] = [];
+  parts.push("<rotation_context>");
+  parts.push(
+    "Codeoid just rotated this session's backing Claude Code context to stay below the compaction ceiling. This is a CONTINUATION, not a new session.",
+  );
+  parts.push("");
+  parts.push(
+    `Workspace: ${input.workdir}. Rotation #${input.rotationCount} of this session ("${input.sessionName}").`,
+  );
+  parts.push("");
+  parts.push("Prior turns are preserved verbatim in codeoid memory. Retrieve on demand:");
+  parts.push("  - `recall(query)`               — semantic search across all prior episodes");
+  parts.push("  - `recall_file(path)`           — most recent prior Read of a specific file");
+  parts.push("  - `timeline(offset?, limit?)`   — walk activity in order; each line has an episode_id");
+  parts.push("  - `get_episode(episode_id)`     — fetch one past turn or tool result verbatim");
+  parts.push(
+    "The workspace index in your system prompt already advertises what topics + files are in memory.",
+  );
+  parts.push("");
+  if (input.lastUserTurn) {
+    parts.push("Most recent user turn before the rotation:");
+    parts.push("---");
+    parts.push(input.lastUserTurn.length > 2000 ? `${input.lastUserTurn.slice(0, 2000)}\n…` : input.lastUserTurn);
+    parts.push("---");
+  } else {
+    parts.push("No prior user turn recorded (memory disabled). Rely on the user's next message.");
+  }
+  parts.push("</rotation_context>");
+  parts.push("");
+  return parts.join("\n");
+}

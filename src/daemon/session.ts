@@ -28,7 +28,7 @@ import {
   isSubagentEvent,
 } from "./providers/interface.js";
 import { createDefaultProviderRegistry, type ProviderRegistry } from "./providers/registry.js";
-import { selectContextStrategy, renderSessionMap, type ContextStrategy } from "./providers/context-strategy.js";
+import { selectContextStrategy, renderSessionMap, renderRotationSeed, type ContextStrategy } from "./providers/context-strategy.js";
 import type { HookBus } from "./hooks/bus.js";
 import type { HookSessionContext } from "./hooks/types.js";
 import { randomUUID } from "node:crypto";
@@ -87,13 +87,14 @@ import {
  * per-workspace so it becomes part of the cached prompt prefix.
  */
 const MEMORY_SYSTEM_PROMPT_APPEND = [
-  "You have access to durable cross-session memory for this workspace via three tools: recall, recall_file, and timeline.",
+  "You have access to durable cross-session memory for this workspace via four tools: recall, recall_file, timeline, and get_episode.",
   "",
   "- Before reading a file, call recall_file(path) — if it was read recently and hasn't changed, reuse that content instead of issuing a fresh Read.",
   "- When the user references earlier work ('what we did yesterday', 'the bug we hit', 'that auth flow'), call recall(query) first. Don't guess from your own session history; it may be out of date.",
   "- At the start of a new session in a known workspace, consider calling timeline() to orient yourself on recent activity.",
+  "- recall and timeline results each carry an episode_id; pass it to get_episode(episode_id) to fetch that turn's exact stored bytes verbatim, with nothing summarized or dropped.",
   "",
-  "Memory stores every tool call and assistant reply across all past sessions in this directory. It is the source of truth for history — summaries in your context may be partial.",
+  "Memory stores every tool call and assistant reply across all past sessions in this directory verbatim. It is the source of truth for history — the transcript in your context may be partial or truncated, so when a detail matters, page it in with these tools rather than relying on what you can see.",
 ].join("\n");
 
 /**
@@ -2538,36 +2539,12 @@ export class Session {
    * was working on, and how to fetch prior detail on demand.
    */
   #buildRotationSeed(_incoming: string): string {
-    const lastTurn = this.#lastUserTurnBeforeRotate;
-    const parts: string[] = [];
-    parts.push("<rotation_context>");
-    parts.push(
-      "Codeoid just rotated this session's backing Claude Code context to stay below the compaction ceiling. This is a CONTINUATION, not a new session.",
-    );
-    parts.push("");
-    parts.push(
-      `Workspace: ${this.workdir}. Rotation #${this.#rotationCount} of this session (\"${this.name}\").`,
-    );
-    parts.push("");
-    parts.push("Prior turns are preserved verbatim in codeoid memory. Retrieve on demand:");
-    parts.push("  - `recall(query)`       — semantic search across all prior episodes");
-    parts.push("  - `recall_file(path)`   — most recent prior Read of a specific file");
-    parts.push("  - `timeline(limit?)`    — chronological recent activity");
-    parts.push(
-      "The workspace index in your system prompt already advertises what topics + files are in memory.",
-    );
-    parts.push("");
-    if (lastTurn) {
-      parts.push("Most recent user turn before the rotation:");
-      parts.push("---");
-      parts.push(lastTurn.length > 2000 ? `${lastTurn.slice(0, 2000)}\n…` : lastTurn);
-      parts.push("---");
-    } else {
-      parts.push("No prior user turn recorded (memory disabled). Rely on the user's next message.");
-    }
-    parts.push("</rotation_context>");
-    parts.push("");
-    return parts.join("\n");
+    return renderRotationSeed({
+      workdir: this.workdir,
+      sessionName: this.name,
+      rotationCount: this.#rotationCount,
+      lastUserTurn: this.#lastUserTurnBeforeRotate ?? null,
+    });
   }
 
   /**

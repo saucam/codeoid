@@ -90,8 +90,16 @@ export const SEED_CHARS_PER_TOKEN = 3.5;
  * Character budget for a history seed targeting (provider, model). This is the
  * `maxChars` handed to renderHistorySeed — sized to the target window so a
  * fork only truncates when the conversation genuinely won't fit.
+ *
+ * `CODEOID_SEED_BUDGET_CHARS` overrides the computed budget with a hard cap
+ * (any positive integer). Operators use it to bound the transcript seed
+ * regardless of the target window (e.g. to keep first-turn cost predictable on
+ * a huge-context model); it also lets the resume-beyond-budget eval force
+ * truncation with a small history instead of ~490k chars.
  */
 export function seedBudgetChars(providerId: string, model?: string | null): number {
+  const override = Number(process.env.CODEOID_SEED_BUDGET_CHARS);
+  if (Number.isFinite(override) && override > 0) return Math.floor(override);
   const window = targetContextWindow(providerId, model);
   return Math.floor(window * SEED_WINDOW_FRACTION * SEED_CHARS_PER_TOKEN);
 }

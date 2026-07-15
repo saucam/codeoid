@@ -59,6 +59,15 @@ mock.module("@anthropic-ai/claude-agent-sdk", () => ({
     queryCallCount += 1;
     return makeMockQuery();
   },
+  // Minimal stubs so buildMemoryMcpServer() runs when a memory engine is
+  // present — the closures are never invoked here, we only assert wiring
+  // (allowedTools) and never actually call a memory tool through the SDK.
+  tool: (name: string, description: string, _shape: unknown, _run: unknown) => ({ name, description }),
+  createSdkMcpServer: (cfg: { name: string; version?: string; tools?: unknown[] }) => ({
+    type: "sdk" as const,
+    name: cfg.name,
+    instance: { tools: cfg.tools ?? [] },
+  }),
 }));
 
 // ── Import AFTER mock registration ────────────────────────────────────────────
@@ -71,6 +80,10 @@ import {
   withMcpToolTimeout,
   buildAgentEnv,
 } from "../daemon/providers/claude/index.js";
+import { MemoryEngine } from "../daemon/memory/engine.js";
+import { SqliteEpisodeStore } from "../daemon/memory/store.js";
+import { MEMORY_TOOL_NAMES } from "../daemon/memory/index.js";
+import type { Embedder } from "../daemon/memory/embedder.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -829,5 +842,118 @@ describe("ClaudeProvider – systemPromptAppend loop rebuild (#153)", () => {
     const options = capturedQueryOpts?.options as { resume?: string } | undefined;
     expect(options?.resume).toBe("test-backing");
     await shutdown(provider);
+  });
+});
+
+// ── #178 Phase 1: VWS wiring (seedText, supportsMemoryTools, get_episode) ──────
+//
+// The Verbatim Working Set strategy seeds a compact <session_map> via seedText
+// (only when the backend can page the store), and pages verbatim on demand via
+// the four memory tools. Phase 1 wires those two hooks on ClaudeProvider and
+// mounts the fourth tool (get_episode). These tests assert the wiring, not the
+// paging behavior (that's the gated resume-beyond-budget eval).
+
+/** Deterministic 8-dim char-histogram embedder — enough for a real engine. */
+class FakeEmbedder implements Embedder {
+  readonly modelName = "fake-test";
+  readonly dimensions = 8;
+  async init(): Promise<void> {}
+  async embed(texts: string[]): Promise<Float32Array[]> {
+    return texts.map((t) => {
+      const v = new Float32Array(this.dimensions);
+      for (const ch of t.toLowerCase()) {
+        const c = ch.charCodeAt(0);
+        if (c >= 97 && c <= 122) v[(c - 97) % this.dimensions]! += 1;
+      }
+      return v;
+    });
+  }
+  async close(): Promise<void> {}
+}
+
+async function makeMemoryEngine(): Promise<MemoryEngine> {
+  const engine = new MemoryEngine({ store: new SqliteEpisodeStore(":memory:"), embedder: new FakeEmbedder() });
+  await engine.init();
+  return engine;
+}
+
+function makeProviderWithMemory(memory: MemoryEngine): ClaudeProvider {
+  return new ClaudeProvider({
+    sessionId: "test-session",
+    initialBackingId: "test-backing",
+    workspaceId: "ws_test",
+    memory,
+    store: {
+      audit: () => {},
+      getClaudeCodeSessionId: () => null,
+      setClaudeCodeSessionId: () => {},
+    } as never,
+  });
+}
+
+/** Pull the content of the first message buffered on the (unconsumed) prompt
+ *  queue — the mock query() never drains it, so the seeded message sits there. */
+async function firstPromptContent(): Promise<string> {
+  const q = capturedQueryOpts?.prompt as AsyncIterable<{ message: { content: string } }> | undefined;
+  if (!q) throw new Error("no prompt queue captured");
+  const { value } = await q[Symbol.asyncIterator]().next();
+  return value?.message?.content ?? "";
+}
+
+describe("ClaudeProvider – VWS wiring (#178 Phase 1)", () => {
+  beforeEach(() => { sdkMessages = []; sdkThrowError = null; capturedQueryOpts = null; sdkGate = null; });
+
+  it("supportsMemoryTools is false without a memory engine, true with one", async () => {
+    expect(makeProvider().supportsMemoryTools).toBe(false);
+    const engine = await makeMemoryEngine();
+    expect(makeProviderWithMemory(engine).supportsMemoryTools).toBe(true);
+    await engine.close();
+  });
+
+  it("seedText prepends the strategy block ahead of the first prompt, then clears", async () => {
+    const provider = makeProvider();
+    provider.seedText("<session_map>MAP</session_map>");
+    provider.runTurn({ history: [], userMessage: "hello", workdir: "/tmp", canUseTool: async () => ({ behavior: "allow" as const }) });
+    const first = await firstPromptContent();
+    expect(first).toContain("<session_map>MAP</session_map>");
+    expect(first).toContain("hello");
+    // Order: seed precedes the user message.
+    expect(first.indexOf("MAP")).toBeLessThan(first.indexOf("hello"));
+
+    // Seed is one-shot: a second turn carries no stale map.
+    capturedQueryOpts = null;
+    provider.runTurn({ history: [], userMessage: "again", workdir: "/tmp", canUseTool: async () => ({ behavior: "allow" as const }) });
+    const second = await firstPromptContent();
+    expect(second).toBe("again");
+    await provider.teardown();
+  });
+
+  it("seedText('') is a no-op (empty block does not wrap the prompt)", async () => {
+    const provider = makeProvider();
+    provider.seedText("");
+    provider.runTurn({ history: [], userMessage: "hi", workdir: "/tmp", canUseTool: async () => ({ behavior: "allow" as const }) });
+    expect(await firstPromptContent()).toBe("hi");
+    await provider.teardown();
+  });
+
+  it("mounts all four memory tools — including get_episode — in allowedTools when memory is present", async () => {
+    const engine = await makeMemoryEngine();
+    const provider = makeProviderWithMemory(engine);
+    provider.runTurn({ history: [], userMessage: "hi", workdir: "/tmp", canUseTool: async () => ({ behavior: "allow" as const }) });
+    const allowed = (capturedQueryOpts?.options as { allowedTools?: string[] })?.allowedTools ?? [];
+    expect(allowed).toContain("mcp__codeoid_memory__get_episode");
+    for (const t of MEMORY_TOOL_NAMES) {
+      expect(allowed).toContain(`mcp__codeoid_memory__${t}`);
+    }
+    await provider.teardown();
+    await engine.close();
+  });
+
+  it("mounts no memory tools when memory is absent", async () => {
+    const provider = makeProvider();
+    provider.runTurn({ history: [], userMessage: "hi", workdir: "/tmp", canUseTool: async () => ({ behavior: "allow" as const }) });
+    const allowed = (capturedQueryOpts?.options as { allowedTools?: string[] })?.allowedTools ?? [];
+    expect(allowed.some((t) => t.startsWith("mcp__codeoid_memory__"))).toBe(false);
+    await provider.teardown();
   });
 });

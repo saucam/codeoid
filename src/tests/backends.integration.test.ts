@@ -31,6 +31,9 @@ import { Store } from "../daemon/store.js";
 import { TranscriptStore } from "../daemon/transcript.js";
 import { SessionManager } from "../daemon/session-manager.js";
 import { createDefaultProviderRegistry } from "../daemon/providers/registry.js";
+import { MemoryEngine } from "../daemon/memory/engine.js";
+import { SqliteEpisodeStore } from "../daemon/memory/store.js";
+import { createEmbedder } from "../daemon/memory/embedder.js";
 import { ALL_SCOPES } from "../protocol/scopes.js";
 import type { AuthContext, DaemonMessage } from "../protocol/types.js";
 
@@ -214,4 +217,156 @@ describe("backends integration (real)", () => {
       );
     }
   }
+});
+
+// ── RESUME-BEYOND-BUDGET (#178 Phase 1) — the strategy selector ────────────────
+//
+// The headline case: a session grows past the seed budget, so a forked backend
+// seeded with a rendered transcript LOSES the oldest turns. The fact under test
+// lives ONLY in the first turn — dropped by the transcript seed. Under the VWS
+// strategy the fork is seeded with a compact session map instead, and the model
+// pages the dropped turn back verbatim via the memory tools (recall/get_episode/
+// timeline). This proves losslessness: dropped-from-context ≠ lost.
+//
+// Runs both strategies on the SAME beyond-budget history and forks onto claude
+// (Phase 1 = the backend with the tools mounted). The flip criterion is:
+//   VWS recalls the dropped fact  ∧  transcript does not.
+// Incoming first-turn tokens are logged for the cost side of the comparison —
+// the strict cost gate wants a full-window large history and is validated in the
+// operator's env; here CODEOID_SEED_BUDGET_CHARS forces truncation cheaply.
+//
+// Gated: CODEOID_INTEGRATION=1 AND "claude" in CODEOID_INTEGRATION_BACKENDS.
+
+const RUN_VWS = RUN && BACKENDS.includes("claude");
+// A unique, unguessable token so a pass means genuine retrieval, not a lucky
+// guess or a hallucination.
+const SECRET = "CRIMSON-OTTER-8842";
+const FILLERS = [
+  "Summarize what a binary search does, in two sentences.",
+  "Name three common HTTP status codes and what each means.",
+  "What is the difference between a process and a thread? Keep it short.",
+  "Give one reason to prefer composition over inheritance.",
+  "In one sentence, what is idempotency in an HTTP API?",
+];
+
+/** Send a turn on a specific manager and wait for idle/error. */
+async function sendAndSettleOn(mgr: SessionManager, c: Client, sessionId: string, text: string): Promise<void> {
+  await mgr.handle({ type: "session.attach", id: randomUUID(), sessionId } as never, AUTH, c as never);
+  const start = c.received.length;
+  await mgr.handle({ type: "session.send", id: randomUUID(), sessionId, text } as never, AUTH, c as never);
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    const settled = c.received
+      .slice(start)
+      .some((m) => m.type === "session.status_change" && ((m as { status: string }).status === "idle" || (m as { status: string }).status === "error"));
+    if (settled) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error(`[${sessionId}] never settled after send`);
+}
+
+/** Largest lastTurnInputTokens broadcast for `sessionId` after index `since` (or -1). */
+function firstTurnInputTokens(c: Client, sessionId: string, since: number): number {
+  let max = -1;
+  for (const m of c.received.slice(since)) {
+    if (m.type !== "session.info_update") continue;
+    const s = (m as { session?: { id?: string; usage?: { lastTurnInputTokens?: number } } }).session;
+    if (s?.id !== sessionId) continue;
+    const n = s.usage?.lastTurnInputTokens;
+    if (typeof n === "number" && n > max) max = n;
+  }
+  return max;
+}
+
+interface StrategyOutcome {
+  recalled: boolean;
+  incomingInputTokens: number;
+  answer: string;
+}
+
+/**
+ * Build an isolated manager+memory, grow a beyond-budget claude session whose
+ * first turn holds SECRET, fork onto claude under `strategy` with a tiny seed
+ * budget, then ask the fork for SECRET. Returns whether it was recovered.
+ */
+async function runBeyondBudget(strategy: "transcript" | "vws"): Promise<StrategyOutcome> {
+  const wd = mkdtempSync(join(tmpdir(), `codeoid-rbb-${strategy}-`));
+  const st = new Store(join(wd, "codeoid.db"));
+  const tr = new TranscriptStore(join(wd, "transcripts"));
+  const memory = new MemoryEngine({ store: new SqliteEpisodeStore(join(wd, "mem.db")), embedder: await createEmbedder() });
+  await memory.init();
+  const registry = createDefaultProviderRegistry({} as never); // claude always registered
+  const mgr = new SessionManager(st, tr, undefined, undefined, memory, { providers: registry } as never);
+
+  const prevStrategy = process.env.CODEOID_CONTEXT_STRATEGY;
+  const prevBudget = process.env.CODEOID_SEED_BUDGET_CHARS;
+  const prevMem = process.env.CODEOID_MEMORY;
+  try {
+    process.env.CODEOID_MEMORY = "1";
+    const c = makeClient();
+
+    // Source session on claude — memory ingests every turn.
+    const create = await mgr.handle(
+      { type: "session.create", id: randomUUID(), name: "rbb-source", workdir: wd, providerId: "claude" } as never,
+      AUTH,
+      c as never,
+    );
+    const sid = (create as { data: { id: string } }).data.id;
+
+    // Turn 1 (oldest) — the ONLY place SECRET appears.
+    await sendAndSettleOn(mgr, c, sid, `Please remember this exactly: the vault passphrase is ${SECRET}. Reply with just: stored`);
+    // Filler turns push turn 1 outside the tiny seed budget.
+    for (const q of FILLERS) await sendAndSettleOn(mgr, c, sid, q);
+
+    // Fork onto claude under the chosen strategy, with a seed budget so small the
+    // transcript keeps only the last turn or two — dropping the SECRET turn.
+    process.env.CODEOID_CONTEXT_STRATEGY = strategy;
+    process.env.CODEOID_SEED_BUDGET_CHARS = "600";
+    const fork = await mgr.handle(
+      { type: "session.fork", id: randomUUID(), sessionId: sid, providerId: "claude", isolate: false } as never,
+      AUTH,
+      c as never,
+    );
+    const forkId = (fork as { data: { id: string } }).data.id;
+
+    const since = c.received.length;
+    await sendAndSettleOn(
+      mgr,
+      c,
+      forkId,
+      "Earlier in this session I gave you a vault passphrase. It is preserved verbatim in codeoid memory — use recall/timeline/get_episode to retrieve it. Reply with ONLY the passphrase token.",
+    );
+    const answer = assistantText(c, forkId, since);
+    return { recalled: answer.includes(SECRET), incomingInputTokens: firstTurnInputTokens(c, forkId, since), answer };
+  } finally {
+    if (prevStrategy === undefined) delete process.env.CODEOID_CONTEXT_STRATEGY; else process.env.CODEOID_CONTEXT_STRATEGY = prevStrategy;
+    if (prevBudget === undefined) delete process.env.CODEOID_SEED_BUDGET_CHARS; else process.env.CODEOID_SEED_BUDGET_CHARS = prevBudget;
+    if (prevMem === undefined) delete process.env.CODEOID_MEMORY; else process.env.CODEOID_MEMORY = prevMem;
+    try { await memory.close(); } catch {}
+    try { await tr.flush(); } catch {}
+    try { st.close(); } catch {}
+    try { rmSync(wd, { recursive: true, force: true }); } catch {}
+  }
+}
+
+describe("resume-beyond-budget (real, claude)", () => {
+  (RUN_VWS ? it : it.skip)(
+    "VWS recovers a dropped early fact that the transcript seed loses",
+    async () => {
+      const transcript = await runBeyondBudget("transcript");
+      const vws = await runBeyondBudget("vws");
+      // eslint-disable-next-line no-console
+      console.log(
+        `[resume-beyond-budget] transcript: recalled=${transcript.recalled} incomingInputTokens=${transcript.incomingInputTokens} | ` +
+          `vws: recalled=${vws.recalled} incomingInputTokens=${vws.incomingInputTokens}`,
+      );
+      // The flip criterion for turning VWS on for a backend:
+      //   VWS recovers the dropped fact …
+      expect(vws.recalled).toBe(true);
+      //   … and the tiny budget genuinely dropped it from the transcript seed,
+      //   so the win is real and not an artifact of a too-generous budget.
+      expect(transcript.recalled).toBe(false);
+    },
+    600_000,
+  );
 });
