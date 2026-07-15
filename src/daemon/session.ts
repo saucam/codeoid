@@ -28,6 +28,7 @@ import {
   isSubagentEvent,
 } from "./providers/interface.js";
 import { createDefaultProviderRegistry, type ProviderRegistry } from "./providers/registry.js";
+import { selectContextStrategy, renderSessionMap, type ContextStrategy } from "./providers/context-strategy.js";
 import type { HookBus } from "./hooks/bus.js";
 import type { HookSessionContext } from "./hooks/types.js";
 import { randomUUID } from "node:crypto";
@@ -329,6 +330,9 @@ export class Session {
   // subprocess) so the session can self-recover instead of wedging forever.
   #lastEventAt = 0;
   #accumulator = new CanonicalHistoryAccumulator();
+  /** Pluggable seed policy for switch/fork. Default `transcript` (no change);
+   *  `CODEOID_CONTEXT_STRATEGY=vws` opts into the compact session map. */
+  #contextStrategy: ContextStrategy = selectContextStrategy();
   // Tracks the sender of the most recently started turn. The onRecoveryNeeded
   // closure reads this instead of closing over the original send()'s sender,
   // which may have been overwritten by a subsequent send() before recovery fires.
@@ -1860,22 +1864,26 @@ export class Session {
    * Returns whether a seed was actually applied.
    */
   async #seedProviderFromHistory(): Promise<boolean> {
-    if (!this.#provider.seedFromHistory || this.#accumulator.history.length === 0) {
-      return false;
-    }
-    // Size the seed to the TARGET model's context window (per-provider default
-    // when the model isn't chosen yet — the common fork case) so it only
-    // truncates when the history genuinely won't fit, then surface it if it did.
-    const maxChars = seedBudgetChars(this.#provider.id, this.#model);
+    if (this.#accumulator.history.length === 0) return false;
+    // Delegate to the active context strategy (default `transcript` = the
+    // legacy rendered-history seed; `vws` = compact session map + on-demand
+    // paging, which falls back to transcript for backends without the recall
+    // tools mounted). Best-effort: a throw degrades to an unseeded start.
     try {
-      const result = await this.#provider.seedFromHistory(this.#accumulator.history, { maxChars });
-      if (result && result.omittedTurns > 0) {
-        this.#surfaceSeedTruncation(result);
+      const outcome = await this.#contextStrategy.seed({
+        provider: this.#provider,
+        history: this.#accumulator.history,
+        memoryEnabled: this.#memory != null && process.env.CODEOID_MEMORY !== "0",
+        seedBudgetChars: seedBudgetChars(this.#provider.id, this.#model),
+        buildSessionMap: () => this.#buildSessionMapAnchor(),
+      });
+      if (outcome.truncation && outcome.truncation.omittedTurns > 0) {
+        this.#surfaceSeedTruncation(outcome.truncation);
       }
-      return true;
+      return outcome.applied;
     } catch (err) {
       console.error(
-        `[codeoid/session ${this.id}] seedFromHistory failed: ${err instanceof Error ? err.message : String(err)}`,
+        `[codeoid/session ${this.id}] context seed (${this.#contextStrategy.name}) failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       return false;
     }
@@ -2560,6 +2568,28 @@ export class Session {
     parts.push("</rotation_context>");
     parts.push("");
     return parts.join("\n");
+  }
+
+  /**
+   * Gather the inputs for the compact "session map" anchor (the Verbatim
+   * Working Set seed) and delegate rendering to the pure `renderSessionMap`.
+   */
+  #buildSessionMapAnchor(): string {
+    let timelineEpisodes: ReturnType<MemoryEngine["timeline"]> = [];
+    if (this.#memory) {
+      try {
+        timelineEpisodes = this.#memory.timeline(this.#workspaceId, 30);
+      } catch {
+        /* graceful — the map still works without the page table */
+      }
+    }
+    return renderSessionMap({
+      workdir: this.workdir,
+      sessionName: this.name,
+      sessionId: this.id,
+      recentTurns: this.#accumulator.history.slice(-3),
+      timelineEpisodes,
+    });
   }
 
   /**

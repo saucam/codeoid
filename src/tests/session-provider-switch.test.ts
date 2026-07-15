@@ -26,6 +26,20 @@ import { ProviderRegistry } from "../daemon/providers/registry.js";
 import type { ProviderEvent } from "../daemon/providers/interface.js";
 import type { AuthContext, DaemonMessage, SessionMessage } from "../protocol/types.js";
 import { ALL_SCOPES, SCOPES, type Scope } from "../protocol/scopes.js";
+import { MemoryEngine } from "../daemon/memory/engine.js";
+import { SqliteEpisodeStore } from "../daemon/memory/store.js";
+import type { Embedder } from "../daemon/memory/embedder.js";
+
+/** Minimal embedder so a MemoryEngine can be constructed for the VWS test. */
+class FakeEmbedder implements Embedder {
+  readonly modelName = "fake-test";
+  readonly dimensions = 8;
+  async init(): Promise<void> {}
+  async embed(texts: string[]): Promise<Float32Array[]> {
+    return texts.map(() => new Float32Array(this.dimensions));
+  }
+  async close(): Promise<void> {}
+}
 
 const AUTH: AuthContext = {
   sub: "user:switch-test",
@@ -83,7 +97,7 @@ function makeRegistry(scripts: { a?: ProviderEvent[][]; b?: ProviderEvent[][] } 
   return { registry, created };
 }
 
-function makeSession(registry: ProviderRegistry, providerId = "mock-a"): Session {
+function makeSession(registry: ProviderRegistry, providerId = "mock-a", memory?: MemoryEngine): Session {
   const id = randomUUID();
   store.createSession({
     id,
@@ -105,6 +119,7 @@ function makeSession(registry: ProviderRegistry, providerId = "mock-a"): Session
     existingId: id,
     providers: registry,
     providerId,
+    ...(memory ? { memory } : {}),
   });
 }
 
@@ -173,6 +188,53 @@ describe("Session.switchProvider", () => {
     expect(created["mock-b"]![0]!.capturedOpts).toHaveLength(1);
 
     await session.destroy(AUTH);
+  });
+
+  it("S9: VWS seeds a compact session map (not a transcript) when the incoming backend has the tools", async () => {
+    const prev = process.env.CODEOID_CONTEXT_STRATEGY;
+    process.env.CODEOID_CONTEXT_STRATEGY = "vws";
+    try {
+      const memory = new MemoryEngine({ store: new SqliteEpisodeStore(":memory:"), embedder: new FakeEmbedder() });
+      await memory.init();
+
+      const created: MockSessionProvider[] = [];
+      const registry = new ProviderRegistry("mock-a");
+      registry.register({
+        id: "mock-a",
+        displayName: "mock-a",
+        create: () => new MockSessionProvider("mock-a", [textTurn("from A")]),
+      });
+      registry.register({
+        id: "mock-b",
+        displayName: "mock-b",
+        create: () => {
+          const p = new MockSessionProvider("mock-b", [textTurn("from B")]);
+          p.supportsMemoryTools = true; // backend has the recall tools mounted
+          created.push(p);
+          return p;
+        },
+      });
+
+      const session = makeSession(registry, "mock-a", memory);
+      session.attach(recordingClient());
+      await session.send("hello a", AUTH); // populate history to seed from
+      await waitFor(() => session.status === "idle" && session.lastAssistantText === "from A");
+
+      const res = await session.switchProvider("mock-b", AUTH);
+      expect(res).toEqual({ ok: true, providerId: "mock-b" });
+
+      const b = created[0]!;
+      // VWS path: a compact session map via seedText, NOT a rendered transcript.
+      expect(b.seededText).toHaveLength(1);
+      expect(b.seededText[0]!).toContain("<session_map>");
+      expect(b.seededText[0]!).toContain("hello a"); // last user turn, verbatim
+      expect(b.seededHistory).toBeNull(); // transcript path was not taken
+
+      await session.destroy(AUTH);
+    } finally {
+      if (prev === undefined) delete process.env.CODEOID_CONTEXT_STRATEGY;
+      else process.env.CODEOID_CONTEXT_STRATEGY = prev;
+    }
   });
 
   it("S8: surfaces a visible warning when the seed is truncated for the target window", async () => {
