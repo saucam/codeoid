@@ -30,6 +30,7 @@ import type { AgentIdentityManager } from "../../agent-identity.js";
 import type { Store } from "../../store.js";
 import {
   buildMemoryMcpServer,
+  MEMORY_TOOL_NAMES,
   type MemoryEngine,
 } from "../../memory/index.js";
 import type { CompressionRegistry } from "../../compress/index.js";
@@ -323,7 +324,7 @@ export class ClaudeProvider implements SessionProvider {
         env: buildAgentEnv(),
         allowedTools: [
           ...(init.memory
-            ? ["mcp__codeoid_memory__recall", "mcp__codeoid_memory__recall_file", "mcp__codeoid_memory__timeline"]
+            ? MEMORY_TOOL_NAMES.map((t) => `mcp__codeoid_memory__${t}`)
             : []),
           // Widened for the conductor's fleet server — without these entries
           // the mounted server's tools stay unreachable (design §3 gotcha).

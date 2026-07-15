@@ -275,6 +275,24 @@ export interface AgentProvider {
     history: readonly CanonicalTurn[],
     opts?: { maxChars?: number },
   ): HistorySeedResult | undefined | Promise<HistorySeedResult | undefined>;
+  /**
+   * Transport-only hook for a strategy-built seed block (e.g. the compact
+   * session map). The session decides the CONTENT (transcript vs session map);
+   * the provider just stashes `block` and prepends it to its first prompt —
+   * the same channel `seedFromHistory` already uses (`#pendingHistorySeed`).
+   * Warm backends implement it; stateless backends omit it (they carry the
+   * full history natively every turn).
+   */
+  seedText?(block: string): void;
+  /**
+   * True when codeoid's memory recall tools (recall/recall_file/timeline/
+   * get_episode) are mounted for this provider+session, so the model can page
+   * the verbatim store on demand. A context-light strategy (session map) is
+   * used ONLY when this is true; otherwise the session falls back to the
+   * transcript seed. This is the per-backend rollout gate — a backend sets it
+   * true only after its tool mount is confirmed.
+   */
+  readonly supportsMemoryTools?: boolean;
   dispose(): Promise<void>;
 }
 

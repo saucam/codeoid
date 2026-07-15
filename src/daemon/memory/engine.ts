@@ -293,14 +293,21 @@ export class MemoryEngine {
     return hits.slice(0, limit);
   }
 
-  /** Fetch a single episode by id (for recall_turn-style lookup). */
+  /** Fetch a single episode by id (for recall_turn-style lookup). Internal —
+   *  NOT tenant-scoped; use getEpisodeScoped for anything a model can reach. */
   getEpisode(id: string): Episode | null {
     return this.#store.getEpisode(id);
   }
 
-  /** List recent episodes (for the warm-tier index / timeline UI). */
-  timeline(workspaceId: string, limit = 40): Episode[] {
-    return this.#store.listRecent(workspaceId, limit);
+  /** Tenant-scoped fetch by id — the only variant safe to expose to a model. */
+  getEpisodeScoped(id: string, workspaceId: string): Episode | null {
+    return this.#store.getEpisodeInWorkspace(id, workspaceId);
+  }
+
+  /** List recent episodes (for the warm-tier index / timeline UI). `offset`
+   *  enables ordered pagination over the full workspace history. */
+  timeline(workspaceId: string, limit = 40, offset = 0): Episode[] {
+    return this.#store.listRecent(workspaceId, limit, offset);
   }
 
   /**

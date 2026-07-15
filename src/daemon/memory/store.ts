@@ -827,12 +827,25 @@ export class SqliteEpisodeStore {
     return row ? this.#rowToEpisode(row) : null;
   }
 
-  listRecent(workspaceId: string, limit: number): Episode[] {
+  /**
+   * Tenant-scoped exact fetch — returns null if the episode belongs to another
+   * workspace. The bare `getEpisode` above is NOT tenant-scoped; only this
+   * variant is safe to expose to a model (a `get_episode` tool must never be a
+   * cross-tenant read primitive).
+   */
+  getEpisodeInWorkspace(id: string, workspaceId: string): Episode | null {
+    const row = this.#db
+      .prepare("SELECT * FROM episodes WHERE id = ? AND workspace_id = ?")
+      .get(id, workspaceId) as EpisodeRow | null;
+    return row ? this.#rowToEpisode(row) : null;
+  }
+
+  listRecent(workspaceId: string, limit: number, offset = 0): Episode[] {
     const rows = this.#db
       .prepare(
-        "SELECT * FROM episodes WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?",
+        "SELECT * FROM episodes WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
       )
-      .all(workspaceId, limit) as EpisodeRow[];
+      .all(workspaceId, limit, offset) as EpisodeRow[];
     return rows.map((r) => this.#rowToEpisode(r));
   }
 

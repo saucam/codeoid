@@ -28,6 +28,7 @@ import {
   isSubagentEvent,
 } from "./providers/interface.js";
 import { createDefaultProviderRegistry, type ProviderRegistry } from "./providers/registry.js";
+import { selectContextStrategy, type ContextStrategy } from "./providers/context-strategy.js";
 import type { HookBus } from "./hooks/bus.js";
 import type { HookSessionContext } from "./hooks/types.js";
 import { randomUUID } from "node:crypto";
@@ -67,6 +68,7 @@ import {
   EpisodeChunker,
   IndexScheduler,
   workspaceIdFromPath,
+  formatTimeline,
   type MemoryEngine,
 } from "./memory/index.js";
 import type { Attachment } from "../protocol/types.js";
@@ -329,6 +331,9 @@ export class Session {
   // subprocess) so the session can self-recover instead of wedging forever.
   #lastEventAt = 0;
   #accumulator = new CanonicalHistoryAccumulator();
+  /** Pluggable seed policy for switch/fork. Default `transcript` (no change);
+   *  `CODEOID_CONTEXT_STRATEGY=vws` opts into the compact session map. */
+  #contextStrategy: ContextStrategy = selectContextStrategy();
   // Tracks the sender of the most recently started turn. The onRecoveryNeeded
   // closure reads this instead of closing over the original send()'s sender,
   // which may have been overwritten by a subsequent send() before recovery fires.
@@ -1860,22 +1865,26 @@ export class Session {
    * Returns whether a seed was actually applied.
    */
   async #seedProviderFromHistory(): Promise<boolean> {
-    if (!this.#provider.seedFromHistory || this.#accumulator.history.length === 0) {
-      return false;
-    }
-    // Size the seed to the TARGET model's context window (per-provider default
-    // when the model isn't chosen yet — the common fork case) so it only
-    // truncates when the history genuinely won't fit, then surface it if it did.
-    const maxChars = seedBudgetChars(this.#provider.id, this.#model);
+    if (this.#accumulator.history.length === 0) return false;
+    // Delegate to the active context strategy (default `transcript` = the
+    // legacy rendered-history seed; `vws` = compact session map + on-demand
+    // paging, which falls back to transcript for backends without the recall
+    // tools mounted). Best-effort: a throw degrades to an unseeded start.
     try {
-      const result = await this.#provider.seedFromHistory(this.#accumulator.history, { maxChars });
-      if (result && result.omittedTurns > 0) {
-        this.#surfaceSeedTruncation(result);
+      const outcome = await this.#contextStrategy.seed({
+        provider: this.#provider,
+        history: this.#accumulator.history,
+        memoryEnabled: this.#memory != null && process.env.CODEOID_MEMORY !== "0",
+        seedBudgetChars: seedBudgetChars(this.#provider.id, this.#model),
+        buildSessionMap: () => this.#buildSessionMapAnchor(),
+      });
+      if (outcome.truncation && outcome.truncation.omittedTurns > 0) {
+        this.#surfaceSeedTruncation(outcome.truncation);
       }
-      return true;
+      return outcome.applied;
     } catch (err) {
       console.error(
-        `[codeoid/session ${this.id}] seedFromHistory failed: ${err instanceof Error ? err.message : String(err)}`,
+        `[codeoid/session ${this.id}] context seed (${this.#contextStrategy.name}) failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       return false;
     }
@@ -2558,6 +2567,68 @@ export class Session {
       parts.push("No prior user turn recorded (memory disabled). Rely on the user's next message.");
     }
     parts.push("</rotation_context>");
+    parts.push("");
+    return parts.join("\n");
+  }
+
+  /**
+   * Build the compact "session map" anchor for a cross-backend switch/fork
+   * (the Verbatim Working Set strategy). Generalizes #buildRotationSeed across
+   * backends: tell the incoming backend this is a continuation, give it the
+   * last few turns verbatim plus an ordered page table of the history (each
+   * line carries an episode_id), and point it at the recall tools to page
+   * anything else in verbatim on demand. Nothing is summarized.
+   */
+  #buildSessionMapAnchor(): string {
+    const clamp = (s: string, n = 2000): string => (s.length > n ? `${s.slice(0, n)}\n…` : s);
+    const parts: string[] = [];
+    parts.push("<session_map>");
+    parts.push(
+      "You are continuing an ongoing session that was running on another agent backend. This is a CONTINUATION — do not re-introduce yourself or repeat completed work.",
+    );
+    parts.push("");
+    parts.push(`Workspace: ${this.workdir}. Session: "${this.name}".`);
+    parts.push("");
+    parts.push(
+      "The full prior history is preserved verbatim in codeoid memory — page any of it in on demand (nothing is summarized):",
+    );
+    parts.push("  - recall(query)              — semantic search across all prior episodes");
+    parts.push("  - timeline(offset?, limit?)  — walk the full history in order; each line has an episode_id");
+    parts.push("  - get_episode(episode_id)    — fetch one past turn or tool result verbatim");
+    parts.push("  - recall_file(path)          — the most recent prior read of a file");
+    parts.push("The workspace index in your system prompt lists the topics + hot files in memory.");
+    parts.push("");
+    // Ordered page table of recent episodes (each carries an episode_id).
+    if (this.#memory) {
+      try {
+        const recent = this.#memory.timeline(this.#workspaceId, 30);
+        if (recent.length > 0) {
+          parts.push("## Recent episodes (newest first — page older with `timeline` offset)");
+          parts.push(formatTimeline(recent, this.id, 0));
+          parts.push("");
+        }
+      } catch {
+        /* graceful — the map still works without the page table */
+      }
+    }
+    // The last few turns verbatim, so the immediate thread survives even if the
+    // model never pages anything.
+    const recentTurns = this.#accumulator.history.slice(-3);
+    if (recentTurns.length > 0) {
+      parts.push(`## Last ${recentTurns.length} turn(s) (verbatim)`);
+      for (const t of recentTurns) {
+        if (t.role === "user") {
+          parts.push(`### User\n${clamp(t.content)}`);
+        } else {
+          const seg: string[] = ["### Assistant"];
+          if (t.content) seg.push(clamp(t.content));
+          for (const tc of t.toolCalls ?? []) seg.push(`[tool: ${tc.name}]`);
+          parts.push(seg.join("\n"));
+        }
+      }
+      parts.push("");
+    }
+    parts.push("</session_map>");
     parts.push("");
     return parts.join("\n");
   }

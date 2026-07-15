@@ -21,6 +21,15 @@ export {
 export { MemoryEngine, type SessionSearchHit } from "./engine.js";
 export { EpisodeChunker, extractFilePaths } from "./chunker.js";
 export { buildMemoryMcpServer } from "./mcp.js";
+export {
+  memoryToolDefs,
+  MEMORY_TOOL_NAMES,
+  formatHits,
+  formatTimeline,
+  formatEpisode,
+  type MemoryToolDef,
+  type MemoryToolContext,
+} from "./tools.js";
 export { DEFAULT_EMBEDDING_MODEL, createEmbedder } from "./embedder.js";
 export { buildWorkspaceIndex, MAX_INDEX_BYTES } from "./index-builder.js";
 export { IndexScheduler } from "./index-scheduler.js";
