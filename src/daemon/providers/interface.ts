@@ -14,6 +14,7 @@ import type {
   AuthContext,
   ContentPart,
   ProviderCommand,
+  SessionMode,
   UiRequestMethod,
 } from "../../protocol/types.js";
 import type { CanonicalTurn, HistorySeedResult } from "./canonical.js";
@@ -103,6 +104,19 @@ export interface TurnOpts {
    */
   requestUserInput?: UiRequestFn;
   sender?: AuthContext;
+  /**
+   * The session's current execution mode. codeoid's `canUseTool` gate enforces
+   * it uniformly for every backend (auto-approve in autonomous, prompt in
+   * guarded, prompt-everything in interactive). Backends that ALSO have a
+   * native approval/sandbox policy (codex) map the mode onto it so switching
+   * modes actually reconfigures the backend — e.g. `autonomous` lets codex run
+   * unattended (no per-action approval round-trip) with full sandbox access,
+   * instead of asking on every action and relying on codeoid to auto-approve.
+   * Backends without a native policy (claude via the SDK gate, gemini-cli/pi
+   * via their request-permission channels) ignore it — the gate already
+   * carries the mode. Absent = treat as `guarded`.
+   */
+  mode?: SessionMode;
 }
 
 // ── Normalized turn result ────────────────────────────────────────────────────

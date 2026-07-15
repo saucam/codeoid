@@ -8,23 +8,29 @@
  *
  *   - warm process; one codex THREAD per backing session (thread id is the
  *     backingSessionId; resetToNewSession starts a fresh thread)
- *   - `approvalPolicy: "untrusted"` is pinned on every turn so codex asks
- *     before privileged actions; each server-side approval request routes
- *     through codeoid's canUseTool — approve/deny round-trips natively (no
- *     injected bridge, unlike pi)
+ *   - the codeoid session MODE drives codex's native `approvalPolicy` on every
+ *     thread/turn start (see codexPolicies()), so switching modes actually
+ *     reconfigures the backend rather than only changing what codeoid's gate
+ *     does with codex's approval requests:
+ *       · guarded / interactive → `untrusted`: codex asks before privileged
+ *         actions and each request routes through codeoid's canUseTool
+ *         (approve/deny natively, no injected bridge unlike pi) so codeoid
+ *         prompts the user;
+ *       · autonomous → `never`: codex runs unattended with NO per-action
+ *         approval round-trip. codeoid records each action retrospectively at
+ *         item/completed (see below) so scrollback + history stay honest.
  *   - the sandbox mode `danger-full-access` is pinned (as codex's
  *     internally-tagged `{type:"dangerFullAccess"}` wire value, via
- *     sandboxPolicyWire()) so codex EXECUTES the commands codeoid approves
- *     instead of re-sandboxing them. codeoid's canUseTool gate is the single
- *     trust authority (it implements the session mode — auto-approve in
- *     autonomous, prompt in guarded); codex's
- *     own bundled-bubblewrap sandbox is redundant with it AND non-portable —
- *     it needs unprivileged user namespaces that containers and hardened
- *     hosts (`apparmor_restrict_unprivileged_userns=1`) forbid, and when
- *     bwrap can't initialize even an APPROVED command dies inside codex with
- *     "command execution rejected / cannot escalate". Operators on a
- *     bwrap-capable host who want defense-in-depth can restore it via
- *     CODEX_SANDBOX_POLICY / CODEX_APPROVAL_POLICY (see codexPolicies()).
+ *     sandboxPolicyWire()) so codex EXECUTES actions with full access
+ *     (including network) instead of re-sandboxing them. codeoid's mode is the
+ *     trust authority; codex's own bundled-bubblewrap sandbox is redundant with
+ *     it AND non-portable — it needs unprivileged user namespaces that
+ *     containers and hardened hosts (`apparmor_restrict_unprivileged_userns=1`)
+ *     forbid, and when bwrap can't initialize even an APPROVED command dies
+ *     inside codex with "command execution rejected / cannot escalate".
+ *     Operators on a bwrap-capable host who want defense-in-depth can override
+ *     both the mode-derived approval policy and the sandbox via
+ *     CODEX_APPROVAL_POLICY / CODEX_SANDBOX_POLICY (see codexPolicies()).
  *   - `item/tool/requestUserInput` → requestUserInput (session.ui_request)
  *   - text/reasoning deltas stream; command/fileChange/mcp items surface
  *     as tool records; usage from turn/completed
@@ -53,6 +59,7 @@ import type {
 import { renderHistorySeed, type CanonicalTurn, type HistorySeedResult } from "../canonical.js";
 import { buildCodexEnv } from "../env.js";
 import { CodexRpcProcess } from "./rpc.js";
+import type { SessionMode } from "../../../protocol/types.js";
 
 /** codex `tokenUsage.last` / `.total` shape (thread/tokenUsage/updated). */
 interface CodexTokenUsage {
@@ -101,22 +108,40 @@ type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 const SANDBOX_MODES = new Set<SandboxMode>(["read-only", "workspace-write", "danger-full-access"]);
 
 /**
+ * Map the codeoid session {@link SessionMode} to codex's native approval policy.
+ * This is what makes a mode switch reconfigure the backend:
+ *   - `autonomous` → `never`: codex runs unattended, no per-action approval
+ *     round-trip (codeoid records each action retrospectively at item/completed).
+ *   - `guarded` / `interactive` → `untrusted`: codex asks before privileged
+ *     actions and each request routes through codeoid's canUseTool so codeoid
+ *     prompts the user. (codex has no "ask for read-only ops too" policy, so
+ *     interactive degrades to untrusted at the codex layer; codeoid's gate
+ *     still prompts for everything codex does ask about.)
+ *   - absent → `untrusted` (treated as guarded).
+ */
+function approvalPolicyForMode(mode: SessionMode | undefined): string {
+  return mode === "autonomous" ? "never" : "untrusted";
+}
+
+/**
  * The approval policy + sandbox MODE codeoid pins on codex thread/turn starts.
  *
- * Defaults (see the file header for the full rationale): codeoid's canUseTool
- * gate is the trust authority, so codex ASKS before every non-trivial action
- * (`untrusted`) and runs approved actions with its own sandbox DISABLED
- * (`danger-full-access`) — portable, and non-redundant with codeoid's gate.
+ * The session mode drives the defaults (see {@link approvalPolicyForMode} and
+ * the file header). The sandbox is `danger-full-access` in every mode so codex
+ * EXECUTES actions with full access instead of re-sandboxing them — codeoid's
+ * mode + canUseTool gate is the trust authority, not codex's bubblewrap.
  *
- * Both are overridable via env for operators on a bubblewrap-capable host who
- * want codex's sandbox as defense-in-depth. An unknown value falls back to the
- * default rather than letting codex reject the turn/start.
+ * Both are overridable via env, which WINS over the mode-derived value: an
+ * operator on a bubblewrap-capable host who wants codex's sandbox as
+ * defense-in-depth (or a pinned approval policy) sets CODEX_SANDBOX_POLICY /
+ * CODEX_APPROVAL_POLICY and it holds regardless of mode. An unknown value falls
+ * back to the mode-derived default rather than letting codex reject the start.
  */
-function codexPolicies(): { approvalPolicy: string; sandboxMode: SandboxMode } {
+function codexPolicies(mode?: SessionMode): { approvalPolicy: string; sandboxMode: SandboxMode } {
   const approval = process.env.CODEX_APPROVAL_POLICY?.trim();
   const sandbox = process.env.CODEX_SANDBOX_POLICY?.trim() as SandboxMode | undefined;
   return {
-    approvalPolicy: approval && APPROVAL_POLICIES.has(approval) ? approval : "untrusted",
+    approvalPolicy: approval && APPROVAL_POLICIES.has(approval) ? approval : approvalPolicyForMode(mode),
     sandboxMode: sandbox && SANDBOX_MODES.has(sandbox) ? sandbox : "danger-full-access",
   };
 }
@@ -288,15 +313,16 @@ export class CodexProvider implements SessionProvider {
     this.#pendingHistorySeed = null;
     const text = seed ? `${seed}\n\n${opts.userMessage}` : opts.userMessage;
 
-    const { approvalPolicy, sandboxMode } = codexPolicies();
+    const { approvalPolicy, sandboxMode } = codexPolicies(opts.mode);
     const result = (await this.#proc!.request("turn/start", {
       threadId: this.#threadId,
       input: [{ type: "text", text, text_elements: [] }],
       cwd: opts.workdir,
-      // Fail-closed parity with the pi bridge: codex ASKS for every
-      // privileged action so codeoid's gate is authoritative, and EXECUTES
-      // approved actions (sandbox off) instead of re-sandboxing them (which
-      // fails wherever bubblewrap can't init). See codexPolicies().
+      // The session mode drives the approval policy (autonomous → codex runs
+      // unattended; guarded/interactive → codex asks and codeoid's gate
+      // prompts) and codex EXECUTES approved actions with full sandbox access
+      // instead of re-sandboxing them (which fails wherever bubblewrap can't
+      // init). See codexPolicies().
       approvalPolicy,
       sandboxPolicy: sandboxPolicyWire(sandboxMode, opts.workdir),
       ...(opts.model ? { model: opts.model } : {}),
@@ -348,7 +374,7 @@ export class CodexProvider implements SessionProvider {
         /* fall through to thread/start */
       }
     }
-    const { approvalPolicy, sandboxMode } = codexPolicies();
+    const { approvalPolicy, sandboxMode } = codexPolicies(opts.mode);
     const started = (await this.#proc.request("thread/start", {
       cwd: opts.workdir,
       approvalPolicy,
