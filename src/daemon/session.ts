@@ -87,13 +87,14 @@ import {
  * per-workspace so it becomes part of the cached prompt prefix.
  */
 const MEMORY_SYSTEM_PROMPT_APPEND = [
-  "You have access to durable cross-session memory for this workspace via three tools: recall, recall_file, and timeline.",
+  "You have access to durable cross-session memory for this workspace via four tools: recall, recall_file, timeline, and get_episode.",
   "",
   "- Before reading a file, call recall_file(path) — if it was read recently and hasn't changed, reuse that content instead of issuing a fresh Read.",
   "- When the user references earlier work ('what we did yesterday', 'the bug we hit', 'that auth flow'), call recall(query) first. Don't guess from your own session history; it may be out of date.",
   "- At the start of a new session in a known workspace, consider calling timeline() to orient yourself on recent activity.",
+  "- recall and timeline results each carry an episode_id; pass it to get_episode(episode_id) to fetch that turn's exact stored bytes verbatim, with nothing summarized or dropped.",
   "",
-  "Memory stores every tool call and assistant reply across all past sessions in this directory. It is the source of truth for history — summaries in your context may be partial.",
+  "Memory stores every tool call and assistant reply across all past sessions in this directory verbatim. It is the source of truth for history — the transcript in your context may be partial or truncated, so when a detail matters, page it in with these tools rather than relying on what you can see.",
 ].join("\n");
 
 /**
@@ -2550,9 +2551,10 @@ export class Session {
     );
     parts.push("");
     parts.push("Prior turns are preserved verbatim in codeoid memory. Retrieve on demand:");
-    parts.push("  - `recall(query)`       — semantic search across all prior episodes");
-    parts.push("  - `recall_file(path)`   — most recent prior Read of a specific file");
-    parts.push("  - `timeline(limit?)`    — chronological recent activity");
+    parts.push("  - `recall(query)`               — semantic search across all prior episodes");
+    parts.push("  - `recall_file(path)`           — most recent prior Read of a specific file");
+    parts.push("  - `timeline(offset?, limit?)`   — walk activity in order; each line has an episode_id");
+    parts.push("  - `get_episode(episode_id)`     — fetch one past turn or tool result verbatim");
     parts.push(
       "The workspace index in your system prompt already advertises what topics + files are in memory.",
     );

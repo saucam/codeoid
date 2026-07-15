@@ -203,6 +203,26 @@ export class ClaudeProvider implements SessionProvider {
     return seed;
   }
 
+  /**
+   * VWS transport: prepend a strategy-built block (the compact session map) to
+   * the next prompt — the same channel seedFromHistory uses. The session picks
+   * transcript vs session-map; the provider just stashes the block.
+   */
+  seedText(block: string): void {
+    this.#pendingHistorySeed = block.length > 0 ? block : null;
+  }
+
+  /**
+   * Claude has the memory recall tools (recall/recall_file/timeline/get_episode)
+   * mounted via the in-process MCP server whenever the session has memory, so it
+   * can page the verbatim store on demand — the precondition the Verbatim
+   * Working Set strategy checks before seeding a compact map instead of a
+   * transcript.
+   */
+  get supportsMemoryTools(): boolean {
+    return this.#init.memory != null;
+  }
+
   async listModels(): Promise<ModelInfo[]> {
     if (!this.#query) return [];
     try {
