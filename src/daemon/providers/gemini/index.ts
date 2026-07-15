@@ -180,10 +180,12 @@ export class GeminiProvider implements AgentProvider {
 
         const calls = response.functionCalls() ?? [];
         if (calls.length === 0 || !toolDeps || round >= MAX_MEMORY_TOOL_ROUNDS) break;
+        if (ac.signal.aborted) return; // don't run tools for an aborted turn
 
         // Execute each call, reply with functionResponse parts, and loop.
         const parts: Part[] = [];
         for (const call of calls) {
+          if (ac.signal.aborted) return;
           const output = await executeMemoryToolCall(
             call.name,
             (call.args ?? {}) as Record<string, unknown>,

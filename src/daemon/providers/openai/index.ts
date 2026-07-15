@@ -177,8 +177,12 @@ export class OpenAIProvider implements AgentProvider {
 
         finalText = roundText;
 
+        // Deltas are accumulated by index; drop any holes so a non-contiguous
+        // (sparse) tool_calls stream can't yield an `undefined` slot below.
+        const calls = toolCalls.filter((c) => c?.id);
+
         // Not a tool round (or cap reached) — this is the final answer.
-        if (finish !== "tool_calls" || !toolDeps || toolCalls.length === 0 || round >= MAX_MEMORY_TOOL_ROUNDS) {
+        if (finish !== "tool_calls" || !toolDeps || calls.length === 0 || round >= MAX_MEMORY_TOOL_ROUNDS) {
           stopReason = finish;
           break;
         }
@@ -187,13 +191,14 @@ export class OpenAIProvider implements AgentProvider {
         messages.push({
           role: "assistant",
           content: roundText || null,
-          tool_calls: toolCalls.map((t) => ({
+          tool_calls: calls.map((t) => ({
             id: t.id,
             type: "function" as const,
             function: { name: t.name, arguments: t.args || "{}" },
           })),
         });
-        for (const t of toolCalls) {
+        for (const t of calls) {
+          if (ac.signal.aborted) return; // stop paging if the turn was aborted
           let args: Record<string, unknown> = {};
           try {
             args = t.args ? (JSON.parse(t.args) as Record<string, unknown>) : {};
