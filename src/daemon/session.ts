@@ -68,10 +68,10 @@ import {
   EpisodeChunker,
   IndexScheduler,
   workspaceIdFromPath,
-  MEMORY_MCP_SERVER_NAME,
   type MemoryEngine,
   type MemoryMcpMount,
 } from "./memory/index.js";
+import { isSafeTool } from "./providers/tool-safety.js";
 import type { Attachment } from "../protocol/types.js";
 import { resolveAttachments } from "./attachments.js";
 import type { CodeoidConfig } from "../config.js";
@@ -3828,17 +3828,6 @@ function formatTokenCount(n: number): string {
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
-function isSafeTool(name: string): boolean {
-  if (SAFE_TOOLS.has(name)) return true;
-  // All memory recall tools are read-only, however a backend namespaces them:
-  // Claude's in-process MCP → `mcp__codeoid_memory__<tool>`; gemini-cli/codex's
-  // URL mount → `<serverName>__<tool>`. Match on the distinctive server segment
-  // so a read-only recall never prompts, whatever the separator.
-  if (name.includes(MEMORY_MCP_SERVER_NAME)) return true;
-  return false;
-}
-
-const SAFE_TOOLS = new Set<string>(["Read", "Grep", "Glob"]);
 
 /**
  * Per-tool whitelist for the `updatedInput` patch a client may send
