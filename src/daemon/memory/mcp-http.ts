@@ -89,7 +89,9 @@ function tokenFrom(req: Request): string | null {
     const t = auth.slice(7).trim();
     if (t) return t;
   }
-  const q = new URL(req.url).searchParams.get("token");
+  // Fallback base so a relative req.url (some test/client setups) can't throw;
+  // Bun.serve hands us absolute URLs, the base is only used to parse the query.
+  const q = new URL(req.url, "http://localhost").searchParams.get("token");
   return q && q.length > 0 ? q : null;
 }
 
