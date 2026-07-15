@@ -123,4 +123,15 @@ describe("memory tool registry", () => {
     const own = await defs().get_episode!.run({ episode_id: ids.b1 }, ctxFor(engine, "wsB", "sB1"));
     expect(own).toContain("gamma telescope migration");
   });
+
+  test("clamps out-of-range args (run() doesn't trust the transport)", async () => {
+    const { engine } = await engineWith();
+    // limit=-1 -> clamped to >=1, offset=-5 -> clamped to 0: returns the newest
+    // page rather than an empty/errored result.
+    const t = await defs().timeline!.run({ limit: -1, offset: -5 }, ctxFor(engine, "wsA", "sA1"));
+    expect(t).toContain("episode_id:");
+    // an absurd recall limit must not blow past the max or throw.
+    const r = await defs().recall!.run({ query: "widget", limit: 9999 }, ctxFor(engine, "wsA", "sA1"));
+    expect(typeof r).toBe("string");
+  });
 });

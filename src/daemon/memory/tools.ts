@@ -49,6 +49,14 @@ const num = (v: unknown): number | undefined =>
   typeof v === "number" && Number.isFinite(v) ? v : undefined;
 const str = (v: unknown): string | undefined =>
   typeof v === "string" && v.length > 0 ? v : undefined;
+/** Clamp to [min, max] with a default — the zod/JSON schemas bound these for
+ *  Claude, but run() must not trust its args: other transports (native
+ *  function-calling, MCP-stdio) may not enforce ranges. */
+const clampInt = (v: unknown, min: number, max: number, dflt: number): number => {
+  const n = num(v);
+  if (n === undefined) return dflt;
+  return Math.min(max, Math.max(min, Math.floor(n)));
+};
 
 /** The four defs. A function (not a const) so each call gets fresh zod objects. */
 export function memoryToolDefs(): MemoryToolDef[] {
@@ -81,7 +89,7 @@ export function memoryToolDefs(): MemoryToolDef[] {
       const hits = await ctx.engine.recall({
         query: String(args.query ?? ""),
         workspaceId: ctx.workspaceId,
-        limit: num(args.limit) ?? 6,
+        limit: clampInt(args.limit, 1, 20, 6),
         toolName: str(args.tool_name),
         excludeSessionId: includeCurrent ? undefined : ctx.sessionId,
       });
@@ -133,8 +141,8 @@ export function memoryToolDefs(): MemoryToolDef[] {
       additionalProperties: false,
     },
     async run(args, ctx) {
-      const limit = num(args.limit) ?? 20;
-      const offset = num(args.offset) ?? 0;
+      const limit = clampInt(args.limit, 1, 60, 20);
+      const offset = clampInt(args.offset, 0, Number.MAX_SAFE_INTEGER, 0);
       const episodes = ctx.engine.timeline(ctx.workspaceId, limit, offset);
       return formatTimeline(episodes, ctx.sessionId, offset);
     },
