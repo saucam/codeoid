@@ -17,7 +17,9 @@
 
 import {
   GoogleGenerativeAI,
+  type FunctionDeclaration,
   type GenerateContentStreamResult,
+  type Part,
 } from "@google/generative-ai";
 import { AsyncQueue } from "../../async-queue.js";
 import type {
@@ -29,12 +31,20 @@ import type {
   TurnRun,
 } from "../interface.js";
 import { toGeminiContent } from "../canonical.js";
+import type { MemoryEngine } from "../../memory/index.js";
+import { executeMemoryToolCall, MAX_MEMORY_TOOL_ROUNDS, memoryToolsAsGemini } from "../tool-loop.js";
 
 export interface GeminiProviderInit {
   /** Explicit API key — falls back to GOOGLE_API_KEY env var. */
   apiKey?: string;
   /** Model to use when TurnOpts.model is absent. */
   defaultModel?: string;
+  /** Memory engine — when present, the memory recall tools are offered as
+   *  function declarations so the model can page the verbatim store on demand. */
+  memory?: MemoryEngine;
+  /** Tenant-scoped workspace id + session id — the memory tool call scope. */
+  workspaceId?: string;
+  sessionId?: string;
 }
 
 export class GeminiProvider implements AgentProvider {
@@ -43,10 +53,22 @@ export class GeminiProvider implements AgentProvider {
 
   #apiKey: string;
   #defaultModel: string;
+  #memory: MemoryEngine | null;
+  #workspaceId: string;
+  #sessionId: string;
 
   constructor(init: GeminiProviderInit = {}) {
     this.#apiKey = init.apiKey ?? process.env.GOOGLE_API_KEY ?? "";
     this.#defaultModel = init.defaultModel ?? "gemini-2.0-flash";
+    this.#memory = init.memory ?? null;
+    this.#workspaceId = init.workspaceId ?? init.sessionId ?? "";
+    this.#sessionId = init.sessionId ?? "";
+  }
+
+  /** The memory recall tools are offered whenever a memory engine is wired,
+   *  so the model can page the verbatim store on demand. */
+  get supportsMemoryTools(): boolean {
+    return this.#memory != null;
   }
 
   runTurn(opts: TurnOpts): TurnRun {
@@ -83,7 +105,23 @@ export class GeminiProvider implements AgentProvider {
   ): Promise<void> {
     const model = opts.model ?? this.#defaultModel;
     const genAI = new GoogleGenerativeAI(this.#apiKey);
-    const genModel = genAI.getGenerativeModel({ model });
+    // Offer the memory tools only when a memory engine is wired; otherwise this
+    // stays the plain single-call text path (unchanged behavior).
+    const toolDeps = this.#memory
+      ? {
+          ctx: { engine: this.#memory, workspaceId: this.#workspaceId, sessionId: this.#sessionId },
+          canUseTool: opts.canUseTool,
+          emit: (e: ProviderEvent) => queue.push(e),
+        }
+      : null;
+    const genModel = genAI.getGenerativeModel({
+      model,
+      // Structurally a valid Gemini schema (SchemaType values are the same
+      // lowercase strings as JSON Schema); the cast bridges the nominal type.
+      ...(toolDeps
+        ? { tools: [{ functionDeclarations: memoryToolsAsGemini() as unknown as FunctionDeclaration[] }] }
+        : {}),
+    });
 
     try {
       // Split history: everything before the last user turn goes as chat history;
@@ -98,49 +136,80 @@ export class GeminiProvider implements AgentProvider {
         ...(opts.systemPromptAppend ? { systemInstruction: opts.systemPromptAppend } : {}),
       });
 
-      let streamResult: GenerateContentStreamResult;
-      try {
-        streamResult = await chat.sendMessageStream(userMessage, { signal: ac.signal });
-      } catch (err) {
-        if (ac.signal.aborted) return;
-        queue.push({
-          type: "error",
-          message: `Gemini API error: ${err instanceof Error ? err.message : String(err)}`,
-        });
-        return;
-      }
+      let finalText = "";
+      let inputTokens = 0;
+      let outputTokens = 0;
+      let stopReason: string | undefined;
+      // First message is the user turn; later rounds send functionResponse parts.
+      let message: string | Part[] = userMessage;
 
-      let fullText = "";
-
-      for await (const chunk of streamResult.stream) {
-        if (ac.signal.aborted) return;
-        const text = chunk.text();
-        if (text) {
-          queue.push({ type: "text_delta", content: text });
-          fullText += text;
+      // Agentic tool-loop: stream a response; if the model called tools, execute
+      // them and reply with functionResponse parts, then loop. The round cap is
+      // a runaway/cost guard. A no-memory turn ends after one round (no calls).
+      for (let round = 0; ; round++) {
+        let streamResult: GenerateContentStreamResult;
+        try {
+          streamResult = await chat.sendMessageStream(message, { signal: ac.signal });
+        } catch (err) {
+          if (ac.signal.aborted) return;
+          queue.push({
+            type: "error",
+            message: `Gemini API error: ${err instanceof Error ? err.message : String(err)}`,
+          });
+          return;
         }
+
+        let roundText = "";
+        for await (const chunk of streamResult.stream) {
+          if (ac.signal.aborted) return;
+          const text = chunk.text();
+          if (text) {
+            queue.push({ type: "text_delta", content: text });
+            roundText += text;
+          }
+        }
+        if (ac.signal.aborted) return;
+
+        const response = await streamResult.response;
+        inputTokens += response.usageMetadata?.promptTokenCount ?? 0;
+        outputTokens += response.usageMetadata?.candidatesTokenCount ?? 0;
+        finalText = roundText;
+        stopReason = response.candidates?.[0]?.finishReason
+          ? String(response.candidates[0].finishReason)
+          : undefined;
+
+        const calls = response.functionCalls() ?? [];
+        if (calls.length === 0 || !toolDeps || round >= MAX_MEMORY_TOOL_ROUNDS) break;
+        if (ac.signal.aborted) return; // don't run tools for an aborted turn
+
+        // Execute each call, reply with functionResponse parts, and loop.
+        const parts: Part[] = [];
+        for (const call of calls) {
+          if (ac.signal.aborted) return;
+          const output = await executeMemoryToolCall(
+            call.name,
+            (call.args ?? {}) as Record<string, unknown>,
+            toolDeps,
+          );
+          parts.push({ functionResponse: { name: call.name, response: { result: output } } });
+        }
+        message = parts;
       }
 
       if (ac.signal.aborted) return;
 
-      queue.push({ type: "text_done", content: fullText });
-
-      // Build normalized result from the final response metadata.
-      const response = await streamResult.response;
-      const usageMeta = response.usageMetadata;
-      const durationMs = Date.now() - startMs;
-      const stopReason = response.candidates?.[0]?.finishReason ?? undefined;
+      queue.push({ type: "text_done", content: finalText });
 
       const result: NormalizedTurnResult = {
         providerId: this.id,
         model,
-        inputTokens: usageMeta?.promptTokenCount ?? 0,
-        outputTokens: usageMeta?.candidatesTokenCount ?? 0,
+        inputTokens,
+        outputTokens,
         cacheReadTokens: 0,
         cacheCreationTokens: 0,
         totalCostUsd: 0, // Gemini does not return cost in the API response.
-        durationMs,
-        stopReason: stopReason ? String(stopReason) : undefined,
+        durationMs: Date.now() - startMs,
+        stopReason,
       };
 
       queue.push({ type: "turn_done", result });

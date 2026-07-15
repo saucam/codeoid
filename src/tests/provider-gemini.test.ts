@@ -11,14 +11,20 @@ import type { ProviderEvent } from "../daemon/providers/interface.js";
 // ── Google AI mock ────────────────────────────────────────────────────────────
 
 type StreamChunk = { text: () => string };
+type ToolCall = { name: string; args: Record<string, unknown> };
+type Round = { chunks: StreamChunk[]; calls: ToolCall[] };
 
 let streamChunks: StreamChunk[] = [];
 let streamError: Error | null = null;
 let usageMetadata: Record<string, unknown> = {};
 let finishReason: string | undefined;
+/** When set, drives a multi-round tool-loop: each sendMessageStream shifts one
+ *  round (its text chunks + the functionCalls it returns). */
+let roundScript: Round[] | null = null;
+/** Every message sent to sendMessageStream — inspect the functionResponse parts. */
+const sentMessages: unknown[] = [];
 
-function makeStream(): AsyncIterable<StreamChunk> {
-  const chunks = [...streamChunks];
+function makeStream(chunks: StreamChunk[]): AsyncIterable<StreamChunk> {
   const err = streamError;
   return {
     [Symbol.asyncIterator]() {
@@ -35,18 +41,34 @@ function makeStream(): AsyncIterable<StreamChunk> {
 }
 
 mock.module("@google/generative-ai", () => ({
+  SchemaType: { OBJECT: "object", STRING: "string", INTEGER: "integer", BOOLEAN: "boolean" },
   GoogleGenerativeAI: class {
     getGenerativeModel(_opts: unknown) {
       return {
         startChat(_chatOpts: unknown) {
           return {
-            sendMessageStream: async (_msg: unknown, _reqOpts: unknown) => ({
-              stream: makeStream(),
-              response: Promise.resolve({
-                usageMetadata,
-                candidates: finishReason ? [{ finishReason }] : [],
-              }),
-            }),
+            sendMessageStream: async (msg: unknown, _reqOpts: unknown) => {
+              sentMessages.push(msg);
+              if (roundScript) {
+                const round = roundScript.shift() ?? { chunks: [], calls: [] };
+                return {
+                  stream: makeStream(round.chunks),
+                  response: Promise.resolve({
+                    usageMetadata,
+                    candidates: [{ finishReason: "STOP" }],
+                    functionCalls: () => round.calls,
+                  }),
+                };
+              }
+              return {
+                stream: makeStream([...streamChunks]),
+                response: Promise.resolve({
+                  usageMetadata,
+                  candidates: finishReason ? [{ finishReason }] : [],
+                  functionCalls: () => [],
+                }),
+              };
+            },
           };
         },
       };
@@ -55,6 +77,34 @@ mock.module("@google/generative-ai", () => ({
 }));
 
 import { GeminiProvider } from "../daemon/providers/gemini/index.js";
+import { MemoryEngine } from "../daemon/memory/engine.js";
+import { SqliteEpisodeStore } from "../daemon/memory/store.js";
+import type { Embedder } from "../daemon/memory/embedder.js";
+
+class FakeEmbedder implements Embedder {
+  readonly modelName = "fake-test";
+  readonly dimensions = 8;
+  async init(): Promise<void> {}
+  async embed(texts: string[]): Promise<Float32Array[]> {
+    return texts.map((t) => {
+      const v = new Float32Array(this.dimensions);
+      for (const ch of t.toLowerCase()) { const c = ch.charCodeAt(0); if (c >= 97 && c <= 122) v[(c - 97) % 8]! += 1; }
+      return v;
+    });
+  }
+  async close(): Promise<void> {}
+}
+
+async function memoryWithEpisode(): Promise<MemoryEngine> {
+  const engine = new MemoryEngine({ store: new SqliteEpisodeStore(":memory:"), embedder: new FakeEmbedder() });
+  await engine.init();
+  engine.ingest({
+    workspaceId: "wsA", sessionId: "sOld", kind: "user_turn", summary: "vault", content: "the vault passphrase is CRIMSON-OTTER",
+    filePaths: [], tokenEstimate: 4, createdAt: 1_000_000, createdBy: "test",
+  });
+  await engine.drain();
+  return engine;
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -91,6 +141,8 @@ describe("GeminiProvider – streaming", () => {
     streamError = null;
     usageMetadata = {};
     finishReason = undefined;
+    roundScript = null;
+    sentMessages.length = 0;
   });
 
   it("emits text_delta + text_done + turn_done for a normal response", async () => {
@@ -158,6 +210,49 @@ describe("GeminiProvider – streaming", () => {
     }
     // After abort the queue is closed — no events or just what arrived before close
     expect(events.length).toBeLessThanOrEqual(1);
+  });
+});
+
+describe("GeminiProvider – memory tool-loop (#178 Phase 5)", () => {
+  beforeEach(() => {
+    streamChunks = [];
+    streamError = null;
+    usageMetadata = {};
+    finishReason = undefined;
+    roundScript = null;
+    sentMessages.length = 0;
+  });
+
+  it("supportsMemoryTools reflects whether a memory engine is wired", async () => {
+    expect(new GeminiProvider({ apiKey: "k" }).supportsMemoryTools).toBe(false);
+    const engine = await memoryWithEpisode();
+    expect(new GeminiProvider({ apiKey: "k", memory: engine, workspaceId: "wsA", sessionId: "s1" }).supportsMemoryTools).toBe(true);
+    await engine.close();
+  });
+
+  it("pages memory: functionCall round → executes recall → functionResponse → final text", async () => {
+    const engine = await memoryWithEpisode();
+    // Round 1: model asks for recall. Round 2: model answers using the result.
+    roundScript = [
+      { chunks: [], calls: [{ name: "codeoid_memory__recall", args: { query: "vault passphrase" } }] },
+      { chunks: [{ text: () => "It is CRIMSON-OTTER." }], calls: [] },
+    ];
+    const provider = new GeminiProvider({ apiKey: "k", memory: engine, workspaceId: "wsA", sessionId: "sNew" });
+    const events = await runProvider(provider, "what was the vault passphrase?");
+
+    // The memory tool ran through the gate and produced verbatim content.
+    const start = events.find((e) => e.type === "tool_start") as Extract<ProviderEvent, { type: "tool_start" }>;
+    const done = events.find((e) => e.type === "tool_complete") as Extract<ProviderEvent, { type: "tool_complete" }>;
+    expect(start.name).toBe("codeoid_memory__recall");
+    expect(done.success).toBe(true);
+    expect(done.output).toContain("CRIMSON-OTTER");
+    // The final answer is round 2's text.
+    expect(events.find((e) => e.type === "text_done")).toMatchObject({ content: "It is CRIMSON-OTTER." });
+    // Round 2 replied with a functionResponse part (not a plain string).
+    const second = sentMessages[1] as Array<{ functionResponse?: { name: string } }>;
+    expect(Array.isArray(second)).toBe(true);
+    expect(second[0]?.functionResponse?.name).toBe("codeoid_memory__recall");
+    await engine.close();
   });
 });
 

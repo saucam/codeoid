@@ -184,7 +184,12 @@ export function createDefaultProviderRegistry(config?: CodeoidConfig): ProviderR
       displayName: "Gemini (Google)",
       create: (init) =>
         new StatelessSessionProvider(
-          new GeminiProvider({ defaultModel: init.model ?? undefined }),
+          new GeminiProvider({
+            defaultModel: init.model ?? undefined,
+            memory: init.memory,
+            workspaceId: init.workspaceId,
+            sessionId: init.sessionId,
+          }),
           init.sessionId,
         ),
     });
@@ -200,7 +205,12 @@ export function createDefaultProviderRegistry(config?: CodeoidConfig): ProviderR
       displayName: "OpenAI",
       create: (init) =>
         new StatelessSessionProvider(
-          new OpenAIProvider({ defaultModel: init.model ?? undefined }),
+          new OpenAIProvider({
+            defaultModel: init.model ?? undefined,
+            memory: init.memory,
+            workspaceId: init.workspaceId,
+            sessionId: init.sessionId,
+          }),
           init.sessionId,
         ),
     });
@@ -228,6 +238,8 @@ export function createDefaultProviderRegistry(config?: CodeoidConfig): ProviderR
             command: resolution.command,
             argsPrefix: resolution.argsPrefix,
             store: init.store,
+            workspaceId: init.workspaceId,
+            memory: init.memory,
             onModels: init.onModels,
           }),
       });
