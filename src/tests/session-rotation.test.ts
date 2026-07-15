@@ -12,6 +12,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../daemon/store.js";
+import { renderRotationSeed } from "../daemon/providers/context-strategy.js";
 
 let tmp: string;
 let store: Store;
@@ -165,55 +166,11 @@ describe("shouldRotate threshold logic", () => {
 
 // ── Seed prompt shape ───────────────────────────────────────────────────
 
-/**
- * Mirror of Session#buildRotationSeed behavior. Tests assert the seed
- * carries: rotation marker, workspace path, rotation count, memory-tool
- * usage guide, and the last-user-turn content when available.
- */
-function buildRotationSeed(opts: {
-  workdir: string;
-  sessionName: string;
-  rotationCount: number;
-  lastUserTurn: string | null;
-}): string {
-  const lines: string[] = [];
-  lines.push("<rotation_context>");
-  lines.push(
-    "Codeoid just rotated this session's backing Claude Code context to stay below the compaction ceiling. This is a CONTINUATION, not a new session.",
-  );
-  lines.push("");
-  lines.push(
-    `Workspace: ${opts.workdir}. Rotation #${opts.rotationCount} of this session (\"${opts.sessionName}\").`,
-  );
-  lines.push("");
-  lines.push("Prior turns are preserved verbatim in codeoid memory. Retrieve on demand:");
-  lines.push("  - `recall(query)`       — semantic search across all prior episodes");
-  lines.push("  - `recall_file(path)`   — most recent prior Read of a specific file");
-  lines.push("  - `timeline(limit?)`    — chronological recent activity");
-  lines.push(
-    "The workspace index in your system prompt already advertises what topics + files are in memory.",
-  );
-  lines.push("");
-  if (opts.lastUserTurn) {
-    lines.push("Most recent user turn before the rotation:");
-    lines.push("---");
-    lines.push(
-      opts.lastUserTurn.length > 2000
-        ? `${opts.lastUserTurn.slice(0, 2000)}\n…`
-        : opts.lastUserTurn,
-    );
-    lines.push("---");
-  } else {
-    lines.push("No prior user turn recorded (memory disabled). Rely on the user's next message.");
-  }
-  lines.push("</rotation_context>");
-  lines.push("");
-  return lines.join("\n");
-}
-
+// Exercises the REAL exported renderer (Session#buildRotationSeed delegates to
+// it) — not a hand-mirrored copy — so the seed's actual shape is what's tested.
 describe("rotation seed prompt", () => {
-  it("advertises all three recall tools", () => {
-    const seed = buildRotationSeed({
+  it("advertises all four recall tools, including get_episode for by-id paging", () => {
+    const seed = renderRotationSeed({
       workdir: "/Workspace/codeoid",
       sessionName: "test",
       rotationCount: 1,
@@ -221,11 +178,12 @@ describe("rotation seed prompt", () => {
     });
     expect(seed).toContain("`recall(query)`");
     expect(seed).toContain("`recall_file(path)`");
-    expect(seed).toContain("`timeline(limit?)`");
+    expect(seed).toContain("`timeline(offset?, limit?)`");
+    expect(seed).toContain("`get_episode(episode_id)`");
   });
 
   it("includes the workspace path + rotation count", () => {
-    const seed = buildRotationSeed({
+    const seed = renderRotationSeed({
       workdir: "/Workspace/codeoid",
       sessionName: "test",
       rotationCount: 7,
@@ -237,7 +195,7 @@ describe("rotation seed prompt", () => {
 
   it("truncates very long last-user-turn content", () => {
     const long = "x".repeat(5000);
-    const seed = buildRotationSeed({
+    const seed = renderRotationSeed({
       workdir: "/tmp",
       sessionName: "test",
       rotationCount: 1,
@@ -248,7 +206,7 @@ describe("rotation seed prompt", () => {
   });
 
   it("degrades gracefully when memory is unavailable", () => {
-    const seed = buildRotationSeed({
+    const seed = renderRotationSeed({
       workdir: "/tmp",
       sessionName: "test",
       rotationCount: 1,
