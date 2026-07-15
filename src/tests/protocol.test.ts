@@ -438,6 +438,12 @@ describe("DaemonMessage routing", () => {
           return `export:${msg.manifest.counts.messages}`;
         case "session.import.result":
           return `import:${msg.newSessionId}`;
+        case "settings.schema.result":
+          return `settings.schema:${msg.manifest.tabs.length}`;
+        case "settings.get.result":
+          return `settings.get:${Object.keys(msg.snapshot.values).length}`;
+        case "settings.set.result":
+          return `settings.set:${msg.ok}`;
       }
     };
 

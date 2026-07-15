@@ -919,3 +919,43 @@ function setByPath(obj: Record<string, unknown>, path: string, value: unknown): 
 function isOsc8Mode(s: string): s is "auto" | "force" | "disable" {
   return s === "auto" || s === "force" || s === "disable";
 }
+
+// ── Settings-page support ──────────────────────────────────────────────────
+
+/**
+ * Resolved absolute paths of the two backing files the settings page reads and
+ * writes. Both are hand-editable directly — the page is just a typed front-end
+ * over them.
+ */
+export function configFilePaths(): {
+  configDir: string;
+  configPath: string;
+  envPath: string;
+} {
+  const dir = getConfigDir();
+  return {
+    configDir: dir,
+    configPath: join(dir, "config.json"),
+    envPath: join(dir, ".env"),
+  };
+}
+
+/**
+ * Validate a candidate raw config object against the authoritative zod schema
+ * WITHOUT applying env overrides or path resolution — the check `settings.set`
+ * runs before persisting a patched config.json. Keeps `RootSchema` the single
+ * source of validation truth (the manifest's bounds are display hints only).
+ */
+export function validateConfigObject(
+  raw: unknown,
+): { ok: true } | { ok: false; issues: { path: string; message: string }[] } {
+  const result = RootSchema.safeParse(raw);
+  if (result.success) return { ok: true };
+  return {
+    ok: false,
+    issues: result.error.issues.map((i) => ({
+      path: i.path.join("."),
+      message: i.message,
+    })),
+  };
+}

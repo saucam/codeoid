@@ -15,8 +15,8 @@ import {
 } from "../protocol/scopes.js";
 
 describe("SCOPES constants", () => {
-  test("all 11 scopes are defined", () => {
-    expect(Object.keys(SCOPES)).toHaveLength(11);
+  test("all 13 scopes are defined", () => {
+    expect(Object.keys(SCOPES)).toHaveLength(13);
     expect(SCOPES.SESSION_CREATE).toBe("session:create");
     expect(SCOPES.SESSION_ATTACH).toBe("session:attach");
     expect(SCOPES.SESSION_WATCH).toBe("session:watch");
@@ -28,10 +28,12 @@ describe("SCOPES constants", () => {
     expect(SCOPES.SESSION_READ).toBe("session:read");
     expect(SCOPES.SESSION_DISPATCH).toBe("session:dispatch");
     expect(SCOPES.FS_READ).toBe("fs:read");
+    expect(SCOPES.SETTINGS_READ).toBe("settings:read");
+    expect(SCOPES.SETTINGS_WRITE).toBe("settings:write");
   });
 
-  test("ALL_SCOPES contains all 11", () => {
-    expect(ALL_SCOPES).toHaveLength(11);
+  test("ALL_SCOPES contains all 13", () => {
+    expect(ALL_SCOPES).toHaveLength(13);
     for (const scope of Object.values(SCOPES)) {
       expect(ALL_SCOPES).toContain(scope);
     }
@@ -39,7 +41,7 @@ describe("SCOPES constants", () => {
 
   test("ALL_SCOPES_STRING is space-delimited", () => {
     const parts = ALL_SCOPES_STRING.split(" ");
-    expect(parts).toHaveLength(11);
+    expect(parts).toHaveLength(13);
     for (const scope of ALL_SCOPES) {
       expect(parts).toContain(scope);
     }
@@ -82,6 +84,11 @@ describe("OPERATOR_SCOPES", () => {
     expect(OPERATOR_SCOPES).toContain(SCOPES.SESSION_SEND);
     expect(OPERATOR_SCOPES).toContain(SCOPES.SESSION_APPROVE);
     expect(OPERATOR_SCOPES).not.toContain(SCOPES.SESSION_DESTROY);
+  });
+
+  test("can read settings but not write them (config is owner-only)", () => {
+    expect(OPERATOR_SCOPES).toContain(SCOPES.SETTINGS_READ);
+    expect(OPERATOR_SCOPES).not.toContain(SCOPES.SETTINGS_WRITE);
   });
 });
 

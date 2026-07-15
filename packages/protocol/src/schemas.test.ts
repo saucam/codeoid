@@ -116,6 +116,17 @@ const samples: { [T in ClientTypes]: Extract<ClientMessage, { type: T }> } = {
     nameOverride: "imported",
   },
   "usage.daily": { type: "usage.daily", id: "r24", days: 30 },
+  "settings.schema": { type: "settings.schema", id: "r29" },
+  "settings.get": { type: "settings.get", id: "r30" },
+  "settings.set": {
+    type: "settings.set",
+    id: "r31",
+    patches: [
+      { key: "memory.enabled", value: false },
+      { key: "OPENAI_API_KEY", value: "sk-test" },
+      { key: "compress.excludeCommands", value: ["git", "ls"] },
+    ],
+  },
 };
 
 describe("fidelity — valid samples round-trip unchanged", () => {
