@@ -1,5 +1,9 @@
 import { describe, test, expect } from "bun:test";
 import {
+  ASK_USER_TOOL_NAME,
+  askUserToolAsGemini,
+  askUserToolAsOpenAI,
+  executeAskUserCall,
   executeMemoryToolCall,
   memoryToolsAsGemini,
   memoryToolsAsOpenAI,
@@ -11,7 +15,7 @@ import { SqliteEpisodeStore } from "../daemon/memory/store.js";
 import { MEMORY_TOOL_NAMES } from "../daemon/memory/tools.js";
 import type { Embedder } from "../daemon/memory/embedder.js";
 import type { Episode } from "../daemon/memory/types.js";
-import type { ProviderEvent } from "../daemon/providers/interface.js";
+import type { ProviderEvent, UiRequest, UiResponse } from "../daemon/providers/interface.js";
 
 class FakeEmbedder implements Embedder {
   readonly modelName = "fake-test";
@@ -123,5 +127,66 @@ describe("executeMemoryToolCall", () => {
   test("round cap is a small positive guard", () => {
     expect(MAX_MEMORY_TOOL_ROUNDS).toBeGreaterThan(0);
     expect(MAX_MEMORY_TOOL_ROUNDS).toBeLessThanOrEqual(16);
+  });
+});
+
+describe("ask-user tool", () => {
+  test("declarations: named ask_user with a required question, options optional", () => {
+    const o = askUserToolAsOpenAI();
+    expect(o.type).toBe("function");
+    expect(o.function.name).toBe(ASK_USER_TOOL_NAME);
+    expect((o.function.parameters as { required: string[] }).required).toEqual(["question"]);
+    const g = askUserToolAsGemini();
+    expect(g.name).toBe(ASK_USER_TOOL_NAME);
+    // Gemini schema must not carry additionalProperties.
+    expect(g.parameters).not.toHaveProperty("additionalProperties");
+  });
+
+  test("with options → select dialog; returns the picked value", async () => {
+    const seen: UiRequest[] = [];
+    const events: ProviderEvent[] = [];
+    const out = await executeAskUserCall(
+      { question: "Deploy where?", options: ["staging", "prod"] },
+      {
+        requestUserInput: async (req: UiRequest): Promise<UiResponse> => {
+          seen.push(req);
+          return { value: "prod", cancelled: false };
+        },
+        emit: (e) => events.push(e),
+      },
+    );
+    expect(out).toBe("prod");
+    expect(seen[0]!.method).toBe("select");
+    expect(seen[0]!.options).toEqual(["staging", "prod"]);
+    expect(seen[0]!.title).toBe("Deploy where?");
+    // Emits tool_start + tool_complete(success) — but does NOT gate (no canUseTool).
+    expect(events.find((e) => e.type === "tool_start")).toMatchObject({ name: ASK_USER_TOOL_NAME });
+    expect(events.find((e) => e.type === "tool_complete")).toMatchObject({ success: true, output: "prod" });
+  });
+
+  test("without options → free-text input dialog", async () => {
+    let method = "";
+    const out = await executeAskUserCall(
+      { question: "Your name?" },
+      {
+        requestUserInput: async (req) => {
+          method = req.method;
+          return { value: "Ada", cancelled: false };
+        },
+        emit: () => {},
+      },
+    );
+    expect(method).toBe("input");
+    expect(out).toBe("Ada");
+  });
+
+  test("a dismissed dialog returns a 'no answer' string (never throws), tool_complete failed", async () => {
+    const events: ProviderEvent[] = [];
+    const out = await executeAskUserCall(
+      { question: "Proceed?" },
+      { requestUserInput: async () => ({ cancelled: true }), emit: (e) => events.push(e) },
+    );
+    expect(out).toMatch(/dismissed|no answer|without answering/i);
+    expect(events.find((e) => e.type === "tool_complete")).toMatchObject({ success: false });
   });
 });

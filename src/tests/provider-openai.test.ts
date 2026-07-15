@@ -6,7 +6,7 @@
  */
 
 import { mock, describe, it, expect, beforeEach } from "bun:test";
-import type { ProviderEvent } from "../daemon/providers/interface.js";
+import type { ProviderEvent, TurnOpts, UiRequest } from "../daemon/providers/interface.js";
 
 // ── OpenAI mock ───────────────────────────────────────────────────────────────
 
@@ -98,6 +98,7 @@ async function memoryWithEpisode(): Promise<MemoryEngine> {
 async function runProvider(
   provider: OpenAIProvider,
   userMessage = "hello",
+  extra: Partial<TurnOpts> = {},
 ): Promise<ProviderEvent[]> {
   const events: ProviderEvent[] = [];
   const run = provider.runTurn({
@@ -105,6 +106,7 @@ async function runProvider(
     userMessage,
     workdir: "/tmp",
     canUseTool: async () => ({ behavior: "allow" as const }),
+    ...extra,
   });
   for await (const e of run.events) {
     events.push(e);
@@ -287,5 +289,45 @@ describe("OpenAIProvider – memory tool-loop (#178 Phase 5)", () => {
     const provider = new OpenAIProvider({ apiKey: "k" });
     await runProvider(provider);
     expect(sentBodies[0]?.tools).toBeUndefined();
+  });
+});
+
+describe("OpenAIProvider – ask-user tool (#178)", () => {
+  beforeEach(() => {
+    streamChunks = [];
+    streamError = null;
+    modelsResult = [];
+    roundScript = null;
+    sentBodies.length = 0;
+  });
+
+  it("offers ask_user when requestUserInput is available and routes the answer back", async () => {
+    roundScript = [
+      [
+        { choices: [{ delta: { tool_calls: [{ index: 0, id: "c1", function: { name: "ask_user", arguments: '{"question":"Deploy where?","options":["staging","prod"]}' } }] } }] },
+        { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+        { choices: [{}], usage: { prompt_tokens: 10, completion_tokens: 2 } },
+      ],
+      [
+        { choices: [{ delta: { content: "Deploying to prod." }, finish_reason: "stop" }] },
+        { choices: [{}], usage: { prompt_tokens: 12, completion_tokens: 3 } },
+      ],
+    ];
+    const seen: UiRequest[] = [];
+    const provider = new OpenAIProvider({ apiKey: "k" });
+    const events = await runProvider(provider, "deploy", {
+      requestUserInput: async (req) => {
+        seen.push(req);
+        return { value: "prod", cancelled: false };
+      },
+    });
+    expect(seen[0]?.method).toBe("select");
+    expect(seen[0]?.options).toEqual(["staging", "prod"]);
+    expect(events.find((e) => e.type === "text_done")).toMatchObject({ content: "Deploying to prod." });
+    // ask_user was offered as a tool, and round 2 carried the answer as a tool result.
+    const offered = sentBodies[0]?.tools as Array<{ function: { name: string } }> | undefined;
+    expect(offered?.some((t) => t.function.name === "ask_user")).toBe(true);
+    const r2 = sentBodies[1]?.messages as Array<{ role: string; content?: string }>;
+    expect(r2.some((m) => m.role === "tool" && m.content === "prod")).toBe(true);
   });
 });

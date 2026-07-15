@@ -20,7 +20,7 @@
 import { randomUUID } from "node:crypto";
 import { memoryToolDefs, type MemoryToolContext } from "../memory/tools.js";
 import { MEMORY_MCP_SERVER_NAME } from "../memory/mcp-http.js";
-import type { ProviderEvent, ToolApprovalFn } from "./interface.js";
+import type { ProviderEvent, ToolApprovalFn, UiRequest, UiRequestFn } from "./interface.js";
 
 /** Hard cap on tool rounds in a single turn — a runaway + cost guard. After
  *  this many rounds the loop stops paging and lets the model answer. */
@@ -37,6 +37,91 @@ interface FunctionToolShape {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
+}
+
+/**
+ * The ask-the-user tool. Unlike the memory tools, this backend (openai/gemini)
+ * has no native way to ask the human anything mid-turn — this gives it one. A
+ * call routes to `requestUserInput` (a `session.ui_request` dialog rendered by
+ * every capable frontend), NOT through the canUseTool approval gate: asking the
+ * user IS the interaction, so gating it would double-prompt.
+ */
+export const ASK_USER_TOOL_NAME = "ask_user";
+
+const ASK_USER_DESCRIPTION =
+  "Ask the human user a question and wait for their answer. Use ONLY when you need a decision, clarification, or information that only the user can provide — not for things you can determine yourself. Provide `options` for a multiple-choice pick; omit it for free-text.";
+
+const ASK_USER_PARAMETERS = {
+  type: "object",
+  properties: {
+    question: { type: "string", description: "The question to put to the user" },
+    options: {
+      type: "array",
+      items: { type: "string" },
+      description: "Optional choices; when given the user picks one",
+    },
+  },
+  required: ["question"],
+} as const;
+
+/** OpenAI function-tool declaration for the ask-user tool. */
+export function askUserToolAsOpenAI(): { type: "function"; function: FunctionToolShape } {
+  return {
+    type: "function" as const,
+    function: {
+      name: ASK_USER_TOOL_NAME,
+      description: ASK_USER_DESCRIPTION,
+      parameters: { ...ASK_USER_PARAMETERS, additionalProperties: false },
+    },
+  };
+}
+
+/** Gemini functionDeclaration for the ask-user tool (no additionalProperties). */
+export function askUserToolAsGemini(): FunctionToolShape {
+  return { name: ASK_USER_TOOL_NAME, description: ASK_USER_DESCRIPTION, parameters: { ...ASK_USER_PARAMETERS } };
+}
+
+export interface AskUserExecDeps {
+  requestUserInput: UiRequestFn;
+  emit: (e: ProviderEvent) => void;
+}
+
+/**
+ * Execute an ask-user tool call: raise a dialog via `requestUserInput` and feed
+ * the answer back to the model as the tool result. Emits tool_start/complete
+ * for the transcript but does NOT gate through canUseTool. Never throws — a
+ * dismissed/timed-out dialog returns a plain "no answer" string.
+ */
+export async function executeAskUserCall(
+  args: Record<string, unknown>,
+  deps: AskUserExecDeps,
+): Promise<string> {
+  const question = typeof args.question === "string" && args.question.trim().length > 0
+    ? args.question
+    : "The assistant needs your input.";
+  const options = Array.isArray(args.options)
+    ? args.options.filter((o): o is string => typeof o === "string")
+    : undefined;
+  const toolId = randomUUID();
+  deps.emit({
+    type: "tool_start",
+    toolId,
+    sdkToolUseId: toolId,
+    name: ASK_USER_TOOL_NAME,
+    input: args,
+    approvalId: `ask-${toolId}`,
+  });
+
+  const req: UiRequest =
+    options && options.length > 0
+      ? { method: "select", title: question, options }
+      : { method: "input", title: question };
+  const resp = await deps.requestUserInput(req);
+  const answer = resp.cancelled
+    ? "The user dismissed the question without answering."
+    : resp.value ?? (resp.confirmed !== undefined ? String(resp.confirmed) : "");
+  deps.emit({ type: "tool_complete", sdkToolUseId: toolId, output: answer, success: !resp.cancelled });
+  return answer;
 }
 
 /** OpenAI `tools[]` (chat.completions function tools) for the memory tools. */
