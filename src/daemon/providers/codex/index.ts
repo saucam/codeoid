@@ -60,6 +60,7 @@ import { renderHistorySeed, type CanonicalTurn, type HistorySeedResult } from ".
 import { buildCodexEnv } from "../env.js";
 import { CodexRpcProcess } from "./rpc.js";
 import type { SessionMode } from "../../../protocol/types.js";
+import { MEMORY_MCP_SERVER_NAME, MEMORY_MCP_TOKEN_ENV, type MemoryMcpMount } from "../../memory/mcp-http.js";
 
 /** codex `tokenUsage.last` / `.total` shape (thread/tokenUsage/updated). */
 interface CodexTokenUsage {
@@ -78,6 +79,14 @@ export interface CodexProviderInit {
   command: string;
   argsPrefix?: string[];
   store: Store;
+  /** Tenant-scoped memory workspace id — the scope a mounted memory token binds to. */
+  workspaceId?: string;
+  /**
+   * Shared in-daemon memory MCP endpoint + URL. When present (memory enabled),
+   * the provider mounts it on the app-server via `-c mcp_servers.*` overrides so
+   * codex can page the verbatim store on demand — the precondition for VWS.
+   */
+  memoryMcp?: MemoryMcpMount;
   onModels?: (
     models: ReadonlyArray<{ value: string; displayName: string; description?: string }>,
   ) => void;
@@ -182,6 +191,10 @@ export class CodexProvider implements SessionProvider {
   #command: string;
   #argsPrefix: string[];
   #onModels?: CodexProviderInit["onModels"];
+  #workspaceId: string;
+  #memoryMcp: MemoryMcpMount | null;
+  /** Live scoped token for the mounted memory endpoint; revoked on teardown. */
+  #memoryToken: string | null = null;
 
   #proc: CodexRpcProcess | null = null;
   #threadId: string | null = null;
@@ -212,6 +225,18 @@ export class CodexProvider implements SessionProvider {
     this.#command = init.command;
     this.#argsPrefix = init.argsPrefix ?? [];
     this.#onModels = init.onModels;
+    this.#workspaceId = init.workspaceId ?? init.sessionId;
+    this.#memoryMcp = init.memoryMcp ?? null;
+  }
+
+  /**
+   * True when the shared memory endpoint is mounted for this session, so codex
+   * can page the verbatim store on demand. The Verbatim Working Set strategy
+   * seeds a compact session map only when this holds; otherwise the session
+   * falls back to the transcript seed.
+   */
+  get supportsMemoryTools(): boolean {
+    return this.#memoryMcp != null;
   }
 
   get backingSessionId(): string {
@@ -238,6 +263,41 @@ export class CodexProvider implements SessionProvider {
     const seed = renderHistorySeed(history, { maxChars: opts?.maxChars });
     this.#pendingHistorySeed = seed.text.length > 0 ? seed.text : null;
     return seed;
+  }
+
+  /**
+   * VWS transport: prepend a strategy-built block (the compact session map) to
+   * the next prompt — the same channel seedFromHistory uses. The session decides
+   * transcript vs session map; the provider just stashes the block.
+   */
+  seedText(block: string): void {
+    this.#pendingHistorySeed = block.length > 0 ? block : null;
+  }
+
+  /**
+   * `-c` config overrides + token env that mount the shared memory endpoint on
+   * the codex app-server (`--url` streamable-HTTP MCP server, bearer token read
+   * from an env var so it never lands in argv). Minted fresh per app-server
+   * spawn — the token is this session's tenant scope; revoked on teardown.
+   */
+  #memoryMcpSpawn(): { args: string[]; env: Record<string, string> } {
+    const mount = this.#memoryMcp;
+    if (!mount) return { args: [], env: {} };
+    if (this.#memoryToken) mount.endpoint.revoke(this.#memoryToken);
+    this.#memoryToken = mount.endpoint.mint({
+      workspaceId: this.#workspaceId,
+      sessionId: this.#sessionId,
+    });
+    const key = `mcp_servers.${MEMORY_MCP_SERVER_NAME}`;
+    return {
+      // The `-c` value parses as TOML — JSON.stringify yields a valid TOML
+      // string literal (quoted). Verified live against codex app-server.
+      args: [
+        "-c", `${key}.url=${JSON.stringify(mount.url)}`,
+        "-c", `${key}.bearer_token_env_var=${JSON.stringify(MEMORY_MCP_TOKEN_ENV)}`,
+      ],
+      env: { [MEMORY_MCP_TOKEN_ENV]: this.#memoryToken },
+    };
   }
 
   runTurn(opts: TurnOpts): TurnRun {
@@ -303,6 +363,10 @@ export class CodexProvider implements SessionProvider {
     this.#proc?.kill();
     this.#proc = null;
     this.#threadId = null;
+    if (this.#memoryToken) {
+      this.#memoryMcp?.endpoint.revoke(this.#memoryToken);
+      this.#memoryToken = null;
+    }
   }
 
   // ── Internal ──────────────────────────────────────────────────────────
@@ -334,11 +398,17 @@ export class CodexProvider implements SessionProvider {
     if (this.#proc?.alive && this.#threadId) return;
 
     if (!this.#proc?.alive) {
+      // Mount the shared memory endpoint (if enabled) via `-c mcp_servers.*`
+      // overrides + a token env var, so codex pages the verbatim store on
+      // demand. No CODEX_HOME/auth.json juggling — the default ~/.codex keeps
+      // the user's auth + config; these just add the one server.
+      const mcp = this.#memoryMcpSpawn();
       this.#proc = new CodexRpcProcess({
         command: this.#command,
         argsPrefix: this.#argsPrefix,
+        args: mcp.args,
         cwd: opts.workdir,
-        env: buildCodexEnv(),
+        env: { ...buildCodexEnv(), ...mcp.env },
         onNotification: (method, params) => this.#onNotification(method, params),
         onServerRequest: (method, params) => this.#onServerRequest(method, params),
         onExit: ({ code, signal, stderrTail }) => {

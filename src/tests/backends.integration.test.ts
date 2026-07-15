@@ -401,4 +401,24 @@ describe("resume-beyond-budget (real)", () => {
     },
     600_000,
   );
+
+  // Phase 3: same case with codex as the incoming backend — it pages the
+  // verbatim store through the shared HTTP MCP endpoint mounted via `-c
+  // mcp_servers.*` overrides + a token env var. Gated on codex requested + authed.
+  (RUN && BACKENDS.includes("codex") ? it : it.skip)(
+    "codex: VWS recovers a dropped early fact via the mounted memory endpoint",
+    async () => {
+      if (!available.includes("codex")) return;
+      const transcript = await runBeyondBudget("transcript", "codex");
+      const vws = await runBeyondBudget("vws", "codex");
+      // eslint-disable-next-line no-console
+      console.log(
+        `[resume-beyond-budget codex] transcript: recalled=${transcript.recalled} incomingInputTokens=${transcript.incomingInputTokens} | ` +
+          `vws: recalled=${vws.recalled} incomingInputTokens=${vws.incomingInputTokens}`,
+      );
+      expect(vws.recalled).toBe(true);
+      expect(transcript.recalled).toBe(false);
+    },
+    600_000,
+  );
 });

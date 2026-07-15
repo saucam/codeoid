@@ -35,6 +35,11 @@ export const MEMORY_MCP_PATH = "/mcp/memory";
  *  by it (e.g. gemini reports `codeoid_memory__recall`); isSafeTool keys off it. */
 export const MEMORY_MCP_SERVER_NAME = "codeoid_memory";
 
+/** Env var a URL-mounting backend reads the per-session bearer token from when
+ *  the config references a token by env-var name rather than inline (codex's
+ *  `bearer_token_env_var`) — keeps the token out of argv. */
+export const MEMORY_MCP_TOKEN_ENV = "CODEOID_MEMORY_TOKEN";
+
 /** Tenant scope a token is bound to — identical to the in-process binding. */
 export interface MemoryMcpBinding {
   workspaceId: string;

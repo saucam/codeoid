@@ -10,6 +10,7 @@
  *   "auto-tool"  → item/completed for a command codex ran WITHOUT asking
  *   "ask-user"   → server→client item/tool/requestUserInput (select)
  *   "echo-policy"→ agentMessage with the approval/sandbox policies received
+ *   "echo-mcp"   → agentMessage with the `-c mcp_servers.*` args + token env
  *   "echo-prompt"→ agentMessage containing the full received prompt
  *   default      → two agentMessage deltas + completed message
  *
@@ -106,6 +107,12 @@ async function runTurn(threadId: string, prompt: string): Promise<void> {
     send({ method: "item/completed", params: { item: { id: "m1", type: "agentMessage", text } } });
   } else if (prompt.includes("echo-policy")) {
     const text = JSON.stringify({ thread: lastThreadPolicies, turn: lastTurnPolicies });
+    send({ method: "item/completed", params: { item: { id: "m1", type: "agentMessage", text } } });
+  } else if (prompt.includes("echo-mcp")) {
+    // Surface the `-c mcp_servers.*` overrides + token env the provider spawned
+    // us with, so the memory mount wiring can be asserted offline.
+    const mcpArgs = process.argv.filter((a) => a.includes("mcp_servers"));
+    const text = JSON.stringify({ mcpArgs, token: process.env.CODEOID_MEMORY_TOKEN ?? null });
     send({ method: "item/completed", params: { item: { id: "m1", type: "agentMessage", text } } });
   } else if (prompt.includes("echo-prompt")) {
     send({ method: "item/completed", params: { item: { id: "m1", type: "agentMessage", text: `PROMPT:${prompt}` } } });

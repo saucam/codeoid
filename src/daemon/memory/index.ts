@@ -25,6 +25,7 @@ export {
   MemoryMcpHttp,
   MEMORY_MCP_PATH,
   MEMORY_MCP_SERVER_NAME,
+  MEMORY_MCP_TOKEN_ENV,
   type MemoryMcpBinding,
   type MemoryMcpMount,
 } from "./mcp-http.js";
