@@ -95,6 +95,11 @@ export class MockSessionProvider implements SessionProvider {
   /** When set, seedFromHistory() returns it — lets tests force a truncation
    *  result so the session's surfacing path can be exercised. */
   seedResultOverride: HistorySeedResult | null = null;
+  /** When true, the session's VWS strategy may seed the compact session map
+   *  instead of a transcript (models a backend with recall tools mounted). */
+  supportsMemoryTools = false;
+  /** Blocks captured by seedText() — the compact session-map seed path. */
+  readonly seededText: string[] = [];
 
   /** When true, TurnRuns expose pushMidTurn (recorded in `midTurnPushes`). */
   #midTurn: boolean;
@@ -168,6 +173,10 @@ export class MockSessionProvider implements SessionProvider {
     this.seededHistory = [...history];
     this.seededMaxChars = opts?.maxChars;
     return this.seedResultOverride ?? undefined;
+  }
+
+  seedText(block: string): void {
+    this.seededText.push(block);
   }
 
   runTurn(opts: TurnOpts): TurnRun {
