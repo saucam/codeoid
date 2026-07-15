@@ -25,6 +25,7 @@ import { isMobile, toggleNav } from "../state/layout";
 import { focusedSession } from "../state/sessions";
 import { forgetApiKey } from "../lib/auth";
 import { openIdentityDrawer } from "./IdentityDrawer";
+import { openSettings } from "./SettingsDrawer";
 import { notifyPermission, requestEnable } from "../state/desktop-notifications";
 
 const StatusBar: Component = () => {
@@ -49,6 +50,7 @@ const StatusBar: Component = () => {
       <span class="ml-auto flex items-center gap-3">
         <SessionMetrics />
         <SearchHotkey />
+        <SettingsButton />
         <NotifyToggle />
         <SignOut />
       </span>
@@ -204,6 +206,17 @@ const SearchHotkey: Component = () => (
   >
     <span>🔍</span>
     <span class="font-mono">Ctrl K</span>
+  </button>
+);
+
+const SettingsButton: Component = () => (
+  <button
+    type="button"
+    onClick={openSettings}
+    class="flex items-center rounded border border-border bg-bg px-1.5 py-0.5 text-[11px] text-fg-muted hover:border-accent/40 hover:text-fg"
+    title="Settings"
+  >
+    ⚙
   </button>
 );
 

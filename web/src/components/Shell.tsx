@@ -28,6 +28,7 @@ import SearchModal from "./SearchModal";
 import SessionExportModal from "./SessionExportModal";
 import SessionImportModal from "./SessionImportModal";
 import SessionListPane from "./SessionListPane";
+import SettingsDrawer from "./SettingsDrawer";
 import StatusBar from "./StatusBar";
 import { openedFile, closeFile } from "../state/files";
 import {
@@ -59,6 +60,7 @@ const Shell: Component = () => {
       <CapabilitiesDrawer />
       <SessionExportModal />
       <SessionImportModal />
+      <SettingsDrawer />
       <HelpModal />
     </>
   );
