@@ -3,10 +3,12 @@ import {
   TranscriptStrategy,
   VerbatimWorkingSetStrategy,
   selectContextStrategy,
+  renderSessionMap,
   type SeedContext,
 } from "./context-strategy";
 import type { SessionProvider } from "./interface";
 import type { CanonicalTurn, HistorySeedResult } from "./canonical";
+import type { Episode } from "../memory/index";
 
 function mockProvider(opts: {
   supportsMemoryTools?: boolean;
@@ -99,5 +101,73 @@ describe("selectContextStrategy", () => {
     expect(selectContextStrategy({ CODEOID_CONTEXT_STRATEGY: "vws" }).name).toBe("verbatim-working-set");
     expect(selectContextStrategy({ CODEOID_CONTEXT_STRATEGY: "session-map" }).name).toBe("verbatim-working-set");
     expect(selectContextStrategy({ CODEOID_CONTEXT_STRATEGY: "VWS" }).name).toBe("verbatim-working-set");
+  });
+});
+
+function epi(id: string, sessionId: string, summary: string): Episode {
+  return {
+    id,
+    workspaceId: "ws",
+    sessionId,
+    kind: "user_turn",
+    summary,
+    content: summary,
+    filePaths: [],
+    tokenEstimate: 1,
+    createdAt: 1_000_000,
+    createdBy: "t",
+  };
+}
+
+describe("renderSessionMap (VWS anchor)", () => {
+  test("carries continuation notice, tool advertisement, page-table ids, last turns verbatim", () => {
+    const out = renderSessionMap({
+      workdir: "/w",
+      sessionName: "sess",
+      sessionId: "s1",
+      recentTurns: [
+        { role: "user", content: "do the thing" },
+        {
+          role: "assistant",
+          content: "done",
+          toolCalls: [{ id: "tc1", name: "Bash", input: {}, output: "", success: true }],
+          providerId: "claude",
+          model: "m",
+        },
+      ],
+      timelineEpisodes: [epi("ep-123", "s1", "earlier work")],
+    });
+    expect(out).toContain("<session_map>");
+    expect(out).toContain("CONTINUATION");
+    expect(out).toContain('Workspace: /w. Session: "sess"');
+    expect(out).toContain("get_episode(episode_id)");
+    expect(out).toContain("episode_id: ep-123"); // page table carries retrievable ids
+    expect(out).toContain("do the thing"); // last user turn, verbatim
+    expect(out).toContain("[tool: Bash]"); // assistant tool call surfaced by name
+    expect(out).toContain("</session_map>");
+  });
+
+  test("omits the page table when there are no episodes", () => {
+    const out = renderSessionMap({
+      workdir: "/w",
+      sessionName: "s",
+      sessionId: "s1",
+      recentTurns: [],
+      timelineEpisodes: [],
+    });
+    expect(out).toContain("<session_map>");
+    expect(out).not.toContain("## Recent episodes");
+  });
+
+  test("clamps very long turn content (bounded seed)", () => {
+    const out = renderSessionMap({
+      workdir: "/w",
+      sessionName: "s",
+      sessionId: "s1",
+      recentTurns: [{ role: "user", content: "x".repeat(5000) }],
+      timelineEpisodes: [],
+    });
+    expect(out).toContain("…");
+    expect(out).not.toContain("x".repeat(2500)); // clamped to ~2000
   });
 });

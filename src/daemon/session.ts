@@ -28,7 +28,7 @@ import {
   isSubagentEvent,
 } from "./providers/interface.js";
 import { createDefaultProviderRegistry, type ProviderRegistry } from "./providers/registry.js";
-import { selectContextStrategy, type ContextStrategy } from "./providers/context-strategy.js";
+import { selectContextStrategy, renderSessionMap, type ContextStrategy } from "./providers/context-strategy.js";
 import type { HookBus } from "./hooks/bus.js";
 import type { HookSessionContext } from "./hooks/types.js";
 import { randomUUID } from "node:crypto";
@@ -68,7 +68,6 @@ import {
   EpisodeChunker,
   IndexScheduler,
   workspaceIdFromPath,
-  formatTimeline,
   type MemoryEngine,
 } from "./memory/index.js";
 import type { Attachment } from "../protocol/types.js";
@@ -2572,65 +2571,25 @@ export class Session {
   }
 
   /**
-   * Build the compact "session map" anchor for a cross-backend switch/fork
-   * (the Verbatim Working Set strategy). Generalizes #buildRotationSeed across
-   * backends: tell the incoming backend this is a continuation, give it the
-   * last few turns verbatim plus an ordered page table of the history (each
-   * line carries an episode_id), and point it at the recall tools to page
-   * anything else in verbatim on demand. Nothing is summarized.
+   * Gather the inputs for the compact "session map" anchor (the Verbatim
+   * Working Set seed) and delegate rendering to the pure `renderSessionMap`.
    */
   #buildSessionMapAnchor(): string {
-    const clamp = (s: string, n = 2000): string => (s.length > n ? `${s.slice(0, n)}\n…` : s);
-    const parts: string[] = [];
-    parts.push("<session_map>");
-    parts.push(
-      "You are continuing an ongoing session that was running on another agent backend. This is a CONTINUATION — do not re-introduce yourself or repeat completed work.",
-    );
-    parts.push("");
-    parts.push(`Workspace: ${this.workdir}. Session: "${this.name}".`);
-    parts.push("");
-    parts.push(
-      "The full prior history is preserved verbatim in codeoid memory — page any of it in on demand (nothing is summarized):",
-    );
-    parts.push("  - recall(query)              — semantic search across all prior episodes");
-    parts.push("  - timeline(offset?, limit?)  — walk the full history in order; each line has an episode_id");
-    parts.push("  - get_episode(episode_id)    — fetch one past turn or tool result verbatim");
-    parts.push("  - recall_file(path)          — the most recent prior read of a file");
-    parts.push("The workspace index in your system prompt lists the topics + hot files in memory.");
-    parts.push("");
-    // Ordered page table of recent episodes (each carries an episode_id).
+    let timelineEpisodes: ReturnType<MemoryEngine["timeline"]> = [];
     if (this.#memory) {
       try {
-        const recent = this.#memory.timeline(this.#workspaceId, 30);
-        if (recent.length > 0) {
-          parts.push("## Recent episodes (newest first — page older with `timeline` offset)");
-          parts.push(formatTimeline(recent, this.id, 0));
-          parts.push("");
-        }
+        timelineEpisodes = this.#memory.timeline(this.#workspaceId, 30);
       } catch {
         /* graceful — the map still works without the page table */
       }
     }
-    // The last few turns verbatim, so the immediate thread survives even if the
-    // model never pages anything.
-    const recentTurns = this.#accumulator.history.slice(-3);
-    if (recentTurns.length > 0) {
-      parts.push(`## Last ${recentTurns.length} turn(s) (verbatim)`);
-      for (const t of recentTurns) {
-        if (t.role === "user") {
-          parts.push(`### User\n${clamp(t.content)}`);
-        } else {
-          const seg: string[] = ["### Assistant"];
-          if (t.content) seg.push(clamp(t.content));
-          for (const tc of t.toolCalls ?? []) seg.push(`[tool: ${tc.name}]`);
-          parts.push(seg.join("\n"));
-        }
-      }
-      parts.push("");
-    }
-    parts.push("</session_map>");
-    parts.push("");
-    return parts.join("\n");
+    return renderSessionMap({
+      workdir: this.workdir,
+      sessionName: this.name,
+      sessionId: this.id,
+      recentTurns: this.#accumulator.history.slice(-3),
+      timelineEpisodes,
+    });
   }
 
   /**
