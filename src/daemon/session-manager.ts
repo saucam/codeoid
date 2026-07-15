@@ -46,7 +46,7 @@ import {
   type DispatcherHost,
 } from "./dispatch.js";
 import type { DispatchEventRow, DispatchTaskRow } from "./store.js";
-import { type MemoryEngine, workspaceIdFromPath } from "./memory/index.js";
+import { type MemoryEngine, type MemoryMcpMount, workspaceIdFromPath } from "./memory/index.js";
 import type { CodeoidConfig } from "../config.js";
 import type { CompressionRegistry } from "./compress/index.js";
 import type {
@@ -149,6 +149,7 @@ export class SessionManager {
   #identityManager?: AgentIdentityManager;
   #rateLimiter: RateLimiter;
   #memory?: MemoryEngine;
+  #memoryMcp?: MemoryMcpMount;
   /** Live model catalogs by provider id (via each backend's supportedModels
    *  equivalent), cached daemon-wide once any session of that provider
    *  initializes. Empty until then. */
@@ -299,6 +300,7 @@ export class SessionManager {
           identityManager: this.#identityManager,
           existingId: meta.sessionId,
           memory: this.#memory,
+          memoryMcp: this.#memoryMcp,
           config: this.#config,
           compressionRegistry: this.#compressionRegistry,
           // The conductor self-persists (design R2): its role, provider
@@ -697,6 +699,7 @@ export class SessionManager {
                 ? { identityManager: this.#identityManager }
                 : {}),
               ...(this.#memory ? { memory: this.#memory } : {}),
+              ...(this.#memoryMcp ? { memoryMcp: this.#memoryMcp } : {}),
               config: this.#config,
               compressionRegistry: this.#compressionRegistry,
               _testProvider: this.#testProviderFactory?.(),
@@ -967,6 +970,12 @@ export class SessionManager {
     this.#memory = memory;
   }
 
+  /** Inject the shared memory MCP endpoint + URL (daemon-wide, built after the
+   *  engine + HTTP server exist). Sessions hand it to URL-mounting backends. */
+  setMemoryMcp(mount: MemoryMcpMount): void {
+    this.#memoryMcp = mount;
+  }
+
   /** Remove a client from all sessions (e.g. on disconnect). */
   disconnectClient(clientId: string): void {
     for (const session of this.#sessions.values()) {
@@ -1091,6 +1100,7 @@ export class SessionManager {
       providerId: msg.providerId,
       identityManager: this.#identityManager,
       memory: this.#memory,
+      memoryMcp: this.#memoryMcp,
       config: this.#config,
       compressionRegistry: this.#compressionRegistry,
       _testProvider: this.#testProviderFactory?.(),
@@ -1276,6 +1286,7 @@ export class SessionManager {
         worktree,
         identityManager: this.#identityManager,
         memory: this.#memory,
+        memoryMcp: this.#memoryMcp,
         config: this.#config,
         compressionRegistry: this.#compressionRegistry,
         _testProvider: this.#testProviderFactory?.(),
@@ -1400,6 +1411,7 @@ export class SessionManager {
       hooks: this.#hooks,
       identityManager: this.#identityManager,
       memory: this.#memory,
+      memoryMcp: this.#memoryMcp,
       config: this.#config,
       compressionRegistry: this.#compressionRegistry,
       _testProvider: this.#testProviderFactory?.(),
@@ -1527,6 +1539,7 @@ export class SessionManager {
           hooks: this.#hooks,
           identityManager: this.#identityManager,
           memory: this.#memory,
+          memoryMcp: this.#memoryMcp,
           config: this.#config,
           compressionRegistry: this.#compressionRegistry,
           _testProvider: this.#testProviderFactory?.(),

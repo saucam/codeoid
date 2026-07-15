@@ -18,7 +18,13 @@ import { ShutdownManager } from "./shutdown.js";
 import { AgentIdentityManager } from "./agent-identity.js";
 import { OAuthHandler, type OAuthConfig } from "./oauth.js";
 import { GoogleOAuthProvider } from "./identity-provider.js";
-import { createMemory, workspaceIdFromPath, type MemoryEngine } from "./memory/index.js";
+import {
+  createMemory,
+  workspaceIdFromPath,
+  MemoryMcpHttp,
+  MEMORY_MCP_PATH,
+  type MemoryEngine,
+} from "./memory/index.js";
 import {
   type CompressionRegistry,
   createRegistry,
@@ -141,6 +147,7 @@ export class DaemonServer {
   #manager: SessionManager;
   #shutdown: ShutdownManager;
   #memory: MemoryEngine | null = null;
+  #memoryMcp: MemoryMcpHttp | null = null;
   #bunServer: ReturnType<typeof Bun.serve> | null = null;
   #sockets = new Map<string, AuthenticatedSocket>();
   #frontends: Frontend[] = [];
@@ -258,6 +265,14 @@ export class DaemonServer {
         });
         await this.#memory.init();
         this.#manager.setMemory(this.#memory);
+        // Shared in-daemon MCP endpoint over the same live engine, mounted by
+        // URL-based backends (gemini-cli via ACP). Loopback URL: the agent
+        // subprocess runs on this host regardless of the daemon's bind address.
+        this.#memoryMcp = new MemoryMcpHttp(this.#memory);
+        this.#manager.setMemoryMcp({
+          endpoint: this.#memoryMcp,
+          url: `http://127.0.0.1:${this.#config.port}${MEMORY_MCP_PATH}`,
+        });
         console.log(
           `[codeoid] memory enabled — episodes -> ${this.#config.memory.dbPath}`,
         );
@@ -325,6 +340,15 @@ export class DaemonServer {
         // HTTP routes
         if (url.pathname === "/health") {
           return Response.json({ status: "ok", version: "0.1.0" });
+        }
+
+        // Shared memory MCP endpoint (URL-mounting backends: gemini-cli/codex).
+        // Auth is the per-session bearer token minted by the mounting provider;
+        // the endpoint fails closed on a missing/unknown token.
+        if (url.pathname === MEMORY_MCP_PATH) {
+          const ep = self.#memoryMcp;
+          if (!ep) return new Response("memory disabled", { status: 503 });
+          return ep.handle(req);
         }
 
         if (url.pathname === "/config") {

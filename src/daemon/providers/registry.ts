@@ -16,6 +16,7 @@ import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-
 import type { Store } from "../store.js";
 import type { AgentIdentityManager } from "../agent-identity.js";
 import type { MemoryEngine } from "../memory/index.js";
+import type { MemoryMcpMount } from "../memory/mcp-http.js";
 import type { CompressionRegistry } from "../compress/index.js";
 import type { CodeoidConfig } from "../../config.js";
 import type { SessionProvider } from "./interface.js";
@@ -46,6 +47,9 @@ export interface ProviderSessionInit {
   store: Store;
   identityManager?: AgentIdentityManager;
   memory?: MemoryEngine;
+  /** Shared in-daemon memory MCP endpoint + URL — mounted by URL-based backends
+   *  (gemini-cli, later codex). Present only when memory is enabled. */
+  memoryMcp?: MemoryMcpMount;
   /** codeoid_fleet MCP server — conductor sessions only. */
   fleet?: McpSdkServerConfigWithInstance;
   config?: CodeoidConfig;
@@ -250,6 +254,8 @@ export function createDefaultProviderRegistry(config?: CodeoidConfig): ProviderR
             command: resolution.command,
             argsPrefix: resolution.argsPrefix,
             store: init.store,
+            workspaceId: init.workspaceId,
+            memoryMcp: init.memoryMcp,
             onModels: init.onModels,
           }),
       });
@@ -276,6 +282,8 @@ export function createDefaultProviderRegistry(config?: CodeoidConfig): ProviderR
             command: resolution.command,
             argsPrefix: resolution.argsPrefix,
             store: init.store,
+            workspaceId: init.workspaceId,
+            memoryMcp: init.memoryMcp,
             onModels: init.onModels,
           }),
       });

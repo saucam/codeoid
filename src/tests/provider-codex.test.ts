@@ -28,6 +28,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CodexRpcProcess } from "../daemon/providers/codex/rpc.js";
 import { CodexProvider } from "../daemon/providers/codex/index.js";
+import { MemoryMcpHttp, MEMORY_MCP_SERVER_NAME } from "../daemon/memory/mcp-http.js";
+import { MemoryEngine } from "../daemon/memory/engine.js";
+import { SqliteEpisodeStore } from "../daemon/memory/store.js";
+import type { Embedder } from "../daemon/memory/embedder.js";
 import { sandboxPolicyError } from "./fixtures/fake-codex-validate.js";
 import { compareNodeVersionsDesc, resolveCodexCommand } from "../daemon/providers/codex/resolve.js";
 import { createDefaultProviderRegistry } from "../daemon/providers/registry.js";
@@ -58,6 +62,45 @@ function turnOpts(
     canUseTool: async () => ({ behavior: "allow" as const }),
     ...overrides,
   };
+}
+
+// ── #178 Phase 3: VWS memory mount over the shared HTTP endpoint ───────────────
+
+class FakeEmbedder implements Embedder {
+  readonly modelName = "fake-test";
+  readonly dimensions = 8;
+  async init(): Promise<void> {}
+  async embed(texts: string[]): Promise<Float32Array[]> {
+    return texts.map((t) => {
+      const v = new Float32Array(this.dimensions);
+      for (const ch of t.toLowerCase()) {
+        const c = ch.charCodeAt(0);
+        if (c >= 97 && c <= 122) v[(c - 97) % this.dimensions]! += 1;
+      }
+      return v;
+    });
+  }
+  async close(): Promise<void> {}
+}
+
+const MOUNT_URL = "http://127.0.0.1:65535/mcp/memory";
+
+async function makeEndpoint(): Promise<{ endpoint: MemoryMcpHttp; engine: MemoryEngine }> {
+  const engine = new MemoryEngine({ store: new SqliteEpisodeStore(":memory:"), embedder: new FakeEmbedder() });
+  await engine.init();
+  return { endpoint: new MemoryMcpHttp(engine), engine };
+}
+
+function makeProviderWithMount(endpoint: MemoryMcpHttp): CodexProvider {
+  return new CodexProvider({
+    sessionId: "sess-1",
+    initialBackingId: "sess-1",
+    command: process.execPath,
+    argsPrefix: [FIXTURE],
+    store: {} as Store,
+    workspaceId: "wsX",
+    memoryMcp: { endpoint, url: MOUNT_URL },
+  });
 }
 
 async function collect(run: TurnRun): Promise<ProviderEvent[]> {
@@ -421,6 +464,44 @@ describe("CodexProvider over fake-codex", () => {
       restoreEnv("CODEX_APPROVAL_POLICY", prev.a);
       restoreEnv("CODEX_SANDBOX_POLICY", prev.s);
     }
+  });
+
+  it("C21: supportsMemoryTools is false without a mount, true with one", async () => {
+    const { endpoint, engine } = await makeEndpoint();
+    expect(makeProvider().supportsMemoryTools).toBe(false);
+    expect(makeProviderWithMount(endpoint).supportsMemoryTools).toBe(true);
+    await engine.close();
+  });
+
+  it("C22: mounts the shared endpoint via -c mcp_servers overrides + a token env var", async () => {
+    const { endpoint, engine } = await makeEndpoint();
+    const p = makeProviderWithMount(endpoint);
+    const events = await collect(p.runTurn(turnOpts("echo-mcp")));
+    const seen = JSON.parse((events.find((e) => e.type === "text_done") as { content: string }).content) as {
+      mcpArgs: string[];
+      token: string | null;
+    };
+    // Two -c overrides: the streamable-HTTP url + the bearer-token env-var name.
+    expect(seen.mcpArgs.some((a) => a.includes(`mcp_servers.${MEMORY_MCP_SERVER_NAME}.url=`) && a.includes(MOUNT_URL))).toBe(true);
+    expect(seen.mcpArgs.some((a) => a.includes(`mcp_servers.${MEMORY_MCP_SERVER_NAME}.bearer_token_env_var=`))).toBe(true);
+    // The token is delivered via the env var (not argv), and matches the mint.
+    expect(seen.token).toMatch(/^mmt_/);
+    expect(endpoint.activeTokens).toBe(1);
+    await p.teardown();
+    expect(endpoint.activeTokens).toBe(0);
+    await engine.close();
+  });
+
+  it("C23: no mcp_servers overrides + no token env when memory is absent", async () => {
+    const p = makeProvider();
+    const events = await collect(p.runTurn(turnOpts("echo-mcp")));
+    const seen = JSON.parse((events.find((e) => e.type === "text_done") as { content: string }).content) as {
+      mcpArgs: string[];
+      token: string | null;
+    };
+    expect(seen.mcpArgs).toEqual([]);
+    expect(seen.token).toBeNull();
+    await p.teardown();
   });
 
   it("C12: rpc edges — spawn failure, request timeout, request/notify after exit", async () => {

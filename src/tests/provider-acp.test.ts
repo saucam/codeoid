@@ -24,6 +24,10 @@ import { createDefaultProviderRegistry } from "../daemon/providers/registry.js";
 import type { ProviderEvent, TurnOpts, TurnRun } from "../daemon/providers/interface.js";
 import type { CodeoidConfig } from "../config.js";
 import type { Store } from "../daemon/store.js";
+import { MemoryMcpHttp, MEMORY_MCP_SERVER_NAME } from "../daemon/memory/mcp-http.js";
+import { MemoryEngine } from "../daemon/memory/engine.js";
+import { SqliteEpisodeStore } from "../daemon/memory/store.js";
+import type { Embedder } from "../daemon/memory/embedder.js";
 
 const FIXTURE = join(import.meta.dir, "fixtures", "fake-acp.ts");
 
@@ -225,6 +229,100 @@ describe("GeminiAcpProvider over fake-acp", () => {
     p.resetToNewSession("fresh");
     expect(p.backingSessionId).toBe("fresh");
     await p.dispose();
+  });
+});
+
+// ── #178 Phase 2: VWS memory mount over the shared HTTP endpoint ───────────────
+
+class FakeEmbedder implements Embedder {
+  readonly modelName = "fake-test";
+  readonly dimensions = 8;
+  async init(): Promise<void> {}
+  async embed(texts: string[]): Promise<Float32Array[]> {
+    return texts.map((t) => {
+      const v = new Float32Array(this.dimensions);
+      for (const ch of t.toLowerCase()) {
+        const c = ch.charCodeAt(0);
+        if (c >= 97 && c <= 122) v[(c - 97) % this.dimensions]! += 1;
+      }
+      return v;
+    });
+  }
+  async close(): Promise<void> {}
+}
+
+async function makeEndpoint(): Promise<{ endpoint: MemoryMcpHttp; engine: MemoryEngine }> {
+  const engine = new MemoryEngine({ store: new SqliteEpisodeStore(":memory:"), embedder: new FakeEmbedder() });
+  await engine.init();
+  return { endpoint: new MemoryMcpHttp(engine), engine };
+}
+
+const MOUNT_URL = "http://127.0.0.1:65535/mcp/memory";
+
+function makeProviderWithMount(endpoint: MemoryMcpHttp): GeminiAcpProvider {
+  return new GeminiAcpProvider({
+    sessionId: "sess-1",
+    initialBackingId: "sess-1",
+    command: process.execPath,
+    argsPrefix: [FIXTURE],
+    store: {} as Store,
+    workspaceId: "wsX",
+    memoryMcp: { endpoint, url: MOUNT_URL },
+  });
+}
+
+function textOf(events: ProviderEvent[]): string {
+  return events
+    .filter((e) => e.type === "text_delta")
+    .map((e) => (e as { content: string }).content)
+    .join("");
+}
+
+describe("GeminiAcpProvider — VWS memory mount (#178 Phase 2)", () => {
+  it("supportsMemoryTools is false without a mount, true with one", async () => {
+    expect(makeProvider().supportsMemoryTools).toBe(false);
+    const { endpoint, engine } = await makeEndpoint();
+    expect(makeProviderWithMount(endpoint).supportsMemoryTools).toBe(true);
+    await engine.close();
+  });
+
+  it("mounts the shared endpoint as an ACP http MCP server with a bearer token", async () => {
+    const { endpoint, engine } = await makeEndpoint();
+    const p = makeProviderWithMount(endpoint);
+    const events = await collect(p.runTurn(turnOpts("echo-mcp")));
+    const raw = textOf(events).replace(/^MCP:/, "");
+    const servers = JSON.parse(raw) as Array<{ type: string; name: string; url: string; headers: Array<{ name: string; value: string }> }>;
+    expect(servers).toHaveLength(1);
+    expect(servers[0]!.type).toBe("http");
+    expect(servers[0]!.name).toBe(MEMORY_MCP_SERVER_NAME);
+    expect(servers[0]!.url).toBe(MOUNT_URL);
+    const authHeader = servers[0]!.headers.find((h) => h.name.toLowerCase() === "authorization");
+    expect(authHeader?.value).toMatch(/^Bearer mmt_/);
+    // A live token is scoped for this session; teardown revokes it.
+    expect(endpoint.activeTokens).toBe(1);
+    await p.teardown();
+    expect(endpoint.activeTokens).toBe(0);
+    await engine.close();
+  });
+
+  it("mounts NO servers when memory is absent (unchanged behavior)", async () => {
+    const p = makeProvider();
+    const events = await collect(p.runTurn(turnOpts("echo-mcp")));
+    expect(textOf(events)).toBe("MCP:[]");
+    await p.teardown();
+  });
+
+  it("seedText prepends the strategy block (session map) to the next prompt", async () => {
+    const { endpoint, engine } = await makeEndpoint();
+    const p = makeProviderWithMount(endpoint);
+    p.seedText("<session_map>PAGE-TABLE</session_map>");
+    const events = await collect(p.runTurn(turnOpts("echo-prompt")));
+    const text = textOf(events);
+    expect(text).toContain("<session_map>PAGE-TABLE</session_map>");
+    expect(text).toContain("echo-prompt");
+    expect(text.indexOf("PAGE-TABLE")).toBeLessThan(text.indexOf("echo-prompt"));
+    await p.teardown();
+    await engine.close();
   });
 });
 
