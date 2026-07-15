@@ -37,6 +37,12 @@ export class StatelessSessionProvider implements SessionProvider {
     return this.#inner.displayName;
   }
 
+  /** Forward the inner provider's memory-tool capability (OpenAI/Gemini set it
+   *  true when a memory engine is wired for their function-calling loop). */
+  get supportsMemoryTools(): boolean {
+    return this.#inner.supportsMemoryTools ?? false;
+  }
+
   get backingSessionId(): string {
     return this.#backingSessionId;
   }

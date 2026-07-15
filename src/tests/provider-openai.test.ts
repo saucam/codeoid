@@ -10,8 +10,9 @@ import type { ProviderEvent } from "../daemon/providers/interface.js";
 
 // ── OpenAI mock ───────────────────────────────────────────────────────────────
 
+type ToolCallDelta = { index: number; id?: string; function?: { name?: string; arguments?: string } };
 type CompletionChunk = {
-  choices: Array<{ delta?: { content?: string | null }; finish_reason?: string | null }>;
+  choices: Array<{ delta?: { content?: string | null; tool_calls?: ToolCallDelta[] }; finish_reason?: string | null }>;
   usage?: { prompt_tokens?: number; completion_tokens?: number } | null;
 };
 type ModelItem = { id: string };
@@ -19,9 +20,12 @@ type ModelItem = { id: string };
 let streamChunks: CompletionChunk[] = [];
 let streamError: Error | null = null;
 let modelsResult: ModelItem[] | Error = [];
+/** When set, drives a multi-round tool-loop: each create() shifts one round. */
+let roundScript: CompletionChunk[][] | null = null;
+/** Every request body passed to create() — inspect tools + tool result messages. */
+const sentBodies: Array<Record<string, unknown>> = [];
 
-function makeCompletionStream(): AsyncIterable<CompletionChunk> {
-  const chunks = [...streamChunks];
+function streamFrom(chunks: CompletionChunk[]): AsyncIterable<CompletionChunk> {
   const err = streamError;
   return {
     [Symbol.asyncIterator]() {
@@ -42,7 +46,11 @@ mock.module("openai", () => {
     default: class OpenAI {
       chat = {
         completions: {
-          create: async (_body: unknown, _opts: unknown) => makeCompletionStream(),
+          create: async (body: Record<string, unknown>, _opts: unknown) => {
+            sentBodies.push(body);
+            if (roundScript) return streamFrom(roundScript.shift() ?? []);
+            return streamFrom([...streamChunks]);
+          },
         },
       };
       models = {
@@ -56,6 +64,34 @@ mock.module("openai", () => {
 });
 
 import { OpenAIProvider } from "../daemon/providers/openai/index.js";
+import { MemoryEngine } from "../daemon/memory/engine.js";
+import { SqliteEpisodeStore } from "../daemon/memory/store.js";
+import type { Embedder } from "../daemon/memory/embedder.js";
+
+class FakeEmbedder implements Embedder {
+  readonly modelName = "fake-test";
+  readonly dimensions = 8;
+  async init(): Promise<void> {}
+  async embed(texts: string[]): Promise<Float32Array[]> {
+    return texts.map((t) => {
+      const v = new Float32Array(this.dimensions);
+      for (const ch of t.toLowerCase()) { const c = ch.charCodeAt(0); if (c >= 97 && c <= 122) v[(c - 97) % 8]! += 1; }
+      return v;
+    });
+  }
+  async close(): Promise<void> {}
+}
+
+async function memoryWithEpisode(): Promise<MemoryEngine> {
+  const engine = new MemoryEngine({ store: new SqliteEpisodeStore(":memory:"), embedder: new FakeEmbedder() });
+  await engine.init();
+  engine.ingest({
+    workspaceId: "wsA", sessionId: "sOld", kind: "user_turn", summary: "vault", content: "the vault passphrase is CRIMSON-OTTER",
+    filePaths: [], tokenEstimate: 4, createdAt: 1_000_000, createdBy: "test",
+  });
+  await engine.drain();
+  return engine;
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -83,6 +119,8 @@ describe("OpenAIProvider – streaming", () => {
     streamChunks = [];
     streamError = null;
     modelsResult = [];
+    roundScript = null;
+    sentBodies.length = 0;
   });
 
   it("emits text_delta + text_done + turn_done for a normal response", async () => {
@@ -188,5 +226,66 @@ describe("OpenAIProvider – dispose", () => {
   it("dispose() resolves without throwing (stateless provider)", async () => {
     const provider = new OpenAIProvider({ apiKey: "fake-key" });
     await expect(provider.dispose()).resolves.toBeUndefined();
+  });
+});
+
+describe("OpenAIProvider – memory tool-loop (#178 Phase 5)", () => {
+  beforeEach(() => {
+    streamChunks = [];
+    streamError = null;
+    modelsResult = [];
+    roundScript = null;
+    sentBodies.length = 0;
+  });
+
+  it("supportsMemoryTools reflects whether a memory engine is wired", async () => {
+    expect(new OpenAIProvider({ apiKey: "k" }).supportsMemoryTools).toBe(false);
+    const engine = await memoryWithEpisode();
+    expect(new OpenAIProvider({ apiKey: "k", memory: engine, workspaceId: "wsA", sessionId: "s1" }).supportsMemoryTools).toBe(true);
+    await engine.close();
+  });
+
+  it("offers tools, pages memory on a tool_calls round, loops to a final answer", async () => {
+    const engine = await memoryWithEpisode();
+    // Round 1: the model emits a tool_call (streamed as indexed deltas) and
+    // finishes with "tool_calls". Round 2: it answers using the tool result.
+    roundScript = [
+      [
+        { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "codeoid_memory__recall", arguments: '{"query":"vault' } }] } }] },
+        { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: ' passphrase"}' } }] }, finish_reason: "tool_calls" }] },
+        { choices: [{}], usage: { prompt_tokens: 20, completion_tokens: 4 } },
+      ],
+      [
+        { choices: [{ delta: { content: "It is CRIMSON-OTTER." }, finish_reason: "stop" }] },
+        { choices: [{}], usage: { prompt_tokens: 30, completion_tokens: 6 } },
+      ],
+    ];
+    const provider = new OpenAIProvider({ apiKey: "k", memory: engine, workspaceId: "wsA", sessionId: "sNew" });
+    const events = await runProvider(provider, "what was the vault passphrase?");
+
+    // The recall tool ran through the gate with verbatim content.
+    const start = events.find((e) => e.type === "tool_start") as Extract<ProviderEvent, { type: "tool_start" }>;
+    const done = events.find((e) => e.type === "tool_complete") as Extract<ProviderEvent, { type: "tool_complete" }>;
+    expect(start.name).toBe("codeoid_memory__recall");
+    expect(done.success).toBe(true);
+    expect(done.output).toContain("CRIMSON-OTTER");
+    // The final answer is round 2's text; usage summed across rounds.
+    expect(events.find((e) => e.type === "text_done")).toMatchObject({ content: "It is CRIMSON-OTTER." });
+    expect(events.find((e) => e.type === "turn_done")).toMatchObject({ result: { inputTokens: 50, outputTokens: 10 } });
+
+    // Round 1 offered tools; round 2's request carried the assistant tool_calls
+    // turn + the tool result message.
+    expect(sentBodies[0]?.tools).toBeDefined();
+    const round2Messages = sentBodies[1]?.messages as Array<{ role: string; tool_call_id?: string }>;
+    expect(round2Messages.some((m) => m.role === "assistant")).toBe(true);
+    expect(round2Messages.some((m) => m.role === "tool" && m.tool_call_id === "call_1")).toBe(true);
+    await engine.close();
+  });
+
+  it("does NOT offer tools when no memory engine is wired (unchanged single-call path)", async () => {
+    streamChunks = [{ choices: [{ delta: { content: "hi" }, finish_reason: "stop" }] }];
+    const provider = new OpenAIProvider({ apiKey: "k" });
+    await runProvider(provider);
+    expect(sentBodies[0]?.tools).toBeUndefined();
   });
 });

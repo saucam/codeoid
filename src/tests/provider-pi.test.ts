@@ -17,6 +17,9 @@ import type {
   TurnOpts,
   UiRequestFn,
 } from "../daemon/providers/interface.js";
+import { MemoryEngine } from "../daemon/memory/engine.js";
+import { SqliteEpisodeStore } from "../daemon/memory/store.js";
+import type { Embedder } from "../daemon/memory/embedder.js";
 
 let wrapperDir: string;
 let fakePi: string;
@@ -87,6 +90,47 @@ function makeProvider(command = fakePi): PiProvider {
     initialBackingId: "sess-pi",
     command,
     store,
+  });
+  return provider;
+}
+
+class FakeEmbedder implements Embedder {
+  readonly modelName = "fake-test";
+  readonly dimensions = 8;
+  async init(): Promise<void> {}
+  async embed(texts: string[]): Promise<Float32Array[]> {
+    return texts.map((t) => {
+      const v = new Float32Array(this.dimensions);
+      for (const ch of t.toLowerCase()) { const c = ch.charCodeAt(0); if (c >= 97 && c <= 122) v[(c - 97) % 8]! += 1; }
+      return v;
+    });
+  }
+  async close(): Promise<void> {}
+}
+
+async function memoryWithEpisode(): Promise<MemoryEngine> {
+  const engine = new MemoryEngine({ store: new SqliteEpisodeStore(":memory:"), embedder: new FakeEmbedder() });
+  await engine.init();
+  engine.ingest({
+    workspaceId: "ws_pi", sessionId: "sOld", kind: "user_turn", summary: "unicorn",
+    content: "alpha unicorn deployment", filePaths: [], tokenEstimate: 4, createdAt: 1_000_000, createdBy: "test",
+  });
+  await engine.drain();
+  return engine;
+}
+
+function makeProviderWithMemory(memory: MemoryEngine, command = fakePi): PiProvider {
+  store.createSession({
+    id: "sess-pi", name: "pi-test", workdir: tmp, status: "idle", createdBy: "u",
+    createdAt: new Date().toISOString(), attachedClients: 0, accountId: "acc", projectId: "proj",
+  });
+  provider = new PiProvider({
+    sessionId: "sess-pi",
+    initialBackingId: "sess-pi",
+    command,
+    store,
+    workspaceId: "ws_pi",
+    memory,
   });
   return provider;
 }
@@ -301,5 +345,37 @@ describe("PiProvider", () => {
     } else {
       throw new Error("no turn_done");
     }
+  });
+});
+
+describe("PiProvider – memory tools (#178 Phase 4)", () => {
+  it("supportsMemoryTools reflects whether a memory engine is wired", () => {
+    expect(makeProvider().supportsMemoryTools).toBe(false);
+  });
+
+  it("with memory: supportsMemoryTools is true and seedText stashes a block", async () => {
+    const engine = await memoryWithEpisode();
+    const p = makeProviderWithMemory(engine);
+    expect(p.supportsMemoryTools).toBe(true);
+    // seedText is the VWS transport hook (prepended to the next prompt).
+    expect(() => p.seedText("<session_map>MAP</session_map>")).not.toThrow();
+    await p.teardown();
+    await engine.close();
+  });
+
+  it("routes a bridge memory-tool call to the daemon engine and returns verbatim content", async () => {
+    const engine = await memoryWithEpisode();
+    const p = makeProviderWithMemory(engine);
+    // The fake-pi "recall-tool" scenario emits a codeoid:memory-tool ui-request;
+    // PiProvider runs the recall def and answers — the fixture echoes it back.
+    const events = await collect(p.runTurn(turnOpts("recall-tool please")).events);
+    await p.teardown();
+    const text = events
+      .filter((e) => e.type === "text_delta" || e.type === "text_done")
+      .map((e) => (e as { content: string }).content)
+      .join("");
+    expect(text).toContain("RECALL:");
+    expect(text).toContain("alpha unicorn deployment");
+    await engine.close();
   });
 });

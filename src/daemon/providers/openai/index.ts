@@ -26,6 +26,8 @@ import type {
 } from "../interface.js";
 import { toOpenAIMessages } from "../canonical.js";
 import { splitForStateless } from "../gemini/index.js";
+import type { MemoryEngine } from "../../memory/index.js";
+import { executeMemoryToolCall, MAX_MEMORY_TOOL_ROUNDS, memoryToolsAsOpenAI } from "../tool-loop.js";
 
 export interface OpenAIProviderInit {
   /** Explicit API key — falls back to OPENAI_API_KEY env var. */
@@ -34,6 +36,12 @@ export interface OpenAIProviderInit {
   defaultModel?: string;
   /** Override base URL (useful for Azure OpenAI or local proxies). */
   baseURL?: string;
+  /** Memory engine — when present, the memory recall tools are offered as
+   *  function tools so the model can page the verbatim store on demand. */
+  memory?: MemoryEngine;
+  /** Tenant-scoped workspace id + session id — the memory tool call scope. */
+  workspaceId?: string;
+  sessionId?: string;
 }
 
 export class OpenAIProvider implements AgentProvider {
@@ -42,6 +50,9 @@ export class OpenAIProvider implements AgentProvider {
 
   #client: OpenAI;
   #defaultModel: string;
+  #memory: MemoryEngine | null;
+  #workspaceId: string;
+  #sessionId: string;
 
   constructor(init: OpenAIProviderInit = {}) {
     this.#client = new OpenAI({
@@ -49,6 +60,15 @@ export class OpenAIProvider implements AgentProvider {
       ...(init.baseURL ? { baseURL: init.baseURL } : {}),
     });
     this.#defaultModel = init.defaultModel ?? "gpt-4o";
+    this.#memory = init.memory ?? null;
+    this.#workspaceId = init.workspaceId ?? init.sessionId ?? "";
+    this.#sessionId = init.sessionId ?? "";
+  }
+
+  /** The memory recall tools are offered whenever a memory engine is wired,
+   *  so the model can page the verbatim store on demand. */
+  get supportsMemoryTools(): boolean {
+    return this.#memory != null;
   }
 
   runTurn(opts: TurnOpts): TurnRun {
@@ -91,44 +111,103 @@ export class OpenAIProvider implements AgentProvider {
 
       messages.push({ role: "user", content: userMessage });
 
-      const stream = await this.#client.chat.completions.create(
-        {
-          model,
-          messages,
-          stream: true,
-          stream_options: { include_usage: true },
-        },
-        { signal: ac.signal },
-      );
+      // Offer the memory tools only when a memory engine is wired. Without it
+      // this stays the plain single-call text path (unchanged behavior).
+      const tools = this.#memory ? memoryToolsAsOpenAI() : undefined;
+      const toolDeps = this.#memory
+        ? {
+            ctx: { engine: this.#memory, workspaceId: this.#workspaceId, sessionId: this.#sessionId },
+            canUseTool: opts.canUseTool,
+            emit: (e: ProviderEvent) => queue.push(e),
+          }
+        : null;
 
-      let fullText = "";
+      let finalText = "";
       let inputTokens = 0;
       let outputTokens = 0;
       let stopReason: string | undefined;
 
-      for await (const chunk of stream) {
+      // Agentic tool-loop: each round streams a completion; if the model asked
+      // for tools we execute them, append the results, and loop. The round cap
+      // is a runaway/cost guard — past it we stop offering tools so the model
+      // must answer. A no-memory turn runs exactly one round (tools undefined).
+      for (let round = 0; ; round++) {
+        const offerTools = tools && round < MAX_MEMORY_TOOL_ROUNDS;
+        const stream = await this.#client.chat.completions.create(
+          {
+            model,
+            messages,
+            stream: true,
+            stream_options: { include_usage: true },
+            ...(offerTools ? { tools } : {}),
+          },
+          { signal: ac.signal },
+        );
+
+        let roundText = "";
+        // OpenAI streams tool_calls as indexed deltas — accumulate by index.
+        const toolCalls: Array<{ id: string; name: string; args: string }> = [];
+        let finish: string | undefined;
+
+        for await (const chunk of stream) {
+          if (ac.signal.aborted) return;
+          const choice = chunk.choices[0];
+          const delta = choice?.delta?.content;
+          if (delta) {
+            queue.push({ type: "text_delta", content: delta });
+            roundText += delta;
+          }
+          for (const tc of choice?.delta?.tool_calls ?? []) {
+            let slot = toolCalls[tc.index];
+            if (!slot) {
+              slot = { id: "", name: "", args: "" };
+              toolCalls[tc.index] = slot;
+            }
+            if (tc.id) slot.id = tc.id;
+            if (tc.function?.name) slot.name = tc.function.name;
+            if (tc.function?.arguments) slot.args += tc.function.arguments;
+          }
+          if (chunk.usage) {
+            inputTokens += chunk.usage.prompt_tokens ?? 0;
+            outputTokens += chunk.usage.completion_tokens ?? 0;
+          }
+          if (choice?.finish_reason) finish = choice.finish_reason;
+        }
         if (ac.signal.aborted) return;
 
-        const delta = chunk.choices[0]?.delta?.content;
-        if (delta) {
-          queue.push({ type: "text_delta", content: delta });
-          fullText += delta;
+        finalText = roundText;
+
+        // Not a tool round (or cap reached) — this is the final answer.
+        if (finish !== "tool_calls" || !toolDeps || toolCalls.length === 0 || round >= MAX_MEMORY_TOOL_ROUNDS) {
+          stopReason = finish;
+          break;
         }
 
-        // Usage arrives in the final chunk when include_usage is set.
-        if (chunk.usage) {
-          inputTokens = chunk.usage.prompt_tokens ?? 0;
-          outputTokens = chunk.usage.completion_tokens ?? 0;
-        }
-
-        if (chunk.choices[0]?.finish_reason) {
-          stopReason = chunk.choices[0].finish_reason;
+        // Record the assistant's tool-call turn, then each tool result, and loop.
+        messages.push({
+          role: "assistant",
+          content: roundText || null,
+          tool_calls: toolCalls.map((t) => ({
+            id: t.id,
+            type: "function" as const,
+            function: { name: t.name, arguments: t.args || "{}" },
+          })),
+        });
+        for (const t of toolCalls) {
+          let args: Record<string, unknown> = {};
+          try {
+            args = t.args ? (JSON.parse(t.args) as Record<string, unknown>) : {};
+          } catch {
+            /* malformed args — pass {} and let the tool clamp/complain */
+          }
+          const output = await executeMemoryToolCall(t.name, args, toolDeps);
+          messages.push({ role: "tool", tool_call_id: t.id, content: output });
         }
       }
 
       if (ac.signal.aborted) return;
 
-      queue.push({ type: "text_done", content: fullText });
+      queue.push({ type: "text_done", content: finalText });
 
       const result: NormalizedTurnResult = {
         providerId: this.id,

@@ -104,6 +104,19 @@ async function runPrompt(message: string): Promise<void> {
       type: "message_end",
       message: { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" },
     });
+  } else if (message.includes("recall-tool")) {
+    // Stand in for a pi-registered memory tool's execute(): send a
+    // codeoid:memory-tool ui-request; PiProvider runs the recall def against
+    // the daemon engine and answers with the verbatim result text.
+    const answer = await askUi({
+      method: "input",
+      title: "codeoid:memory-tool",
+      placeholder: JSON.stringify({ tool: "recall", args: { query: "unicorn" } }),
+    });
+    emit({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: `RECALL:${String(answer.value ?? "")}` }], stopReason: "stop" },
+    });
   } else if (message.includes("notify")) {
     emit({
       type: "extension_ui_request",

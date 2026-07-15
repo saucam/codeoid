@@ -39,8 +39,10 @@ import {
   APPROVAL_TITLE,
   BRIDGE_READY_VALUE,
   BRIDGE_STATUS_KEY,
+  MEMORY_TOOL_TITLE,
   writeBridgeExtension,
 } from "./bridge.js";
+import { memoryToolDefs, type MemoryEngine, type MemoryToolContext } from "../../memory/index.js";
 import { PiRpcProcess, type PiFrame } from "./rpc.js";
 import { translatePiEvent } from "./translate.js";
 
@@ -54,6 +56,11 @@ export interface PiProviderInit {
   /** argv entries preceding `--mode rpc` (bundled: the cli entry path). */
   argsPrefix?: string[];
   store: Store;
+  /** Tenant-scoped memory workspace id — the scope memory tool calls run under. */
+  workspaceId?: string;
+  /** Memory engine — when present, the bridge registers the recall tools and
+   *  the provider runs them against this engine (pi has no MCP; see bridge.ts). */
+  memory?: MemoryEngine;
   onModels?: (
     models: ReadonlyArray<{ value: string; displayName: string; description?: string }>,
   ) => void;
@@ -81,6 +88,8 @@ export class PiProvider implements SessionProvider {
   #argsPrefix: string[];
   #store: Store;
   #onModels?: PiProviderInit["onModels"];
+  #workspaceId: string;
+  #memory: MemoryEngine | null;
 
   #proc: PiRpcProcess | null = null;
   #bridgeReady = false;
@@ -106,6 +115,23 @@ export class PiProvider implements SessionProvider {
     this.#argsPrefix = init.argsPrefix ?? [];
     this.#store = init.store;
     this.#onModels = init.onModels;
+    this.#workspaceId = init.workspaceId ?? init.sessionId;
+    this.#memory = init.memory ?? null;
+  }
+
+  /**
+   * True when memory is wired: the bridge registers the recall tools and this
+   * provider runs them, so the model can page the verbatim store on demand —
+   * the precondition for the Verbatim Working Set strategy on pi.
+   */
+  get supportsMemoryTools(): boolean {
+    return this.#memory != null;
+  }
+
+  /** VWS transport: prepend a strategy-built block (the session map) to the
+   *  next prompt — the same channel seedFromHistory uses. */
+  seedText(block: string): void {
+    this.#pendingHistorySeed = block.length > 0 ? block : null;
   }
 
   get backingSessionId(): string {
@@ -247,7 +273,7 @@ export class PiProvider implements SessionProvider {
   async #ensureProcess(opts: TurnOpts): Promise<void> {
     if (this.#proc?.alive) return;
 
-    const args: string[] = ["-e", writeBridgeExtension()];
+    const args: string[] = ["-e", writeBridgeExtension({ memoryTools: this.#memory != null })];
     if (opts.systemPromptAppend) {
       args.push("--append-system-prompt", opts.systemPromptAppend);
     }
@@ -481,6 +507,14 @@ export class PiProvider implements SessionProvider {
       return;
     }
 
+    // Bridge memory-tool call: the pi-registered recall tool proxies here (pi
+    // has no MCP). The call was already gated by the tool_call approval hook
+    // above (isSafeTool auto-approves recall); run it against the daemon engine.
+    if (method === "input" && frame.title === MEMORY_TOOL_TITLE && id) {
+      await this.#onMemoryToolRequest(id, frame);
+      return;
+    }
+
     // Fire-and-forget extension output → visible rows.
     if (method === "notify") {
       const level = frame.notifyType === "error" ? "system" : "info";
@@ -560,6 +594,44 @@ export class PiProvider implements SessionProvider {
           message: err instanceof Error ? err.message : String(err),
         }),
       );
+    }
+  }
+
+  /**
+   * Run a bridge memory-tool call against the daemon's MemoryEngine and answer
+   * with the verbatim result text. The call already passed the approval gate
+   * (tool_call hook), so there is no second gate here; the tool_start/complete
+   * events come from that path + pi's normal tool-result flow.
+   */
+  async #onMemoryToolRequest(id: string, frame: PiFrame): Promise<void> {
+    const reply = (value: string) =>
+      this.#proc?.send({ type: "extension_ui_response", id, value });
+    const memory = this.#memory;
+    if (!memory) {
+      reply("codeoid memory is not enabled for this session.");
+      return;
+    }
+    let payload: { tool?: string; args?: Record<string, unknown> };
+    try {
+      payload = JSON.parse(String(frame.placeholder ?? "{}")) as typeof payload;
+    } catch {
+      reply("Error: malformed memory-tool payload");
+      return;
+    }
+    const def = memoryToolDefs().find((d) => d.name === payload.tool);
+    if (!def) {
+      reply(`Unknown memory tool: ${String(payload.tool)}`);
+      return;
+    }
+    const ctx: MemoryToolContext = {
+      engine: memory,
+      workspaceId: this.#workspaceId,
+      sessionId: this.#sessionId,
+    };
+    try {
+      reply(await def.run(payload.args ?? {}, ctx));
+    } catch (err) {
+      reply(`Error: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
