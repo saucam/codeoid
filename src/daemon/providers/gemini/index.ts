@@ -32,7 +32,14 @@ import type {
 } from "../interface.js";
 import { toGeminiContent } from "../canonical.js";
 import type { MemoryEngine } from "../../memory/index.js";
-import { executeMemoryToolCall, MAX_MEMORY_TOOL_ROUNDS, memoryToolsAsGemini } from "../tool-loop.js";
+import {
+  ASK_USER_TOOL_NAME,
+  askUserToolAsGemini,
+  executeAskUserCall,
+  executeMemoryToolCall,
+  MAX_MEMORY_TOOL_ROUNDS,
+  memoryToolsAsGemini,
+} from "../tool-loop.js";
 
 export interface GeminiProviderInit {
   /** Explicit API key — falls back to GOOGLE_API_KEY env var. */
@@ -105,21 +112,28 @@ export class GeminiProvider implements AgentProvider {
   ): Promise<void> {
     const model = opts.model ?? this.#defaultModel;
     const genAI = new GoogleGenerativeAI(this.#apiKey);
-    // Offer the memory tools only when a memory engine is wired; otherwise this
-    // stays the plain single-call text path (unchanged behavior).
-    const toolDeps = this.#memory
+    // Tools offered: the memory tools when a memory engine is wired, plus the
+    // ask-user tool when the session can raise dialogs. With neither this stays
+    // the plain single-call text path (unchanged behavior).
+    const emit = (e: ProviderEvent) => queue.push(e);
+    const memoryDeps = this.#memory
       ? {
           ctx: { engine: this.#memory, workspaceId: this.#workspaceId, sessionId: this.#sessionId },
           canUseTool: opts.canUseTool,
-          emit: (e: ProviderEvent) => queue.push(e),
+          emit,
         }
       : null;
+    const askDeps = opts.requestUserInput ? { requestUserInput: opts.requestUserInput, emit } : null;
+    const declarations = [
+      ...(memoryDeps ? memoryToolsAsGemini() : []),
+      ...(askDeps ? [askUserToolAsGemini()] : []),
+    ];
     const genModel = genAI.getGenerativeModel({
       model,
       // Structurally a valid Gemini schema (SchemaType values are the same
       // lowercase strings as JSON Schema); the cast bridges the nominal type.
-      ...(toolDeps
-        ? { tools: [{ functionDeclarations: memoryToolsAsGemini() as unknown as FunctionDeclaration[] }] }
+      ...(declarations.length > 0
+        ? { tools: [{ functionDeclarations: declarations as unknown as FunctionDeclaration[] }] }
         : {}),
     });
 
@@ -179,18 +193,20 @@ export class GeminiProvider implements AgentProvider {
           : undefined;
 
         const calls = response.functionCalls() ?? [];
-        if (calls.length === 0 || !toolDeps || round >= MAX_MEMORY_TOOL_ROUNDS) break;
+        if (calls.length === 0 || declarations.length === 0 || round >= MAX_MEMORY_TOOL_ROUNDS) break;
         if (ac.signal.aborted) return; // don't run tools for an aborted turn
 
         // Execute each call, reply with functionResponse parts, and loop.
         const parts: Part[] = [];
         for (const call of calls) {
           if (ac.signal.aborted) return;
-          const output = await executeMemoryToolCall(
-            call.name,
-            (call.args ?? {}) as Record<string, unknown>,
-            toolDeps,
-          );
+          const args = (call.args ?? {}) as Record<string, unknown>;
+          const output =
+            call.name === ASK_USER_TOOL_NAME && askDeps
+              ? await executeAskUserCall(args, askDeps)
+              : memoryDeps
+                ? await executeMemoryToolCall(call.name, args, memoryDeps)
+                : `Tool unavailable: ${call.name}`;
           parts.push({ functionResponse: { name: call.name, response: { result: output } } });
         }
         message = parts;

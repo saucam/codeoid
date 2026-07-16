@@ -27,7 +27,14 @@ import type {
 import { toOpenAIMessages } from "../canonical.js";
 import { splitForStateless } from "../gemini/index.js";
 import type { MemoryEngine } from "../../memory/index.js";
-import { executeMemoryToolCall, MAX_MEMORY_TOOL_ROUNDS, memoryToolsAsOpenAI } from "../tool-loop.js";
+import {
+  ASK_USER_TOOL_NAME,
+  askUserToolAsOpenAI,
+  executeAskUserCall,
+  executeMemoryToolCall,
+  MAX_MEMORY_TOOL_ROUNDS,
+  memoryToolsAsOpenAI,
+} from "../tool-loop.js";
 
 export interface OpenAIProviderInit {
   /** Explicit API key — falls back to OPENAI_API_KEY env var. */
@@ -111,16 +118,25 @@ export class OpenAIProvider implements AgentProvider {
 
       messages.push({ role: "user", content: userMessage });
 
-      // Offer the memory tools only when a memory engine is wired. Without it
-      // this stays the plain single-call text path (unchanged behavior).
-      const tools = this.#memory ? memoryToolsAsOpenAI() : undefined;
-      const toolDeps = this.#memory
+      // Tools offered: the memory tools when a memory engine is wired, plus the
+      // ask-user tool when the session can raise dialogs. With neither this
+      // stays the plain single-call text path (unchanged behavior).
+      const emit = (e: ProviderEvent) => queue.push(e);
+      const memoryDeps = this.#memory
         ? {
             ctx: { engine: this.#memory, workspaceId: this.#workspaceId, sessionId: this.#sessionId },
             canUseTool: opts.canUseTool,
-            emit: (e: ProviderEvent) => queue.push(e),
+            emit,
           }
         : null;
+      const askDeps = opts.requestUserInput
+        ? { requestUserInput: opts.requestUserInput, emit }
+        : null;
+      const toolList = [
+        ...(memoryDeps ? memoryToolsAsOpenAI() : []),
+        ...(askDeps ? [askUserToolAsOpenAI()] : []),
+      ];
+      const tools = toolList.length > 0 ? toolList : undefined;
 
       let finalText = "";
       let inputTokens = 0;
@@ -182,7 +198,7 @@ export class OpenAIProvider implements AgentProvider {
         const calls = toolCalls.filter((c) => c?.id);
 
         // Not a tool round (or cap reached) — this is the final answer.
-        if (finish !== "tool_calls" || !toolDeps || calls.length === 0 || round >= MAX_MEMORY_TOOL_ROUNDS) {
+        if (finish !== "tool_calls" || !tools || calls.length === 0 || round >= MAX_MEMORY_TOOL_ROUNDS) {
           stopReason = finish;
           break;
         }
@@ -205,7 +221,12 @@ export class OpenAIProvider implements AgentProvider {
           } catch {
             /* malformed args — pass {} and let the tool clamp/complain */
           }
-          const output = await executeMemoryToolCall(t.name, args, toolDeps);
+          const output =
+            t.name === ASK_USER_TOOL_NAME && askDeps
+              ? await executeAskUserCall(args, askDeps)
+              : memoryDeps
+                ? await executeMemoryToolCall(t.name, args, memoryDeps)
+                : `Tool unavailable: ${t.name}`;
           messages.push({ role: "tool", tool_call_id: t.id, content: output });
         }
       }

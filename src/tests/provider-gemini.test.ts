@@ -6,7 +6,7 @@
  */
 
 import { mock, describe, it, expect, beforeEach } from "bun:test";
-import type { ProviderEvent } from "../daemon/providers/interface.js";
+import type { ProviderEvent, TurnOpts, UiRequest } from "../daemon/providers/interface.js";
 
 // ── Google AI mock ────────────────────────────────────────────────────────────
 
@@ -111,6 +111,7 @@ async function memoryWithEpisode(): Promise<MemoryEngine> {
 async function runProvider(
   provider: GeminiProvider,
   userMessage = "hello",
+  extra: Partial<TurnOpts> = {},
 ): Promise<ProviderEvent[]> {
   const events: ProviderEvent[] = [];
   const run = provider.runTurn({
@@ -118,6 +119,7 @@ async function runProvider(
     userMessage,
     workdir: "/tmp",
     canUseTool: async () => ({ behavior: "allow" as const }),
+    ...extra,
   });
   for await (const e of run.events) {
     events.push(e);
@@ -269,5 +271,38 @@ describe("GeminiProvider – dispose", () => {
   it("dispose() resolves without throwing (stateless provider)", async () => {
     const provider = new GeminiProvider({ apiKey: "fake-key" });
     await expect(provider.dispose()).resolves.toBeUndefined();
+  });
+});
+
+describe("GeminiProvider – ask-user tool (#178)", () => {
+  beforeEach(() => {
+    streamChunks = [];
+    streamError = null;
+    usageMetadata = {};
+    finishReason = undefined;
+    roundScript = null;
+    sentMessages.length = 0;
+  });
+
+  it("offers ask_user when requestUserInput is available and routes the answer back", async () => {
+    roundScript = [
+      { chunks: [], calls: [{ name: "ask_user", args: { question: "Deploy where?", options: ["staging", "prod"] } }] },
+      { chunks: [{ text: () => "Deploying to prod." }], calls: [] },
+    ];
+    const seen: UiRequest[] = [];
+    const provider = new GeminiProvider({ apiKey: "k" });
+    const events = await runProvider(provider, "deploy", {
+      requestUserInput: async (req) => {
+        seen.push(req);
+        return { value: "prod", cancelled: false };
+      },
+    });
+    expect(seen[0]?.method).toBe("select");
+    expect(seen[0]?.options).toEqual(["staging", "prod"]);
+    expect(events.find((e) => e.type === "text_done")).toMatchObject({ content: "Deploying to prod." });
+    // Round 2 replied with a functionResponse for ask_user carrying the answer.
+    const second = sentMessages[1] as Array<{ functionResponse?: { name: string; response: { result: string } } }>;
+    expect(second[0]?.functionResponse?.name).toBe("ask_user");
+    expect(second[0]?.functionResponse?.response.result).toBe("prod");
   });
 });
