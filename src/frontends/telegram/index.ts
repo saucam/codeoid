@@ -20,6 +20,7 @@ import { Bot, type Context, InlineKeyboard } from "grammy";
 import { autoRetry } from "@grammyjs/auto-retry";
 import { randomUUID } from "node:crypto";
 import { verifyToken } from "../../daemon/auth.js";
+import { getManifest, getSnapshot } from "../../daemon/settings/store.js";
 import { ALL_SCOPES_STRING } from "../../protocol/scopes.js";
 import type { Frontend, FrontendContext } from "../types.js";
 import type { SessionManager } from "../../daemon/session-manager.js";
@@ -196,6 +197,7 @@ export class TelegramFrontend implements Frontend {
         { command: "mcp", description: "MCP servers" },
         { command: "hooks", description: "Configured hooks" },
         { command: "who", description: "Show your identity" },
+        { command: "settings", description: "Show current settings (read-only)" },
         { command: "destroy", description: "Destroy a session: /destroy <name>" },
         { command: "auth", description: "Authenticate: /auth <api_key>" },
         { command: "help", description: "Show help" },
@@ -249,6 +251,7 @@ export class TelegramFrontend implements Frontend {
     this.#bot.command("provider", (ctx) => this.#handleProvider(ctx));
     this.#bot.command("fork", (ctx) => this.#handleFork(ctx));
     this.#bot.command("who", (ctx) => this.#handleWho(ctx));
+    this.#bot.command("settings", (ctx) => this.#handleSettings(ctx));
     // Capabilities discovery — mirror the web /agents /skills /mcp /hooks.
     this.#bot.command("agents", (ctx) => this.#handleCapabilities(ctx, "agents"));
     this.#bot.command("skills", (ctx) => this.#handleCapabilities(ctx, "skills"));
@@ -848,6 +851,49 @@ export class TelegramFrontend implements Frontend {
       a.delegationDepth ? `delegation depth: ${a.delegationDepth}` : "",
     ].filter(Boolean);
     await ctx.reply(lines.join("\n"), { parse_mode: "MarkdownV2" });
+  }
+
+  /**
+   * Read-only settings summary: the daemon's current, non-default configuration
+   * (secret VALUES never shown — only which are set) plus the backing file
+   * paths for editing. In-process, so it reads the store directly.
+   */
+  async #handleSettings(ctx: Context): Promise<void> {
+    const state = this.#requireAuth(ctx);
+    if (!state) return;
+    const manifest = getManifest();
+    const snapshot = getSnapshot();
+    const fmt = (v: unknown): string => {
+      if (v === null || v === undefined) return "—";
+      if (Array.isArray(v)) return v.length ? v.join(", ") : "—";
+      if (typeof v === "boolean") return v ? "on" : "off";
+      return String(v);
+    };
+    const lines: string[] = ["*Settings*", escMd("Customized values (read-only)")];
+    for (const tab of manifest.tabs) {
+      const rows: string[] = [];
+      for (const group of tab.groups) {
+        for (const f of group.fields) {
+          if (f.secret) continue;
+          const st = snapshot.values[f.key];
+          if (!st || st.source === "default") continue; // only what's been changed
+          rows.push(`  ${escMd(f.label)}: \`${escCode(fmt(st.value))}\` ${escMd(`(${st.source})`)}`);
+        }
+      }
+      if (rows.length > 0) lines.push(`*${escMd(tab.title)}*`, ...rows);
+    }
+    if (lines.length === 2) lines.push(escMd("All settings are at their defaults."));
+    const secretsSet = Object.entries(snapshot.secrets)
+      .filter(([, s]) => s.set)
+      .map(([k]) => k);
+    lines.push(`*Secrets set*: ${secretsSet.length ? escCode(secretsSet.join(", ")) : escMd("none")}`);
+    lines.push(`edit: \`${escCode(snapshot.configPath)}\` · \`${escCode(snapshot.envPath)}\``);
+    const text = lines.join("\n");
+    if (text.length <= 4000) {
+      await ctx.reply(text, { parse_mode: "MarkdownV2" });
+    } else {
+      await ctx.reply(`Settings summary is long — see ${snapshot.configPath}`);
+    }
   }
 
   async #handleCapabilities(
