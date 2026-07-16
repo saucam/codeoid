@@ -101,21 +101,24 @@ Codeoid needs one thing to start: a ZeroID key. Two ways to get one.
 
 **Option B — Self-hosted ZeroID (local, ~2 min)**
 
-[ZeroID](https://github.com/highflame-ai/zeroid) is open source. Bring it up locally with Docker, then mint a key and point Codeoid at it:
+[ZeroID](https://github.com/highflame-ai/zeroid) is open source. Bring it up with Docker, mint a key, then point Codeoid at it.
+
+First, in a directory **outside** your Codeoid checkout, run ZeroID:
 
 ```bash
-# 1. Run ZeroID (Postgres + issuer on :8899)
-git clone https://github.com/highflame-ai/zeroid && cd zeroid
+git clone https://github.com/highflame-ai/zeroid
+cd zeroid
 make setup-keys              # generate the ECDSA/RSA signing keys
-docker compose up -d         # starts Postgres + ZeroID
+docker compose up -d         # starts Postgres + ZeroID on :8899
 curl http://localhost:8899/health     # → {"status":"healthy",...}
+# Then register an agent to mint a key (zid_sk_…, shown once) — use the
+# ZeroID SDK / API from its quickstart, e.g.
+#   client.agents.register(name="codeoid", created_by="you@example.com")
+```
 
-# 2. Register an agent to mint a key (zid_sk_…) — shown once.
-#    Use the ZeroID SDK / API (see the ZeroID repo's quickstart), e.g.
-#    client.agents.register(name="codeoid", created_by="you@example.com")
+Then, back in Codeoid, log in against your local issuer with that key (`codeoid login` if installed globally):
 
-# 3. Point Codeoid at your local issuer and log in with that key.
-cd ../codeoid
+```bash
 bun src/cli.ts login --zeroid local                       # localhost:8899
 # ...or any deployment:
 bun src/cli.ts login --zeroid https://zeroid.mycorp.com
