@@ -33,8 +33,11 @@ import type {
   SessionInfo,
   SessionMode,
   SessionSearchResultMsg,
+  SessionUiRequestMsg,
   ToolInfo,
+  UiRequestMethod,
 } from "../../protocol/types.js";
+import { CAPABILITIES } from "../../protocol/types.js";
 import type { AttachedClient } from "../../daemon/session.js";
 import {
   StreamRelay,
@@ -78,6 +81,30 @@ interface PendingApproval {
 const MAX_PENDING_APPROVALS = 200;
 const APPROVAL_TTL_MS = 60 * 60 * 1000; // 1 hour
 
+/**
+ * Capabilities the Telegram client declares to the daemon. `ui.dialogs` opts
+ * this frontend into `session.ui_request` broadcasts (provider-initiated
+ * dialogs from codex / pi / openai / gemini) — without it the daemon
+ * silently withholds them and only Claude's approval-card questions ever show.
+ */
+const TELEGRAM_CAPABILITIES: readonly string[] = [CAPABILITIES.UI_DIALOGS];
+
+/**
+ * A pending provider dialog (`session.ui_request`) awaiting an answer. Keyed by
+ * `${userId}:${short}` (short = requestId's first 8 chars) like approvals, so
+ * the same fanned-out request never clobbers another user's entry. For
+ * input/editor methods `awaitingText` is set: the user's next plain message is
+ * consumed as the answer instead of being sent to the session.
+ */
+interface PendingUiReq {
+  requestId: string;
+  sessionId: string;
+  method: UiRequestMethod;
+  options?: string[];
+  awaitingText: boolean;
+  createdAt: number;
+}
+
 interface UserState {
   auth: AuthContext | null;
   attachedSessionId: string | null;
@@ -117,6 +144,9 @@ export class TelegramFrontend implements Frontend {
   #users = new Map<number, UserState>();
   /** `${userId}:${short}` → pending approval (inline-keyboard approvals). */
   #approvals = new Map<string, PendingApproval>();
+
+  /** `${userId}:${short}` → pending provider dialog (`session.ui_request`). */
+  #uiRequests = new Map<string, PendingUiReq>();
   /** Approval time-to-live (ms); overridable so tests can exercise expiry. */
   #approvalTtlMs: number;
   /** Send surface handed to each user's StreamRelay. */
@@ -404,6 +434,7 @@ export class TelegramFrontend implements Frontend {
     const client: AttachedClient = {
       id: state.clientId,
       auth: state.auth!,
+      capabilities: TELEGRAM_CAPABILITIES,
       send: (msg: DaemonMessage) => this.#forwardToChat(chatId, userId, msg),
     };
 
@@ -871,6 +902,17 @@ export class TelegramFrontend implements Frontend {
       return;
     }
 
+    // A pending input/editor dialog for this user consumes the next message as
+    // its answer (oldest first) instead of sending it to the session.
+    const uiEntry = [...this.#uiRequests.entries()].find(
+      ([k, e]) => k.startsWith(`${ctx.from?.id}:`) && e.awaitingText,
+    );
+    if (uiEntry) {
+      await this.#respondUiRequest(ctx, uiEntry[0], uiEntry[1], { value: text });
+      await ctx.reply("✅ Answer sent.").catch(() => {});
+      return;
+    }
+
     // Tool approvals go through the inline Approve/Deny buttons (precise
     // approvalId, concurrent-safe), so plain text is always a message to the
     // session — no "yes"/"no" interception.
@@ -929,6 +971,20 @@ export class TelegramFrontend implements Frontend {
       case "session.message.delta": {
         // Buffer; don't stream to Telegram per-token (rate limits).
         relay.handleDelta(chatId, msg);
+        break;
+      }
+
+      case "session.ui_request": {
+        // A provider raised a dialog (codex/pi/openai/gemini ask the user).
+        this.#sendUiRequest(chatId, userId, msg);
+        break;
+      }
+
+      case "session.ui_resolved": {
+        // Another client answered (or it timed out / was cancelled) — drop
+        // our pending entry so a stale text reply can't answer a dead request.
+        const short = msg.requestId.slice(0, 8);
+        this.#uiRequests.delete(`${userId}:${short}`);
         break;
       }
 
@@ -1129,6 +1185,47 @@ export class TelegramFrontend implements Frontend {
       return;
     }
 
+    // Provider dialog answer (`session.ui_request`). Keyed `${userId}:${short}`
+    // like approvals; `rest[0]` is the choice: o<idx> | y | n | x(cancel).
+    if (kind === "uireq") {
+      const userId = ctx.from?.id;
+      if (userId === undefined) {
+        await ctx.answerCallbackQuery().catch(() => {});
+        return;
+      }
+      const key = `${userId}:${short}`;
+      const entry = this.#uiRequests.get(key);
+      if (!entry) {
+        await ctx.answerCallbackQuery({ text: "Dialog no longer active." }).catch(() => {});
+        await ctx.editMessageReplyMarkup().catch(() => {});
+        return;
+      }
+      const choice = rest[0] ?? "";
+      let payload: { value?: string; confirmed?: boolean; cancelled?: boolean };
+      let label: string;
+      if (choice === "x") {
+        payload = { cancelled: true };
+        label = "⨯ Cancelled";
+      } else if (entry.method === "confirm") {
+        const yes = choice === "y";
+        payload = { confirmed: yes };
+        label = yes ? "✅ Yes" : "🚫 No";
+      } else {
+        const idx = Number.parseInt(choice.replace(/^o/, ""), 10);
+        const value = entry.options?.[idx];
+        if (value === undefined) {
+          await ctx.answerCallbackQuery({ text: "Invalid option." }).catch(() => {});
+          return;
+        }
+        payload = { value };
+        label = value;
+      }
+      await this.#respondUiRequest(ctx, key, entry, payload);
+      await ctx.answerCallbackQuery({ text: label.slice(0, 200) }).catch(() => {});
+      await ctx.editMessageText(`❓ ${label}`).catch(() => {});
+      return;
+    }
+
     // Approvals are keyed `${userId}:${short}` — each attached user has
     // their own registration for the same fanned-out approval, so one user's
     // entry can never clobber another's. The tapping user's id rebuilds the
@@ -1309,12 +1406,81 @@ export class TelegramFrontend implements Frontend {
     }
   }
 
+  /**
+   * Render a provider dialog (`session.ui_request`). select/confirm use inline
+   * buttons; input/editor prompt for a text reply (the next plain message is
+   * consumed as the answer — see #handleText). A ⨯ Cancel button always lets
+   * the user dismiss. Only `short` (requestId prefix) travels in callback_data.
+   */
+  #sendUiRequest(chatId: number, userId: number, req: SessionUiRequestMsg): void {
+    // Light cap: the daemon's ui_resolved broadcast normally clears entries,
+    // but a detach mid-dialog could otherwise leak one. Evict the oldest.
+    if (this.#uiRequests.size >= MAX_PENDING_APPROVALS) {
+      const oldest = this.#uiRequests.keys().next().value;
+      if (oldest) this.#uiRequests.delete(oldest);
+    }
+    const short = req.requestId.slice(0, 8);
+    const key = `${userId}:${short}`;
+    this.#uiRequests.set(key, {
+      requestId: req.requestId,
+      sessionId: req.sessionId,
+      method: req.method,
+      options: req.options,
+      awaitingText: req.method === "input" || req.method === "editor",
+      createdAt: Date.now(),
+    });
+
+    const lines = [`❓ ${req.title}`];
+    if (req.message) lines.push(req.message);
+
+    const kb = new InlineKeyboard();
+    if (req.method === "select" && req.options && req.options.length > 0) {
+      req.options.slice(0, 20).forEach((opt, i) => {
+        kb.text(opt.slice(0, 60), `uireq:${short}:o${i}`).row();
+      });
+    } else if (req.method === "confirm") {
+      kb.text("✅ Yes", `uireq:${short}:y`).text("🚫 No", `uireq:${short}:n`).row();
+    } else {
+      // input / editor — the answer arrives as the user's next message.
+      lines.push("✍️ Reply with your answer.");
+      if (req.prefill) lines.push(`(suggested: ${req.prefill})`);
+    }
+    kb.text("⨯ Cancel", `uireq:${short}:x`);
+
+    this.#bot.api.sendMessage(chatId, lines.join("\n\n"), { reply_markup: kb }).catch(() => {});
+  }
+
+  /** Answer a pending dialog: send `session.ui_response` and drop the entry. */
+  async #respondUiRequest(
+    ctx: Context,
+    key: string,
+    entry: PendingUiReq,
+    payload: { value?: string; confirmed?: boolean; cancelled?: boolean },
+  ): Promise<void> {
+    this.#uiRequests.delete(key);
+    const userId = ctx.from?.id;
+    const state = userId !== undefined ? this.#users.get(userId) : undefined;
+    if (!state?.auth) return;
+    await this.#manager.handle(
+      {
+        type: "session.ui_response",
+        id: randomUUID(),
+        sessionId: entry.sessionId,
+        requestId: entry.requestId,
+        ...payload,
+      },
+      state.auth,
+      this.#makeClient(state, ctx),
+    );
+  }
+
   #makeClient(state: UserState, ctx: Context): AttachedClient {
     const chatId = ctx.chat!.id;
     const userId = ctx.from!.id;
     return {
       id: state.clientId,
       auth: state.auth!,
+      capabilities: TELEGRAM_CAPABILITIES,
       send: (msg: DaemonMessage) => this.#forwardToChat(chatId, userId, msg),
     };
   }

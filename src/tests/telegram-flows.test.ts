@@ -528,6 +528,103 @@ describe("Telegram flows — attach, streaming turn, idle", () => {
   });
 });
 
+describe("Telegram flows — provider dialogs (session.ui_request)", () => {
+  function uiRequest(
+    sessionId: string,
+    requestId: string,
+    method: "select" | "confirm" | "input" | "editor",
+    extra: { title?: string; options?: string[]; message?: string } = {},
+  ): DaemonMessage {
+    return {
+      type: "session.ui_request",
+      sessionId,
+      requestId,
+      method,
+      title: extra.title ?? "Provider asks",
+      ...(extra.options ? { options: extra.options } : {}),
+      ...(extra.message ? { message: extra.message } : {}),
+      timestamp: new Date(0).toISOString(),
+    } as DaemonMessage;
+  }
+
+  it("declares the ui.dialogs capability so the daemon sends it dialogs", async () => {
+    const { drive, manager, texts } = await boot();
+    await drive("/attach alpha");
+    await until(() => texts().some((t) => t.startsWith("Attached to")));
+    const client = manager.attachClients.get("sess-a")!;
+    expect(client.capabilities).toContain("ui.dialogs");
+  });
+
+  it("select: renders option buttons and a tap sends session.ui_response {value}", async () => {
+    const { drive, driveCallback, manager, calls, texts } = await boot();
+    await drive("/attach alpha");
+    await until(() => texts().some((t) => t.startsWith("Attached to")));
+    const client = manager.attachClients.get("sess-a")!;
+
+    client.send(uiRequest("sess-a", "req12345-rest", "select", { title: "Deploy where?", options: ["staging", "prod"] }));
+    await until(() => texts().some((t) => t.startsWith("❓ Deploy where?")));
+    const prompt = calls.filter((c) => c.method === "sendMessage").find((c) => String(c.payload.text).startsWith("❓ Deploy where?"));
+    expect(prompt!.payload.reply_markup).toBeDefined();
+
+    await driveCallback("uireq:req12345:o1");
+    await until(() =>
+      manager.handled.some(
+        (m) => m.type === "session.ui_response" && m.requestId === "req12345-rest" && m.value === "prod",
+      ),
+    );
+  });
+
+  it("confirm: Yes tap sends session.ui_response {confirmed:true}", async () => {
+    const { drive, driveCallback, manager, texts } = await boot();
+    await drive("/attach alpha");
+    await until(() => texts().some((t) => t.startsWith("Attached to")));
+    const client = manager.attachClients.get("sess-a")!;
+
+    client.send(uiRequest("sess-a", "cfm45678-x", "confirm", { title: "Proceed?" }));
+    await until(() => texts().some((t) => t.startsWith("❓ Proceed?")));
+    await driveCallback("uireq:cfm45678:y");
+    await until(() =>
+      manager.handled.some(
+        (m) => m.type === "session.ui_response" && m.requestId === "cfm45678-x" && m.confirmed === true,
+      ),
+    );
+  });
+
+  it("input: the user's next text message answers the dialog (not sent to the session)", async () => {
+    const { drive, manager, texts } = await boot();
+    await drive("/attach alpha");
+    await until(() => texts().some((t) => t.startsWith("Attached to")));
+    const client = manager.attachClients.get("sess-a")!;
+
+    client.send(uiRequest("sess-a", "inp99999-y", "input", { title: "Your name?" }));
+    await until(() => texts().some((t) => t.startsWith("❓ Your name?")));
+    await drive("Ada Lovelace");
+    await until(() =>
+      manager.handled.some(
+        (m) => m.type === "session.ui_response" && m.requestId === "inp99999-y" && m.value === "Ada Lovelace",
+      ),
+    );
+    // It must NOT have been forwarded as a session.send.
+    expect(manager.handled.some((m) => m.type === "session.send" && m.text === "Ada Lovelace")).toBe(false);
+  });
+
+  it("cancel button sends session.ui_response {cancelled:true}", async () => {
+    const { drive, driveCallback, manager, texts } = await boot();
+    await drive("/attach alpha");
+    await until(() => texts().some((t) => t.startsWith("Attached to")));
+    const client = manager.attachClients.get("sess-a")!;
+
+    client.send(uiRequest("sess-a", "cxl11111-z", "confirm", { title: "Sure?" }));
+    await until(() => texts().some((t) => t.startsWith("❓ Sure?")));
+    await driveCallback("uireq:cxl11111:x");
+    await until(() =>
+      manager.handled.some(
+        (m) => m.type === "session.ui_response" && m.requestId === "cxl11111-z" && m.cancelled === true,
+      ),
+    );
+  });
+});
+
 describe("Telegram flows — switch, failed re-attach, detach, destroy, search", () => {
   it("switching sessions flushes buffered content + marker BEFORE the attach confirmation", async () => {
     const { drive, manager, texts } = await boot();
