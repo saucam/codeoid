@@ -14,6 +14,11 @@
 | `session:send` | Send messages |
 | `session:interrupt` | Interrupt running agents |
 | `session:approve` | Approve / deny tool requests; also required for `/mode`, `/pin`, `/unpin` |
+| `session:read` | Read-only fleet visibility (conductor): list / find / summarize sessions |
+| `session:dispatch` | Send-class fleet routing (conductor): direct / interrupt / spawn on the owner's behalf |
+| `fs:read` | Read files + list directories under a session's workdir |
+| `settings:read` | Read the settings manifest + current (non-secret) configuration |
+| `settings:write` | Write daemon configuration (`config.json` + `.env`), including secrets |
 
 Share a read-only token with a teammate via ZeroID:
 
@@ -65,17 +70,19 @@ CODEOID_COMPRESS_MIN_BYTES=1024          # skip compression below this size
 
 # Auto-rotation (Layer D)
 CODEOID_AUTO_ROTATE=0                   # auto-rotate backing session near context ceiling
-CODEOID_AUTO_ROTATE_PCT=0.8              # rotate at this occupancy (when enabled)
-CODEOID_AUTO_ROTATE_HARD_PCT=0.9         # hard-rotate even when disabled
-CODEOID_AUTO_ROTATE_MIN_TURNS=3          # skip rotation on fresh sessions
+CODEOID_AUTO_ROTATE_WARN_PCT=0.75        # warn at this occupancy (no action)
+CODEOID_AUTO_ROTATE_PCT=0.9              # rotate at this occupancy (when enabled)
+CODEOID_AUTO_ROTATE_HARD_PCT=0.97        # hard-rotate even when disabled
+CODEOID_AUTO_ROTATE_MIN_TURNS=5          # skip rotation on fresh sessions
 
 # Anthropic (optional, for Haiku cluster labeling)
 ANTHROPIC_API_KEY=sk-ant-...            # if set, clusters get LLM-quality labels
 
-# OAuth (web UI PKCE)
-CODEOID_HMAC_SECRET=...                 # enables OAuth authorization server
-GOOGLE_CLIENT_ID=...                    # optional: Google IdP
-GOOGLE_CLIENT_SECRET=...
+# OAuth (browser sign-in for the web UI) — the authorization server turns on
+# only when BOTH of these are set.
+GOOGLE_CLIENT_ID=...                    # Google IdP client id
+GOOGLE_CLIENT_SECRET=...                # Google IdP client secret
+CODEOID_OAUTH_CLIENT_ID=codeoid          # optional: OAuth client id (default "codeoid")
 
 # Telegram frontend
 TELEGRAM_BOT_TOKEN=...
