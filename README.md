@@ -152,12 +152,12 @@ Or browse to http://localhost:7400/ui/ for the web UI.
 
 **Claude is the default and always available.** Every other backend is opt-in and auto-detected:
 
-- **CLI backends** (`codex`, `gemini-cli`, `pi`) authenticate with **their own login** — your existing Codex / Google / pi subscription — so Codeoid needs no API key for them. `gemini-cli` and `pi` ship **bundled** with Codeoid (no separate install), so you only have to log into them once; `codex` you install yourself.
+- **CLI backends** (`codex`, `gemini-cli`, `pi`) run their own agent CLI. **Codex** and **pi** authenticate with their own login (your existing Codex / pi subscription); **`gemini-cli`** uses a Gemini API key or Vertex. `gemini-cli` and `pi` ship **bundled** with Codeoid (no separate install); `codex` you install yourself.
 - **In-daemon API backends** (`openai`, `gemini`) register only when their **API key** is set in `~/.codeoid/.env`. These bill against the key, not a subscription.
 
 Pick a backend per session with `codeoid new <name> --provider <id>`, or switch a live session with `/provider <id>`. Set keys from the Settings screen (⚙ / `/settings`) or by editing `~/.codeoid/.env` — see [Configuration](docs/CONFIGURATION.md) for every variable.
 
-> **Subscription vs. API key (important for Gemini):** there are **two** Gemini backends. `gemini-cli` uses the Gemini CLI's Google login, so it rides your **Google AI Pro/Ultra subscription with no key**. The in-daemon `gemini` backend talks to the public Gemini API, which is **API-key only** (billed against the key, not your subscription). Want to use your Ultra plan? Use **gemini-cli**, not `gemini`.
+> **Gemini needs an API key (or Vertex) — a consumer Google (AI Pro/Ultra) subscription can't be used with Codeoid.** Both Gemini backends authenticate with `GEMINI_API_KEY` / `GOOGLE_API_KEY` (from [AI Studio](https://aistudio.google.com/apikey)) or Vertex. The difference is capability: `gemini-cli` runs the full Gemini CLI over ACP (streaming + its own tools/MCP), while `gemini` is a lightweight in-daemon API client.
 
 <details>
 <summary><b>Claude</b> — default, always on (Anthropic)</summary>
@@ -172,16 +172,14 @@ Models: the aliases `opus` / `sonnet` / `haiku`, or any full `claude-*` id (`cod
 </details>
 
 <details>
-<summary><b>Gemini CLI</b> (<code>gemini-cli</code>) — your Google subscription, no API key</summary>
+<summary><b>Gemini CLI</b> (<code>gemini-cli</code>) — the richer Gemini backend (API key / Vertex)</summary>
 
-This is the backend to use if you pay for **Google AI Pro/Ultra** and don't want to use an API key.
+Runs the full Gemini CLI over ACP — streaming plus its own tools/MCP — so it's a fuller Gemini experience than the lightweight in-daemon `gemini` backend.
 
-1. **Log in once** with the Gemini CLI so it stores your Google OAuth credentials in `~/.gemini`: install it (`npm i -g @google/gemini-cli`, or `npx @google/gemini-cli`), run `gemini`, and choose **"Login with Google"** with your AI Pro/Ultra account. No key needed. (You *can* instead set `GEMINI_API_KEY` or Vertex env.)
-2. That's it — Codeoid **bundles the Gemini CLI**, so at runtime it uses `gemini` from your `PATH` if present, otherwise its own bundled copy. Nothing else to install for Codeoid's sake.
+- **Auth:** set `GEMINI_API_KEY` (from [AI Studio](https://aistudio.google.com/apikey)) in `~/.codeoid/.env`, or configure Vertex (`GOOGLE_*` + a GCP project). A consumer Google subscription is not supported.
+- **No install needed** — Codeoid **bundles the Gemini CLI**; at runtime it uses `gemini` from your `PATH` if present, otherwise its bundled copy.
 
 Override the binary with `providers.geminiCli.command`, or disable it with `providers.geminiCli.enabled: false` in `config.json`. Driven over ACP (`gemini --acp`).
-
-> ⚠️ If you *also* set `GOOGLE_API_KEY` / `GEMINI_API_KEY` (for the in-daemon `gemini` backend), the CLI may prefer key auth over your Google login. Leave those unset to ride the subscription.
 </details>
 
 <details>
@@ -210,11 +208,9 @@ An in-daemon backend that talks to the OpenAI API. Set `OPENAI_API_KEY=sk-…` i
 </details>
 
 <details>
-<summary><b>Gemini</b> (<code>gemini</code>) — API key (not your subscription)</summary>
+<summary><b>Gemini</b> (<code>gemini</code>) — API key</summary>
 
-An in-daemon backend that talks to the public Gemini API. Set `GOOGLE_API_KEY=…` (or `GEMINI_API_KEY`) in `~/.codeoid/.env`. Registers only when the key is present, and **bills against the key, not your Google subscription**.
-
-To use your **AI Pro/Ultra subscription** with no key, use the **`gemini-cli`** backend above instead.
+A lightweight in-daemon backend that talks to the Gemini API. Set `GOOGLE_API_KEY=…` (or `GEMINI_API_KEY`) in `~/.codeoid/.env`; it registers only when the key is present. For a fuller agent (streaming + tools) on the same key, use `gemini-cli` above.
 </details>
 
 ## Architecture

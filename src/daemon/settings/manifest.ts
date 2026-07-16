@@ -387,7 +387,7 @@ const geminiCli: SettingsTab = {
   id: "gemini-cli",
   title: "Gemini CLI",
   icon: "◆",
-  description: "Google gemini-cli over ACP. Auth uses your `~/.gemini` login (or GEMINI_API_KEY / Vertex).",
+  description: "Google gemini-cli over ACP (streaming + tools). Auth: a Gemini API key or Vertex — a consumer Google subscription can't be used.",
   groups: [
     {
       id: "gemini-cli-provider",
