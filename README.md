@@ -27,6 +27,7 @@ Run N parallel coding-agent sessions across repos — Claude Code by default, wi
 - [Why Codeoid](#why-codeoid)
 - [How Codeoid compares](#how-codeoid-compares)
 - [Quick start](#quick-start)
+- [Backends](#backends)
 - [Architecture](#architecture)
 - [Features](#features)
 - [Configuration](#configuration)
@@ -61,7 +62,7 @@ Its closest peer is **[Omnigent](https://github.com/omnigent-ai/omnigent)**, ano
 ### Prerequisites
 
 - [Bun](https://bun.sh) v1.0+
-- Claude Code CLI logged in (`claude login`) or `ANTHROPIC_API_KEY` set — the default backend. Other backends are optional: `OPENAI_API_KEY` / `GOOGLE_API_KEY` for the OpenAI/Gemini APIs, or the `codex` / `pi` / `gemini` CLIs on your `PATH`.
+- Claude Code CLI logged in (`claude login`) or `ANTHROPIC_API_KEY` set — the default backend. Other backends (Codex, Gemini CLI, pi, OpenAI, Gemini) are optional — see [Backends](#backends) for each one's setup.
 - A ZeroID identity — either the hosted Highflame SaaS (no infra) or a [self-hosted ZeroID](https://github.com/highflame-ai/zeroid)
 
 ### Install
@@ -98,16 +99,31 @@ Codeoid needs one thing to start: a ZeroID key. Two ways to get one.
    bun src/cli.ts login          # prompts for the key (hidden), verifies it, saves to ~/.codeoid/config.json
    ```
 
-**Option B — Self-hosted ZeroID**
+**Option B — Self-hosted ZeroID (local, ~2 min)**
 
-Run your own [ZeroID](https://github.com/highflame-ai/zeroid), register an agent to get a key, then point Codeoid at it. `--zeroid` accepts a preset (`highflame`, `highflame-dev`, `local`) or any URL:
+[ZeroID](https://github.com/highflame-ai/zeroid) is open source. Bring it up locally with Docker, then mint a key and point Codeoid at it:
 
 ```bash
-bun src/cli.ts login --zeroid local                       # local ZeroID on :8899
-bun src/cli.ts login --zeroid https://zeroid.mycorp.com   # your deployment
+# 1. Run ZeroID (Postgres + issuer on :8899)
+git clone https://github.com/highflame-ai/zeroid && cd zeroid
+make setup-keys              # generate the ECDSA/RSA signing keys
+docker compose up -d         # starts Postgres + ZeroID
+curl http://localhost:8899/health     # → {"status":"healthy",...}
+
+# 2. Register an agent to mint a key (zid_sk_…) — shown once.
+#    Use the ZeroID SDK / API (see the ZeroID repo's quickstart), e.g.
+#    client.agents.register(name="codeoid", created_by="you@example.com")
+
+# 3. Point Codeoid at your local issuer and log in with that key.
+cd ../codeoid
+bun src/cli.ts login --zeroid local                       # localhost:8899
+# ...or any deployment:
+bun src/cli.ts login --zeroid https://zeroid.mycorp.com
 ```
 
-The issuer is pinned to whatever you log in against — a token minted by any other issuer is rejected. `login` exchanges the key on the spot and prints the subject + granted scopes so you know it works before the daemon ever starts.
+`--zeroid` accepts a preset (`highflame`, `highflame-dev`, `local`) or any URL. The issuer is pinned to whatever you log in against — a token minted by any other issuer is rejected. `login` exchanges the key on the spot and prints the subject + granted scopes so you know it works before the daemon ever starts.
+
+> The daemon fetches the issuer's JWKS to verify tokens, so wherever ZeroID runs must be reachable from the daemon.
 
 ### Run
 
@@ -128,6 +144,75 @@ bun src/cli.ts tui
 ```
 
 Or browse to http://localhost:7400/ui/ for the web UI.
+
+## Backends
+
+**Claude is the default and always available.** Every other backend is opt-in and auto-detected:
+
+- **CLI backends** (`codex`, `gemini-cli`, `pi`) authenticate with **their own login** — your existing Codex / Google / pi subscription — so Codeoid needs no API key for them. `gemini-cli` and `pi` ship **bundled** with Codeoid (no separate install), so you only have to log into them once; `codex` you install yourself.
+- **In-daemon API backends** (`openai`, `gemini`) register only when their **API key** is set in `~/.codeoid/.env`. These bill against the key, not a subscription.
+
+Pick a backend per session with `codeoid new <name> --provider <id>`, or switch a live session with `/provider <id>`. Set keys from the Settings screen (⚙ / `/settings`) or by editing `~/.codeoid/.env` — see [Configuration](docs/CONFIGURATION.md) for every variable.
+
+> **Subscription vs. API key (important for Gemini):** there are **two** Gemini backends. `gemini-cli` uses the Gemini CLI's Google login, so it rides your **Google AI Pro/Ultra subscription with no key**. The in-daemon `gemini` backend talks to the public Gemini API, which is **API-key only** (billed against the key, not your subscription). Want to use your Ultra plan? Use **gemini-cli**, not `gemini`.
+
+<details>
+<summary><b>Claude</b> — default, always on (Anthropic)</summary>
+
+Nothing to install — it runs in-process via the Claude Agent SDK. Just authenticate one of two ways:
+
+- **Subscription:** `claude login` (uses your Claude/Anthropic plan), or
+- **API key:** put `ANTHROPIC_API_KEY=sk-ant-…` in `~/.codeoid/.env`.
+- **Amazon Bedrock:** set `CLAUDE_CODE_USE_BEDROCK=1`. AWS credentials aren't forwarded to the backend by default — allow them through with `CODEOID_AGENT_ENV_ALLOW=AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_SESSION_TOKEN`.
+
+Models: the aliases `opus` / `sonnet` / `haiku`, or any full `claude-*` id (`codeoid new work --provider claude`, then `/model opus`).
+</details>
+
+<details>
+<summary><b>Gemini CLI</b> (<code>gemini-cli</code>) — your Google subscription, no API key</summary>
+
+This is the backend to use if you pay for **Google AI Pro/Ultra** and don't want to use an API key.
+
+1. **Log in once** with the Gemini CLI so it stores your Google OAuth credentials in `~/.gemini`: install it (`npm i -g @google/gemini-cli`, or `npx @google/gemini-cli`), run `gemini`, and choose **"Login with Google"** with your AI Pro/Ultra account. No key needed. (You *can* instead set `GEMINI_API_KEY` or Vertex env.)
+2. That's it — Codeoid **bundles the Gemini CLI**, so at runtime it uses `gemini` from your `PATH` if present, otherwise its own bundled copy. Nothing else to install for Codeoid's sake.
+
+Override the binary with `providers.geminiCli.command`, or disable it with `providers.geminiCli.enabled: false` in `config.json`. Driven over ACP (`gemini --acp`).
+
+> ⚠️ If you *also* set `GOOGLE_API_KEY` / `GEMINI_API_KEY` (for the in-daemon `gemini` backend), the CLI may prefer key auth over your Google login. Leave those unset to ride the subscription.
+</details>
+
+<details>
+<summary><b>Codex</b> (<code>codex</code>) — OpenAI Codex CLI</summary>
+
+1. Install the **OpenAI Codex CLI** (`npm i -g @openai/codex`) — unlike gemini-cli/pi it is **not** bundled, so `codex` must be on your `PATH` (or point `providers.codex.command` at it).
+2. Authenticate with `codex login` (stored in `~/.codex/auth.json`) — uses your OpenAI/Codex plan — or provide `OPENAI_API_KEY` in the environment.
+3. Codeoid auto-detects `codex` (your `PATH` plus common Node bin dirs) and drives it over `codex app-server`.
+
+Override with `providers.codex.command`, disable with `providers.codex.enabled: false`. Codex's native approval/sandbox default is derived from the session **mode**; pin it with `CODEX_APPROVAL_POLICY` (`untrusted` / `on-request` / `never`) and `CODEX_SANDBOX_POLICY` (`read-only` / `workspace-write` / `danger-full-access`).
+</details>
+
+<details>
+<summary><b>pi</b> (<code>pi</code>) — the pi coding agent</summary>
+
+1. **Log in once** with the pi CLI so it stores credentials in `~/.pi/agent/auth.json`.
+2. That's it — Codeoid **bundles pi**, so at runtime it uses `pi` from your `PATH` if present, otherwise its bundled copy, driven over `pi --mode rpc`.
+
+Override with `providers.pi.command`, disable with `providers.pi.enabled: false`. `PI_CONFIG_DIR` relocates pi's config/credential directory.
+</details>
+
+<details>
+<summary><b>OpenAI</b> (<code>openai</code>) — API key</summary>
+
+An in-daemon backend that talks to the OpenAI API. Set `OPENAI_API_KEY=sk-…` in `~/.codeoid/.env` (or via the Settings screen). The backend registers only when the key is present. Billed against the key.
+</details>
+
+<details>
+<summary><b>Gemini</b> (<code>gemini</code>) — API key (not your subscription)</summary>
+
+An in-daemon backend that talks to the public Gemini API. Set `GOOGLE_API_KEY=…` (or `GEMINI_API_KEY`) in `~/.codeoid/.env`. Registers only when the key is present, and **bills against the key, not your Google subscription**.
+
+To use your **AI Pro/Ultra subscription** with no key, use the **`gemini-cli`** backend above instead.
+</details>
 
 ## Architecture
 
