@@ -34,6 +34,10 @@ export const SCOPES = {
   SESSION_DISPATCH: "session:dispatch",
   /** Read files and list directories under a session's workdir */
   FS_READ: "fs:read",
+  /** Read the settings manifest + current (non-secret) daemon configuration */
+  SETTINGS_READ: "settings:read",
+  /** Write daemon configuration (config.json + .env), including secrets */
+  SETTINGS_WRITE: "settings:write",
 } as const;
 
 export type Scope = (typeof SCOPES)[keyof typeof SCOPES];
@@ -48,7 +52,11 @@ export const WATCHER_SCOPES: readonly Scope[] = [
   SCOPES.FS_READ,
 ];
 
-/** Operator — full control except destroy */
+/**
+ * Operator — full control except destroy. Gets settings READ (a settings
+ * page is expected to render for an operator) but NOT settings WRITE — the
+ * config is owner-only, since a write can rewrite secrets and provider wiring.
+ */
 export const OPERATOR_SCOPES: readonly Scope[] = [
   SCOPES.SESSION_LIST,
   SCOPES.SESSION_CREATE,
@@ -58,6 +66,7 @@ export const OPERATOR_SCOPES: readonly Scope[] = [
   SCOPES.SESSION_INTERRUPT,
   SCOPES.SESSION_APPROVE,
   SCOPES.FS_READ,
+  SCOPES.SETTINGS_READ,
 ];
 
 /** All scopes as a space-delimited string (for OAuth scope parameter) */

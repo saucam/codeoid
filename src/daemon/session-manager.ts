@@ -20,6 +20,7 @@ import {
 import type { HookBus } from "./hooks/bus.js";
 import type { Store } from "./store.js";
 import { hasScope, SCOPES } from "../protocol/scopes.js";
+import { applyPatches, getManifest, getSnapshot } from "./settings/store.js";
 import { RateLimiter } from "./rate-limit.js";
 import type { TranscriptStore } from "./transcript.js";
 import {
@@ -481,6 +482,12 @@ export class SessionManager {
         return this.#sessionExport(msg, auth);
       case "session.import":
         return this.#sessionImport(msg, auth);
+      case "settings.schema":
+        return this.#settingsSchema(msg, auth);
+      case "settings.get":
+        return this.#settingsGet(msg, auth);
+      case "settings.set":
+        return this.#settingsSet(msg, auth);
       case "usage.daily":
         return this.#usageDaily(msg, auth);
       default: {
@@ -874,6 +881,87 @@ export class SessionManager {
     const provider = msg.provider ?? DEFAULT_PROVIDER_ID;
     const { models, live } = this.#currentModels(provider);
     return { type: "models.list.result", requestId: msg.id, models, live, provider };
+  }
+
+  // ---------- settings ----------
+
+  /** Serve the declarative settings manifest. Read-only, `settings:read`. */
+  #settingsSchema(
+    msg: Extract<ClientMessage, { type: "settings.schema" }>,
+    auth: AuthContext,
+  ): DaemonMessage {
+    if (!hasScope(auth.scopes as string[], SCOPES.SETTINGS_READ)) {
+      return this.#settingsForbidden(msg.id);
+    }
+    return { type: "settings.schema.result", requestId: msg.id, manifest: getManifest() };
+  }
+
+  /** Serve the current effective settings (never secret values). `settings:read`. */
+  #settingsGet(
+    msg: Extract<ClientMessage, { type: "settings.get" }>,
+    auth: AuthContext,
+  ): DaemonMessage {
+    if (!hasScope(auth.scopes as string[], SCOPES.SETTINGS_READ)) {
+      return this.#settingsForbidden(msg.id);
+    }
+    try {
+      return { type: "settings.get.result", requestId: msg.id, snapshot: getSnapshot() };
+    } catch (err) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: err instanceof Error ? err.message : String(err),
+        code: "internal",
+      };
+    }
+  }
+
+  /** Persist a batch of setting changes to config.json / .env. `settings:write`. */
+  #settingsSet(
+    msg: Extract<ClientMessage, { type: "settings.set" }>,
+    auth: AuthContext,
+  ): DaemonMessage {
+    if (!hasScope(auth.scopes as string[], SCOPES.SETTINGS_WRITE)) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: "Missing scope: settings:write",
+        code: "forbidden",
+      };
+    }
+    try {
+      const result = applyPatches(msg.patches);
+      this.#store.audit(
+        auth.sub,
+        "settings.set",
+        "",
+        `keys=${msg.patches.map((p) => p.key).join(",")} ok=${result.ok}`,
+      );
+      return {
+        type: "settings.set.result",
+        requestId: msg.id,
+        ok: result.ok,
+        snapshot: result.snapshot,
+        errors: result.errors,
+        restartRequired: result.restartRequired,
+      };
+    } catch (err) {
+      return {
+        type: "response.error",
+        requestId: msg.id,
+        error: err instanceof Error ? err.message : String(err),
+        code: "internal",
+      };
+    }
+  }
+
+  #settingsForbidden(requestId: string): DaemonMessage {
+    return {
+      type: "response.error",
+      requestId,
+      error: "Missing scope: settings:read",
+      code: "forbidden",
+    };
   }
 
   async #fsBrowseDir(

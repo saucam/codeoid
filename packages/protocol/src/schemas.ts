@@ -300,6 +300,39 @@ export const usageDailySchema = z.object({
   days: z.number().int().min(1).max(365).optional(),
 });
 
+export const settingsSchemaSchema = z.object({
+  ...base,
+  type: z.literal("settings.schema"),
+});
+
+export const settingsGetSchema = z.object({
+  ...base,
+  type: z.literal("settings.get"),
+});
+
+/** A single settings change — value is one of the JSON-serializable kinds. */
+const settingValueField = z.union([
+  z.string().max(LIMITS.SETTING_VALUE_MAX),
+  z.number(),
+  z.boolean(),
+  z.array(z.string().max(LIMITS.SETTING_VALUE_MAX)).max(256),
+  z.null(),
+]);
+
+export const settingsSetSchema = z.object({
+  ...base,
+  type: z.literal("settings.set"),
+  patches: z
+    .array(
+      z.object({
+        key: z.string().min(1).max(128),
+        value: settingValueField,
+      }),
+    )
+    .min(1)
+    .max(256),
+});
+
 // ── The unions ────────────────────────────────────────────────────────────────
 
 export const clientMessageSchema = z.discriminatedUnion("type", [
@@ -332,6 +365,9 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
   modelsListSchema,
   sessionExportSchema,
   sessionImportSchema,
+  settingsSchemaSchema,
+  settingsGetSchema,
+  settingsSetSchema,
   usageDailySchema,
 ]);
 

@@ -15,6 +15,14 @@
  */
 
 import type { Scope } from "./scopes.js";
+import type {
+  SettingsSchemaMsg,
+  SettingsGetMsg,
+  SettingsSetMsg,
+  SettingsSchemaResultMsg,
+  SettingsGetResultMsg,
+  SettingsSetResultMsg,
+} from "./settings.js";
 
 /**
  * Wire-protocol version. Bump on breaking changes (renamed/removed fields,
@@ -98,6 +106,12 @@ export const LIMITS = {
   ID_MAX: 128,
   /** Max model id / alias length (`session.set_model`). */
   MODEL_MAX: 256,
+  /**
+   * Max length of a single `settings.set` value (a string field, one array
+   * element, or a secret). Generous — API keys, shell commands, and paths all
+   * fit comfortably under 8 KiB.
+   */
+  SETTING_VALUE_MAX: 8192,
   /** Max free-text length on a `session.ui_response` (`value`). */
   UI_TEXT_MAX: 65_536,
   /** Max number of options on a `session.ui_request` select. */
@@ -753,6 +767,9 @@ export type ClientMessage =
   | ModelsListMsg
   | SessionExportMsg
   | SessionImportMsg
+  | SettingsSchemaMsg
+  | SettingsGetMsg
+  | SettingsSetMsg
   | UsageDailyMsg;
 
 interface BaseClientMsg {
@@ -1551,7 +1568,10 @@ export type DaemonMessage =
   | ClaudeConfigResultMsg
   | ModelsListResultMsg
   | SessionExportResultMsg
-  | SessionImportResultMsg;
+  | SessionImportResultMsg
+  | SettingsSchemaResultMsg
+  | SettingsGetResultMsg
+  | SettingsSetResultMsg;
 
 export interface AuthOkMsg {
   type: "auth.ok";
