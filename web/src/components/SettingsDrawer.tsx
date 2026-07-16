@@ -15,6 +15,7 @@ import {
   Component,
   For,
   Show,
+  createEffect,
   createMemo,
   createSignal,
   onCleanup,
@@ -398,26 +399,41 @@ const TextLikeControl: Component<{ field: SettingField }> = (props) => {
     if (Array.isArray(v)) return v.join(", ");
     return String(v);
   };
-  const onInput = (raw: string) => {
+  const parse = (raw: string): SettingValue => {
     if (f.kind === "int" || f.kind === "float") {
-      if (raw.trim() === "") return setField(f, null);
+      if (raw.trim() === "") return null;
       const n = f.kind === "int" ? Number.parseInt(raw, 10) : Number.parseFloat(raw);
-      return setField(f, Number.isFinite(n) ? n : null);
+      return Number.isFinite(n) ? n : null;
     }
     if (f.kind === "string[]") {
-      const arr = raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
-      return setField(f, arr);
+      return raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
     }
-    return setField(f, raw);
+    return raw;
   };
+  // Buffer the raw text locally so parsing never clobbers in-progress
+  // characters — a trailing ".", "-", or ", " while typing a decimal or a
+  // comma-list. Resync from the store only when its value actually diverges
+  // from what we're showing (an external change: Discard / Save / tab switch),
+  // never on our own keystrokes.
+  const [local, setLocal] = createSignal(display());
+  createEffect(() => {
+    const ext = currentValue(f);
+    if (JSON.stringify(parse(local())) !== JSON.stringify(ext)) {
+      setLocal(display());
+    }
+  });
+  const onInput = (raw: string) => {
+    setLocal(raw);
+    setField(f, parse(raw));
+  };
+  const numeric = f.kind === "int" || f.kind === "float";
   return (
     <input
-      type={f.kind === "int" || f.kind === "float" ? "number" : "text"}
+      type="text"
+      inputMode={numeric ? (f.kind === "int" ? "numeric" : "decimal") : undefined}
       class={inputClass}
-      value={display()}
+      value={local()}
       placeholder={f.placeholder ?? (f.default !== undefined ? String(f.default) : "")}
-      min={f.min}
-      max={f.max}
       onInput={(e) => onInput(e.currentTarget.value)}
     />
   );
