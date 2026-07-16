@@ -401,10 +401,15 @@ const TextLikeControl: Component<{ field: SettingField }> = (props) => {
     return String(v);
   };
   const parse = (raw: string): SettingValue => {
+    const t = raw.trim();
     if (f.kind === "int" || f.kind === "float") {
-      if (raw.trim() === "") return null;
-      const n = f.kind === "int" ? Number.parseInt(raw, 10) : Number.parseFloat(raw);
-      return Number.isFinite(n) ? n : null;
+      if (t === "") return null;
+      // Strict: reject partial/lossy input (e.g. "3.7" for an int, "3." mid-type)
+      // by keeping the raw string so it's preserved — the daemon then rejects it
+      // with a visible error instead of us silently truncating or clearing it.
+      const ok = f.kind === "int" ? /^-?\d+$/.test(t) : Number.isFinite(Number(t));
+      if (!ok) return raw;
+      return f.kind === "int" ? Number.parseInt(t, 10) : Number(t);
     }
     if (f.kind === "string[]") {
       return raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
