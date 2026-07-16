@@ -20,6 +20,7 @@ import {
   createSignal,
   onCleanup,
   onMount,
+  untrack,
 } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 
@@ -417,8 +418,10 @@ const TextLikeControl: Component<{ field: SettingField }> = (props) => {
   // never on our own keystrokes.
   const [local, setLocal] = createSignal(display());
   createEffect(() => {
+    // Only react to external store changes — untrack the local buffer so our
+    // own setLocal (below) can't re-trigger this effect into a feedback loop.
     const ext = currentValue(f);
-    if (JSON.stringify(parse(local())) !== JSON.stringify(ext)) {
+    if (JSON.stringify(parse(untrack(local))) !== JSON.stringify(ext)) {
       setLocal(display());
     }
   });

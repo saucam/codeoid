@@ -61,9 +61,12 @@ export async function fetchSettings(force = false): Promise<void> {
   const cur = state();
   if (!force && cur.manifest && cur.snapshot) return; // already loaded
   inflight = true;
-  setState((s) => ({ ...s, loading: true, error: null }));
+  // Clear stale save errors so a reopened drawer doesn't show an old banner.
+  setState((s) => ({ ...s, loading: true, error: null, saveErrors: [] }));
   try {
-    let manifest = cur.manifest;
+    // A forced refresh reloads the manifest too (the daemon's schema may have
+    // changed), not just the values.
+    let manifest = force ? null : cur.manifest;
     if (!manifest) {
       const sid = newRequestId();
       const res = await getClient().request<SettingsSchemaResultMsg>(
