@@ -156,6 +156,20 @@ describe("dispatchSlash", () => {
     expect(c.sent).toEqual([]);
   });
 
+  it("parses /settings and its aliases", () => {
+    expect(parseSlash("/settings")).toEqual({ kind: "settings" });
+    expect(parseSlash("/config")).toEqual({ kind: "settings" });
+    expect(parseSlash("/prefs")).toEqual({ kind: "settings" });
+  });
+
+  it("/settings invokes the settings hook and emits nothing", () => {
+    const showSettings = mock();
+    const c = { ...ctx(), showSettings };
+    dispatchSlash({ kind: "settings" }, c);
+    expect(showSettings).toHaveBeenCalledTimes(1);
+    expect(c.sent).toEqual([]);
+  });
+
   it("parses capabilities aliases into the right tab", () => {
     expect(parseSlash("/agents")).toEqual({ kind: "capabilities", tab: "agents" });
     expect(parseSlash("/agent")).toEqual({ kind: "capabilities", tab: "agents" });

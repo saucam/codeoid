@@ -360,6 +360,7 @@ const codex: SettingsTab = {
       fields: [
         env("CODEX_APPROVAL_POLICY", "Approval policy", "When Codex asks before acting. Default is derived from the session mode (autonomous → never).", {
           kind: "enum",
+          applies: "next-session",
           options: [
             { value: "untrusted", label: "Untrusted", description: "Ask for anything not trusted." },
             { value: "on-request", label: "On request" },
@@ -370,6 +371,7 @@ const codex: SettingsTab = {
           kind: "enum",
           default: "danger-full-access",
           advanced: true,
+          applies: "next-session",
           options: [
             { value: "read-only", label: "Read only" },
             { value: "workspace-write", label: "Workspace write" },

@@ -432,6 +432,20 @@ describe("Telegram flows — auth and /ls", () => {
     expect(ls!.payload.text).toContain("\\`tick\\`");
   });
 
+  it("renders a read-only /settings summary (secret values never shown)", async () => {
+    const { drive, sent, texts } = await boot();
+
+    await drive("/settings");
+    await until(() => texts().some((t) => t.includes("Settings")));
+
+    const msg = sent().find((c) => String(c.payload.text).includes("Settings"));
+    expect(msg).toBeDefined();
+    expect(msg!.payload.parse_mode).toBe("MarkdownV2");
+    // Summary lists which secrets are set (never their values) + edit paths.
+    expect(msg!.payload.text).toContain("Secrets set");
+    expect(msg!.payload.text).toContain("edit:");
+  });
+
   it("handles /new usage error and success", async () => {
     const { drive, texts, manager } = await boot();
 

@@ -33,6 +33,7 @@ import {
 } from "../../state/sessions";
 import { openCapabilitiesDrawer } from "../CapabilitiesDrawer";
 import { openHelpModal } from "../HelpModal";
+import { openSettings } from "../SettingsDrawer";
 import { openModelPicker } from "../SessionControls";
 import { openIdentityDrawer } from "../IdentityDrawer";
 import { openExportModal } from "../SessionExportModal";
@@ -233,6 +234,7 @@ const PromptBox: Component = () => {
           removeSession,
           showIdentity: openIdentityDrawer,
           showCapabilities: openCapabilitiesDrawer,
+          showSettings: openSettings,
           showExport: openExportModal,
           showImport: openImportModal,
           onSessionForked: (forked) => {
