@@ -393,6 +393,32 @@ describe("SessionManager session.fork", () => {
     expect(fork.mode).toBe("autonomous");
     expect(fork.turnsRemaining).toBe(5);
   });
+
+  it("F6c: mode is inherited even when the fork targets a DIFFERENT backend", async () => {
+    const { registry } = makeRegistry();
+    const manager = makeManager(registry);
+    const c = client(AUTH);
+    const parentId = await createSession(manager, c, "mock-a");
+    await manager.handle(
+      { type: "session.set_mode", id: "m6c", sessionId: parentId, mode: "autonomous" },
+      AUTH,
+      c,
+    );
+
+    // "Branch claude, continue on codex" style: switch provider AND carry mode.
+    // The fork's target backend then applies that mode via its own native
+    // policy path (e.g. codex → approvalPolicy "never"), identical to a
+    // non-fork autonomous session on that backend.
+    const resp = await manager.handle(
+      { type: "session.fork", id: "f6c", sessionId: parentId, providerId: "mock-b" },
+      AUTH,
+      c,
+    );
+    expect(resp.type).toBe("response.ok");
+    const fork = (resp as { data: { providerId?: string; mode?: string } }).data;
+    expect(fork.providerId).toBe("mock-b"); // different backend
+    expect(fork.mode).toBe("autonomous"); // mode carried across the provider switch
+  });
 });
 
 // ── Git worktree isolation (real git) ────────────────────────────────────────
