@@ -1372,6 +1372,18 @@ export class SessionManager {
           atTurn,
         },
         worktree,
+        // Inherit the parent's execution mode + remaining autonomous budget so a
+        // fork continues under the SAME trust as the session it came from.
+        // Without this a fork silently starts `guarded` (the Session default)
+        // regardless of the parent, so an autonomous parent's fork blocks its
+        // own writes/exec on approval prompts — which, unattended, get auto-denied
+        // at turn boundaries ("Denied by user"). A fork is user-initiated from a
+        // session they own, so carrying the parent's mode is the least-surprising
+        // behaviour and keeps the mode→backend-policy plumbing consistent.
+        initialMode: {
+          mode: parent.mode,
+          ...(parent.turnsRemaining !== undefined ? { maxTurns: parent.turnsRemaining } : {}),
+        },
         identityManager: this.#identityManager,
         memory: this.#memory,
         memoryMcp: this.#memoryMcp,

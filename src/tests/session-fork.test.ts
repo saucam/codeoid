@@ -344,6 +344,81 @@ describe("SessionManager session.fork", () => {
     );
     expect(resp).toMatchObject({ type: "response.error", code: "not_found" });
   });
+
+  it("F6: a fork inherits the parent's execution mode (autonomous parent → autonomous fork)", async () => {
+    const { registry } = makeRegistry();
+    const manager = makeManager(registry);
+    const c = client(AUTH);
+    const parentId = await createSession(manager, c);
+
+    // Put the parent in unbounded autonomous mode.
+    const set = await manager.handle(
+      { type: "session.set_mode", id: "m6", sessionId: parentId, mode: "autonomous" },
+      AUTH,
+      c,
+    );
+    expect(set.type).toBe("response.ok");
+
+    const resp = await manager.handle(
+      { type: "session.fork", id: "f6", sessionId: parentId },
+      AUTH,
+      c,
+    );
+    expect(resp.type).toBe("response.ok");
+    const fork = (resp as { data: { mode?: string; turnsRemaining?: number } }).data;
+    // Regression: forks used to always start `guarded` (the Session default),
+    // so an autonomous parent's fork silently blocked its own writes/exec on
+    // approval prompts that, unattended, got auto-denied ("Denied by user").
+    expect(fork.mode).toBe("autonomous");
+    expect(fork.turnsRemaining).toBeUndefined(); // unbounded budget carried over
+  });
+
+  it("F6b: a fork carries the parent's remaining autonomous budget", async () => {
+    const { registry } = makeRegistry();
+    const manager = makeManager(registry);
+    const c = client(AUTH);
+    const parentId = await createSession(manager, c);
+    await manager.handle(
+      { type: "session.set_mode", id: "m6b", sessionId: parentId, mode: "autonomous", maxTurns: 5 },
+      AUTH,
+      c,
+    );
+
+    const resp = await manager.handle(
+      { type: "session.fork", id: "f6b", sessionId: parentId },
+      AUTH,
+      c,
+    );
+    const fork = (resp as { data: { mode?: string; turnsRemaining?: number } }).data;
+    expect(fork.mode).toBe("autonomous");
+    expect(fork.turnsRemaining).toBe(5);
+  });
+
+  it("F6c: mode is inherited even when the fork targets a DIFFERENT backend", async () => {
+    const { registry } = makeRegistry();
+    const manager = makeManager(registry);
+    const c = client(AUTH);
+    const parentId = await createSession(manager, c, "mock-a");
+    await manager.handle(
+      { type: "session.set_mode", id: "m6c", sessionId: parentId, mode: "autonomous" },
+      AUTH,
+      c,
+    );
+
+    // "Branch claude, continue on codex" style: switch provider AND carry mode.
+    // The fork's target backend then applies that mode via its own native
+    // policy path (e.g. codex → approvalPolicy "never"), identical to a
+    // non-fork autonomous session on that backend.
+    const resp = await manager.handle(
+      { type: "session.fork", id: "f6c", sessionId: parentId, providerId: "mock-b" },
+      AUTH,
+      c,
+    );
+    expect(resp.type).toBe("response.ok");
+    const fork = (resp as { data: { providerId?: string; mode?: string } }).data;
+    expect(fork.providerId).toBe("mock-b"); // different backend
+    expect(fork.mode).toBe("autonomous"); // mode carried across the provider switch
+  });
 });
 
 // ── Git worktree isolation (real git) ────────────────────────────────────────
