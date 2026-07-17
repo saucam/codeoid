@@ -273,16 +273,25 @@ Gate it with a new `fleet:read` scope.
 // packages/protocol/src/types.ts  — additive; gated by a new fleet:read scope
 
 // client → daemon
-{ type: "fleet.subscribe", id, scope: "tenant" }              // snapshot + live stream
-{ type: "fleet.snapshot.result", id, fleet: FleetSnapshot }
+interface FleetSubscribe { type: "fleet.subscribe"; id: string; scope: "tenant" }        // snapshot + live stream
+interface FleetSnapshotResult { type: "fleet.snapshot.result"; id: string; fleet: FleetSnapshot }
 
-// daemon → client  (broadcast, mirrors session.status_change)
-{ type: "fleet.update", delta: FleetDelta }   // task transition · new dispatch · digest · worker lifecycle
+// daemon → client (broadcast, mirrors session.status_change)
+// delta = a task transition, a new dispatch, a digest, or a worker-lifecycle event
+interface FleetUpdate { type: "fleet.update"; delta: FleetDelta }
 
-interface FleetTaskView {                       // ← already exists in daemon fleet.ts / store.ts
-  id; kind: "send" | "spawn"; shape: "ship" | "scout";
+// ← already exists in daemon fleet.ts / store.ts
+interface FleetTaskView {
+  id: string;
+  kind: "send" | "spawn";
+  shape: "ship" | "scout";
   status: "queued" | "claimed" | "running" | "done" | "failed" | "blocked";
-  attempts; workerSessionId; targetSession; resultDigest; error; createdBy;  // WIMSE URI
+  attempts: number;
+  workerSessionId?: string;
+  targetSession?: string;
+  resultDigest?: string;
+  error?: string;
+  createdBy: string;      // conductor WIMSE URI
   dependsOn?: string[];   // reserved, UNPOPULATED in P5 — lets the graph draw blocking edges later, no breaking change
 }
 
