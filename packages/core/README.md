@@ -1,6 +1,6 @@
 # @codeoid/core
 
-Framework-agnostic client core for the [Codeoid](https://github.com/saucam/codeoid)
+Framework-agnostic client core for the [Codeoid](https://github.com/highflame-ai/codeoid)
 daemon — everything a frontend needs except the pixels:
 
 - **`CodeoidClient`** — the WebSocket transport: auth handshake (token +

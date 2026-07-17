@@ -6,7 +6,7 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/saucam/codeoid.git",
+    "url": "git+https://github.com/highflame-ai/codeoid.git",
     "directory": "packages/protocol"
   },
   "main": "./src/index.ts",

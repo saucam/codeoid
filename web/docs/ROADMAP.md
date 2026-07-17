@@ -91,7 +91,7 @@ codeoid-session-<id>.tar.gz
     "rotationCount": 0
   },
   "workdir": {
-    "alias": "github.com/saucam/codeoid",   // derived from `git remote get-url origin`
+    "alias": "github.com/highflame-ai/codeoid",   // derived from `git remote get-url origin`
     "originalAbsolute": "/home/yash/Workspace/codeoid",  // for diagnostics only
     "filePathPolicy": "alias-relative"
   },
