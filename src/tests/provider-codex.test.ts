@@ -504,6 +504,73 @@ describe("CodexProvider over fake-codex", () => {
     await p.teardown();
   });
 
+  it("C24: an MCP tool-call elicitation routes through canUseTool as mcp__<server>__<tool> and accepts", async () => {
+    // Regression: codex gates MCP tool calls with `mcpServer/elicitation/request`
+    // (not the item/* approvals), reply shape `{action}` (not `{decision}`).
+    // Before the fix this hit the default handler, threw, and codex read the
+    // error as a decline — so recall was auto-denied in guarded/interactive.
+    const p = makeProvider();
+    const gated: Array<{ name: string; input: Record<string, unknown> }> = [];
+    const events = await collect(
+      p.runTurn(
+        turnOpts("please mcp-tool", {
+          canUseTool: async (_toolId, _approvalId, toolName, input) => {
+            gated.push({ name: toolName, input });
+            return { behavior: "allow" as const };
+          },
+        }),
+      ),
+    );
+    await p.teardown();
+
+    // Canonical `mcp__<server>__<tool>` name — the form the session's isSafeTool
+    // recognises, so read-only memory tools auto-approve instead of prompting.
+    expect(gated).toEqual([{ name: "mcp__codeoid_memory__recall", input: { query: "compliance" } }]);
+    const start = events.find((e) => e.type === "tool_start");
+    expect(start && (start as { name: string }).name).toBe("mcp__codeoid_memory__recall");
+    const complete = events.find((e) => e.type === "tool_complete");
+    expect(complete && (complete as { output: string }).output).toBe("8 episodes");
+    expect(complete && (complete as { success: boolean }).success).toBe(true);
+    expect(events.some((e) => e.type === "text_done" && e.content === "Recalled.")).toBe(true);
+  });
+
+  it("C25: denying an MCP tool-call elicitation replies decline (action shape) and the tool never runs", async () => {
+    const p = makeProvider();
+    const events = await collect(
+      p.runTurn(
+        turnOpts("please mcp-tool", {
+          canUseTool: async () => ({ behavior: "deny" as const, message: "no" }),
+        }),
+      ),
+    );
+    await p.teardown();
+    // codex received `{action:"decline"}` → skipped the call → no tool_complete.
+    expect(events.some((e) => e.type === "tool_complete")).toBe(false);
+    expect(
+      events.some((e) => e.type === "text_done" && e.content === "The MCP tool call was rejected by the user."),
+    ).toBe(true);
+  });
+
+  it("C26: elicitation with no preceding item/started recovers tool from message + args from _meta", async () => {
+    // Defensive fallback: build the canonical name from the `message` and the
+    // input from `_meta.tool_params` when the mcpToolCall item wasn't observed.
+    const p = makeProvider();
+    const gated: Array<{ name: string; input: Record<string, unknown> }> = [];
+    const events = await collect(
+      p.runTurn(
+        turnOpts("please mcp-nostart", {
+          canUseTool: async (_toolId, _approvalId, toolName, input) => {
+            gated.push({ name: toolName, input });
+            return { behavior: "allow" as const };
+          },
+        }),
+      ),
+    );
+    await p.teardown();
+    expect(gated).toEqual([{ name: "mcp__codeoid_memory__recall", input: { query: "compliance" } }]);
+    expect(events.some((e) => e.type === "text_done" && e.content === "Recalled (nostart).")).toBe(true);
+  });
+
   it("C12: rpc edges — spawn failure, request timeout, request/notify after exit", async () => {
     // Spawn failure rejects in-flight requests.
     const dead = new CodexRpcProcess({
