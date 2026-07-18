@@ -343,7 +343,7 @@ export class GeminiAcpProvider implements SessionProvider {
         if (spec.builtin) continue;
         const t = spec.transport;
         if (t.kind === "http") {
-          const headers = Object.entries(t.headers).map(([name, value]) => ({ name, value }));
+          const headers = Object.entries(t.headers ?? {}).map(([name, value]) => ({ name, value }));
           if (t.bearerTokenEnv) {
             const tok = process.env[t.bearerTokenEnv];
             if (tok) headers.push({ name: "Authorization", value: `Bearer ${tok}` });
@@ -351,7 +351,7 @@ export class GeminiAcpProvider implements SessionProvider {
           servers.push({ type: "http", name: spec.name, url: t.url, headers });
         } else if (t.kind === "stdio") {
           const env = Object.entries(resolveEnvMap(t.env ?? {}, process.env)).map(([name, value]) => ({ name, value }));
-          servers.push({ name: spec.name, command: t.command, args: t.args, env });
+          servers.push({ name: spec.name, command: t.command, args: t.args ?? [], env });
         }
       }
     }

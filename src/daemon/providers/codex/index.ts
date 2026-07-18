@@ -334,7 +334,7 @@ export class CodexProvider implements SessionProvider {
       const t = spec.transport;
       if (t.kind === "stdio") {
         args.push("-c", `${key}.command=${JSON.stringify(t.command)}`);
-        if (t.args.length > 0) args.push("-c", `${key}.args=${JSON.stringify(t.args)}`);
+        if (t.args && t.args.length > 0) args.push("-c", `${key}.args=${JSON.stringify(t.args)}`);
         const resolved = resolveEnvMap(t.env ?? {}, process.env);
         if (Object.keys(resolved).length > 0) args.push("-c", `${key}.env=${tomlInlineTable(resolved)}`);
       } else if (t.kind === "http") {
