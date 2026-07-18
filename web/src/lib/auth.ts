@@ -17,8 +17,8 @@
  * lib/sanitize-url) precisely because these live here.
  */
 
-const STORAGE_KEY_API_KEY = "codeoid.apiKey";
-const STORAGE_KEY_TOKEN = "codeoid.token";
+export const STORAGE_KEY_API_KEY = "codeoid.apiKey";
+export const STORAGE_KEY_TOKEN = "codeoid.token";
 
 export interface ResolveOptions {
   /** Pre-issued daemon JWT. Takes precedence. */
