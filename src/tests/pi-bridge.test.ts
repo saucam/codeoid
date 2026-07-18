@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { buildBridgeSource, APPROVAL_TITLE, MEMORY_TOOL_TITLE } from "../daemon/providers/pi/bridge.js";
+import { buildBridgeSource, APPROVAL_TITLE, MCP_TOOL_TITLE, MEMORY_TOOL_TITLE } from "../daemon/providers/pi/bridge.js";
 import { MEMORY_TOOL_NAMES } from "../daemon/memory/tools.js";
 
 describe("pi bridge source", () => {
@@ -29,5 +29,23 @@ describe("pi bridge source", () => {
     // execute() proxies to the daemon over the reserved memory-tool title.
     expect(src).toContain(MEMORY_TOOL_TITLE);
     expect(src).toContain("ctx.ui.input");
+  });
+
+  test("external MCP tools: registered with raw JSON-Schema params, proxied via the mcp title (no typebox)", () => {
+    const src = buildBridgeSource(false, [
+      { name: "mcp__github__search", description: "Search repos.", parameters: { type: "object", properties: { q: { type: "string" } } } },
+    ]);
+    // No typebox needed — external params are raw JSON Schema.
+    expect(src).not.toContain('import { Type } from "typebox"');
+    expect(src).toContain("pi.registerTool");
+    expect(src).toContain("mcp__github__search");
+    expect(src).toContain('"type":"object"'); // the raw JSON Schema is embedded verbatim
+    expect(src).toContain(MCP_TOOL_TITLE);
+    // Still gated by the tool_call approval hook.
+    expect(src).toContain(APPROVAL_TITLE);
+  });
+
+  test("no external block when the mcp tool list is empty", () => {
+    expect(buildBridgeSource(false, [])).not.toContain(MCP_TOOL_TITLE);
   });
 });

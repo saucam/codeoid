@@ -28,6 +28,7 @@ import {
 } from "./memory/index.js";
 import { McpRegistry } from "./mcp/registry.js";
 import { McpHub } from "./mcp/hub.js";
+import { importClaudeMcpServers } from "./mcp/import-claude.js";
 import {
   type CompressionRegistry,
   createRegistry,
@@ -316,7 +317,13 @@ export class DaemonServer {
     // the registry injects `codeoid_memory` only when memory is enabled, and the
     // hub serves external servers with or without an engine. Providers mount the
     // registry's servers on every backend through one uniform gate.
-    this.#mcpRegistry = new McpRegistry(this.#config.fullConfig?.mcpServers, {
+    // Import global ~/.claude.json servers so a user's existing Claude MCP
+    // servers work on every backend; an explicit config entry wins on collision.
+    const imported = importClaudeMcpServers();
+    const mcpServers = { ...imported, ...(this.#config.fullConfig?.mcpServers ?? {}) };
+    const importedCount = Object.keys(imported).length;
+    if (importedCount > 0) console.log(`[codeoid] mcp: imported ${importedCount} server(s) from ~/.claude.json`);
+    this.#mcpRegistry = new McpRegistry(mcpServers, {
       memoryEnabled: this.#memory != null,
     });
     this.#mcpHub = new McpHub({

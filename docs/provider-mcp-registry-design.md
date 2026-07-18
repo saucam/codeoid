@@ -1,8 +1,10 @@
 # Registry-driven MCP mounter
 
-Status: proposed (design gate for the implementation PR).
+Status: IMPLEMENTED (S1–S5). All six backends mount registry MCP servers.
 Author: codeoid.
 Related: `docs/provider-codex-design.md`, `#178` (Verbatim Working Set), the codex `mcpServer/elicitation/request` fix (PR #196).
+
+**Shipped:** #197 (S1+S2), #198 (S3 openai/gemini + S4 claude + daemon plumbing), #199 (S4 codex/gemini-cli), and this PR (pi + S5 importer + S6 observability/docs). Remaining follow-ups: registry **hot-reload** (live add/remove without restart) and the **`/settings` surface** (show mounted servers + health). `codeoid` has no OTEL, so S6 observability is a daemon log line per failed tool call rather than a span.
 
 ---
 
@@ -229,8 +231,8 @@ Implementation edge: one gate, one name, one span, one timeout policy — the an
 - **S2 — `McpHub` client.** stdio + streamable-HTTP + in-process transports; `initialize`/`list`/`call`; timeouts; health; per-session scope at call time. Tests: against a mock stdio server and a mock HTTP endpoint (reuse the PR #196 mock).
 - **S3 — Model B wiring (openai/gemini/pi).** Generalize `executeMemoryToolCall` → `executeMcpToolCall(server, tool)` routing through `McpHub`; surface allowlisted tools as function declarations. This is the slice that closes the biggest gap. Tests: tool-loop with a mock server.
 - **S4 — Model A wiring (claude/codex/gemini-cli).** Registry → SDK `mcpServers` (claude), `-c mcp_servers.*` (codex), `session/new.mcpServers` (gemini-cli); all keyed to the canonical name + shared gate. Tests per provider.
-- **S5 — claude importer + reconciliation + hot-reload.** Fold `loadUserMcpServers`; native-config shadow logging; live add/remove.
-- **S6 — observability + docs + `/settings` surface.** OTEL spans, health in the settings manifest, operator docs.
+- **S5 — claude importer + reconciliation.** ✅ `importClaudeMcpServers()` folds global `~/.claude.json` `mcpServers` into the registry so they mount on every backend; a config `mcpServers` entry wins on collision, and the claude spread is last-wins so no double-mount. Per-project servers stay claude-only (workdir-scoped). Hot-reload (live add/remove) is a follow-up.
+- **S6 — observability + docs.** ✅ A daemon log line per failed external tool call (codeoid has no OTEL) + this doc's status. The `/settings` surface (list mounted servers + health) is a follow-up.
 
 ## 15. Testing strategy
 
