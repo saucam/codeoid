@@ -475,6 +475,53 @@ const ProvidersSchema = z
     geminiCli: { enabled: true, command: "gemini" },
   });
 
+/**
+ * A single MCP server in the canonical registry (see
+ * docs/provider-mcp-registry-design.md). Declared once here; codeoid mounts it
+ * on EVERY backend. Transport is inferred: exactly one of `command` (stdio) or
+ * `url` (streamable-HTTP). `codeoid_memory` is a built-in entry and is NOT
+ * declarable here.
+ */
+const McpServerSchema = z
+  .object({
+    // ── transport (inferred) ──
+    /** stdio: launch this command. Mutually exclusive with `url`. */
+    command: z.string().optional(),
+    args: z.array(z.string()).default([]),
+    /** Subprocess env for a stdio server. A value of the form `${VAR}` is
+     *  resolved from the daemon's own environment at mount time so secrets stay
+     *  out of the config file. */
+    env: z.record(z.string(), z.string()).default({}),
+    /** http: streamable-HTTP endpoint. Mutually exclusive with `command`. */
+    url: z.string().optional(),
+    headers: z.record(z.string(), z.string()).default({}),
+    /** Env-var NAME the daemon reads the bearer token from (never inline). */
+    bearerTokenEnv: z.string().optional(),
+    // ── policy ──
+    /** `readonly` → auto-approve on every backend (like the memory tools);
+     *  `prompt` → always route through the approval gate. */
+    trust: z.enum(["readonly", "prompt"]).default("prompt"),
+    /** Tenant binding passed at call time. */
+    scope: z.enum(["global", "workspace", "session"]).default("workspace"),
+    /** Allowlist of tool names surfaced to the model; omit = all. */
+    tools: z.array(z.string()).optional(),
+    /** Restrict to specific backends (e.g. ["claude","codex"]); omit = all. */
+    backends: z.array(z.string()).optional(),
+    enabled: z.boolean().default(true),
+    /** Escape hatch: sync into the backend's OWN native config instead of
+     *  proxying through the daemon (Model-A backends only). Default false. */
+    native: z.boolean().default(false),
+  })
+  .refine((s) => (s.command === undefined) !== (s.url === undefined), {
+    message: "an MCP server must set exactly one of `command` (stdio) or `url` (streamable-HTTP)",
+  });
+
+const McpServersSchema = z.record(z.string(), McpServerSchema).default({});
+
+/** Raw (validated, pre-normalization) MCP server config as it appears in the
+ *  `mcpServers` block. Normalized into an `McpServerSpec` by `McpRegistry`. */
+export type RawMcpServerConfig = z.infer<typeof McpServerSchema>;
+
 const RootSchema = z.object({
   daemonUrl: z.string().default("ws://127.0.0.1:7400"),
   dbPath: z.string().default("codeoid.db"),
@@ -497,6 +544,7 @@ const RootSchema = z.object({
   conductor: ConductorSchema,
   dispatch: DispatchSchema,
   providers: ProvidersSchema,
+  mcpServers: McpServersSchema,
   hooks: HooksSchema,
   embed: EmbedSchema,
   fork: z
@@ -640,6 +688,13 @@ export interface CodeoidConfig {
       command: string;
     };
   };
+  /**
+   * Canonical MCP server registry — declared once, mounted on every backend
+   * (see docs/provider-mcp-registry-design.md). Optional in the type so
+   * hand-built test configs stay minimal; loadConfig always populates it
+   * (schema default: {}).
+   */
+  mcpServers?: Record<string, RawMcpServerConfig>;
   /**
    * Daemon-native hooks — dispatched at Session's seams for every backend.
    * Optional in the type so hand-built test configs stay minimal;
@@ -896,6 +951,7 @@ export function loadConfig(opts: LoadOptions = {}): CodeoidConfig {
     conductor: parsed.conductor,
     dispatch: parsed.dispatch,
     providers: parsed.providers,
+    mcpServers: parsed.mcpServers,
     hooks: parsed.hooks,
     embed: parsed.embed,
     fork: parsed.fork,
