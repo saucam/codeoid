@@ -280,6 +280,7 @@ export function createDefaultProviderRegistry(config?: CodeoidConfig): ProviderR
             store: init.store,
             workspaceId: init.workspaceId,
             memoryMcp: init.memoryMcp,
+            mcpRegistry: init.mcpRegistry,
             onModels: init.onModels,
           }),
       });
@@ -308,6 +309,7 @@ export function createDefaultProviderRegistry(config?: CodeoidConfig): ProviderR
             store: init.store,
             workspaceId: init.workspaceId,
             memoryMcp: init.memoryMcp,
+            mcpRegistry: init.mcpRegistry,
             onModels: init.onModels,
           }),
       });
