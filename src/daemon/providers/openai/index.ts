@@ -31,10 +31,15 @@ import {
   ASK_USER_TOOL_NAME,
   askUserToolAsOpenAI,
   executeAskUserCall,
+  executeMcpToolCall,
   executeMemoryToolCall,
   MAX_MEMORY_TOOL_ROUNDS,
+  mcpToolsAsOpenAI,
   memoryToolsAsOpenAI,
 } from "../tool-loop.js";
+import { SessionMcpTools } from "../../mcp/tool-source.js";
+import type { McpRegistry } from "../../mcp/registry.js";
+import type { McpHub } from "../../mcp/hub.js";
 
 export interface OpenAIProviderInit {
   /** Explicit API key — falls back to OPENAI_API_KEY env var. */
@@ -49,6 +54,10 @@ export interface OpenAIProviderInit {
   /** Tenant-scoped workspace id + session id — the memory tool call scope. */
   workspaceId?: string;
   sessionId?: string;
+  /** Cross-backend MCP registry + daemon-owned client — external servers reach
+   *  this backend (which has no MCP client) through the hub. */
+  mcpRegistry?: McpRegistry;
+  mcpHub?: McpHub;
 }
 
 export class OpenAIProvider implements AgentProvider {
@@ -60,6 +69,8 @@ export class OpenAIProvider implements AgentProvider {
   #memory: MemoryEngine | null;
   #workspaceId: string;
   #sessionId: string;
+  #mcpRegistry: McpRegistry | null;
+  #mcpHub: McpHub | null;
 
   constructor(init: OpenAIProviderInit = {}) {
     this.#client = new OpenAI({
@@ -70,6 +81,8 @@ export class OpenAIProvider implements AgentProvider {
     this.#memory = init.memory ?? null;
     this.#workspaceId = init.workspaceId ?? init.sessionId ?? "";
     this.#sessionId = init.sessionId ?? "";
+    this.#mcpRegistry = init.mcpRegistry ?? null;
+    this.#mcpHub = init.mcpHub ?? null;
   }
 
   /** The memory recall tools are offered whenever a memory engine is wired,
@@ -132,8 +145,20 @@ export class OpenAIProvider implements AgentProvider {
       const askDeps = opts.requestUserInput
         ? { requestUserInput: opts.requestUserInput, emit }
         : null;
+      // External MCP servers (registry) reach this clientless backend through
+      // the daemon-owned hub. Discover their tools once per turn.
+      const mcpTools =
+        this.#mcpRegistry && this.#mcpHub
+          ? new SessionMcpTools(this.#mcpRegistry, this.#mcpHub, this.id, {
+              workspaceId: this.#workspaceId,
+              sessionId: this.#sessionId,
+            })
+          : null;
+      const mcpHandles = mcpTools?.hasServers() ? await mcpTools.handles() : [];
+      const mcpDeps = mcpTools ? { tools: mcpTools, canUseTool: opts.canUseTool, emit } : null;
       const toolList = [
         ...(memoryDeps ? memoryToolsAsOpenAI() : []),
+        ...mcpToolsAsOpenAI(mcpHandles),
         ...(askDeps ? [askUserToolAsOpenAI()] : []),
       ];
       const tools = toolList.length > 0 ? toolList : undefined;
@@ -224,9 +249,11 @@ export class OpenAIProvider implements AgentProvider {
           const output =
             t.name === ASK_USER_TOOL_NAME && askDeps
               ? await executeAskUserCall(args, askDeps)
-              : memoryDeps
-                ? await executeMemoryToolCall(t.name, args, memoryDeps)
-                : `Tool unavailable: ${t.name}`;
+              : mcpDeps && t.name.startsWith("mcp__")
+                ? await executeMcpToolCall(t.name, args, mcpDeps)
+                : memoryDeps
+                  ? await executeMemoryToolCall(t.name, args, memoryDeps)
+                  : `Tool unavailable: ${t.name}`;
           messages.push({ role: "tool", tool_call_id: t.id, content: output });
         }
       }

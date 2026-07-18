@@ -36,10 +36,15 @@ import {
   ASK_USER_TOOL_NAME,
   askUserToolAsGemini,
   executeAskUserCall,
+  executeMcpToolCall,
   executeMemoryToolCall,
   MAX_MEMORY_TOOL_ROUNDS,
+  mcpToolsAsGemini,
   memoryToolsAsGemini,
 } from "../tool-loop.js";
+import { SessionMcpTools } from "../../mcp/tool-source.js";
+import type { McpRegistry } from "../../mcp/registry.js";
+import type { McpHub } from "../../mcp/hub.js";
 
 export interface GeminiProviderInit {
   /** Explicit API key — falls back to GOOGLE_API_KEY env var. */
@@ -52,6 +57,10 @@ export interface GeminiProviderInit {
   /** Tenant-scoped workspace id + session id — the memory tool call scope. */
   workspaceId?: string;
   sessionId?: string;
+  /** Cross-backend MCP registry + daemon-owned client — external servers reach
+   *  this backend (which has no MCP client) through the hub. */
+  mcpRegistry?: McpRegistry;
+  mcpHub?: McpHub;
 }
 
 export class GeminiProvider implements AgentProvider {
@@ -63,6 +72,8 @@ export class GeminiProvider implements AgentProvider {
   #memory: MemoryEngine | null;
   #workspaceId: string;
   #sessionId: string;
+  #mcpRegistry: McpRegistry | null;
+  #mcpHub: McpHub | null;
 
   constructor(init: GeminiProviderInit = {}) {
     this.#apiKey = init.apiKey ?? process.env.GOOGLE_API_KEY ?? "";
@@ -70,6 +81,8 @@ export class GeminiProvider implements AgentProvider {
     this.#memory = init.memory ?? null;
     this.#workspaceId = init.workspaceId ?? init.sessionId ?? "";
     this.#sessionId = init.sessionId ?? "";
+    this.#mcpRegistry = init.mcpRegistry ?? null;
+    this.#mcpHub = init.mcpHub ?? null;
   }
 
   /** The memory recall tools are offered whenever a memory engine is wired,
@@ -124,8 +137,18 @@ export class GeminiProvider implements AgentProvider {
         }
       : null;
     const askDeps = opts.requestUserInput ? { requestUserInput: opts.requestUserInput, emit } : null;
+    const mcpTools =
+      this.#mcpRegistry && this.#mcpHub
+        ? new SessionMcpTools(this.#mcpRegistry, this.#mcpHub, this.id, {
+            workspaceId: this.#workspaceId,
+            sessionId: this.#sessionId,
+          })
+        : null;
+    const mcpHandles = mcpTools?.hasServers() ? await mcpTools.handles() : [];
+    const mcpDeps = mcpTools ? { tools: mcpTools, canUseTool: opts.canUseTool, emit } : null;
     const declarations = [
       ...(memoryDeps ? memoryToolsAsGemini() : []),
+      ...mcpToolsAsGemini(mcpHandles),
       ...(askDeps ? [askUserToolAsGemini()] : []),
     ];
     const genModel = genAI.getGenerativeModel({
@@ -204,9 +227,11 @@ export class GeminiProvider implements AgentProvider {
           const output =
             call.name === ASK_USER_TOOL_NAME && askDeps
               ? await executeAskUserCall(args, askDeps)
-              : memoryDeps
-                ? await executeMemoryToolCall(call.name, args, memoryDeps)
-                : `Tool unavailable: ${call.name}`;
+              : mcpDeps && call.name.startsWith("mcp__")
+                ? await executeMcpToolCall(call.name, args, mcpDeps)
+                : memoryDeps
+                  ? await executeMemoryToolCall(call.name, args, memoryDeps)
+                  : `Tool unavailable: ${call.name}`;
           parts.push({ functionResponse: { name: call.name, response: { result: output } } });
         }
         message = parts;

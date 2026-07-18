@@ -20,6 +20,7 @@
 import { randomUUID } from "node:crypto";
 import { memoryToolDefs, type MemoryToolContext } from "../memory/tools.js";
 import { MEMORY_MCP_SERVER_NAME } from "../memory/mcp-http.js";
+import type { McpToolHandle, SessionMcpTools } from "../mcp/tool-source.js";
 import type { ProviderEvent, ToolApprovalFn, UiRequest, UiRequestFn } from "./interface.js";
 
 /** Hard cap on tool rounds in a single turn — a runaway + cost guard. After
@@ -190,6 +191,82 @@ export async function executeMemoryToolCall(
     return text;
   } catch (e) {
     const msg = `Error: ${e instanceof Error ? e.message : String(e)}`;
+    deps.emit({ type: "tool_complete", sdkToolUseId: toolId, output: msg, success: false });
+    return msg;
+  }
+}
+
+// ── external MCP servers (registry, via McpHub) ──────────────────────────────
+//
+// The in-daemon backends have no MCP client, so external servers reach them the
+// same way the memory tools do: declarations here, execution through the shared
+// canUseTool gate. Names are the canonical `mcp__<server>__<tool>` so isSafeTool
+// / the session gate treat readonly servers the same on every backend.
+
+/** Ensure a tool's parameters are a JSON-schema object OpenAI/Gemini accept. */
+function paramsSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  if (schema && typeof schema === "object" && typeof schema.type === "string") return schema;
+  const properties = (schema?.properties as Record<string, unknown> | undefined) ?? {};
+  return { type: "object", properties };
+}
+
+/** OpenAI function tools for the external MCP servers this backend should see. */
+export function mcpToolsAsOpenAI(handles: McpToolHandle[]): Array<{ type: "function"; function: FunctionToolShape }> {
+  return handles.map((h) => ({
+    type: "function" as const,
+    function: { name: h.canonicalName, description: h.description, parameters: paramsSchema(h.inputSchema) },
+  }));
+}
+
+/** Gemini functionDeclarations for the external MCP servers (no additionalProperties). */
+export function mcpToolsAsGemini(handles: McpToolHandle[]): FunctionToolShape[] {
+  return handles.map((h) => {
+    const { additionalProperties: _drop, ...rest } = paramsSchema(h.inputSchema);
+    return { name: h.canonicalName, description: h.description, parameters: rest };
+  });
+}
+
+export interface McpToolExecDeps {
+  tools: SessionMcpTools;
+  canUseTool: ToolApprovalFn;
+  emit: (e: ProviderEvent) => void;
+}
+
+/**
+ * Execute one model-issued external-MCP tool call: emit tool_start, gate through
+ * canUseTool (readonly servers auto-approve via the session gate's registry
+ * check; others prompt), run it through the daemon-owned McpHub, emit
+ * tool_complete. Never throws — a denial or error returns a string for the model.
+ */
+export async function executeMcpToolCall(
+  toolName: string,
+  args: Record<string, unknown>,
+  deps: McpToolExecDeps,
+): Promise<string> {
+  const toolId = randomUUID();
+  const approvalId = `mcp-${toolId}`;
+  deps.emit({ type: "tool_start", toolId, sdkToolUseId: toolId, name: toolName, input: args, approvalId });
+
+  let verdict: Awaited<ReturnType<ToolApprovalFn>>;
+  try {
+    verdict = await deps.canUseTool(toolId, approvalId, toolName, args);
+  } catch {
+    verdict = { behavior: "deny" };
+  }
+  if (verdict.behavior !== "allow") {
+    const msg = verdict.message ?? "Tool call denied by policy.";
+    deps.emit({ type: "tool_complete", sdkToolUseId: toolId, output: msg, success: false });
+    return msg;
+  }
+
+  // The hub is fail-soft, but keep the "never throws" guarantee LOCAL: a future
+  // throwing path in tools.call still returns a string result, never a crash.
+  try {
+    const res = await deps.tools.call(toolName, (verdict.updatedInput ?? args) as Record<string, unknown>);
+    deps.emit({ type: "tool_complete", sdkToolUseId: toolId, output: res.text, success: !res.isError });
+    return res.text;
+  } catch (e) {
+    const msg = `Error calling ${toolName}: ${e instanceof Error ? e.message : String(e)}`;
     deps.emit({ type: "tool_complete", sdkToolUseId: toolId, output: msg, success: false });
     return msg;
   }

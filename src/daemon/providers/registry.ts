@@ -17,6 +17,8 @@ import type { Store } from "../store.js";
 import type { AgentIdentityManager } from "../agent-identity.js";
 import type { MemoryEngine } from "../memory/index.js";
 import type { MemoryMcpMount } from "../memory/mcp-http.js";
+import type { McpRegistry } from "../mcp/registry.js";
+import type { McpHub } from "../mcp/hub.js";
 import type { CompressionRegistry } from "../compress/index.js";
 import type { CodeoidConfig } from "../../config.js";
 import type { SessionProvider } from "./interface.js";
@@ -50,6 +52,11 @@ export interface ProviderSessionInit {
   /** Shared in-daemon memory MCP endpoint + URL — mounted by URL-based backends
    *  (gemini-cli, later codex). Present only when memory is enabled. */
   memoryMcp?: MemoryMcpMount;
+  /** Cross-backend MCP registry — the servers to mount on this session's backend. */
+  mcpRegistry?: McpRegistry;
+  /** Daemon-owned MCP client pool backing the registry (Model-B backends execute
+   *  external tool calls through it; Model-A backends mount servers natively). */
+  mcpHub?: McpHub;
   /** codeoid_fleet MCP server — conductor sessions only. */
   fleet?: McpSdkServerConfigWithInstance;
   config?: CodeoidConfig;
@@ -166,6 +173,7 @@ export function createDefaultProviderRegistry(config?: CodeoidConfig): ProviderR
         identityManager: init.identityManager,
         memory: init.memory,
         fleet: init.fleet,
+        mcpRegistry: init.mcpRegistry,
         config: init.config,
         compressionRegistry: init.compressionRegistry,
         onModels: init.onModels,
@@ -189,6 +197,8 @@ export function createDefaultProviderRegistry(config?: CodeoidConfig): ProviderR
             memory: init.memory,
             workspaceId: init.workspaceId,
             sessionId: init.sessionId,
+            mcpRegistry: init.mcpRegistry,
+            mcpHub: init.mcpHub,
           }),
           init.sessionId,
         ),
@@ -210,6 +220,8 @@ export function createDefaultProviderRegistry(config?: CodeoidConfig): ProviderR
             memory: init.memory,
             workspaceId: init.workspaceId,
             sessionId: init.sessionId,
+            mcpRegistry: init.mcpRegistry,
+            mcpHub: init.mcpHub,
           }),
           init.sessionId,
         ),

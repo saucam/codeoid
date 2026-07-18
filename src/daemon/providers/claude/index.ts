@@ -33,6 +33,8 @@ import {
   MEMORY_TOOL_NAMES,
   type MemoryEngine,
 } from "../../memory/index.js";
+import type { McpRegistry } from "../../mcp/registry.js";
+import { resolveEnvMap } from "../../mcp/types.js";
 import type { CompressionRegistry } from "../../compress/index.js";
 import { FLEET_TOOL_NAMES } from "../../fleet.js";
 import { rewriteBashToolInput } from "../../compress/index.js";
@@ -60,6 +62,9 @@ export interface ClaudeProviderInit {
   memory?: MemoryEngine;
   /** codeoid_fleet MCP server — conductor sessions only (read-only fleet view). */
   fleet?: McpSdkServerConfigWithInstance;
+  /** Cross-backend MCP registry — external servers are mounted natively on the
+   *  SDK (claude owns its own MCP client); approval flows through canUseTool. */
+  mcpRegistry?: McpRegistry;
   config?: CodeoidConfig;
   compressionRegistry?: CompressionRegistry;
   /** Called once per session with the live model catalog. */
@@ -330,6 +335,9 @@ export class ClaudeProvider implements SessionProvider {
       // Conductor sessions only — the read-only fleet view (P3). In-process,
       // so the external-server timeout doesn't apply.
       ...(init.fleet ? { codeoid_fleet: init.fleet } : {}),
+      // Registry servers — mounted natively on the SDK (claude owns its client);
+      // tool calls surface as `mcp__<server>__<tool>` and gate via canUseTool.
+      ...withMcpToolTimeout(registryServersForClaude(init.mcpRegistry), mcpToolTimeoutMs),
     };
     const mcpServers = Object.keys(merged).length > 0 ? merged : undefined;
 
@@ -753,6 +761,34 @@ export function withMcpToolTimeout(
       typeof obj.timeout === "number"
         ? cfg
         : ({ ...obj, timeout: ms } as unknown as McpServerConfig);
+  }
+  return out;
+}
+
+/** Registry servers (external, non-builtin) for the claude backend as SDK
+ *  McpServerConfigs — a native mount, since claude's SDK owns its MCP client.
+ *  `${VAR}` env refs and a `bearerTokenEnv` are resolved against the daemon env
+ *  here so secrets never live in config; tool calls gate via canUseTool. */
+export function registryServersForClaude(registry: McpRegistry | undefined): Record<string, McpServerConfig> {
+  if (!registry) return {};
+  const out: Record<string, McpServerConfig> = {};
+  for (const spec of registry.forBackend("claude")) {
+    if (spec.builtin) continue;
+    const t = spec.transport;
+    if (t.kind === "stdio") {
+      out[spec.name] = {
+        command: t.command,
+        args: t.args,
+        env: resolveEnvMap(t.env ?? {}, process.env),
+      } as unknown as McpServerConfig;
+    } else if (t.kind === "http") {
+      const headers: Record<string, string> = { ...t.headers };
+      if (t.bearerTokenEnv) {
+        const tok = process.env[t.bearerTokenEnv];
+        if (tok) headers.Authorization = `Bearer ${tok}`;
+      }
+      out[spec.name] = { type: "http", url: t.url, headers } as unknown as McpServerConfig;
+    }
   }
   return out;
 }
