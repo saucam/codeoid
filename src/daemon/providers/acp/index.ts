@@ -39,6 +39,8 @@ import { renderHistorySeed, type CanonicalTurn, type HistorySeedResult } from ".
 import { buildGeminiCliEnv } from "../env.js";
 import { StdioJsonRpcProcess } from "../jsonrpc-stdio.js";
 import { MEMORY_MCP_SERVER_NAME, type MemoryMcpMount } from "../../memory/mcp-http.js";
+import type { McpRegistry } from "../../mcp/registry.js";
+import { resolveEnvMap } from "../../mcp/types.js";
 
 export interface GeminiAcpProviderInit {
   sessionId: string;
@@ -55,6 +57,9 @@ export interface GeminiAcpProviderInit {
    * store on demand — the precondition for the Verbatim Working Set strategy.
    */
   memoryMcp?: MemoryMcpMount;
+  /** Cross-backend MCP registry — external servers mount on session/new
+   *  (gemini-cli owns its client); approval flows through canUseTool. */
+  mcpRegistry?: McpRegistry;
   onModels?: (
     models: ReadonlyArray<{ value: string; displayName: string; description?: string }>,
   ) => void;
@@ -72,6 +77,7 @@ export class GeminiAcpProvider implements SessionProvider {
   #argsPrefix: string[];
   #workspaceId: string;
   #memoryMcp: MemoryMcpMount | null;
+  #mcpRegistry: McpRegistry | null;
   /** Live scoped token for the mounted memory endpoint; revoked on teardown. */
   #memoryToken: string | null = null;
 
@@ -98,6 +104,7 @@ export class GeminiAcpProvider implements SessionProvider {
     this.#argsPrefix = init.argsPrefix ?? [];
     this.#workspaceId = init.workspaceId ?? init.sessionId;
     this.#memoryMcp = init.memoryMcp ?? null;
+    this.#mcpRegistry = init.mcpRegistry ?? null;
   }
 
   /**
@@ -310,23 +317,45 @@ export class GeminiAcpProvider implements SessionProvider {
    * timeline/get_episode as `${MEMORY_MCP_SERVER_NAME}__*` tools it can call.
    */
   #buildMcpServers(): Array<Record<string, unknown>> {
+    const servers: Array<Record<string, unknown>> = [];
     const mount = this.#memoryMcp;
-    if (!mount) return [];
-    // Re-mint each session/new: the token is the per-session tenant scope, and
-    // resetToNewSession/re-auth-retry may create more than one backing session.
-    if (this.#memoryToken) mount.endpoint.revoke(this.#memoryToken);
-    this.#memoryToken = mount.endpoint.mint({
-      workspaceId: this.#workspaceId,
-      sessionId: this.#sessionId,
-    });
-    return [
-      {
+    if (mount) {
+      // Re-mint each session/new: the token is the per-session tenant scope, and
+      // resetToNewSession/re-auth-retry may create more than one backing session.
+      if (this.#memoryToken) mount.endpoint.revoke(this.#memoryToken);
+      this.#memoryToken = mount.endpoint.mint({
+        workspaceId: this.#workspaceId,
+        sessionId: this.#sessionId,
+      });
+      servers.push({
         type: "http",
         name: MEMORY_MCP_SERVER_NAME,
         url: mount.url,
         headers: [{ name: "Authorization", value: `Bearer ${this.#memoryToken}` }],
-      },
-    ];
+      });
+    }
+    // Registry servers — native mount (gemini-cli owns its MCP client). ACP's
+    // McpServer shape: http → {type,url,headers[]}; stdio → {command,args,env[]}
+    // (env/headers are {name,value} pairs, mirroring the memory http mount).
+    const reg = this.#mcpRegistry;
+    if (reg) {
+      for (const spec of reg.forBackend(this.id)) {
+        if (spec.builtin) continue;
+        const t = spec.transport;
+        if (t.kind === "http") {
+          const headers = Object.entries(t.headers ?? {}).map(([name, value]) => ({ name, value }));
+          if (t.bearerTokenEnv) {
+            const tok = process.env[t.bearerTokenEnv];
+            if (tok) headers.push({ name: "Authorization", value: `Bearer ${tok}` });
+          }
+          servers.push({ type: "http", name: spec.name, url: t.url, headers });
+        } else if (t.kind === "stdio") {
+          const env = Object.entries(resolveEnvMap(t.env ?? {}, process.env)).map(([name, value]) => ({ name, value }));
+          servers.push({ name: spec.name, command: t.command, args: t.args ?? [], env });
+        }
+      }
+    }
+    return servers;
   }
 
   #push(event: ProviderEvent): void {

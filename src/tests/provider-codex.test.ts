@@ -29,6 +29,8 @@ import { join } from "node:path";
 import { CodexRpcProcess } from "../daemon/providers/codex/rpc.js";
 import { CodexProvider } from "../daemon/providers/codex/index.js";
 import { MemoryMcpHttp, MEMORY_MCP_SERVER_NAME } from "../daemon/memory/mcp-http.js";
+import { McpRegistry } from "../daemon/mcp/registry.js";
+import type { RawMcpServerConfig } from "../config.js";
 import { MemoryEngine } from "../daemon/memory/engine.js";
 import { SqliteEpisodeStore } from "../daemon/memory/store.js";
 import type { Embedder } from "../daemon/memory/embedder.js";
@@ -569,6 +571,35 @@ describe("CodexProvider over fake-codex", () => {
     await p.teardown();
     expect(gated).toEqual([{ name: "mcp__codeoid_memory__recall", input: { query: "compliance" } }]);
     expect(events.some((e) => e.type === "text_done" && e.content === "Recalled (nostart).")).toBe(true);
+  });
+
+  it("C27: registry external servers mount via -c mcp_servers overrides (stdio + http)", async () => {
+    const raw = (p: Partial<RawMcpServerConfig>): RawMcpServerConfig =>
+      ({ args: [], env: {}, headers: {}, trust: "prompt", scope: "session", enabled: true, native: false, ...p }) as RawMcpServerConfig;
+    const reg = new McpRegistry(
+      {
+        ghstdio: raw({ command: "npx", args: ["-y", "@mcp/gh"], env: { TOKEN: "${GH_PAT}" } }),
+        linear: raw({ url: "https://mcp.linear.app/mcp", bearerTokenEnv: "LINEAR_KEY" }),
+      },
+      { memoryEnabled: false },
+    );
+    const p = new CodexProvider({
+      sessionId: "sess-1",
+      initialBackingId: "sess-1",
+      command: process.execPath,
+      argsPrefix: [FIXTURE],
+      store: {} as Store,
+      mcpRegistry: reg,
+    });
+    const events = await collect(p.runTurn(turnOpts("echo-mcp")));
+    await p.teardown();
+    const seen = JSON.parse((events.find((e) => e.type === "text_done") as { content: string }).content) as { mcpArgs: string[] };
+    const joined = seen.mcpArgs.join(" ");
+    expect(joined).toContain("mcp_servers.ghstdio.command=");
+    expect(joined).toContain("mcp_servers.ghstdio.args=");
+    expect(joined).toContain('mcp_servers.ghstdio.env={ TOKEN = '); // TOML inline table, not JSON
+    expect(joined).toContain("mcp_servers.linear.url=");
+    expect(joined).toContain("mcp_servers.linear.bearer_token_env_var=");
   });
 
   it("C12: rpc edges — spawn failure, request timeout, request/notify after exit", async () => {

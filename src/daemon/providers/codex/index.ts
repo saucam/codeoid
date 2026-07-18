@@ -61,6 +61,8 @@ import { buildCodexEnv } from "../env.js";
 import { CodexRpcProcess } from "./rpc.js";
 import type { SessionMode } from "../../../protocol/types.js";
 import { MEMORY_MCP_SERVER_NAME, MEMORY_MCP_TOKEN_ENV, type MemoryMcpMount } from "../../memory/mcp-http.js";
+import type { McpRegistry } from "../../mcp/registry.js";
+import { resolveEnvMap } from "../../mcp/types.js";
 
 /** codex `tokenUsage.last` / `.total` shape (thread/tokenUsage/updated). */
 interface CodexTokenUsage {
@@ -87,6 +89,9 @@ export interface CodexProviderInit {
    * codex can page the verbatim store on demand — the precondition for VWS.
    */
   memoryMcp?: MemoryMcpMount;
+  /** Cross-backend MCP registry — external servers mount natively via `-c
+   *  mcp_servers.*` (codex owns its client); approval flows through canUseTool. */
+  mcpRegistry?: McpRegistry;
   onModels?: (
     models: ReadonlyArray<{ value: string; displayName: string; description?: string }>,
   ) => void;
@@ -193,6 +198,7 @@ export class CodexProvider implements SessionProvider {
   #onModels?: CodexProviderInit["onModels"];
   #workspaceId: string;
   #memoryMcp: MemoryMcpMount | null;
+  #mcpRegistry: McpRegistry | null;
   /** Live scoped token for the mounted memory endpoint; revoked on teardown. */
   #memoryToken: string | null = null;
 
@@ -235,6 +241,7 @@ export class CodexProvider implements SessionProvider {
     this.#onModels = init.onModels;
     this.#workspaceId = init.workspaceId ?? init.sessionId;
     this.#memoryMcp = init.memoryMcp ?? null;
+    this.#mcpRegistry = init.mcpRegistry ?? null;
   }
 
   /**
@@ -306,6 +313,40 @@ export class CodexProvider implements SessionProvider {
       ],
       env: { [MEMORY_MCP_TOKEN_ENV]: this.#memoryToken },
     };
+  }
+
+  /**
+   * `-c mcp_servers.*` overrides mounting the registry's external servers on the
+   * codex app-server — a native mount, since codex owns its own MCP client.
+   * stdio → command/args/env (env as a TOML inline table); http → url +
+   * bearer_token_env_var, with the resolved token handed to codex via its env.
+   * Built-in memory is mounted separately (#memoryMcpSpawn). Tool calls surface
+   * as `mcp__<server>__<tool>` and gate through the elicitation handler.
+   */
+  #registryMcpArgs(): { args: string[]; env: Record<string, string> } {
+    const reg = this.#mcpRegistry;
+    if (!reg) return { args: [], env: {} };
+    const args: string[] = [];
+    const env: Record<string, string> = {};
+    for (const spec of reg.forBackend(this.id)) {
+      if (spec.builtin) continue;
+      const key = `mcp_servers.${spec.name}`;
+      const t = spec.transport;
+      if (t.kind === "stdio") {
+        args.push("-c", `${key}.command=${JSON.stringify(t.command)}`);
+        if (t.args && t.args.length > 0) args.push("-c", `${key}.args=${JSON.stringify(t.args)}`);
+        const resolved = resolveEnvMap(t.env ?? {}, process.env);
+        if (Object.keys(resolved).length > 0) args.push("-c", `${key}.env=${tomlInlineTable(resolved)}`);
+      } else if (t.kind === "http") {
+        args.push("-c", `${key}.url=${JSON.stringify(t.url)}`);
+        if (t.bearerTokenEnv) {
+          args.push("-c", `${key}.bearer_token_env_var=${JSON.stringify(t.bearerTokenEnv)}`);
+          const tok = process.env[t.bearerTokenEnv];
+          if (tok) env[t.bearerTokenEnv] = tok;
+        }
+      }
+    }
+    return { args, env };
   }
 
   runTurn(opts: TurnOpts): TurnRun {
@@ -411,12 +452,13 @@ export class CodexProvider implements SessionProvider {
       // demand. No CODEX_HOME/auth.json juggling — the default ~/.codex keeps
       // the user's auth + config; these just add the one server.
       const mcp = this.#memoryMcpSpawn();
+      const reg = this.#registryMcpArgs();
       this.#proc = new CodexRpcProcess({
         command: this.#command,
         argsPrefix: this.#argsPrefix,
-        args: mcp.args,
+        args: [...mcp.args, ...reg.args],
         cwd: opts.workdir,
-        env: { ...buildCodexEnv(), ...mcp.env },
+        env: { ...buildCodexEnv(), ...mcp.env, ...reg.env },
         onNotification: (method, params) => this.#onNotification(method, params),
         onServerRequest: (method, params) => this.#onServerRequest(method, params),
         onExit: ({ code, signal, stderrTail }) => {
@@ -683,6 +725,13 @@ function metaToolParams(params: Record<string, unknown>): Record<string, unknown
   const meta = params._meta as Record<string, unknown> | undefined;
   const tp = meta?.tool_params;
   return tp && typeof tp === "object" ? (tp as Record<string, unknown>) : {};
+}
+
+/** Render an env map as a TOML inline table (`{ KEY = "val", … }`) for a codex
+ *  `-c mcp_servers.<name>.env=…` override — JSON of an object is NOT valid TOML. */
+function tomlInlineTable(map: Record<string, string>): string {
+  const entries = Object.entries(map).map(([k, v]) => `${k} = ${JSON.stringify(v)}`);
+  return `{ ${entries.join(", ")} }`;
 }
 
 /** Map an approval request to a codeoid tool name + input. */

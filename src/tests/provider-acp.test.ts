@@ -25,6 +25,8 @@ import type { ProviderEvent, TurnOpts, TurnRun } from "../daemon/providers/inter
 import type { CodeoidConfig } from "../config.js";
 import type { Store } from "../daemon/store.js";
 import { MemoryMcpHttp, MEMORY_MCP_SERVER_NAME } from "../daemon/memory/mcp-http.js";
+import { McpRegistry } from "../daemon/mcp/registry.js";
+import type { RawMcpServerConfig } from "../config.js";
 import { MemoryEngine } from "../daemon/memory/engine.js";
 import { SqliteEpisodeStore } from "../daemon/memory/store.js";
 import type { Embedder } from "../daemon/memory/embedder.js";
@@ -310,6 +312,35 @@ describe("GeminiAcpProvider — VWS memory mount (#178 Phase 2)", () => {
     const events = await collect(p.runTurn(turnOpts("echo-mcp")));
     expect(textOf(events)).toBe("MCP:[]");
     await p.teardown();
+  });
+
+  it("mounts registry external servers on session/new (http + stdio ACP shapes)", async () => {
+    const raw = (p: Partial<RawMcpServerConfig>): RawMcpServerConfig =>
+      ({ args: [], env: {}, headers: {}, trust: "prompt", scope: "session", enabled: true, native: false, ...p }) as RawMcpServerConfig;
+    const reg = new McpRegistry(
+      {
+        linear: raw({ url: "https://mcp.linear.app/mcp", bearerTokenEnv: "LINEAR_KEY" }),
+        ghstdio: raw({ command: "npx", args: ["-y", "@mcp/gh"] }),
+      },
+      { memoryEnabled: false },
+    );
+    const p = new GeminiAcpProvider({
+      sessionId: "sess-1",
+      initialBackingId: "sess-1",
+      command: process.execPath,
+      argsPrefix: [FIXTURE],
+      store: {} as Store,
+      mcpRegistry: reg,
+    });
+    const events = await collect(p.runTurn(turnOpts("echo-mcp")));
+    await p.teardown();
+    const servers = JSON.parse(textOf(events).replace(/^MCP:/, "")) as Array<Record<string, unknown>>;
+    const http = servers.find((s) => s.name === "linear");
+    expect(http?.type).toBe("http");
+    expect(http?.url).toBe("https://mcp.linear.app/mcp");
+    const stdio = servers.find((s) => s.name === "ghstdio");
+    expect(stdio?.command).toBe("npx");
+    expect(stdio?.args).toEqual(["-y", "@mcp/gh"]);
   });
 
   it("seedText prepends the strategy block (session map) to the next prompt", async () => {
