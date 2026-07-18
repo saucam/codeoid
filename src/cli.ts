@@ -81,7 +81,9 @@ program
     // single-origin so one HTTPS tunnel also serves as a Telegram Mini App.
     if (opts.web !== false) {
       const { WebUiFrontend } = await import("./frontends/web-ui/index.js");
-      daemon.use(new WebUiFrontend());
+      // Thread the embed-SSO allowlist so the served index.html publishes it to
+      // the web UI's trusted-framing-origin gate. Empty ⇒ hash handoff disabled.
+      daemon.use(new WebUiFrontend(config.embed?.allowedOrigins ?? []));
     }
 
     // Telegram (enabled when TELEGRAM_BOT_TOKEN is set)

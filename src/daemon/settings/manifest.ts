@@ -518,6 +518,10 @@ const frontends: SettingsTab = {
       title: "Web",
       fields: [
         env("CODEOID_FS_BROWSE_ROOT", "File-browser root", "Root directory the web file picker is allowed to browse. Defaults to your home directory.", {}),
+        cfg("embed.allowedOrigins", "Embed SSO allowed origins", "Parent origins (scheme://host[:port]) permitted to frame the web UI and pre-authenticate it via the URL-hash handoff. Empty = the hash handoff is disabled (safe default).", {
+          kind: "string[]",
+          envVar: "CODEOID_EMBED_ALLOWED_ORIGINS",
+        }),
       ],
     },
   ],

@@ -424,6 +424,22 @@ const HooksSchema = z
   })
   .default({ enabled: true, entries: [] });
 
+/**
+ * Embed trust — origins allowed to frame the web UI and pre-authenticate it via
+ * the URL-hash credential handoff (embed SSO). This is the allowlist the web UI
+ * enforces with a fail-closed trusted-framing-origin gate: a hash-delivered
+ * credential is honored ONLY when the page is embedded by one of these origins
+ * (exact `scheme://host[:port]` match). Empty (the default) ⇒ NO origin is
+ * trusted ⇒ the hash handoff is effectively disabled — the safe default that
+ * closes the login-CSRF / session-fixation vector for any deploy that hasn't
+ * explicitly opted an embedding parent in.
+ */
+const EmbedSchema = z
+  .object({
+    allowedOrigins: z.array(z.string()).default([]),
+  })
+  .default({ allowedOrigins: [] });
+
 /** Per-backend provider settings. Append-only — one optional block per provider. */
 const ProvidersSchema = z
   .object({
@@ -482,6 +498,7 @@ const RootSchema = z.object({
   dispatch: DispatchSchema,
   providers: ProvidersSchema,
   hooks: HooksSchema,
+  embed: EmbedSchema,
   fork: z
     .object({
       /** Shell command run once in a freshly-created fork worktree to make it
@@ -632,6 +649,16 @@ export interface CodeoidConfig {
     enabled: boolean;
     entries: HookEntryConfig[];
   };
+  /**
+   * Embed trust — origins permitted to frame the web UI and pre-authenticate
+   * it via the URL-hash credential handoff. The web UI's trusted-framing-origin
+   * gate consults this allowlist; empty ⇒ the hash handoff is disabled (safe
+   * default). Optional in the type so hand-built test configs stay minimal;
+   * loadConfig always populates it (schema default: empty).
+   */
+  embed?: {
+    allowedOrigins: string[];
+  };
 }
 
 // ── Env-var override map ─────────────────────────────────────────────────
@@ -692,6 +719,10 @@ const ENV_OVERRIDES: readonly EnvOverride[] = [
   { env: "CODEOID_HOOKS_ENABLED", path: "hooks.enabled", kind: "boolean" },
   { env: "CODEOID_TURN_STALL_TIMEOUT_MS", path: "session.turnStallTimeoutMs", kind: "int" },
   { env: "CODEOID_MCP_TOOL_TIMEOUT_MS", path: "session.mcpToolTimeoutMs", kind: "int" },
+  // Embed-SSO trusted framing origins (comma-separated). Each is an exact
+  // origin (scheme://host[:port]) permitted to frame the web UI and hand it a
+  // credential via the URL hash. Empty ⇒ hash handoff disabled (safe default).
+  { env: "CODEOID_EMBED_ALLOWED_ORIGINS", path: "embed.allowedOrigins", kind: "csv" },
 ];
 
 // ── Loading ──────────────────────────────────────────────────────────────
@@ -866,6 +897,7 @@ export function loadConfig(opts: LoadOptions = {}): CodeoidConfig {
     dispatch: parsed.dispatch,
     providers: parsed.providers,
     hooks: parsed.hooks,
+    embed: parsed.embed,
     fork: parsed.fork,
   };
 }

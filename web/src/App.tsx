@@ -11,7 +11,7 @@
 import { Component, Show, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
 
 import { rememberedApiKey, rememberedOAuthToken } from "./lib/auth";
-import { consumeHandoffCredential } from "./lib/handoff";
+import { consumeHandoffCredential, readEmbedAllowedOrigins } from "./lib/handoff";
 import SignIn from "./components/SignIn";
 import Shell from "./components/Shell";
 import {
@@ -43,7 +43,12 @@ const App: Component = () => {
     // this UI by handing a SHORT-LIVED credential via the URL hash. Consume it
     // FIRST — the helper persists it to storage and strips it from the URL — so
     // it wins over any stale stored credential and never lingers in history.
-    const handoff = consumeHandoffCredential();
+    // The helper enforces a fail-closed trusted-framing-origin gate against the
+    // daemon-published allowlist: it consumes the hash ONLY when this page is
+    // embedded by an allowlisted parent origin, closing the login-CSRF vector.
+    const handoff = consumeHandoffCredential({
+      allowedOrigins: readEmbedAllowedOrigins(),
+    });
 
     const savedKey = rememberedApiKey();
     const savedToken = rememberedOAuthToken();
