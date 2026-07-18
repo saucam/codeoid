@@ -218,6 +218,14 @@ export class CodexProvider implements SessionProvider {
   #lastTokenUsage: CodexTokenUsage | null = null;
   /** item id → {name, input} for items already announced via tool_start. */
   #announcedItems = new Map<string, { name: string; input: Record<string, unknown> }>();
+  /**
+   * serverName → the most-recent mcpToolCall item awaiting its approval
+   * elicitation. codex gates an MCP tool call with `mcpServer/elicitation/request`,
+   * which names the SERVER but not the tool; the `item/started` (mcpToolCall)
+   * that fires just before it carries both, so we correlate here to build the
+   * canonical `mcp__<server>__<tool>` name the approval gate + isSafeTool key off.
+   */
+  #pendingMcpCalls = new Map<string, { itemId: string; tool: string; input: Record<string, unknown> }>();
 
   constructor(init: CodexProviderInit) {
     this.#sessionId = init.sessionId;
@@ -487,11 +495,26 @@ export class CodexProvider implements SessionProvider {
         if (delta) this.#push({ type: "thinking_delta", content: delta });
         break;
       }
+      case "item/started": {
+        // codex names the SERVER (not the tool) in the approval elicitation
+        // that follows an mcpToolCall — stash the tool + args here so the
+        // elicitation handler can build the canonical `mcp__server__tool` name.
+        const item = params.item as Record<string, unknown> | undefined;
+        if (item && (item.type as string) === "mcpToolCall") {
+          this.#pendingMcpCalls.set(String(item.server ?? ""), {
+            itemId: String(item.id ?? ""),
+            tool: String(item.tool ?? "tool"),
+            input: (item.arguments as Record<string, unknown>) ?? {},
+          });
+        }
+        break;
+      }
       case "item/completed": {
         const item = params.item as Record<string, unknown> | undefined;
         if (!item) break;
         const itemType = item.type as string;
         const itemId = String(item.id ?? "");
+        if (itemType === "mcpToolCall") this.#pendingMcpCalls.delete(String(item.server ?? ""));
         if (itemType === "agentMessage") {
           const text = (item.text ?? item.content ?? "") as string;
           this.#push({ type: "text_done", content: typeof text === "string" ? text : "" });
@@ -579,6 +602,44 @@ export class CodexProvider implements SessionProvider {
         const verdict = await canUseTool(itemId, `codex-${itemId}`, name, input);
         return { decision: verdict.behavior === "allow" ? "approved" : "denied" };
       }
+      case "mcpServer/elicitation/request": {
+        // codex gates EVERY MCP tool call behind an MCP elicitation when the
+        // approval policy is `untrusted` (guarded / interactive mode). Unlike
+        // the item/* approvals it names the SERVER, not the tool, and expects
+        // the MCP `{action}` reply shape — NOT the `{decision}` the item/*
+        // approvals use. Without this case the request hits `default` below,
+        // throws, and codex reads the error as a declined elicitation, so
+        // every MCP tool call (incl. read-only memory recall) is auto-denied
+        // in guarded/interactive mode. Route it through the SAME canUseTool
+        // gate as every other backend, keyed by the canonical
+        // `mcp__<server>__<tool>` name so isSafeTool auto-approves read-only
+        // memory tools and everything else prompts.
+        const canUseTool = this.#canUseTool;
+        // Fail closed: an approval with no gate wired is declined, never run.
+        if (!canUseTool) return { action: "decline" };
+        const serverName = String(params.serverName ?? "");
+        const pending = this.#pendingMcpCalls.get(serverName);
+        this.#pendingMcpCalls.delete(serverName);
+        const tool = pending?.tool ?? mcpToolFromMessage(params.message) ?? "tool";
+        const input = pending?.input ?? metaToolParams(params);
+        const itemId = pending?.itemId ?? String(params.turnId ?? randomUUID());
+        const name = `mcp__${serverName}__${tool}`;
+        // Announce so scrollback shows the real tool; keyed by the mcpToolCall
+        // itemId so the item/completed handler pairs the tool_complete instead
+        // of re-announcing (autonomous runs, which never elicit, still announce
+        // retrospectively via codexItemToTool).
+        this.#announcedItems.set(itemId, { name, input });
+        this.#push({
+          type: "tool_start",
+          toolId: itemId,
+          sdkToolUseId: itemId,
+          name,
+          input,
+          approvalId: `codex-${itemId}`,
+        });
+        const verdict = await canUseTool(itemId, `codex-${itemId}`, name, input);
+        return verdict.behavior === "allow" ? { action: "accept", content: {} } : { action: "decline" };
+      }
       case "item/tool/requestUserInput": {
         const ask = this.#requestUserInput;
         if (!ask) return { answers: [] };
@@ -607,6 +668,21 @@ export class CodexProvider implements SessionProvider {
         throw new Error(`codeoid does not handle codex request: ${method}`);
     }
   }
+}
+
+/** Recover the MCP tool name from the elicitation `message` when the preceding
+ *  item/started wasn't observed (defensive): `…run tool "recall"?` → `recall`. */
+function mcpToolFromMessage(message: unknown): string | null {
+  if (typeof message !== "string") return null;
+  const m = message.match(/run tool "([^"]+)"/);
+  return m ? m[1] : null;
+}
+
+/** Fallback tool arguments from the elicitation `_meta.tool_params`. */
+function metaToolParams(params: Record<string, unknown>): Record<string, unknown> {
+  const meta = params._meta as Record<string, unknown> | undefined;
+  const tp = meta?.tool_params;
+  return tp && typeof tp === "object" ? (tp as Record<string, unknown>) : {};
 }
 
 /** Map an approval request to a codeoid tool name + input. */

@@ -86,6 +86,48 @@ async function runTurn(threadId: string, prompt: string): Promise<void> {
       params: { item: { id: "item-auto-1", type: "commandExecution", command: "ls -la", aggregatedOutput: "file-a\nfile-b", status: "completed" } },
     });
     send({ method: "item/completed", params: { item: { id: "m1", type: "agentMessage", text: "Listed files." } } });
+  } else if (prompt.includes("mcp-nostart")) {
+    // Defensive path: an elicitation arrives with NO preceding item/started
+    // (so the provider can't correlate the tool from the item). It must still
+    // recover the tool name from the `message` and the args from
+    // `_meta.tool_params`. Distinct token so it doesn't match "mcp-tool".
+    const decision = await serverRequest("mcpServer/elicitation/request", {
+      threadId,
+      turnId: "turn-1",
+      serverName: "codeoid_memory",
+      mode: "form",
+      _meta: { codex_approval_kind: "mcp_tool_call", tool_description: "Recall verbatim episodes.", tool_params: { query: "compliance" } },
+      message: 'Allow the codeoid_memory MCP server to run tool "recall"?',
+      requestedSchema: { type: "object", properties: {} },
+    });
+    const text = decision.action === "accept" ? "Recalled (nostart)." : "Rejected.";
+    send({ method: "item/completed", params: { item: { id: "m1", type: "agentMessage", text } } });
+  } else if (prompt.includes("mcp-tool")) {
+    // codex gates an MCP tool call: item/started names server+tool, then a
+    // separate MCP elicitation (names only the server) asks permission. The
+    // reply MUST be the MCP `{action}` shape; run or skip on accept/decline.
+    send({
+      method: "item/started",
+      params: { item: { id: "item-mcp-1", type: "mcpToolCall", server: "codeoid_memory", tool: "recall", arguments: { query: "compliance" } } },
+    });
+    const decision = await serverRequest("mcpServer/elicitation/request", {
+      threadId,
+      turnId: "turn-1",
+      serverName: "codeoid_memory",
+      mode: "form",
+      _meta: { codex_approval_kind: "mcp_tool_call", tool_description: "Recall verbatim episodes.", tool_params: { query: "compliance" } },
+      message: 'Allow the codeoid_memory MCP server to run tool "recall"?',
+      requestedSchema: { type: "object", properties: {} },
+    });
+    if (decision.action === "accept") {
+      send({
+        method: "item/completed",
+        params: { item: { id: "item-mcp-1", type: "mcpToolCall", server: "codeoid_memory", tool: "recall", arguments: { query: "compliance" }, aggregatedOutput: "8 episodes", status: "completed" } },
+      });
+      send({ method: "item/completed", params: { item: { id: "m1", type: "agentMessage", text: "Recalled." } } });
+    } else {
+      send({ method: "item/completed", params: { item: { id: "m1", type: "agentMessage", text: "The MCP tool call was rejected by the user." } } });
+    }
   } else if (prompt.includes("ask-user")) {
     const answer = await serverRequest("item/tool/requestUserInput", {
       threadId,
