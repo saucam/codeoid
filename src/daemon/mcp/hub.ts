@@ -108,6 +108,9 @@ export class McpHub {
     try {
       return await withTimeout(client.callTool(tool, args, scope), this.#timeoutMs, `${spec.name}/${tool}`);
     } catch (e) {
+      // codeoid has no OTEL; a failed external tool call is worth one daemon log
+      // line (transport error / timeout) so a flaky server is diagnosable.
+      console.error(`[codeoid] mcp: ${spec.name}/${tool} failed: ${errMsg(e)}`);
       this.#drop(spec.name); // reconnect on next use
       return { text: `Error calling ${spec.name}/${tool}: ${errMsg(e)}`, isError: true };
     }
