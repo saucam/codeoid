@@ -78,14 +78,18 @@ export class SessionMcpTools {
   }
 
   /** Route a canonical `mcp__<server>__<tool>` call to the hub with the session
-   *  scope. Matches by known server name (robust to `_`/`__` inside names). */
+   *  scope. Matches the LONGEST server-name prefix, so overlapping names (e.g.
+   *  `git` vs `git__extra`, or any name that is a prefix of another) route to
+   *  the most specific server rather than the first one that happens to match. */
   async call(canonicalName: string, args: Record<string, unknown>): Promise<McpCallResult> {
+    let best: { spec: McpServerSpec; tool: string } | null = null;
     for (const spec of this.#specs()) {
       const prefix = `mcp__${spec.name}__`;
-      if (canonicalName.startsWith(prefix)) {
-        return this.#hub.callTool(spec, canonicalName.slice(prefix.length), args, this.#scope);
+      if (canonicalName.startsWith(prefix) && (best === null || spec.name.length > best.spec.name.length)) {
+        best = { spec, tool: canonicalName.slice(prefix.length) };
       }
     }
+    if (best) return this.#hub.callTool(best.spec, best.tool, args, this.#scope);
     return { text: `Unknown MCP tool: ${canonicalName}`, isError: true };
   }
 }

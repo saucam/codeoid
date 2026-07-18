@@ -53,6 +53,20 @@ describe("SessionMcpTools", () => {
     hub.closeAll();
   });
 
+  it("routes to the longest matching server name on prefix overlap", async () => {
+    const reg = new McpRegistry(
+      { local: raw({ command: process.execPath, args: [FIXTURE] }), local__x: raw({ command: process.execPath, args: [FIXTURE] }) },
+      { memoryEnabled: false },
+    );
+    const hub = new McpHub({ daemonEnv: DAEMON_ENV });
+    const tools = new SessionMcpTools(reg, hub, "openai", SCOPE);
+    // Must route to server "local__x" (tool "echo"), NOT "local" (tool "x__echo").
+    const res = await tools.call("mcp__local__x__echo", { msg: "hi" });
+    expect(res.isError).toBe(false);
+    expect(res.text).toBe('echo:{"msg":"hi"}');
+    hub.closeAll();
+  });
+
   it("honors the per-backend allowlist (backends field)", () => {
     const { tools, hub } = toolsFor("openai", { local: raw({ command: "x", backends: ["claude"] }) });
     expect(tools.hasServers()).toBe(false); // not for openai

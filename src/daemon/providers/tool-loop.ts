@@ -259,7 +259,15 @@ export async function executeMcpToolCall(
     return msg;
   }
 
-  const res = await deps.tools.call(toolName, (verdict.updatedInput ?? args) as Record<string, unknown>);
-  deps.emit({ type: "tool_complete", sdkToolUseId: toolId, output: res.text, success: !res.isError });
-  return res.text;
+  // The hub is fail-soft, but keep the "never throws" guarantee LOCAL: a future
+  // throwing path in tools.call still returns a string result, never a crash.
+  try {
+    const res = await deps.tools.call(toolName, (verdict.updatedInput ?? args) as Record<string, unknown>);
+    deps.emit({ type: "tool_complete", sdkToolUseId: toolId, output: res.text, success: !res.isError });
+    return res.text;
+  } catch (e) {
+    const msg = `Error calling ${toolName}: ${e instanceof Error ? e.message : String(e)}`;
+    deps.emit({ type: "tool_complete", sdkToolUseId: toolId, output: msg, success: false });
+    return msg;
+  }
 }

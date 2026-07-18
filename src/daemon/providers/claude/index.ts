@@ -779,7 +779,7 @@ export function registryServersForClaude(registry: McpRegistry | undefined): Rec
       out[spec.name] = {
         command: t.command,
         args: t.args,
-        env: resolveEnvMap(t.env, process.env),
+        env: resolveEnvMap(t.env ?? {}, process.env),
       } as unknown as McpServerConfig;
     } else if (t.kind === "http") {
       const headers: Record<string, string> = { ...t.headers };
