@@ -27,7 +27,7 @@ describe("importClaudeMcpServers", () => {
   it("imports global stdio + http servers with codeoid defaults; skips malformed", () => {
     writeClaude({
       mcpServers: {
-        github: { command: "npx", args: ["-y", "@mcp/github"], env: { GH: "x" } },
+        github: { command: "npx", args: ["-y", "@mcp/github"], env: { GH: "x", PORT: 8080 } },
         linear: { url: "https://mcp.linear.app/mcp", headers: { Authorization: "Bearer z" } },
         broken: { note: "neither command nor url" },
       },
@@ -36,7 +36,8 @@ describe("importClaudeMcpServers", () => {
     });
     const specs = importClaudeMcpServers(home);
     expect(Object.keys(specs).sort()).toEqual(["github", "linear"]);
-    expect(specs.github).toMatchObject({ command: "npx", args: ["-y", "@mcp/github"], env: { GH: "x" }, trust: "prompt", scope: "workspace", native: false });
+    // Non-string env values are coerced (not discarded).
+    expect(specs.github).toMatchObject({ command: "npx", args: ["-y", "@mcp/github"], env: { GH: "x", PORT: "8080" }, trust: "prompt", scope: "workspace", native: false });
     expect(specs.linear).toMatchObject({ url: "https://mcp.linear.app/mcp", headers: { Authorization: "Bearer z" } });
     expect("proj" in specs).toBe(false);
   });

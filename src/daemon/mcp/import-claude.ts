@@ -76,6 +76,13 @@ function stringArray(x: unknown): string[] | null {
 
 function stringRecord(x: unknown): Record<string, string> | null {
   if (typeof x !== "object" || x === null || Array.isArray(x)) return null;
-  const entries = Object.entries(x as Record<string, unknown>);
-  return entries.every(([, val]) => typeof val === "string") ? (Object.fromEntries(entries) as Record<string, string>) : null;
+  // Coerce primitives (a user's ~/.claude.json env may hold numbers/booleans);
+  // a single non-string value must not discard the whole block. Non-primitive
+  // values (objects/arrays/null) are skipped — env/header values are scalars.
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(x as Record<string, unknown>)) {
+    if (typeof v === "string") out[k] = v;
+    else if (typeof v === "number" || typeof v === "boolean") out[k] = String(v);
+  }
+  return out;
 }

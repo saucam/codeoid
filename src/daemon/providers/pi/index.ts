@@ -662,8 +662,14 @@ export class PiProvider implements SessionProvider {
       reply("Error: missing mcp tool name");
       return;
     }
-    const res = await view.call(payload.name, payload.args ?? {});
-    reply(res.text);
+    // view.call is fail-soft, but always reply — a missing RPC response would
+    // hang the pi process waiting on the ui.input round-trip.
+    try {
+      const res = await view.call(payload.name, payload.args ?? {});
+      reply(res.text);
+    } catch (err) {
+      reply(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   async #onMemoryToolRequest(id: string, frame: PiFrame): Promise<void> {
