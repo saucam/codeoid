@@ -48,6 +48,8 @@ import {
 } from "./dispatch.js";
 import type { DispatchEventRow, DispatchTaskRow } from "./store.js";
 import { type MemoryEngine, type MemoryMcpMount, workspaceIdFromPath } from "./memory/index.js";
+import type { McpRegistry } from "./mcp/registry.js";
+import type { McpHub } from "./mcp/hub.js";
 import type { CodeoidConfig } from "../config.js";
 import type { CompressionRegistry } from "./compress/index.js";
 import type {
@@ -151,6 +153,8 @@ export class SessionManager {
   #rateLimiter: RateLimiter;
   #memory?: MemoryEngine;
   #memoryMcp?: MemoryMcpMount;
+  #mcpRegistry?: McpRegistry;
+  #mcpHub?: McpHub;
   /** Live model catalogs by provider id (via each backend's supportedModels
    *  equivalent), cached daemon-wide once any session of that provider
    *  initializes. Empty until then. */
@@ -302,6 +306,8 @@ export class SessionManager {
           existingId: meta.sessionId,
           memory: this.#memory,
           memoryMcp: this.#memoryMcp,
+mcpRegistry: this.#mcpRegistry,
+mcpHub: this.#mcpHub,
           config: this.#config,
           compressionRegistry: this.#compressionRegistry,
           // The conductor self-persists (design R2): its role, provider
@@ -707,6 +713,8 @@ export class SessionManager {
                 : {}),
               ...(this.#memory ? { memory: this.#memory } : {}),
               ...(this.#memoryMcp ? { memoryMcp: this.#memoryMcp } : {}),
+              mcpRegistry: this.#mcpRegistry,
+              mcpHub: this.#mcpHub,
               config: this.#config,
               compressionRegistry: this.#compressionRegistry,
               _testProvider: this.#testProviderFactory?.(),
@@ -1064,6 +1072,13 @@ export class SessionManager {
     this.#memoryMcp = mount;
   }
 
+  /** Inject the cross-backend MCP registry + daemon-owned client pool. Sessions
+   *  hand both to every provider so the registry's servers mount on all backends. */
+  setMcp(registry: McpRegistry, hub: McpHub): void {
+    this.#mcpRegistry = registry;
+    this.#mcpHub = hub;
+  }
+
   /** Remove a client from all sessions (e.g. on disconnect). */
   disconnectClient(clientId: string): void {
     for (const session of this.#sessions.values()) {
@@ -1189,6 +1204,8 @@ export class SessionManager {
       identityManager: this.#identityManager,
       memory: this.#memory,
       memoryMcp: this.#memoryMcp,
+mcpRegistry: this.#mcpRegistry,
+mcpHub: this.#mcpHub,
       config: this.#config,
       compressionRegistry: this.#compressionRegistry,
       _testProvider: this.#testProviderFactory?.(),
@@ -1387,6 +1404,8 @@ export class SessionManager {
         identityManager: this.#identityManager,
         memory: this.#memory,
         memoryMcp: this.#memoryMcp,
+mcpRegistry: this.#mcpRegistry,
+mcpHub: this.#mcpHub,
         config: this.#config,
         compressionRegistry: this.#compressionRegistry,
         _testProvider: this.#testProviderFactory?.(),
@@ -1512,6 +1531,8 @@ export class SessionManager {
       identityManager: this.#identityManager,
       memory: this.#memory,
       memoryMcp: this.#memoryMcp,
+mcpRegistry: this.#mcpRegistry,
+mcpHub: this.#mcpHub,
       config: this.#config,
       compressionRegistry: this.#compressionRegistry,
       _testProvider: this.#testProviderFactory?.(),
@@ -1640,6 +1661,8 @@ export class SessionManager {
           identityManager: this.#identityManager,
           memory: this.#memory,
           memoryMcp: this.#memoryMcp,
+mcpRegistry: this.#mcpRegistry,
+mcpHub: this.#mcpHub,
           config: this.#config,
           compressionRegistry: this.#compressionRegistry,
           _testProvider: this.#testProviderFactory?.(),

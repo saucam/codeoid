@@ -22,6 +22,7 @@
 import { StdioJsonRpcProcess } from "../providers/jsonrpc-stdio.js";
 import { memoryToolDefs, type MemoryToolContext } from "../memory/tools.js";
 import type { MemoryEngine } from "../memory/engine.js";
+import { resolveEnvMap } from "./types.js";
 import type { McpHttpTransport, McpServerSpec, McpStdioTransport } from "./types.js";
 
 /** A tool as codeoid surfaces it to a backend (bare name; the canonical
@@ -383,19 +384,6 @@ function parseJsonRpc(body: string): { result?: unknown; error?: { message?: str
     }
   }
   throw new Error("unparseable MCP response");
-}
-
-/** Resolve `${VAR}` env references against the daemon env; literals pass through. */
-function resolveEnvMap(
-  env: Record<string, string>,
-  daemonEnv: Record<string, string | undefined>,
-): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(env)) {
-    const m = /^\$\{(\w+)\}$/.exec(v);
-    out[k] = m ? (daemonEnv[m[1]] ?? "") : v;
-  }
-  return out;
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {

@@ -74,3 +74,20 @@ export function canonicalToolName(server: string, tool: string): string {
 export function isProxied(spec: McpServerSpec): boolean {
   return !spec.native;
 }
+
+/** Resolve a `${VAR}` env reference against the daemon env so secrets stay out
+ *  of the config file; a literal (no `${...}`) passes through unchanged. */
+export function resolveEnvValue(value: string, env: Record<string, string | undefined>): string {
+  const m = /^\$\{(\w+)\}$/.exec(value);
+  return m ? (env[m[1]] ?? "") : value;
+}
+
+/** Resolve every value in an env map via {@link resolveEnvValue}. */
+export function resolveEnvMap(
+  map: Record<string, string>,
+  env: Record<string, string | undefined>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(map)) out[k] = resolveEnvValue(v, env);
+  return out;
+}

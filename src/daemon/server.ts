@@ -22,9 +22,12 @@ import {
   createMemory,
   workspaceIdFromPath,
   MemoryMcpHttp,
+
   MEMORY_MCP_PATH,
   type MemoryEngine,
 } from "./memory/index.js";
+import { McpRegistry } from "./mcp/registry.js";
+import { McpHub } from "./mcp/hub.js";
 import {
   type CompressionRegistry,
   createRegistry,
@@ -148,6 +151,8 @@ export class DaemonServer {
   #shutdown: ShutdownManager;
   #memory: MemoryEngine | null = null;
   #memoryMcp: MemoryMcpHttp | null = null;
+  #mcpRegistry: McpRegistry | null = null;
+  #mcpHub: McpHub | null = null;
   #bunServer: ReturnType<typeof Bun.serve> | null = null;
   #sockets = new Map<string, AuthenticatedSocket>();
   #frontends: Frontend[] = [];
@@ -215,6 +220,7 @@ export class DaemonServer {
     this.#shutdown.register("memory", async () => {
       if (this.#memory) await this.#memory.close();
     });
+    this.#shutdown.register("mcp", () => this.#mcpHub?.closeAll());
     this.#shutdown.register("store", () => this.#store.close());
     this.#shutdown.register("sessions", () => this.#manager.drain(10_000));
     // LIFO: registered after sessions → stops BEFORE the drain, so the
@@ -304,6 +310,24 @@ export class DaemonServer {
         this.#memory = null;
       }
     }
+
+    // Cross-backend MCP registry + daemon-owned client pool (see
+    // docs/provider-mcp-registry-design.md). Built whether or not memory is on:
+    // the registry injects `codeoid_memory` only when memory is enabled, and the
+    // hub serves external servers with or without an engine. Providers mount the
+    // registry's servers on every backend through one uniform gate.
+    this.#mcpRegistry = new McpRegistry(this.#config.fullConfig?.mcpServers, {
+      memoryEnabled: this.#memory != null,
+    });
+    this.#mcpHub = new McpHub({
+      engine: this.#memory,
+      toolTimeoutMs: this.#config.fullConfig?.session.mcpToolTimeoutMs,
+      daemonEnv: process.env,
+    });
+    for (const w of this.#mcpRegistry.warnings) console.warn(`[codeoid] ${w}`);
+    this.#manager.setMcp(this.#mcpRegistry, this.#mcpHub);
+    const mcpCount = this.#mcpRegistry.list().filter((s) => !s.builtin).length;
+    if (mcpCount > 0) console.log(`[codeoid] mcp: ${mcpCount} external server(s) registered`);
 
     // Resume sessions from transcripts
     const resumed = await this.#manager.resumeSessions();

@@ -72,6 +72,8 @@ import {
   type MemoryMcpMount,
 } from "./memory/index.js";
 import { isSafeTool } from "./providers/tool-safety.js";
+import type { McpRegistry } from "./mcp/registry.js";
+import type { McpHub } from "./mcp/hub.js";
 import type { Attachment } from "../protocol/types.js";
 import { resolveAttachments } from "./attachments.js";
 import type { CodeoidConfig } from "../config.js";
@@ -177,6 +179,9 @@ export interface SessionCreateOptions {
   memory?: MemoryEngine;
   /** Shared in-daemon memory MCP endpoint + URL, for URL-mounting backends. */
   memoryMcp?: MemoryMcpMount;
+  /** Cross-backend MCP registry + daemon-owned client pool — mounted on every backend. */
+  mcpRegistry?: McpRegistry;
+  mcpHub?: McpHub;
   /**
    * Full parsed config — carries compress / workspaceIndex / telemetry
    * toggles. When absent, compression stays off (safe default).
@@ -350,6 +355,8 @@ export class Session {
   #seq = 0;
   #memory?: MemoryEngine;
   #memoryMcp?: MemoryMcpMount;
+  #mcpRegistry?: McpRegistry;
+  #mcpHub?: McpHub;
   #chunker?: EpisodeChunker;
   // Counts mid-turn messages in flight. When the SDK interrupts the current
   // turn to process a pushMidTurn() injection, it emits a turn_done for the
@@ -569,6 +576,8 @@ export class Session {
     this.#identityManager = opts.identityManager;
     this.#memory = opts.memory;
     this.#memoryMcp = opts.memoryMcp;
+    this.#mcpRegistry = opts.mcpRegistry;
+    this.#mcpHub = opts.mcpHub;
     this.#config = opts.config;
     // Retained for provider (re-)construction — switchProvider() rebuilds
     // the backend long after the constructor options are gone.
@@ -724,6 +733,8 @@ export class Session {
       identityManager: this.#identityManager,
       memory: this.#memory,
       memoryMcp: this.#memoryMcp,
+      mcpRegistry: this.#mcpRegistry,
+      mcpHub: this.#mcpHub,
       fleet: this.#fleet,
       config: this.#config,
       compressionRegistry: this.#compressionRegistry,
@@ -2661,6 +2672,10 @@ export class Session {
 
     // Read-only / retrieval tools — safe in both guarded and autonomous.
     if (isSafeTool(toolName)) return true;
+    // Registry MCP servers declared `trust: readonly` — same treatment, but the
+    // set is dynamic (config-driven), so it's checked here rather than baked
+    // into isSafeTool. Interactive still prompts (checked above).
+    if (this.#isReadonlyMcpTool(toolName)) return true;
 
     // Write / exec tools — only auto-approved in autonomous mode.
     if (this.#mode === "autonomous") {
@@ -2691,8 +2706,21 @@ export class Session {
     if (isFleetSendTool(toolName)) return false;
     if (this.#mode === "interactive") return false;
     if (isSafeTool(toolName)) return true;
+    if (this.#isReadonlyMcpTool(toolName)) return true;
     if (this.#mode === "autonomous") {
       return this.#turnsRemaining === undefined || this.#turnsRemaining > 0;
+    }
+    return false;
+  }
+
+  /** True for a registry MCP tool (`mcp__<server>__<tool>`) whose server is
+   *  declared `trust: readonly` — auto-approved on every backend, like the
+   *  built-in memory tools. */
+  #isReadonlyMcpTool(toolName: string): boolean {
+    const reg = this.#mcpRegistry;
+    if (!reg || !toolName.startsWith("mcp__")) return false;
+    for (const spec of reg.list()) {
+      if (spec.trust === "readonly" && toolName.startsWith(`mcp__${spec.name}__`)) return true;
     }
     return false;
   }
