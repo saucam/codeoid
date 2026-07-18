@@ -117,6 +117,18 @@ async function runPrompt(message: string): Promise<void> {
       type: "message_end",
       message: { role: "assistant", content: [{ type: "text", text: `RECALL:${String(answer.value ?? "")}` }], stopReason: "stop" },
     });
+  } else if (message.includes("mcp-tool")) {
+    // Stand in for a pi-registered external-MCP tool's execute(): send a
+    // codeoid:mcp-tool ui-request; PiProvider runs it through McpHub and answers.
+    const answer = await askUi({
+      method: "input",
+      title: "codeoid:mcp-tool",
+      placeholder: JSON.stringify({ name: "mcp__local__echo", args: { msg: "hi" } }),
+    });
+    emit({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: `MCP:${String(answer.value ?? "")}` }], stopReason: "stop" },
+    });
   } else if (message.includes("notify")) {
     emit({
       type: "extension_ui_request",

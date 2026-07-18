@@ -252,6 +252,8 @@ export function createDefaultProviderRegistry(config?: CodeoidConfig): ProviderR
             store: init.store,
             workspaceId: init.workspaceId,
             memory: init.memory,
+            mcpRegistry: init.mcpRegistry,
+            mcpHub: init.mcpHub,
             onModels: init.onModels,
           }),
       });

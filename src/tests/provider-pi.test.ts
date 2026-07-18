@@ -20,6 +20,11 @@ import type {
 import { MemoryEngine } from "../daemon/memory/engine.js";
 import { SqliteEpisodeStore } from "../daemon/memory/store.js";
 import type { Embedder } from "../daemon/memory/embedder.js";
+import { McpRegistry } from "../daemon/mcp/registry.js";
+import { McpHub } from "../daemon/mcp/hub.js";
+import type { RawMcpServerConfig } from "../config.js";
+
+const MCP_FIXTURE = resolve(import.meta.dir, "fixtures/fake-mcp-stdio.ts");
 
 let wrapperDir: string;
 let fakePi: string;
@@ -377,5 +382,28 @@ describe("PiProvider – memory tools (#178 Phase 4)", () => {
     expect(text).toContain("RECALL:");
     expect(text).toContain("alpha unicorn deployment");
     await engine.close();
+  });
+
+  it("routes a bridge external-MCP call to the daemon hub and returns the tool result", async () => {
+    const raw = (p: Partial<RawMcpServerConfig>): RawMcpServerConfig =>
+      ({ args: [], env: {}, headers: {}, trust: "prompt", scope: "session", enabled: true, native: false, ...p }) as RawMcpServerConfig;
+    const reg = new McpRegistry({ local: raw({ command: process.execPath, args: [MCP_FIXTURE] }) }, { memoryEnabled: false });
+    const hub = new McpHub({ daemonEnv: { PATH: process.env.PATH, HOME: process.env.HOME } });
+    store.createSession({
+      id: "sess-pi", name: "pi-test", workdir: tmp, status: "idle", createdBy: "u",
+      createdAt: new Date().toISOString(), attachedClients: 0, accountId: "acc", projectId: "proj",
+    });
+    provider = new PiProvider({
+      sessionId: "sess-pi", initialBackingId: "sess-pi", command: fakePi, store, workspaceId: "ws_pi",
+      mcpRegistry: reg, mcpHub: hub,
+    });
+    const events = await collect(provider.runTurn(turnOpts("mcp-tool please")).events);
+    await provider.teardown();
+    hub.closeAll();
+    const text = events
+      .filter((e) => e.type === "text_delta" || e.type === "text_done")
+      .map((e) => (e as { content: string }).content)
+      .join("");
+    expect(text).toContain('MCP:echo:{"msg":"hi"}');
   });
 });

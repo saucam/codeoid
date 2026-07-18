@@ -37,12 +37,17 @@ import { renderHistorySeed, type CanonicalTurn, type HistorySeedResult } from ".
 import { buildPiEnv } from "../env.js";
 import {
   APPROVAL_TITLE,
+  type BridgeMcpTool,
   BRIDGE_READY_VALUE,
   BRIDGE_STATUS_KEY,
+  MCP_TOOL_TITLE,
   MEMORY_TOOL_TITLE,
   writeBridgeExtension,
 } from "./bridge.js";
 import { memoryToolDefs, type MemoryEngine, type MemoryToolContext } from "../../memory/index.js";
+import { SessionMcpTools } from "../../mcp/tool-source.js";
+import type { McpRegistry } from "../../mcp/registry.js";
+import type { McpHub } from "../../mcp/hub.js";
 import { PiRpcProcess, type PiFrame } from "./rpc.js";
 import { translatePiEvent } from "./translate.js";
 
@@ -61,6 +66,10 @@ export interface PiProviderInit {
   /** Memory engine — when present, the bridge registers the recall tools and
    *  the provider runs them against this engine (pi has no MCP; see bridge.ts). */
   memory?: MemoryEngine;
+  /** Cross-backend MCP registry + daemon-owned client — external servers reach
+   *  pi (which has no MCP client) by registering bridge tools that proxy to the hub. */
+  mcpRegistry?: McpRegistry;
+  mcpHub?: McpHub;
   onModels?: (
     models: ReadonlyArray<{ value: string; displayName: string; description?: string }>,
   ) => void;
@@ -90,6 +99,8 @@ export class PiProvider implements SessionProvider {
   #onModels?: PiProviderInit["onModels"];
   #workspaceId: string;
   #memory: MemoryEngine | null;
+  #mcpRegistry: McpRegistry | null;
+  #mcpHub: McpHub | null;
 
   #proc: PiRpcProcess | null = null;
   #bridgeReady = false;
@@ -117,6 +128,8 @@ export class PiProvider implements SessionProvider {
     this.#onModels = init.onModels;
     this.#workspaceId = init.workspaceId ?? init.sessionId;
     this.#memory = init.memory ?? null;
+    this.#mcpRegistry = init.mcpRegistry ?? null;
+    this.#mcpHub = init.mcpHub ?? null;
   }
 
   /**
@@ -273,7 +286,8 @@ export class PiProvider implements SessionProvider {
   async #ensureProcess(opts: TurnOpts): Promise<void> {
     if (this.#proc?.alive) return;
 
-    const args: string[] = ["-e", writeBridgeExtension({ memoryTools: this.#memory != null })];
+    const mcpTools = await this.#discoverMcpTools();
+    const args: string[] = ["-e", writeBridgeExtension({ memoryTools: this.#memory != null, mcpTools })];
     if (opts.systemPromptAppend) {
       args.push("--append-system-prompt", opts.systemPromptAppend);
     }
@@ -515,6 +529,13 @@ export class PiProvider implements SessionProvider {
       return;
     }
 
+    // Bridge external-MCP call: the pi-registered tool proxies here (pi has no
+    // MCP). Already gated by the tool_call approval hook; run it via McpHub.
+    if (method === "input" && frame.title === MCP_TOOL_TITLE && id) {
+      await this.#onMcpToolRequest(id, frame);
+      return;
+    }
+
     // Fire-and-forget extension output → visible rows.
     if (method === "notify") {
       const level = frame.notifyType === "error" ? "system" : "info";
@@ -603,6 +624,48 @@ export class PiProvider implements SessionProvider {
    * (tool_call hook), so there is no second gate here; the tool_start/complete
    * events come from that path + pi's normal tool-result flow.
    */
+  /** Per-(session) view of the registry for the pi backend, or null when no
+   *  registry/hub is wired. */
+  #mcpToolsView(): SessionMcpTools | null {
+    if (!this.#mcpRegistry || !this.#mcpHub) return null;
+    return new SessionMcpTools(this.#mcpRegistry, this.#mcpHub, this.id, {
+      workspaceId: this.#workspaceId,
+      sessionId: this.#sessionId,
+    });
+  }
+
+  /** Discover external MCP tools to register in the bridge at spawn time. */
+  async #discoverMcpTools(): Promise<BridgeMcpTool[]> {
+    const view = this.#mcpToolsView();
+    if (!view || !view.hasServers()) return [];
+    const handles = await view.handles();
+    return handles.map((h) => ({ name: h.canonicalName, description: h.description, parameters: h.inputSchema }));
+  }
+
+  /** Bridge external-MCP call: the pi-registered tool proxies here (pi has no
+   *  MCP). Already gated by the tool_call hook; run it through the daemon hub. */
+  async #onMcpToolRequest(id: string, frame: PiFrame): Promise<void> {
+    const reply = (value: string) => this.#proc?.send({ type: "extension_ui_response", id, value });
+    const view = this.#mcpToolsView();
+    if (!view) {
+      reply("codeoid MCP is not enabled for this session.");
+      return;
+    }
+    let payload: { name?: string; args?: Record<string, unknown> };
+    try {
+      payload = JSON.parse(String(frame.placeholder ?? "{}")) as typeof payload;
+    } catch {
+      reply("Error: malformed mcp-tool payload");
+      return;
+    }
+    if (!payload.name) {
+      reply("Error: missing mcp tool name");
+      return;
+    }
+    const res = await view.call(payload.name, payload.args ?? {});
+    reply(res.text);
+  }
+
   async #onMemoryToolRequest(id: string, frame: PiFrame): Promise<void> {
     const reply = (value: string) =>
       this.#proc?.send({ type: "extension_ui_response", id, value });

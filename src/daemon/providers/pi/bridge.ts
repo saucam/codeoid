@@ -31,6 +31,18 @@ export const APPROVAL_TITLE = "codeoid:tool-approval";
  *  the verbatim result text. pi has no MCP, so this ctx.ui.input round-trip is
  *  how a pi-registered tool reaches the daemon-side MemoryEngine. */
 export const MEMORY_TOOL_TITLE = "codeoid:memory-tool";
+/** Reserved dialog title — external registry MCP tool calls. Same round-trip as
+ *  memory tools, but the provider routes these to the daemon-owned McpHub. */
+export const MCP_TOOL_TITLE = "codeoid:mcp-tool";
+
+/** An external MCP tool the bridge should register on pi. `parameters` is the
+ *  raw JSON Schema from the server (pi's registerTool takes JSON Schema directly,
+ *  so no typebox conversion is needed). */
+export interface BridgeMcpTool {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
 /** Status key/value the bridge sets on session_start — the readiness handshake. */
 export const BRIDGE_STATUS_KEY = "codeoid";
 export const BRIDGE_READY_VALUE = "bridge-ready";
@@ -103,11 +115,37 @@ const BRIDGE_MEMORY_BLOCK = `
   }`;
 
 /**
+ * External registry MCP tools (final backend). pi has no MCP client, so each
+ * registered tool proxies to the daemon over ctx.ui.input(MCP_TOOL_TITLE);
+ * PiProvider runs it through the daemon-owned McpHub and answers with the result
+ * text. `parameters` is the server's raw JSON Schema (no typebox needed). The
+ * tool_call gate above already approves the call before pi executes it.
+ */
+function bridgeMcpBlock(tools: BridgeMcpTool[]): string {
+  return `
+  const codeoidMcpTools = ${JSON.stringify(tools)};
+  for (const t of codeoidMcpTools) {
+    pi.registerTool({
+      name: t.name,
+      label: t.name,
+      description: t.description,
+      parameters: t.parameters,
+      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        if (!ctx.hasUI) return { content: [{ type: "text", text: "codeoid MCP unavailable (no UI channel)" }] };
+        const answer = await ctx.ui.input(${JSON.stringify(MCP_TOOL_TITLE)}, JSON.stringify({ name: t.name, args: params || {} }));
+        return { content: [{ type: "text", text: answer == null ? "" : String(answer) }] };
+      },
+    });
+  }`;
+}
+
+/**
  * Build the bridge extension source. With `memoryTools`, prepend the typebox
  * import (spike-verified to resolve in pi's `-e` loader) and register the
- * memory recall tools inside the extension.
+ * memory recall tools. `mcpTools` registers external registry servers' tools
+ * (raw JSON Schema params — no typebox).
  */
-export function buildBridgeSource(memoryTools: boolean): string {
+export function buildBridgeSource(memoryTools: boolean, mcpTools: BridgeMcpTool[] = []): string {
   return `${memoryTools ? 'import { Type } from "typebox";\n' : ""}/**
  * codeoid bridge — injected by the codeoid daemon (PiProvider). Do not edit:
  * regenerated on every session spawn.
@@ -115,6 +153,7 @@ export function buildBridgeSource(memoryTools: boolean): string {
 export default function (pi) {
 ${BRIDGE_BASE_BODY}
 ${memoryTools ? BRIDGE_MEMORY_BLOCK : ""}
+${mcpTools.length > 0 ? bridgeMcpBlock(mcpTools) : ""}
 }
 `;
 }
@@ -124,10 +163,10 @@ ${memoryTools ? BRIDGE_MEMORY_BLOCK : ""}
  * provider instance keeps concurrent sessions from racing on one path. The
  * memory variant is written as `.mjs` to force ESM (the typebox import).
  */
-export function writeBridgeExtension(opts: { memoryTools?: boolean } = {}): string {
+export function writeBridgeExtension(opts: { memoryTools?: boolean; mcpTools?: BridgeMcpTool[] } = {}): string {
   const dir = mkdtempSync(join(tmpdir(), "codeoid-pi-bridge-"));
   const memoryTools = opts.memoryTools ?? false;
   const path = join(dir, memoryTools ? "codeoid-bridge.mjs" : "codeoid-bridge.js");
-  writeFileSync(path, buildBridgeSource(memoryTools), "utf8");
+  writeFileSync(path, buildBridgeSource(memoryTools, opts.mcpTools ?? []), "utf8");
   return path;
 }
