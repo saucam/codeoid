@@ -11,6 +11,7 @@
 import { Component, Show, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
 
 import { rememberedApiKey, rememberedOAuthToken } from "./lib/auth";
+import { consumeHandoffCredential, readEmbedAllowedOrigins } from "./lib/handoff";
 import SignIn from "./components/SignIn";
 import Shell from "./components/Shell";
 import {
@@ -38,13 +39,33 @@ const App: Component = () => {
   installApprovalNotifications();
 
   onMount(async () => {
+    // Embed SSO: an embedding parent (e.g. Highflame Studio) may pre-authenticate
+    // this UI by handing a SHORT-LIVED credential via the URL hash. Consume it
+    // FIRST — the helper persists it to storage and strips it from the URL — so
+    // it wins over any stale stored credential and never lingers in history.
+    // The helper enforces a fail-closed trusted-framing-origin gate against the
+    // daemon-published allowlist: it consumes the hash ONLY when this page is
+    // embedded by an allowlisted parent origin, closing the login-CSRF vector.
+    const handoff = consumeHandoffCredential({
+      allowedOrigins: readEmbedAllowedOrigins(),
+    });
+
     const savedKey = rememberedApiKey();
     const savedToken = rememberedOAuthToken();
-    if (savedKey || savedToken) {
+
+    // A freshly handed-in credential beats a stored one: a handed-in api key
+    // exchanges for a fresh JWT; a handed-in token is used directly. Otherwise
+    // fall back to the remembered-cred flow — prefer a stored api key exchange
+    // (yields a fresh JWT), else let resolveToken use the stored OAuth token.
+    let opts: { apiKey?: string; token?: string } | null = null;
+    if (handoff.apiKey) opts = { apiKey: handoff.apiKey };
+    else if (handoff.token) opts = { token: handoff.token };
+    else if (savedKey) opts = { apiKey: savedKey };
+    else if (savedToken) opts = {};
+
+    if (opts) {
       try {
-        // Prefer explicit API key exchange (yields a fresh JWT).
-        // With no apiKey, resolveToken falls back to the stored OAuth token.
-        await bootstrap(savedKey ? { apiKey: savedKey } : {});
+        await bootstrap(opts);
       } catch {
         // bootstrap surfaces the reason via bootstrapError; SignIn renders it.
       }
