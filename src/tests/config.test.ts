@@ -402,3 +402,32 @@ describe("loadConfig — hooks", () => {
     expect(() => loadConfig({ configPath, env: {} })).toThrow();
   });
 });
+
+describe("loadConfig — mcpServers registry", () => {
+  it("parses stdio + http servers and applies trust/scope/native defaults", () => {
+    writeConfig({
+      mcpServers: {
+        github: { command: "npx", args: ["-y", "@mcp/github"], env: { TOKEN: "${GH_PAT}" } },
+        linear: { url: "https://mcp.linear.app/mcp", bearerTokenEnv: "LINEAR_KEY", trust: "readonly", scope: "session" },
+      },
+    });
+    const c = loadConfig({ configPath, env: {} });
+    expect(c.mcpServers?.github).toMatchObject({ command: "npx", args: ["-y", "@mcp/github"], trust: "prompt", scope: "workspace", native: false });
+    expect(c.mcpServers?.linear).toMatchObject({ url: "https://mcp.linear.app/mcp", bearerTokenEnv: "LINEAR_KEY", trust: "readonly", scope: "session" });
+  });
+
+  it("rejects a server that sets neither command nor url", () => {
+    writeConfig({ mcpServers: { bad: { trust: "readonly" } } });
+    expect(() => loadConfig({ configPath, env: {} })).toThrow();
+  });
+
+  it("rejects a server that sets BOTH command and url", () => {
+    writeConfig({ mcpServers: { bad: { command: "x", url: "https://y/mcp" } } });
+    expect(() => loadConfig({ configPath, env: {} })).toThrow();
+  });
+
+  it("defaults to an empty registry when omitted", () => {
+    writeConfig({});
+    expect(loadConfig({ configPath, env: {} }).mcpServers).toEqual({});
+  });
+});
