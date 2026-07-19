@@ -62,8 +62,16 @@ export interface McpHubOptions {
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 
+/** Last-observed status of a server, accumulated from normal use (list/call).
+ *  Read by the settings surface — no live probe on read. */
+interface McpLiveStatus {
+  tools: string[];
+  error?: string;
+}
+
 export class McpHub {
   readonly #clients = new Map<string, McpClient>();
+  readonly #status = new Map<string, McpLiveStatus>();
   readonly #engine: MemoryEngine | null;
   readonly #timeoutMs: number;
   readonly #env: Record<string, string | undefined>;
@@ -79,9 +87,12 @@ export class McpHub {
   async listTools(spec: McpServerSpec): Promise<McpToolDef[]> {
     try {
       const client = this.#clientFor(spec);
-      const tools = await client.listTools();
-      return spec.toolAllowlist ? tools.filter((t) => spec.toolAllowlist?.includes(t.name)) : tools;
+      const all = await client.listTools();
+      const tools = spec.toolAllowlist ? all.filter((t) => spec.toolAllowlist?.includes(t.name)) : all;
+      this.#status.set(spec.name, { tools: tools.map((t) => t.name) });
+      return tools;
     } catch (e) {
+      this.#status.set(spec.name, { tools: [], error: errMsg(e) });
       this.#drop(spec.name);
       return [];
     }
@@ -111,9 +122,21 @@ export class McpHub {
       // codeoid has no OTEL; a failed external tool call is worth one daemon log
       // line (transport error / timeout) so a flaky server is diagnosable.
       console.error(`[codeoid] mcp: ${spec.name}/${tool} failed: ${errMsg(e)}`);
+      this.#status.set(spec.name, { tools: this.#status.get(spec.name)?.tools ?? [], error: errMsg(e) });
       this.#drop(spec.name); // reconnect on next use
       return { text: `Error calling ${spec.name}/${tool}: ${errMsg(e)}`, isError: true };
     }
+  }
+
+  /** Last-observed status for a server (from accumulated use), or undefined if
+   *  the daemon hasn't listed/called it yet. Read by the settings surface. */
+  statusFor(name: string): { tools: string[]; error?: string } | undefined {
+    return this.#status.get(name);
+  }
+
+  /** Whether a live client is currently held for this server (connected). */
+  hasClient(name: string): boolean {
+    return this.#clients.has(name);
   }
 
   /** Tear down every client (daemon stop / registry reload). */

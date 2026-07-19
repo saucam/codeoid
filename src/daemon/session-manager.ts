@@ -56,6 +56,7 @@ import type {
   AuthContext,
   ClientMessage,
   DaemonMessage,
+  McpServerStatus,
   ModelInfo,
   SessionInfo,
   SessionWorktree,
@@ -904,6 +905,39 @@ mcpHub: this.#mcpHub,
     return { type: "settings.schema.result", requestId: msg.id, manifest: getManifest() };
   }
 
+  /** Read-only registry MCP servers + live health for the settings surface.
+   *  Config comes from the registry; health/tools reflect what the daemon-owned
+   *  hub has observed so far (no live probe — opening settings has no side effects). */
+  #mcpServerStatuses(): McpServerStatus[] {
+    const reg = this.#mcpRegistry;
+    const hub = this.#mcpHub;
+    if (!reg || !hub) return [];
+    return reg.list().map((spec) => {
+      const status = hub.statusFor(spec.name);
+      const connected = hub.hasClient(spec.name);
+      const health: McpServerStatus["health"] = !spec.enabled
+        ? "disabled"
+        : status?.error
+          ? "error"
+          : connected
+            ? "connected"
+            : "idle";
+      return {
+        name: spec.name,
+        transport: spec.transport.kind,
+        trust: spec.trust,
+        scope: spec.scope,
+        backends: spec.backends ?? null,
+        enabled: spec.enabled,
+        builtin: spec.builtin,
+        health,
+        toolCount: status?.tools.length ?? 0,
+        tools: status?.tools ?? [],
+        ...(status?.error ? { error: status.error } : {}),
+      };
+    });
+  }
+
   /** Serve the current effective settings (never secret values). `settings:read`. */
   #settingsGet(
     msg: Extract<ClientMessage, { type: "settings.get" }>,
@@ -913,7 +947,11 @@ mcpHub: this.#mcpHub,
       return this.#settingsForbidden(msg.id);
     }
     try {
-      return { type: "settings.get.result", requestId: msg.id, snapshot: getSnapshot() };
+      return {
+        type: "settings.get.result",
+        requestId: msg.id,
+        snapshot: { ...getSnapshot(), mcpServers: this.#mcpServerStatuses() },
+      };
     } catch (err) {
       return {
         type: "response.error",
@@ -949,7 +987,7 @@ mcpHub: this.#mcpHub,
         type: "settings.set.result",
         requestId: msg.id,
         ok: result.ok,
-        snapshot: result.snapshot,
+        snapshot: { ...result.snapshot, mcpServers: this.#mcpServerStatuses() },
         errors: result.errors,
         restartRequired: result.restartRequired,
       };

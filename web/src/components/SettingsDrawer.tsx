@@ -27,6 +27,7 @@ import { createStore, produce } from "solid-js/store";
 import { fetchSettings, saveSettings, settingsState } from "../state/settings";
 import { relativeTime } from "../lib/format";
 import type {
+  McpServerStatus,
   SecretStatus,
   SettingField,
   SettingPatch,
@@ -130,7 +131,7 @@ const SettingsDrawer: Component = () => {
             <nav class="w-52 shrink-0 overflow-y-auto border-r border-border bg-bg/30 py-2">
               <For each={manifest()?.tabs ?? []}>
                 {(t) => {
-                  const active = () => tab()?.id === t.id;
+                  const active = () => (activeTab() || manifest()?.tabs[0]?.id) === t.id;
                   return (
                     <button
                       type="button"
@@ -149,6 +150,23 @@ const SettingsDrawer: Component = () => {
                   );
                 }}
               </For>
+              {/* Synthetic read-only tab — registry MCP servers + live health.
+                  Snapshot-backed (not a manifest tab); shown only when the daemon
+                  reports it. */}
+              <Show when={settingsState().snapshot?.mcpServers}>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("mcp")}
+                  class={`flex w-full items-center gap-2 border-l-2 px-3 py-1.5 text-left text-[13px] transition ${
+                    activeTab() === "mcp"
+                      ? "border-accent bg-bg-active/40 text-fg"
+                      : "border-transparent text-fg-muted hover:bg-bg-hover hover:text-fg"
+                  }`}
+                >
+                  <span class="w-4 text-center">🔌</span>
+                  <span>MCP Servers</span>
+                </button>
+              </Show>
             </nav>
 
             {/* Content */}
@@ -156,7 +174,10 @@ const SettingsDrawer: Component = () => {
               <Show when={settingsState().loading && !manifest()}>
                 <div class="text-xs text-fg-faint">loading…</div>
               </Show>
-              <Show when={tab()} keyed>
+              <Show when={activeTab() === "mcp"}>
+                <McpServersPanel servers={settingsState().snapshot?.mcpServers ?? []} />
+              </Show>
+              <Show when={activeTab() !== "mcp" && tab()} keyed>
                 {(t) => (
                   <div>
                     <div class="mb-3 flex items-start justify-between gap-3">
@@ -232,6 +253,81 @@ const SettingsDrawer: Component = () => {
 };
 
 // ── Field row ───────────────────────────────────────────────────────────────
+
+const HEALTH_STYLE: Record<McpServerStatus["health"], { label: string; cls: string }> = {
+  connected: { label: "connected", cls: "border-success/40 bg-success/10 text-success" },
+  error: { label: "error", cls: "border-danger/40 bg-danger/10 text-danger" },
+  idle: { label: "idle", cls: "border-border bg-bg/40 text-fg-muted" },
+  disabled: { label: "disabled", cls: "border-border bg-bg/40 text-fg-faint" },
+};
+
+/** Read-only panel: the registry's MCP servers + live health. Config comes from
+ *  config.json / ~/.claude.json; health/tools reflect what the daemon has seen. */
+const McpServersPanel: Component<{ servers: McpServerStatus[] }> = (props) => (
+  <div>
+    <div class="mb-3">
+      <h3 class="flex items-center gap-2 text-[15px] font-semibold text-fg">
+        <span>🔌</span>MCP Servers
+      </h3>
+      <p class="mt-0.5 text-[12px] text-fg-muted">
+        Declared in <code class="font-mono">mcpServers</code> (config + imported from{" "}
+        <code class="font-mono">~/.claude.json</code>) and mounted on every backend. Read-only —
+        edit config.json to change. Health reflects use so far (no live probe).
+      </p>
+    </div>
+    <Show
+      when={props.servers.length > 0}
+      fallback={
+        <div class="rounded border border-border px-3 py-4 text-center text-[12px] text-fg-muted">
+          No MCP servers configured.
+        </div>
+      }
+    >
+      <div class="flex flex-col gap-2">
+        <For each={props.servers}>
+          {(s) => (
+            <div class="rounded border border-border bg-bg/30 px-3 py-2.5">
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="font-mono text-[13px] text-fg">{s.name}</span>
+                <Show when={s.builtin}>
+                  <span class="rounded bg-accent/20 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-accent">
+                    built-in
+                  </span>
+                </Show>
+                <span
+                  class={`rounded border px-1.5 py-0.5 text-[10px] uppercase tracking-wider ${HEALTH_STYLE[s.health].cls}`}
+                >
+                  {HEALTH_STYLE[s.health].label}
+                </span>
+                <span class="ml-auto text-[11px] text-fg-faint">
+                  {s.transport} · {s.trust}
+                  {s.toolCount > 0 ? ` · ${s.toolCount} tool${s.toolCount === 1 ? "" : "s"}` : ""}
+                </span>
+              </div>
+              <Show when={s.error}>
+                <div class="mt-1 text-[11px] text-danger">{s.error}</div>
+              </Show>
+              <Show when={s.tools.length > 0}>
+                <div class="mt-1.5 flex flex-wrap gap-1">
+                  <For each={s.tools}>
+                    {(t) => (
+                      <span class="rounded bg-bg-active/40 px-1.5 py-0.5 font-mono text-[10px] text-fg-muted">
+                        {t}
+                      </span>
+                    )}
+                  </For>
+                </div>
+              </Show>
+              <Show when={s.backends}>
+                {(b) => <div class="mt-1 text-[11px] text-fg-faint">backends: {b().join(", ")}</div>}
+              </Show>
+            </div>
+          )}
+        </For>
+      </div>
+    </Show>
+  </div>
+);
 
 const FieldRow: Component<{ field: SettingField }> = (props) => {
   const f = props.field;

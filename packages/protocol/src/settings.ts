@@ -112,6 +112,32 @@ export interface SecretStatus {
   source: "env-file" | "external" | "unset";
 }
 
+/** Daemon-observed health of a registry MCP server. Derived from accumulated
+ *  use (no live probe on read): `idle` = configured but not yet exercised. */
+export type McpServerHealth = "connected" | "error" | "idle" | "disabled";
+
+/** Read-only status of one registry MCP server (the cross-backend mounter's
+ *  view), surfaced in the settings drawer. Config comes from the registry; the
+ *  health/tools reflect what the daemon-owned client has seen so far. */
+export interface McpServerStatus {
+  name: string;
+  transport: "stdio" | "http" | "in-process";
+  trust: "readonly" | "prompt";
+  scope: "global" | "workspace" | "session";
+  /** Backends this server mounts on; `null` = all. */
+  backends: string[] | null;
+  enabled: boolean;
+  /** `codeoid_memory` — always present, not user-declared. */
+  builtin: boolean;
+  health: McpServerHealth;
+  /** Tools last observed from the server (0 until first used). */
+  toolCount: number;
+  /** Bare tool names last observed. */
+  tools: string[];
+  /** Last error text when `health === "error"`. */
+  error?: string;
+}
+
 /** The current effective settings — the `settings.get` payload. */
 export interface SettingsSnapshot {
   /** key → { value, source } for every non-secret field. */
@@ -122,6 +148,9 @@ export interface SettingsSnapshot {
   configPath: string;
   /** Resolved absolute path of the .env file. */
   envPath: string;
+  /** Read-only registry MCP servers + live health (daemon-populated; absent
+   *  when the daemon has no registry, e.g. hand-built test snapshots). */
+  mcpServers?: McpServerStatus[];
 }
 
 /** One change requested by `settings.set`, addressed by field `key`. */
