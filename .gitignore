@@ -13,3 +13,6 @@ dist/
 # coverage / test-result artifacts
 coverage/
 junit.xml
+
+# codeoid is a bun project — bun.lock is the lockfile; never commit an npm lock
+package-lock.json
