@@ -262,8 +262,9 @@ const HEALTH_STYLE: Record<McpServerStatus["health"], { label: string; cls: stri
 };
 
 /** Read-only panel: the registry's MCP servers + live health. Config comes from
- *  config.json / ~/.claude.json; health/tools reflect what the daemon has seen. */
-const McpServersPanel: Component<{ servers: McpServerStatus[] }> = (props) => (
+ *  config.json / ~/.claude.json; health/tools reflect what the daemon has seen.
+ *  Exported for a render test. */
+export const McpServersPanel: Component<{ servers: McpServerStatus[] }> = (props) => (
   <div>
     <div class="mb-3">
       <h3 class="flex items-center gap-2 text-[15px] font-semibold text-fg">
