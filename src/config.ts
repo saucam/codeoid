@@ -923,6 +923,23 @@ export function loadConfig(opts: LoadOptions = {}): CodeoidConfig {
       fileConfig !== null &&
       "agentIdentity" in fileConfig);
 
+  // A registrar key (zid_sk_*) is minted into a real tenant, and its injector
+  // (e.g. Forge) supplies ZEROID_ACCOUNT_ID + ZEROID_PROJECT_ID alongside it. If
+  // the key is present but the tenant fell back to the personal/dev defaults, the
+  // daemon's local identity store would be keyed personal/dev while the minted
+  // identities live in the badge's actual tenant — a silent split. Surface it.
+  if (
+    parsed.agentIdentity.registrarKey !== undefined &&
+    parsed.agentIdentity.accountId === "personal" &&
+    parsed.agentIdentity.projectId === "dev"
+  ) {
+    console.warn(
+      "[codeoid] ZEROID_REGISTRAR_KEY is set but ZEROID_ACCOUNT_ID/ZEROID_PROJECT_ID " +
+        "are not — falling back to personal/dev. The registrar key is scoped to a real " +
+        "tenant; set both so the local identity store matches the badge's tenant.",
+    );
+  }
+
   const osc8Mode = isOsc8Mode(parsed.telemetry.osc8)
     ? parsed.telemetry.osc8
     : "auto";

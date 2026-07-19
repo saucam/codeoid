@@ -4,7 +4,7 @@
  * instead of touching process.env so we don't leak state between runs.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -80,6 +80,59 @@ describe("loadConfig — file values", () => {
     expect(c.compress.enabled).toBe(false);
     expect(c.workspaceIndex.enabled).toBe(true);
     expect(c.memory?.enabled).toBe(true);
+  });
+});
+
+describe("loadConfig — registrar key + tenant", () => {
+  it("ZEROID_REGISTRAR_KEY flows into agentIdentity.registrarKey (with an explicit tenant)", () => {
+    const c = loadConfig({
+      configPath,
+      env: {
+        ZEROID_REGISTRAR_KEY: "zid_sk_badge",
+        ZEROID_ACCOUNT_ID: "acme",
+        ZEROID_PROJECT_ID: "prod",
+      },
+    });
+    expect(c.agentIdentity).toEqual({
+      accountId: "acme",
+      projectId: "prod",
+      registrarKey: "zid_sk_badge",
+    });
+  });
+
+  it("warns when the registrar key is set but the tenant fell back to personal/dev", () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const c = loadConfig({
+        configPath,
+        env: { ZEROID_REGISTRAR_KEY: "zid_sk_badge" },
+      });
+      // The key still flows (best-effort), just into the default tenant...
+      expect(c.agentIdentity?.registrarKey).toBe("zid_sk_badge");
+      expect(c.agentIdentity?.accountId).toBe("personal");
+      // ...and the misconfiguration is surfaced.
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toContain("ZEROID_REGISTRAR_KEY");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("does NOT warn when the registrar key comes with an explicit tenant", () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      loadConfig({
+        configPath,
+        env: {
+          ZEROID_REGISTRAR_KEY: "zid_sk_badge",
+          ZEROID_ACCOUNT_ID: "acme",
+          ZEROID_PROJECT_ID: "prod",
+        },
+      });
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 
