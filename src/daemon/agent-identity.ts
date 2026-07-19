@@ -26,6 +26,16 @@ export interface AgentIdentityConfig {
   accountId: string;
   projectId: string;
   /**
+   * ZeroID registrar key (zid_sk_*) authenticating the daemon's admin calls
+   * (agents.register / agents.deactivate). Injected per-sandbox (e.g. by
+   * Forge). When present, the single #client exchanges it for a short-lived
+   * Bearer so registration creates REAL identities against a secured ZeroID
+   * instead of degrading to anonymous:*. Absent = unauthenticated admin calls
+   * (a local/dev ZeroID that permits anonymous registration). Distinct from a
+   * per-agent api_key: the #clientForAgent clients are NOT given this key.
+   */
+  registrarKey?: string;
+  /**
    * Prefix for the conductor's ZeroID external_id. Defaults to
    * "codeoid-conductor"; integration tests override it so their throwaway
    * identities are unmistakable (codeoid-conductor-test-*) and sweepable.
@@ -146,6 +156,8 @@ export class AgentIdentityManager {
       baseUrl: config.auth.baseUrl,
       accountId: config.accountId,
       projectId: config.projectId,
+      // Registrar key (if injected) authenticates admin registration calls.
+      apiKey: config.registrarKey,
     });
     this.#store = store;
   }

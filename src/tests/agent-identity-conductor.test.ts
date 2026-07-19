@@ -36,7 +36,7 @@ class FakeZeroID {
   tokenCalls: Array<Record<string, unknown>> = [];
   keyRotations: Array<{ identityId: string; publicKeyPem: unknown }> = [];
   deactivateCalls: string[] = [];
-  /** When true, POST /api/v1/agents/register returns 422. */
+  /** When true, POST /agents/register returns 422. */
   failRegister = false;
   /** When true, the deactivate endpoint returns 422. */
   failDeactivate = false;
@@ -60,7 +60,7 @@ class FakeZeroID {
       const path = url.replace(BASE_URL, "");
       const body = init?.body ? JSON.parse(String(init.body)) : {};
 
-      if (path === "/api/v1/agents/register") {
+      if (path === "/agents/register") {
         this.registerCalls.push(body);
         if (this.failRegister) {
           return Response.json({ detail: "validation failed" }, { status: 422 });
@@ -119,7 +119,7 @@ class FakeZeroID {
       }
 
       const deactivateMatch = path.match(
-        /^\/api\/v1\/agents\/registry\/([^/]+)\/deactivate$/,
+        /^\/agents\/registry\/([^/]+)\/deactivate$/,
       );
       if (deactivateMatch) {
         const id = deactivateMatch[1]!;

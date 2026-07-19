@@ -311,6 +311,7 @@ const AgentIdentitySchema = z
   .object({
     accountId: z.string().default("personal"),
     projectId: z.string().default("dev"),
+    registrarKey: z.string().optional(),
   })
   .default({ accountId: "personal", projectId: "dev" });
 
@@ -585,6 +586,13 @@ export interface CodeoidConfig {
   agentIdentity?: {
     accountId: string;
     projectId: string;
+    /**
+     * ZeroID registrar key (zid_sk_*) that authenticates agent registration.
+     * Injected per-sandbox (e.g. by Forge) so the daemon registers REAL
+     * identities against a secured ZeroID instead of degrading to anonymous:*.
+     * Distinct from apiKey (the human-operator client token).
+     */
+    registrarKey?: string;
   };
   /** Memory / recall config — when enabled, stores episodes and exposes recall() to Claude. */
   memory?: {
@@ -742,6 +750,7 @@ const ENV_OVERRIDES: readonly EnvOverride[] = [
   { env: "CODEOID_OAUTH_CLIENT_ID", path: "oauth.clientId", kind: "string" },
   { env: "ZEROID_ACCOUNT_ID", path: "agentIdentity.accountId", kind: "string" },
   { env: "ZEROID_PROJECT_ID", path: "agentIdentity.projectId", kind: "string" },
+  { env: "ZEROID_REGISTRAR_KEY", path: "agentIdentity.registrarKey", kind: "string" },
   { env: "CODEOID_MEMORY", path: "memory.enabled", kind: "boolean" },
   { env: "CODEOID_MEMORY_DB_PATH", path: "memory.dbPath", kind: "string" },
   { env: "CODEOID_MEMORY_MODEL", path: "memory.model", kind: "string" },
@@ -909,9 +918,27 @@ export function loadConfig(opts: LoadOptions = {}): CodeoidConfig {
   //    multi-tenant mode.
   const hasExplicitTenant =
     env.ZEROID_ACCOUNT_ID !== undefined ||
+    env.ZEROID_REGISTRAR_KEY !== undefined ||
     (typeof fileConfig === "object" &&
       fileConfig !== null &&
       "agentIdentity" in fileConfig);
+
+  // A registrar key (zid_sk_*) is minted into a real tenant, and its injector
+  // (e.g. Forge) supplies ZEROID_ACCOUNT_ID + ZEROID_PROJECT_ID alongside it. If
+  // the key is present but the tenant fell back to the personal/dev defaults, the
+  // daemon's local identity store would be keyed personal/dev while the minted
+  // identities live in the badge's actual tenant — a silent split. Surface it.
+  if (
+    parsed.agentIdentity.registrarKey !== undefined &&
+    parsed.agentIdentity.accountId === "personal" &&
+    parsed.agentIdentity.projectId === "dev"
+  ) {
+    console.warn(
+      "[codeoid] ZEROID_REGISTRAR_KEY is set but ZEROID_ACCOUNT_ID/ZEROID_PROJECT_ID " +
+        "are not — falling back to personal/dev. The registrar key is scoped to a real " +
+        "tenant; set both so the local identity store matches the badge's tenant.",
+    );
+  }
 
   const osc8Mode = isOsc8Mode(parsed.telemetry.osc8)
     ? parsed.telemetry.osc8
@@ -933,6 +960,7 @@ export function loadConfig(opts: LoadOptions = {}): CodeoidConfig {
       ? {
           accountId: parsed.agentIdentity.accountId,
           projectId: parsed.agentIdentity.projectId,
+          registrarKey: parsed.agentIdentity.registrarKey,
         }
       : undefined,
     memory: {

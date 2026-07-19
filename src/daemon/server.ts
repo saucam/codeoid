@@ -121,6 +121,8 @@ export interface DaemonConfig {
   agentIdentity?: {
     accountId: string;
     projectId: string;
+    /** ZeroID registrar key (zid_sk_*) authenticating agent registration. */
+    registrarKey?: string;
   };
   /** Memory config — when present, episodes are stored and recall() is exposed to Claude. */
   memory?: {
@@ -182,6 +184,7 @@ export class DaemonServer {
           auth: config.auth,
           accountId: config.agentIdentity.accountId,
           projectId: config.agentIdentity.projectId,
+          registrarKey: config.agentIdentity.registrarKey,
         },
         this.#store,
       );
