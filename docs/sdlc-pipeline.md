@@ -1,6 +1,7 @@
 # SDLC Pipeline — Design Proposal
 
 > Status: **DRAFT for grilling** · Author: design session 2026-07-16
+> · Enriched 2026-07-20 with external prior-art & SOTA validation (§2a) + refinements (§5a)
 > Goal: give Codeoid a first-class, **optional**, **plugin-based**
 > spec-driven-development pipeline — the durable, identity-aware, multi-provider
 > host for a `spec → ship` workflow — where every phase, gate, and skill is a
@@ -30,6 +31,10 @@ model, review → a cross-provider panel).
   "ethos" ship in the daemon core. Those live in a swappable **SDLC pack**
   (§3, §7). Codeoid gains a *generic pipeline primitive*; the process content is
   content.
+- **Off by default.** The pipeline ships dark: no pack is enabled unless one is
+  explicitly selected (per-run, project, or user config). A session with nothing
+  configured behaves exactly as today (`freestyle`) — the same "zero behavior change
+  until enabled" discipline as `ContextStrategy`.
 - **We do not clone ADLC.** ADLC's skills already run unmodified inside a Codeoid
   session (they are just Claude Code skills). We adopt the methodology as content
   and upgrade the layers ADLC structurally can't do: durable orchestration,
@@ -64,6 +69,60 @@ out-classes.
 **What we adopt as content:** the phase sequence, the gate discipline
 ("Verify, don't trust"), knowledge artifacts (lessons/assumptions), and the
 adversarial-review posture.
+
+---
+
+## 2a. External prior art & SOTA validation
+
+§2 covers ADLC — the methodology this pipeline hosts.
+This section places the design against the wider field of AI-SDLC systems, to validate its load-bearing bets and to import the ideas ADLC alone does not surface.
+Sources: GitHub **Spec Kit**, **BMAD-METHOD**, Amazon **Kiro**, **Aider**, **Cline / Roo Code**, **OpenHands**, **Tessl**; four 2026 papers — Spec Kit Agents (`arXiv:2604.05278`), Meta-Engineering Harnesses (`arXiv:2605.25665`), Terminal Coding Agents (`arXiv:2603.05344`), Open Agent Spec (`arXiv:2510.04173`); and the two peer meta-harnesses checked out locally, **omnigent** and **kiss_ai**.
+
+### 2a.1 The field converges on five primitives
+
+Every surveyed system independently decomposes an SDLC into the same five parts.
+This is the external check on our registry model (§3a): our four registries express these five primitives, and the mapping exposes the two we currently under-model — artifacts and per-phase toolset.
+
+| Primitive | Cleanest example in the field | Where it lives here |
+|---|---|---|
+| **Phase** — named step with intent | Spec Kit `/speckit.*` (constitution→specify→plan→tasks→analyze→implement) | `PhaseDef` + `PhaseKind` registry (§3a, §5) |
+| **Per-phase prompt + toolset (+ model)** | Roo custom mode: `roleDefinition` + tool-groups + per-group `fileRegex`; Aider: reason-model vs edit-model | prompt/model/provider present; **toolset added §5a.1** |
+| **Artifact** — typed I/O between phases | Spec Kit `specs/NNN/{spec,plan,tasks}.md`; BMAD self-contained story file | knowledge artifacts only; **typed I/O added §5a.2** |
+| **Entry / exit gate** — predicate guarding a transition | Roo `FileRestrictionError` (hard); BMAD `PASS/CONCERNS/FAIL/WAIVED`; Meta-Engineering independent arbiter | exit gates present; **entry gates §5a.3, tiers §5a.5** |
+| **Strategy / profile** — swappable composition | Spec Kit stackable templates (`overrides > presets > extensions > core`) | the **pack** (§3a.2, §7) |
+
+### 2a.2 Convergent patterns — evidence for our bets
+
+- **Methodology-agnostic core + swappable content.** Spec Kit runs one spec→plan→tasks pipeline against 30+ agents, with a *constitution* governing it separately. → validates §3's three-layer split.
+- **A standing constitution / steering layer, separate from the per-task spec.** Spec Kit `constitution.md`, Kiro steering docs, Cline `.clinerules`, Roo `.roo/rules/`. → we under-model this; added in §5a.4.
+- **Plan-before-code as a separable phase.** Cline Plan/Act, Aider architect/editor, Spec Kit plan-then-implement. → our `architect` / `validate` phases already encode it.
+- **Read-only grounding before acting.** Cline Plan mode is read-only; the Spec Kit Agents paper formalizes read-only probing hooks that ground each phase in repo evidence. → imported as *entry gates*, §5a.3.
+- **Tests / contracts as the gate.** Spec Kit makes TDD non-negotiable; Tessl validates regenerated code against specs; Meta-Engineering compiles requirements into contracts. → our `command`-tier gates, §5a.5.
+- **Structured-error feedback over one-shot generation.** Failed checks return as structured context, not raw stack traces — every paper credits this for the reliability gain. → §5a.5.
+
+### 2a.3 Divergent choices — and where we land
+
+- **Primary unit — artifact vs persona vs mode.** Artifact-heavy (Spec Kit / Kiro / Tessl), persona-heavy (BMAD's Analyst / PM / Architect / SM / Dev / QA), mode-heavy (Cline / Roo / Aider).
+  Mode-heavy's fatal flaw is that the plan lives in chat and evaporates; our daemon-owned, restart-surviving phase state (§5.2) is exactly that fix.
+  We are **artifact + durable-state**, not mode.
+- **Enforcement — soft vs hard.** Spec Kit gates are LLM-honored checklists; Roo throws a real `FileRestrictionError`.
+  We support the full spectrum as tiers (§5a.5), with the hard tier enforced at the tool fence (§5a.1).
+- **Verification — self vs adversary.** Most tools self-check; the Meta-Engineering paper argues for an independent adversarial verifier + failure arbiter.
+  Our cross-provider panel (§4.4) already is one — this settles open Q6.
+- **Runtime coupling.** Kiro is IDE-locked; Spec Kit is agent-agnostic; Open Agent Spec goes furthest (one spec, many runtimes via adapters).
+  Codeoid's provider-agnostic core puts us on the agent-agnostic end for free.
+
+### 2a.4 Peer meta-harnesses: the state-machine question
+
+omnigent and kiss_ai are the two systems architecturally closest to Codeoid — multi-provider harnesses that host a coding *process* rather than being a single agent.
+Both **deliberately refuse to build a coded phase state-machine.**
+omnigent expresses its process as prose `SKILL.md` files + a four-value `purpose` enum (`implement` / `review` / `explore` / `search`) + runner-side policies that deny any step lacking a valid purpose.
+kiss_ai expresses it as a single `SYSTEM.md` prompt + a `finish(success, is_continue, summary)` continuation contract + a read-only *judge* agent that inspects the work and returns pass/fail.
+Both explicitly flag the same limitation: no inspectable phase DAG.
+That gap is this design's entire thesis, and the reason to build the pipeline they refused is architectural, not stylistic.
+Codeoid's daemon owns all state and its frontends are pure renderers, so a phase can be first-class, persisted, restart-surviving, and answered from any device (§4.1, §5.2) — the properties a single-process, single-frontend harness cannot give a state-machine.
+omnigent and kiss_ai were right to stay prose-only for their architecture; we are right not to for ours.
+Borrow from them regardless: omnigent's rule that a reviewer must be a **different vendor** than the implementer sharpens our review panel (§4.4), and kiss_ai's **`finish(...)` tri-state** is the exact signal a phase worker should send the engine to mean pass / continue / fail.
 
 ---
 
@@ -172,8 +231,8 @@ turn a phase or pack on/off:
 ```jsonc
 {
   "pipeline": {
-    "defaultPack": "adlc",
-    "packs": { "adlc": { "enabled": true }, "house-process": { "enabled": false } },
+    "defaultPack": null,          // off by default — freestyle until a pack is chosen
+    "packs": { "adlc": { "enabled": false }, "house-process": { "enabled": false } },
     "phases": {
       "review":   { "enabled": true, "skill": "review", "gate": "no_blocking_findings",
                     "panel": ["claude", "gemini"] },   // override a phase inline
@@ -285,6 +344,9 @@ draft → running ⇄ halted → { merged | failed | abandoned }
 A **Pipeline** is an ordered list of **Phases**. Each phase has: `id`, `name`,
 `skill` (the slash command / prompt it runs), `provider?`, `model?`, `gate?` (a
 predicate on phase output), and `onFail` (`halt` | `retry(n)` | `abort`).
+Each phase also carries (§5a): `tools?` (per-phase allow/deny scope, enforced at the
+`canUseTool` fence), `reads?` / `writes?` (typed artifact I/O), and gates positioned
+`at: entry | exit` (grounding vs acceptance).
 
 ```typescript
 type PhaseState =
@@ -329,6 +391,88 @@ no stale files, survives process death, visible from anywhere.
 
 ---
 
+## 5a. Refinements from external prior art
+
+Five additions the survey (§2a) surfaces.
+Each is a small extension to the primitive in §5 — not a new layer.
+
+### 5a.1 Per-phase tool scoping — the hard enforcement tier
+
+A phase is not only a prompt + a provider; it is also a set of **allowed / denied tools**, enforced *during* the phase rather than checked after it.
+This is Roo Code's `fileRegex` + tool-groups, and it is the strongest enforcement tier available.
+It maps onto a seam Codeoid already owns: the per-turn tool gate (`Session#shouldAutoApprove` / the `canUseTool` fence) — the same place `mode` is enforced today — so a phase's tool policy composes with the session `mode` and can **hard-deny regardless of mode**.
+
+```typescript
+// added to PhaseDef
+tools?: {
+  allow?: string[];   // tool / file globs, e.g. ["Read","Write(**/*_test.*)","Bash(*test*)"]
+  deny?:  string[];   // hard block — wins over allow and over mode, e.g. ["Edit"]
+};
+```
+
+A TDD "red" phase that may not touch source until a failing test exists: `deny: ["Edit"]`, `allow: ["Read","Grep","Write(**/*_test.*)","Bash(*test*)"]`.
+Because it is enforced at the fence, a mis-scoped phase fails closed instead of relying on the model to honor a prompt.
+
+### 5a.2 Artifacts as typed phase I/O
+
+§7 models *knowledge* artifacts (lessons / assumptions).
+The survey adds **typed inter-phase artifacts**: each phase declares what it reads and the one artifact it writes, and phases communicate through those files, not through chat.
+This is the Spec Kit spine (`spec.md → plan.md → tasks.md`) and BMAD's self-contained story file.
+
+```typescript
+// added to PhaseDef
+reads?:  string[];   // artifact ids this phase consumes
+writes?: string;     // artifact id this phase produces (path under .codeoid/sdlc/<pipeline>/)
+```
+
+Two properties worth importing wholesale:
+
+- **Machine-detectable incompleteness.** Spec Kit marks unresolved decisions inline as `[NEEDS CLARIFICATION]`, and the mere presence of that marker is a gate failure — giving the `spec_valid` gate (§7) a concrete, cheap predicate.
+- **On disk, indexed into memory.** Write phase artifacts under `.codeoid/sdlc/<pipeline>/` (git-trackable, survives context rotation) and index them into the memory store so later phases page them via the recall tools.
+
+This resolves open Q3 in favor of *both*: on-disk source of truth, store-indexed for cross-phase and cross-repo recall.
+
+### 5a.3 Entry (grounding) gates, not only exit gates
+
+§5's gates are **exit** predicates evaluated on a phase's output.
+The Spec Kit Agents paper (`arXiv:2604.05278`) shows the higher-value gate is on **entry**: a read-only probing hook that grounds the phase in repository evidence *before* it decides anything.
+Its reported effect is a cure for the "context-blind" hallucinated-API failure mode (+0.15 on a 5-point judge; 58.2 % Pass@1 on SWE-bench Lite).
+
+```typescript
+interface GatePlugin {
+  id: string;
+  at: "entry" | "exit";                  // NEW — grounding gate vs acceptance gate
+  evaluate(ctx: GateCtx): Promise<GateVerdict>;
+}
+```
+
+An entry gate is a read-only phase pre-step — grep / read / probe the repo, load the relevant contracts — whose output is injected into the phase context; it never edits.
+It runs under the read-only tool scope of §5a.1, which is also what makes it cheap and safe.
+
+### 5a.4 The constitution / steering layer
+
+Near-universal in the field (Spec Kit `constitution.md`, Kiro steering `product/tech/structure.md`) and currently absent here: a **standing-rules artifact**, separate from the per-task spec, that every phase must satisfy.
+It composes into every phase's system prompt (the same seam that appends the per-phase prompt), and its articles are gate inputs — a phase can fail because it violates an article.
+Kiro's scoping metadata is worth copying verbatim: each steering doc declares `inclusion: always | fileMatch:<glob> | manual`, so a rule applies globally, only to matching files, or only on demand.
+This is what lets an org encode "≤3 projects / library-first / tests-are-non-negotiable" once and have every phase honor it — composed via packs (§7), never by forking the daemon.
+
+### 5a.5 Gate enforcement tiers — resolves open Q4
+
+Gate predicates need not be one kind.
+The field uses four escalating tiers; the engine should support all of them, chosen per gate in the pack YAML:
+
+| Tier | `kind` | Mechanism | Source |
+|---|---|---|---|
+| Self-check | `self` | Model asserts the gate is met | Spec Kit gates |
+| Deterministic | `command` | Run a shell command; check exit code / output | kiss_ai `uv run check`; tests-pass |
+| Status-label | `status` | Human or agent sets `PASS / CONCERNS / FAIL / WAIVED` | BMAD QA gate |
+| Adversarial | `review` | Dispatch an **independent, different-vendor** reviewer (the panel, §4.4) + a judge that arbitrates | omnigent cross-vendor review; Meta-Engineering arbiter (`arXiv:2605.25665`) |
+
+This answers open Q4 ("declarative vs skill"): it is **both**, as tiers — `command` / `status` are declarative and inspectable, `self` / `review` are skill-driven.
+On failure, the verdict's `reason` / `questions` are fed back as **structured error context** (not a raw failure) — the pattern every paper credits for the reliability gain, and the same halt payload §4.1 already surfaces to frontends.
+
+---
+
 ## 6. Protocol & scope additions
 
 New client → daemon messages (additive):
@@ -366,6 +510,10 @@ capability ids**, so a pack is data, and authoring one is filling in a YAML file
 ```yaml
 # packs/adlc/pipeline.yaml
 id: adlc
+constitution: constitution.md          # standing rules; composed into every phase prompt (§5a.4)
+steering:                              # scoped rules, Kiro-style (§5a.4)
+  - { file: tech.md, inclusion: always }
+  - { file: api.md,  inclusion: 'fileMatch:packages/api/**' }
 phases:
   - id: spec        ; kind: skill ; skill: spec       ; gate: has_acceptance_criteria
   - id: architect   ; kind: skill ; skill: architect  ; provider: claude ; model: opus
@@ -469,12 +617,16 @@ actual differentiator. Scope for that or don't start.
    context + dispatch + worktree isolation for free.
 3. **Where do knowledge artifacts live** — per-repo `.codeoid/knowledge/` (ADLC
    style) or the daemon store (queryable across repos via the memory tools)? The
-   memory-recall infra argues for the store.
+   memory-recall infra argues for the store. → **Resolved (§5a.2):** both — on-disk
+   `.codeoid/sdlc/` as source of truth, indexed into the store for cross-phase recall.
 4. **Gate predicates: declarative (YAML expression) or a skill that returns
    pass/fail?** Declarative is safer/inspectable; a skill is more flexible. Maybe
-   both, like ADLC's `/validate`.
+   both, like ADLC's `/validate`. → **Resolved (§5a.5):** both, as four enforcement
+   tiers — `self` / `command` / `status` / `review`.
 5. **Do phases share one worker session (provider-switch between phases) or one
    worker per phase?** One-per-phase gives clean identity/audit boundaries and
    parallelism; shared gives cheaper context continuity. Likely one-per-phase.
 6. **Cross-provider review merge:** union of findings, or a judge phase that
-   dedupes/ranks? (ADLC's adversarial-review posture suggests a judge.)
+   dedupes/ranks? (ADLC's adversarial-review posture suggests a judge.) → **Leaning
+   judge (§5a.5):** confirmed by the Meta-Engineering independent-arbiter result
+   (`arXiv:2605.25665`).
