@@ -15,7 +15,10 @@ import { SessionManager } from "../daemon/session-manager.js";
 import { Store } from "../daemon/store.js";
 import { TranscriptStore } from "../daemon/transcript.js";
 import { SCOPES } from "../protocol/scopes.js";
-import type { SettingKind } from "../protocol/types.js";
+import type { McpServerStatus, SettingKind } from "../protocol/types.js";
+import { McpRegistry } from "../daemon/mcp/registry.js";
+import { McpHub } from "../daemon/mcp/hub.js";
+import type { RawMcpServerConfig } from "../config.js";
 
 // ── Manifest integrity (no daemon, no IO) ─────────────────────────────────────
 
@@ -274,6 +277,25 @@ describe("settings RPC handlers", () => {
 
     const ok = await mgr().handle({ type: "settings.get", id: "2" }, auth([SCOPES.SETTINGS_READ]), client);
     expect(ok.type).toBe("settings.get.result");
+  });
+
+  it("settings.get surfaces registry MCP servers + health (read-only)", async () => {
+    const raw = (p: Partial<RawMcpServerConfig>): RawMcpServerConfig =>
+      ({ args: [], env: {}, headers: {}, trust: "prompt", scope: "session", enabled: true, native: false, ...p }) as RawMcpServerConfig;
+    const m = mgr();
+    m.setMcp(
+      new McpRegistry({ github: raw({ command: "npx", args: ["-y", "@mcp/gh"] }) }, { memoryEnabled: true }),
+      new McpHub({}),
+    );
+    const ok = (await m.handle({ type: "settings.get", id: "3" }, auth([SCOPES.SETTINGS_READ]), client)) as {
+      snapshot: { mcpServers?: McpServerStatus[] };
+    };
+    const servers = ok.snapshot.mcpServers ?? [];
+    const mem = servers.find((s) => s.name === "codeoid_memory");
+    expect(mem).toMatchObject({ builtin: true, transport: "in-process", trust: "readonly" });
+    const gh = servers.find((s) => s.name === "github");
+    // Configured but never used this run → idle, no tools yet.
+    expect(gh).toMatchObject({ builtin: false, transport: "stdio", health: "idle", toolCount: 0 });
   });
 
   it("settings.set requires settings:write (read alone is not enough)", async () => {

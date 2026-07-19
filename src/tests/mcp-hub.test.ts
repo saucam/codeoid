@@ -153,4 +153,24 @@ describe("McpHub — stdio", () => {
     expect(bad.text).toBe("kaboom");
     hub.closeAll();
   });
+
+  it("tracks live status (tools + connected) for the settings surface", async () => {
+    const hub = new McpHub({ daemonEnv: DAEMON_ENV });
+    const s = spec({ name: "local", transport: { kind: "stdio", command: process.execPath, args: [FIXTURE], env: {} } });
+    expect(hub.statusFor("local")).toBeUndefined(); // untouched
+    expect(hub.hasClient("local")).toBe(false);
+    await hub.listTools(s);
+    expect(hub.hasClient("local")).toBe(true);
+    expect(hub.statusFor("local")?.tools.sort()).toEqual(["boom", "echo"]);
+    expect(hub.statusFor("local")?.error).toBeUndefined();
+    hub.closeAll();
+  });
+
+  it("records a transport failure in status (timeout → error)", async () => {
+    const hub = new McpHub({ daemonEnv: DAEMON_ENV, toolTimeoutMs: 50 });
+    const s = spec({ name: "remote", transport: { kind: "http", url: HTTP_URL, headers: {}, bearerTokenEnv: "TOK" } });
+    await hub.callTool(s, "slow", {}, SCOPE); // server sleeps 300ms → times out
+    expect(hub.statusFor("remote")?.error).toContain("timed out");
+    hub.closeAll();
+  });
 });
