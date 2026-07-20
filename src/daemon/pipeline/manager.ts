@@ -152,11 +152,22 @@ export class PipelineManager {
       .map((s) => s.id);
     // Bound concurrency: each advance may spawn a real worker turn, so a restart
     // with many interrupted pipelines must not launch them all at once (a
-    // boot-time resource storm). Drive in fixed-size batches.
+    // boot-time resource storm). Drive in fixed-size batches, and isolate each
+    // advance — one pipeline that throws must not abort the rest of the resume.
     const results: PipelineState[] = [];
     for (let i = 0; i < ids.length; i += RESUME_CONCURRENCY) {
       const batch = ids.slice(i, i + RESUME_CONCURRENCY);
-      results.push(...(await Promise.all(batch.map((id) => this.advance(id)))));
+      const settled = await Promise.all(
+        batch.map(async (id) => {
+          try {
+            return await this.advance(id);
+          } catch (err) {
+            console.error(`[pipeline] failed to advance pipeline ${id} during resume: ${err instanceof Error ? err.message : String(err)}`);
+            return null;
+          }
+        }),
+      );
+      results.push(...settled.filter((r): r is PipelineState => r !== null));
     }
     return results;
   }
