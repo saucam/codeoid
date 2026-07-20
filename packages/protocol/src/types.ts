@@ -1564,6 +1564,9 @@ export interface PipelinePhaseWire {
   id: string;
   name?: string;
   status: "pending" | "running" | "halted" | "passed" | "failed";
+  /** Capability role this phase runs under (from the pack) — a client can render
+   *  the phase's tool envelope (e.g. a read-only reviewer). */
+  role?: string;
   summary?: string;
   reason?: string;
   /** Set when status==="halted" — echo back in pipeline.answer. */
@@ -1595,6 +1598,8 @@ export interface PhaseDefWire {
   entryGate?: string;
   provider?: string;
   model?: string;
+  /** Capability role this phase runs under (an id into the pack's roles). */
+  role?: string;
   /** Reserved metadata (not yet consumed): typed artifact ids (§5a.2). */
   reads?: string[];
   writes?: string;
@@ -1604,7 +1609,12 @@ export interface PhaseDefWire {
 export interface PipelineCreateMsg extends BaseClientMsg {
   type: "pipeline.create";
   name: string;
-  phases: PhaseDefWire[];
+  /** Explicit phase plan. Provide this OR `pack` (not both). If neither is
+   *  given, the daemon's configured `defaultPack` is used. */
+  phases?: PhaseDefWire[];
+  /** Id of an installed pack whose pipeline this run uses (see pipeline.packs
+   *  config). Mutually exclusive with `phases`. */
+  pack?: string;
   spec?: string;
   workdir?: string;
 }

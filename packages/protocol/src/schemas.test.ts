@@ -159,6 +159,33 @@ describe("fidelity — valid samples round-trip unchanged", () => {
   }
 });
 
+describe("pipeline.create — pack / role / optional phases", () => {
+  test("accepts a pack reference with no phases", () => {
+    const r = parseClientMessage({ type: "pipeline.create", id: "x", name: "R", pack: "aif-sdlc", workdir: "/tmp/repo" });
+    expect(r.ok).toBe(true);
+    if (r.ok && r.value.type === "pipeline.create") {
+      expect(r.value.pack).toBe("aif-sdlc");
+      expect(r.value.phases).toBeUndefined();
+    }
+  });
+
+  test("accepts a phase carrying a capability role", () => {
+    const r = parseClientMessage({
+      type: "pipeline.create",
+      id: "x",
+      name: "R",
+      phases: [{ id: "impl", kind: "skill", skill: "build", role: "implementer" }],
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok && r.value.type === "pipeline.create") expect(r.value.phases?.[0]?.role).toBe("implementer");
+  });
+
+  test("accepts create with neither phases nor pack (defaultPack resolved server-side)", () => {
+    const r = parseClientMessage({ type: "pipeline.create", id: "x", name: "R" });
+    expect(r.ok).toBe(true);
+  });
+});
+
 // ── 3. Forward-compat + rejection behaviour ───────────────────────────────────
 
 describe("forward-compat", () => {

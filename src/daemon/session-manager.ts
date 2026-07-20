@@ -1786,7 +1786,7 @@ mcpHub: this.#mcpHub,
       updatedAt: s.updatedAt,
       phases: s.phases.map((p) => {
         const st = p.state;
-        const w: PipelinePhaseWire = { id: p.def.id, name: p.def.name, status: st.status };
+        const w: PipelinePhaseWire = { id: p.def.id, name: p.def.name, role: p.def.role, status: st.status };
         if (st.status === "passed") w.summary = st.summary;
         else if (st.status === "failed") w.reason = st.reason;
         else if (st.status === "halted") {
@@ -1807,8 +1807,12 @@ mcpHub: this.#mcpHub,
     if (msg.workdir !== undefined && !normalizeWorkdir(msg.workdir)) {
       return { type: "response.error", requestId: msg.id, error: `workdir not usable: ${msg.workdir}`, code: "invalid_request" };
     }
+    // Resolve the plan: explicit `pack`, else explicit `phases`, else the
+    // configured default pack. `phases` XOR `pack` is enforced in create().
+    const defaultPack = this.#config?.pipeline?.defaultPack ?? undefined;
+    const pack = msg.pack ?? (msg.phases === undefined ? defaultPack : undefined);
     const providerIds = this.#providers.ids();
-    for (const p of msg.phases) {
+    for (const p of msg.phases ?? []) {
       if (p.provider && !providerIds.includes(p.provider)) {
         return { type: "response.error", requestId: msg.id, error: `phase "${p.id}": unknown provider "${p.provider}"`, code: "invalid_request" };
       }
@@ -1817,6 +1821,7 @@ mcpHub: this.#mcpHub,
       const state = g.pm.create({
         name: msg.name,
         phases: msg.phases,
+        pack,
         spec: msg.spec,
         workdir: msg.workdir,
         accountId: auth.accountId,
