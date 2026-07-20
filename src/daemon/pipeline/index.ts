@@ -14,3 +14,6 @@ export { alwaysGate, manualGate, noopPhaseKind, registerBuiltins } from "./built
 export { PipelineEngine } from "./engine";
 export { PipelineStore } from "./store";
 export { type CreatePipelineOpts, PipelineManager } from "./manager";
+export { createPipelineManagerFromConfig, type PipelineWiringConfig } from "./wiring";
+export { makeSkillPhaseKind } from "./skill-kind";
+export type { PhaseRunner, PhaseRunRequest, PhaseRunOutput } from "./runner";
