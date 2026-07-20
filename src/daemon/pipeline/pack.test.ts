@@ -197,6 +197,33 @@ phases:
     expect(() => loadPack(dir)).toThrow("duplicate phase id");
   });
 
+  test("rejects a constitution path that escapes the pack dir (traversal)", () => {
+    const dir = writePack(`schema: codeoid/pack@v1
+id: p
+name: P
+version: 0.1.0
+constitution: ../../../../etc/passwd
+phases:
+  - id: a
+    kind: noop
+`);
+    expect(() => loadPack(dir)).toThrow("escapes the pack directory");
+  });
+
+  test("rejects an absolute role path (arbitrary file read)", () => {
+    const dir = writePack(`schema: codeoid/pack@v1
+id: p
+name: P
+version: 0.1.0
+roles:
+  - /etc/passwd
+phases:
+  - id: a
+    kind: noop
+`);
+    expect(() => loadPack(dir)).toThrow("escapes the pack directory");
+  });
+
   test("throws when a phase has neither kind nor skill", () => {
     const dir = writePack(`schema: codeoid/pack@v1
 id: p
@@ -228,9 +255,9 @@ phases:
 `);
   }
 
-  test("runs a pack-defined pipeline to done (command gate passes)", async () => {
+  test("runs a pack-defined pipeline to done (trusted command gate passes)", async () => {
     const mgr = new PipelineManager(new PipelineStore(new Database(":memory:")));
-    mgr.installPack(loadPack(noopPack("  - id: green\n    kind: command\n    run: \"true\"", "green")));
+    mgr.installPack(loadPack(noopPack('  - id: green\n    kind: command\n    run: "true"', "green"), { trusted: true }));
     const p = mgr.create({ name: "run", pack: "noop-pack", ...tenant });
     expect(p.status).toBe("draft");
     expect(p.phases.map((ph) => ph.def.id)).toEqual(["a", "b"]);
@@ -238,15 +265,27 @@ phases:
     expect(done.status).toBe("done");
   });
 
-  test("a failing command gate halts the pipeline with the gate reason", async () => {
+  test("a failing trusted command gate halts the pipeline with the gate reason", async () => {
     const mgr = new PipelineManager(new PipelineStore(new Database(":memory:")));
-    mgr.installPack(loadPack(noopPack("  - id: red\n    kind: command\n    run: \"false\"", "red")));
+    mgr.installPack(loadPack(noopPack('  - id: red\n    kind: command\n    run: "false"', "red"), { trusted: true }));
     const p = mgr.create({ name: "run", pack: "noop-pack", ...tenant });
     const halted = await mgr.advance(p.id);
     expect(halted.status).toBe("halted");
     expect(halted.phases[0].state.status).toBe("halted");
     if (halted.phases[0].state.status === "halted") {
       expect(halted.phases[0].state.reason).toContain("command gate");
+    }
+  });
+
+  test("an UNTRUSTED command gate never executes — fails closed (registry default)", async () => {
+    const mgr = new PipelineManager(new PipelineStore(new Database(":memory:")));
+    // No { trusted } → default false. Even a "true" command must not run.
+    mgr.installPack(loadPack(noopPack('  - id: green\n    kind: command\n    run: "true"', "green")));
+    const p = mgr.create({ name: "run", pack: "noop-pack", ...tenant });
+    const halted = await mgr.advance(p.id);
+    expect(halted.status).toBe("halted");
+    if (halted.phases[0].state.status === "halted") {
+      expect(halted.phases[0].state.reason).toContain("requires a trusted pack");
     }
   });
 

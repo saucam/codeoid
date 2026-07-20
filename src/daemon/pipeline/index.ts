@@ -20,6 +20,7 @@ export {
   packManifestSchema,
   roleSchema,
   type LoadedPack,
+  type LoadPackOptions,
   type PackManifest,
   type RoleDef,
 } from "./pack";

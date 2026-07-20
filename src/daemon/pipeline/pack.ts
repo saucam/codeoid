@@ -8,7 +8,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { z } from "zod";
 import type {
   GatePlugin,
@@ -102,10 +102,32 @@ export interface LoadedPack extends Pack {
   dir: string;
 }
 
+export interface LoadPackOptions {
+  /** Whether the host trusts this pack to execute `command` gates on its
+   *  machine. Defaults to FALSE. A pack is pure data: it may *declare* a shell
+   *  command, but declaring is not executing — a pack fetched from a shared /
+   *  untrusted registry runs no host commands until an operator explicitly
+   *  trusts it (Workspace-Trust / `direnv allow` model). Untrusted `command`
+   *  gates fail closed, exactly like not-yet-enforced gates. */
+  trusted?: boolean;
+}
+
 // ── Loader ────────────────────────────────────────────────────────────────
 
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
-const underDir = (dir: string, rel: string): string => (isAbsolute(rel) ? rel : resolve(dir, rel));
+
+/** Resolve a pack-relative path, CONFINED to the pack directory. A manifest may
+ *  only reference files it ships: absolute paths and `..` traversal are rejected,
+ *  so a hostile pack can't read `/etc/shadow` or `../../secrets` into a prompt.
+ *  (Boundary is `base + sep` so a sibling like `pack-evil` can't masquerade.) */
+const underDir = (dir: string, rel: string): string => {
+  const base = resolve(dir);
+  const resolved = resolve(base, rel);
+  if (isAbsolute(rel) || (resolved !== base && !resolved.startsWith(base + sep))) {
+    throw new Error(`path "${rel}" escapes the pack directory`);
+  }
+  return resolved;
+};
 const readText = (path: string): string => readFileSync(path, "utf8");
 const readYaml = (path: string): unknown => Bun.YAML.parse(readText(path));
 
@@ -116,8 +138,9 @@ const readYaml = (path: string): unknown => Bun.YAML.parse(readText(path));
  * its `pipeline` is the phase list (each phase carrying its capability `role`).
  * Phase gate ids may reference this pack's gates OR built-in gates (always /
  * manual) — those are validated at `create()` against the live registries.
+ * `command` gates only execute when `opts.trusted` is set (default false).
  */
-export function loadPack(dir: string): LoadedPack {
+export function loadPack(dir: string, opts: LoadPackOptions = {}): LoadedPack {
   let manifestRaw: unknown;
   try {
     manifestRaw = readYaml(join(dir, "pack.yaml"));
@@ -164,7 +187,7 @@ export function loadPack(dir: string): LoadedPack {
   );
   const skillIds = new Set(skills.map((s) => s.id));
 
-  const gates: GatePlugin[] = m.gates.map((g) => buildGate(g, dir));
+  const gates: GatePlugin[] = m.gates.map((g) => buildGate(g, dir, opts.trusted ?? false));
 
   const seen = new Set<string>();
   const pipeline: PhaseDef[] = m.phases.map((p) => {
@@ -216,9 +239,21 @@ function toOnFail(v: PackManifest["phases"][number]["onFail"]): PhaseFailAction 
 
 // ── Gate builders ─────────────────────────────────────────────────────────
 
-function buildGate(g: PackManifest["gates"][number], dir: string): GatePlugin {
+/** A gate that never passes — used for gates that must not silently succeed
+ *  (untrusted command gates, and self/skill/review until the enforcement slice). */
+function failClosedGate(id: string, at: "entry" | "exit", reason: string): GatePlugin {
+  return { id, at, async evaluate() { return { pass: false, reason }; } };
+}
+
+function buildGate(g: PackManifest["gates"][number], dir: string, trusted: boolean): GatePlugin {
   const at = g.at ?? "exit";
   if (g.kind === "command") {
+    // A command gate is DATA (a declared shell string). Executing it is a host
+    // trust decision: an untrusted pack (the registry default) fails closed, so
+    // fetching a pack never runs host commands until an operator opts in.
+    if (!trusted) {
+      return failClosedGate(g.id, at, `command gate "${g.id}" requires a trusted pack (host opt-in) — not executed`);
+    }
     const run = g.run;
     return {
       id: g.id,
@@ -234,13 +269,7 @@ function buildGate(g: PackManifest["gates"][number], dir: string): GatePlugin {
     };
   }
   // self / skill / review gates are declared in the schema but not yet enforced
-  // end-to-end. Fail CLOSED (never silently pass) with a clear reason, so a pack
-  // using them halts for a human until the gate-execution slice lands.
-  return {
-    id: g.id,
-    at,
-    async evaluate() {
-      return { pass: false, reason: `gate "${g.id}" (kind "${g.kind}") is not yet enforced` };
-    },
-  };
+  // end-to-end. Fail CLOSED (never silently pass), so a pack using them halts for
+  // a human until the gate-execution slice lands.
+  return failClosedGate(g.id, at, `gate "${g.id}" (kind "${g.kind}") is not yet enforced`);
 }
