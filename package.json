@@ -1,6 +1,6 @@
 {
   "name": "codeoid",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Identity-first control plane for AI coding agents \u2014 multi-session, multi-frontend, with cross-session memory",
   "type": "module",
   "workspaces": [
