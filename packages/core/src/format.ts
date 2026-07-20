@@ -11,7 +11,11 @@ export function formatTokens(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n)) return "—";
   const abs = Math.abs(n);
   if (abs >= 1_000_000) return `${trimZeros(n / 1_000_000)}M`;
-  if (abs >= 10_000) return `${Math.round(n / 1_000)}k`;
+  if (abs >= 10_000) {
+    // Guard the boundary: 999_500..999_999 rounds to 1000k — promote to "1M".
+    const k = Math.round(n / 1_000);
+    return Math.abs(k) >= 1_000 ? `${trimZeros(k / 1_000)}M` : `${k}k`;
+  }
   if (abs >= 1_000) return `${trimZeros(n / 1_000)}k`;
   return Math.round(n).toString();
 }

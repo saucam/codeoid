@@ -449,8 +449,13 @@ export class AgentIdentityManager {
         "subagent.identity.deactivated",
         sessionId,
       );
-    } catch {
-      // Best-effort
+    } catch (err) {
+      // A failed revocation leaves the token ACTIVE — log it (don't swallow),
+      // matching deactivateConductor. The local row is still dropped below.
+      console.error(
+        `[codeoid] failed to deactivate subagent identity ${agent.wimseUri} (token may remain active):`,
+        err instanceof Error ? err.message : err,
+      );
     }
     this.#agents.delete(key);
   }
@@ -467,8 +472,11 @@ export class AgentIdentityManager {
       if (key.startsWith(`${sessionId}:`) && key !== sessionId) {
         try {
           await this.#client.agents.deactivate(subagent.identityId);
-        } catch {
-          // Best-effort
+        } catch (err) {
+          console.error(
+            `[codeoid] failed to deactivate subagent identity ${subagent.wimseUri} (token may remain active):`,
+            err instanceof Error ? err.message : err,
+          );
         }
         this.#agents.delete(key);
       }
@@ -482,8 +490,11 @@ export class AgentIdentityManager {
         "agent.identity.deactivated",
         sessionId,
       );
-    } catch {
-      // Best-effort
+    } catch (err) {
+      console.error(
+        `[codeoid] failed to deactivate session-agent identity ${agent.wimseUri} (token may remain active):`,
+        err instanceof Error ? err.message : err,
+      );
     }
     this.#agents.delete(sessionId);
   }

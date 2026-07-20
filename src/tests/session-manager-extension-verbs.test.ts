@@ -147,7 +147,7 @@ describe("session.commands", () => {
 describe("session.ui_response", () => {
   it("routes an answer to the pending request; second answer is not_found", async () => {
     const sessionId = await createSession();
-    const session = manager.findByName("ext")!;
+    const session = manager.findByName("ext", OWNER)!;
     const answer = session.requestUserInput({ method: "confirm", title: "OK?" });
     const requestId = (() => {
       // The request id is broadcast to capable clients; grab it via a probe

@@ -106,7 +106,20 @@ export class GeminiProvider implements AgentProvider {
     const ac = new AbortController();
     const startMs = Date.now();
 
-    void this.#stream(opts, queue, ac, startMs);
+    // Guard the fire-and-forget: work BEFORE #stream's internal try (notably
+    // `await mcpTools.handles()` for MCP discovery) can reject, which would be an
+    // unhandled rejection AND leave `queue` unclosed — the consumer's `for await`
+    // would hang forever with no turn_done/error. Surface it as an error event
+    // and close the queue (mirrors the OpenAI provider, which guards this inline).
+    void this.#stream(opts, queue, ac, startMs).catch((err) => {
+      if (!ac.signal.aborted) {
+        queue.push({
+          type: "error",
+          message: `GeminiProvider: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+      queue.close();
+    });
 
     return {
       events: queue,
