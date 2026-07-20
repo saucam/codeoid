@@ -51,7 +51,7 @@ describe("PipelineEngine.run", () => {
     expect(out.status).toBe("halted");
     const st = out.phases[0].state;
     expect(st.status).toBe("halted");
-    if (st.status === "halted") expect(st.requestId).toBe("gate:one");
+    if (st.status === "halted") expect(st.requestId).toBe("exit:one");
   });
 
   test("a failing gate with onFail:abort fails the pipeline", async () => {

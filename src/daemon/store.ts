@@ -114,6 +114,12 @@ export class Store {
     this.#migrate();
   }
 
+  /** The underlying connection — shared with sibling stores in the same daemon
+   *  (e.g. the pipeline store) so they don't open a second handle to the file. */
+  get database(): Database {
+    return this.#db;
+  }
+
   #migrate(): void {
     this.#db.exec(`
       CREATE TABLE IF NOT EXISTS sessions (

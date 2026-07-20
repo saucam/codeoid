@@ -167,6 +167,10 @@ export interface SessionInfo {
   providerId?: string;
   /** Current execution mode (default "interactive"). */
   mode?: SessionMode;
+  /** Active SDLC pipeline phase id when this session backs a phase. Absent = not a pipeline session. */
+  phase?: string;
+  /** Methodology pack/profile driving this session's phase. */
+  profile?: string;
   /** Remaining turns budget for autonomous mode (undefined = unbounded, 0 = exhausted). */
   turnsRemaining?: number;
   /** Files pinned to the session — prepended to every turn's prompt. */
@@ -770,7 +774,12 @@ export type ClientMessage =
   | SettingsSchemaMsg
   | SettingsGetMsg
   | SettingsSetMsg
-  | UsageDailyMsg;
+  | UsageDailyMsg
+  | PipelineCreateMsg
+  | PipelineListMsg
+  | PipelineGetMsg
+  | PipelineAnswerMsg
+  | PipelineAbortMsg;
 
 interface BaseClientMsg {
   /** Request ID for correlating responses */
@@ -1547,6 +1556,94 @@ export interface SessionCommandsResultMsg {
 // Daemon → Client messages
 // =============================================================================
 
+// ── SDLC pipeline (docs/sdlc-pipeline.md) — additive; no version bump ─────────
+
+/** A pipeline phase projected for the wire (subset of the daemon PhaseState). */
+export interface PipelinePhaseWire {
+  id: string;
+  name?: string;
+  status: "pending" | "running" | "halted" | "passed" | "failed";
+  summary?: string;
+  reason?: string;
+  /** Set when status==="halted" — echo back in pipeline.answer. */
+  requestId?: string;
+  questions?: string[];
+}
+
+/** A pipeline projected for the wire (serializable subset of PipelineState). */
+export interface PipelineWire {
+  id: string;
+  name: string;
+  status: "draft" | "running" | "halted" | "merged" | "done" | "failed" | "abandoned";
+  cursor: number;
+  phases: PipelinePhaseWire[];
+  spec?: string;
+  workdir?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** A phase definition supplied by a client creating a pipeline (mirrors the
+ *  daemon PhaseDef). Referenced kind/gate/skill ids must be registered. */
+export interface PhaseDefWire {
+  id: string;
+  name?: string;
+  kind: string;
+  skill?: string;
+  gate?: string;
+  entryGate?: string;
+  provider?: string;
+  model?: string;
+  tools?: { allow?: string[]; deny?: string[] };
+  reads?: string[];
+  writes?: string;
+  onFail?: { action: "halt" } | { action: "retry"; max: number } | { action: "abort" };
+}
+
+export interface PipelineCreateMsg extends BaseClientMsg {
+  type: "pipeline.create";
+  name: string;
+  phases: PhaseDefWire[];
+  spec?: string;
+  workdir?: string;
+}
+export interface PipelineListMsg extends BaseClientMsg {
+  type: "pipeline.list";
+}
+export interface PipelineGetMsg extends BaseClientMsg {
+  type: "pipeline.get";
+  pipelineId: string;
+}
+export interface PipelineAbortMsg extends BaseClientMsg {
+  type: "pipeline.abort";
+  pipelineId: string;
+}
+/** Answer a halted phase (mirrors session.ui_response). */
+export interface PipelineAnswerMsg extends BaseClientMsg {
+  type: "pipeline.answer";
+  pipelineId: string;
+  /** Echoes the halted phase's requestId. */
+  requestId: string;
+  approved: boolean;
+  /** Free-text — becomes the phase summary (approve) or fail reason (reject). */
+  value?: string;
+}
+
+/** Single-pipeline reply to pipeline.create / get / answer / abort. */
+export interface PipelineSnapshotMsg {
+  type: "pipeline.snapshot";
+  requestId: string;
+  pipeline: PipelineWire;
+}
+/** Reply to pipeline.list. */
+export interface PipelineListResultMsg {
+  type: "pipeline.list.result";
+  requestId: string;
+  pipelines: PipelineWire[];
+}
+
+// =============================================================================
+
 export type DaemonMessage =
   | AuthOkMsg
   | ResponseOkMsg
@@ -1571,7 +1668,9 @@ export type DaemonMessage =
   | SessionImportResultMsg
   | SettingsSchemaResultMsg
   | SettingsGetResultMsg
-  | SettingsSetResultMsg;
+  | SettingsSetResultMsg
+  | PipelineSnapshotMsg
+  | PipelineListResultMsg;
 
 export interface AuthOkMsg {
   type: "auth.ok";

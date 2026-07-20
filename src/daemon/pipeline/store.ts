@@ -8,7 +8,7 @@
 
 import { Database } from "bun:sqlite";
 import type { PipelineState } from "./interface";
-import { TERMINAL_STATUSES } from "./interface";
+import { ACTIVE_STATUSES } from "./interface";
 
 export class PipelineStore {
   #db: Database;
@@ -89,15 +89,14 @@ export class PipelineStore {
     return rows.map((r) => JSON.parse(r.state_json) as PipelineState);
   }
 
-  /** Non-terminal pipelines — the set a fresh daemon rehydrates on boot. Filters
-   *  in SQL (drives idx_pipelines_status) instead of scanning every row into JS;
-   *  the placeholders are derived from TERMINAL_STATUSES so the terminal set
-   *  stays single-sourced (no drift between this query and isTerminal()). */
+  /** Non-terminal pipelines — the set a fresh daemon rehydrates on boot. A
+   *  positive `status IN (…)` (vs `NOT IN`) so idx_pipelines_status is usable;
+   *  placeholders derived from ACTIVE_STATUSES so the set stays single-sourced. */
   listActive(): PipelineState[] {
-    const placeholders = TERMINAL_STATUSES.map(() => "?").join(", ");
+    const placeholders = ACTIVE_STATUSES.map(() => "?").join(", ");
     const rows = this.#db
-      .prepare(`SELECT state_json FROM pipelines WHERE status NOT IN (${placeholders})`)
-      .all(...TERMINAL_STATUSES) as Array<{ state_json: string }>;
+      .prepare(`SELECT state_json FROM pipelines WHERE status IN (${placeholders})`)
+      .all(...ACTIVE_STATUSES) as Array<{ state_json: string }>;
     return rows.map((r) => JSON.parse(r.state_json) as PipelineState);
   }
 

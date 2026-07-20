@@ -18,11 +18,19 @@ export interface ToolPolicy {
   deny?: string[];
 }
 
-/** What to do when a phase's exit gate (or its kind) fails. */
+/**
+ * What to do when a phase's gate (or its kind) fails.
+ *   - "halt"  — park at a human decision point; `PipelineManager.answer(approved)`
+ *               resumes it. Approving is a deliberate human **override**, even of
+ *               a deterministic gate — use "abort" when a failure must be final.
+ *               The default.
+ *   - "retry" — re-run the phase up to `max` attempts, then fail.
+ *   - "abort" — hard-fail the pipeline immediately (no human override).
+ */
 export type PhaseFailAction =
-  | { action: "halt" } // wait for a human decision (the default)
-  | { action: "retry"; max: number } // re-run up to `max` attempts, then fail
-  | { action: "abort" }; // fail the pipeline immediately
+  | { action: "halt" }
+  | { action: "retry"; max: number }
+  | { action: "abort" };
 
 /** One phase in a pipeline's plan. `kind` selects the PhaseKind that runs it;
  *  everything else is optional content resolved through the registries. */
@@ -77,6 +85,11 @@ export function isTerminal(status: PipelineStatus): boolean {
   return TERMINAL_STATUSES.includes(status);
 }
 
+/** Non-terminal statuses — the exact complement of TERMINAL_STATUSES; the set a
+ *  fresh daemon rehydrates on boot. Kept explicit (not derived) so it can drive
+ *  an indexed `status IN (…)` query; a test asserts it stays the complement. */
+export const ACTIVE_STATUSES: readonly PipelineStatus[] = ["draft", "running", "halted"];
+
 export interface PipelinePhase {
   def: PhaseDef;
   state: PhaseState;
@@ -88,6 +101,8 @@ export interface PipelineState {
   id: string;
   name: string;
   spec?: string;
+  /** Repo/workdir the phases operate in (worker sessions run here). */
+  workdir?: string;
   phases: PipelinePhase[];
   /** index of the active phase. */
   cursor: number;

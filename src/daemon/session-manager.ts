@@ -48,6 +48,7 @@ import {
 } from "./dispatch.js";
 import { createPipelineManagerFromConfig } from "./pipeline/wiring.js";
 import type { PipelineManager } from "./pipeline/manager.js";
+import { SessionPhaseRunner } from "./pipeline/runner.js";
 import type { DispatchEventRow, DispatchTaskRow } from "./store.js";
 import { type MemoryEngine, type MemoryMcpMount, workspaceIdFromPath } from "./memory/index.js";
 import type { McpRegistry } from "./mcp/registry.js";
@@ -60,9 +61,13 @@ import type {
   DaemonMessage,
   McpServerStatus,
   ModelInfo,
+  PipelinePhaseWire,
+  PipelineWire,
   SessionInfo,
   SessionWorktree,
 } from "../protocol/types.js";
+import type { Scope } from "../protocol/scopes.js";
+import type { PipelineState } from "./pipeline/interface.js";
 import { randomUUID } from "node:crypto";
 import {
   createForkWorktree,
@@ -221,9 +226,14 @@ export class SessionManager {
       opts?.config?.dispatch,
     );
     // SDLC pipeline (docs/sdlc-pipeline.md) — off by default; when enabled, the
-    // manager shares the daemon DB and rehydrates non-terminal pipelines on
-    // construction (resume). Undefined when disabled ⇒ the daemon stays dark.
-    this.#pipelines = createPipelineManagerFromConfig(opts?.config);
+    // manager shares the daemon DB (one connection) and rehydrates non-terminal
+    // pipelines on construction (resume). The runner drives prompt/slash phases
+    // on worker turns; the `() => this` thunk is only dereferenced at run time,
+    // after construction. Undefined when disabled ⇒ the daemon stays dark.
+    this.#pipelines = createPipelineManagerFromConfig(opts?.config, {
+      runner: new SessionPhaseRunner(() => this),
+      db: store.database,
+    });
   }
 
   /** The dispatch queue driver (P4). Exposed for server lifecycle + tests. */
@@ -511,6 +521,16 @@ mcpHub: this.#mcpHub,
         return this.#settingsSet(msg, auth);
       case "usage.daily":
         return this.#usageDaily(msg, auth);
+      case "pipeline.create":
+        return this.#pipelineCreate(msg, auth);
+      case "pipeline.list":
+        return this.#pipelineList(msg, auth);
+      case "pipeline.get":
+        return this.#pipelineGet(msg, auth);
+      case "pipeline.answer":
+        return this.#pipelineAnswer(msg, auth);
+      case "pipeline.abort":
+        return this.#pipelineAbort(msg, auth);
       default: {
         // Inbound messages are cast from raw JSON at the transport, so an
         // unknown/malformed `type` reaches here. Without this the function
@@ -1616,6 +1636,207 @@ mcpHub: this.#mcpHub,
       }
     }
     return undefined;
+  }
+
+  /**
+   * Run one turn for an SDLC pipeline phase on a disposable worker session and
+   * return the assistant's final text. Mirrors the dispatcher's spawn path but
+   * honors a per-phase provider/model and is a single request/await (no queue).
+   * Used by SessionPhaseRunner (the pipeline PhaseRunner). The worker is always
+   * torn down, even on error. Satisfies the pipeline package's PhaseTurnHost.
+   */
+  async runPhaseTurn(req: {
+    prompt: string;
+    provider?: string;
+    model?: string;
+    workdir: string;
+    accountId: string;
+    projectId: string;
+    createdBy: string;
+  }): Promise<string> {
+    const workdir = normalizeWorkdir(req.workdir);
+    if (!workdir) throw new Error(`workdir not usable: ${req.workdir}`);
+    const auth: AuthContext = {
+      sub: req.createdBy,
+      scopes: [],
+      delegationDepth: 1,
+      accountId: req.accountId,
+      projectId: req.projectId,
+    };
+    let resolveDone: () => void = () => {};
+    const done = new Promise<void>((r) => {
+      resolveDone = r;
+    });
+    const session = new Session({
+      name: `phase-${randomUUID().slice(0, 8)}`,
+      workdir,
+      role: "worker",
+      initialMode: { mode: "autonomous", maxTurns: this.#dispatcher.config.workerToolBudget },
+      providerId: req.provider,
+      defaultModel: req.model,
+      auth,
+      store: this.#store,
+      transcriptStore: this.#transcriptStore,
+      providers: this.#providers,
+      hooks: this.#hooks,
+      identityManager: this.#identityManager,
+      memory: this.#memory,
+      memoryMcp: this.#memoryMcp,
+      mcpRegistry: this.#mcpRegistry,
+      mcpHub: this.#mcpHub,
+      config: this.#config,
+      compressionRegistry: this.#compressionRegistry,
+      _testProvider: this.#testProviderFactory?.(),
+      onStatusChange: (id, status) => {
+        this.#statusObserver(id, status);
+        // Resolve on any resting state: idle/error, or waiting_approval when the
+        // autonomous budget is spent (the phase didn't finish — return partial).
+        if (status === "idle" || status === "error" || status === "waiting_approval") {
+          resolveDone();
+        }
+      },
+      onModels: (providerId, m) => this._cacheModels(providerId, m),
+    });
+    this.#sessions.set(session.id, session);
+    try {
+      await session.send(req.prompt, auth);
+      await done;
+      return session.lastAssistantText ?? "";
+    } finally {
+      try {
+        await session.destroy(this.#dispatchSystemAuth(req.accountId, req.projectId));
+      } catch {
+        // Best-effort teardown.
+      }
+      this.#sessions.delete(session.id);
+    }
+  }
+
+  // ── SDLC pipeline handlers (docs/sdlc-pipeline.md) ─────────────────────
+
+  /** Scope check + pipeline-enabled check shared by every pipeline handler. */
+  #pipelineGuard(
+    reqId: string,
+    auth: AuthContext,
+    scope: Scope,
+  ): { pm: PipelineManager } | { error: DaemonMessage } {
+    if (!hasScope(auth.scopes as string[], scope)) {
+      return {
+        error: { type: "response.error", requestId: reqId, error: `Missing scope: ${scope}`, code: "forbidden" },
+      };
+    }
+    const pm = this.#pipelines;
+    if (!pm) {
+      return {
+        error: { type: "response.error", requestId: reqId, error: "Pipeline is disabled", code: "invalid_request" },
+      };
+    }
+    return { pm };
+  }
+
+  /** Tenant-scoped lookup — the manager doesn't tenancy-check, so callers must. */
+  #ownedPipeline(pm: PipelineManager, id: string, auth: AuthContext): PipelineState | undefined {
+    const s = pm.get(id);
+    if (!s || s.accountId !== auth.accountId || s.projectId !== auth.projectId) return undefined;
+    return s;
+  }
+
+  #pipelineError(reqId: string, e: unknown): DaemonMessage {
+    return {
+      type: "response.error",
+      requestId: reqId,
+      error: e instanceof Error ? e.message : String(e),
+      code: "invalid_request",
+    };
+  }
+
+  /** Project the daemon-owned PipelineState onto the serializable wire shape. */
+  #pipelineToWire(s: PipelineState): PipelineWire {
+    return {
+      id: s.id,
+      name: s.name,
+      status: s.status,
+      cursor: s.cursor,
+      spec: s.spec,
+      workdir: s.workdir,
+      createdAt: s.createdAt,
+      updatedAt: s.updatedAt,
+      phases: s.phases.map((p) => {
+        const st = p.state;
+        const w: PipelinePhaseWire = { id: p.def.id, name: p.def.name, status: st.status };
+        if (st.status === "passed") w.summary = st.summary;
+        else if (st.status === "failed") w.reason = st.reason;
+        else if (st.status === "halted") {
+          w.requestId = st.requestId;
+          w.reason = st.reason;
+          w.questions = st.questions;
+        }
+        return w;
+      }),
+    };
+  }
+
+  #pipelineCreate(msg: Extract<ClientMessage, { type: "pipeline.create" }>, auth: AuthContext): DaemonMessage {
+    const g = this.#pipelineGuard(msg.id, auth, SCOPES.PIPELINE_CREATE);
+    if ("error" in g) return g.error;
+    try {
+      const state = g.pm.create({
+        name: msg.name,
+        phases: msg.phases,
+        spec: msg.spec,
+        workdir: msg.workdir,
+        accountId: auth.accountId,
+        projectId: auth.projectId,
+        createdBy: auth.sub,
+      });
+      return { type: "pipeline.snapshot", requestId: msg.id, pipeline: this.#pipelineToWire(state) };
+    } catch (e) {
+      return this.#pipelineError(msg.id, e);
+    }
+  }
+
+  #pipelineList(msg: Extract<ClientMessage, { type: "pipeline.list" }>, auth: AuthContext): DaemonMessage {
+    const g = this.#pipelineGuard(msg.id, auth, SCOPES.PIPELINE_READ);
+    if ("error" in g) return g.error;
+    const pipelines = g.pm.list(auth.accountId, auth.projectId).map((s) => this.#pipelineToWire(s));
+    return { type: "pipeline.list.result", requestId: msg.id, pipelines };
+  }
+
+  #pipelineGet(msg: Extract<ClientMessage, { type: "pipeline.get" }>, auth: AuthContext): DaemonMessage {
+    const g = this.#pipelineGuard(msg.id, auth, SCOPES.PIPELINE_READ);
+    if ("error" in g) return g.error;
+    const s = this.#ownedPipeline(g.pm, msg.pipelineId, auth);
+    if (!s) return { type: "response.error", requestId: msg.id, error: "Pipeline not found", code: "not_found" };
+    return { type: "pipeline.snapshot", requestId: msg.id, pipeline: this.#pipelineToWire(s) };
+  }
+
+  async #pipelineAnswer(
+    msg: Extract<ClientMessage, { type: "pipeline.answer" }>,
+    auth: AuthContext,
+  ): Promise<DaemonMessage> {
+    const g = this.#pipelineGuard(msg.id, auth, SCOPES.PIPELINE_ANSWER);
+    if ("error" in g) return g.error;
+    if (!this.#ownedPipeline(g.pm, msg.pipelineId, auth)) {
+      return { type: "response.error", requestId: msg.id, error: "Pipeline not found", code: "not_found" };
+    }
+    try {
+      const next = await g.pm.answer(msg.pipelineId, msg.requestId, {
+        approved: msg.approved,
+        value: msg.value,
+      });
+      return { type: "pipeline.snapshot", requestId: msg.id, pipeline: this.#pipelineToWire(next) };
+    } catch (e) {
+      return this.#pipelineError(msg.id, e);
+    }
+  }
+
+  #pipelineAbort(msg: Extract<ClientMessage, { type: "pipeline.abort" }>, auth: AuthContext): DaemonMessage {
+    const g = this.#pipelineGuard(msg.id, auth, SCOPES.PIPELINE_CREATE);
+    if ("error" in g) return g.error;
+    const s = this.#ownedPipeline(g.pm, msg.pipelineId, auth);
+    if (!s) return { type: "response.error", requestId: msg.id, error: "Pipeline not found", code: "not_found" };
+    const next = g.pm.abort(msg.pipelineId) ?? s;
+    return { type: "pipeline.snapshot", requestId: msg.id, pipeline: this.#pipelineToWire(next) };
   }
 
   // ── Dispatcher host (P4) ──────────────────────────────────────────────

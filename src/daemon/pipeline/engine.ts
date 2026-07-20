@@ -21,6 +21,7 @@ import type {
   PipelineState,
 } from "./interface";
 import { isTerminal } from "./interface";
+import { errMessage } from "./errors";
 
 /** Defensive cap against a mis-authored retry loop (each retry is one step). */
 const MAX_STEPS = 10_000;
@@ -60,7 +61,7 @@ export class PipelineEngine {
     // Entry (grounding) gate — read-only probe before the phase acts (§5a.3).
     if (phase.def.entryGate) {
       const v = await this.#gate(phase.def.entryGate, s, phase.def, "entry");
-      if (!v.pass) return applyFail(s, phase, v, attempts);
+      if (!v.pass) return applyFail(s, phase, v, attempts, "entry");
     }
 
     // Run the phase kind. A throwing plugin must not crash the run and leave
@@ -89,13 +90,13 @@ export class PipelineEngine {
       return touch(s);
     }
     if (res.outcome === "failed") {
-      return applyFail(s, phase, { pass: false, reason: res.reason }, attempts);
+      return applyFail(s, phase, { pass: false, reason: res.reason }, attempts, "kind");
     }
 
     // Exit gate — acceptance predicate on the phase output (§5, §5a.5).
     if (phase.def.gate) {
       const v = await this.#gate(phase.def.gate, s, phase.def, "exit");
-      if (!v.pass) return applyFail(s, phase, v, attempts);
+      if (!v.pass) return applyFail(s, phase, v, attempts, "exit");
     }
 
     // Passed → record the result and advance the cursor.
@@ -137,8 +138,6 @@ export class PipelineEngine {
   }
 }
 
-const errMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
-
 function touch(s: PipelineState): PipelineState {
   s.updatedAt = now();
   return s;
@@ -155,6 +154,7 @@ function applyFail(
   phase: PipelinePhase,
   verdict: GateVerdict,
   attempts: number,
+  source: "entry" | "exit" | "kind",
 ): PipelineState {
   const onFail: PhaseFailAction = phase.def.onFail ?? { action: "halt" };
   const reason = verdict.reason ?? "phase gate failed";
@@ -168,7 +168,9 @@ function applyFail(
   if (onFail.action === "halt") {
     phase.state = {
       status: "halted",
-      requestId: `gate:${phase.def.id}`,
+      // Source-qualified so a phase with both an entry and an exit gate produces
+      // distinct halt ids (no collision when answering).
+      requestId: `${source}:${phase.def.id}`,
       reason,
       questions: verdict.questions,
     };

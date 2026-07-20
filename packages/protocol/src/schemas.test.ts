@@ -127,6 +127,25 @@ const samples: { [T in ClientTypes]: Extract<ClientMessage, { type: T }> } = {
       { key: "compress.excludeCommands", value: ["git", "ls"] },
     ],
   },
+  "pipeline.create": {
+    type: "pipeline.create",
+    id: "r32",
+    name: "REQ-1",
+    phases: [{ id: "impl", kind: "skill", skill: "implement", onFail: { action: "halt" } }],
+    spec: "build X",
+    workdir: "/tmp/repo",
+  },
+  "pipeline.list": { type: "pipeline.list", id: "r33" },
+  "pipeline.get": { type: "pipeline.get", id: "r34", pipelineId: "p1" },
+  "pipeline.answer": {
+    type: "pipeline.answer",
+    id: "r35",
+    pipelineId: "p1",
+    requestId: "exit:impl",
+    approved: true,
+    value: "LGTM",
+  },
+  "pipeline.abort": { type: "pipeline.abort", id: "r36", pipelineId: "p1" },
 };
 
 describe("fidelity — valid samples round-trip unchanged", () => {
