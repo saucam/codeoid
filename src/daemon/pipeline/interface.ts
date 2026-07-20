@@ -42,6 +42,11 @@ export interface PhaseDef {
   gate?: string;
   /** entry (grounding) gate id — a read-only probe before the phase acts (§5a.3). */
   entryGate?: string;
+  /** Capability role this phase runs under — an id into the pack's `roles` (an
+   *  ai-factory role envelope). Compiles to Cedar and is enforced at the tool
+   *  fence (Shield) so e.g. a `reviewer` phase cannot write or egress (§5a.1).
+   *  Carried through the loader now; runtime enforcement wires to Shield next. */
+  role?: string;
   /** Reserved metadata (not yet consumed): typed artifact ids this phase reads
    *  / writes (§5a.2). Kept for pack authoring; artifact I/O lands with its
    *  enforcement. Per-phase tool scoping (§5a.1) was removed until the worker

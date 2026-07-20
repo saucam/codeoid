@@ -16,6 +16,14 @@ export { PipelineStore } from "./store";
 export { type CreatePipelineOpts, type PipelineManagerOptions, PipelineManager } from "./manager";
 export { makeSkillPhaseKind } from "./skill-kind";
 export {
+  loadPack,
+  packManifestSchema,
+  roleSchema,
+  type LoadedPack,
+  type PackManifest,
+  type RoleDef,
+} from "./pack";
+export {
   SessionPhaseRunner,
   type PhaseRunner,
   type PhaseRunRequest,

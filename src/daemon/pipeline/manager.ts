@@ -13,7 +13,7 @@
 import { randomUUID } from "node:crypto";
 import { registerBuiltins } from "./builtin";
 import { PipelineEngine } from "./engine";
-import type { PhaseDef, PipelineRegistries, PipelineState } from "./interface";
+import type { Pack, PhaseDef, PipelineRegistries, PipelineState } from "./interface";
 import { isTerminal } from "./interface";
 import { createRegistries } from "./registry";
 import type { PhaseRunner } from "./runner";
@@ -22,7 +22,10 @@ import type { PipelineStore } from "./store";
 
 export interface CreatePipelineOpts {
   name: string;
-  phases: PhaseDef[];
+  /** Explicit phase plan, OR provide `pack` to use an installed pack's pipeline. */
+  phases?: PhaseDef[];
+  /** Id of an installed pack (via installPack) whose pipeline this run uses. */
+  pack?: string;
   accountId: string;
   projectId: string;
   createdBy: string;
@@ -57,18 +60,27 @@ export class PipelineManager {
     return this.#registries;
   }
 
-  /** Create a draft pipeline (all phases pending) and persist it. Throws if a
-   *  phase references a kind/gate/skill that isn't registered, a `skill` phase
-   *  has no skill id, or two phases share an id (fail fast). */
+  /** Register a pack's skills + gates and index it by id, so `create({ pack })`
+   *  can resolve its pipeline. Idempotent (registries are last-wins). */
+  installPack(pack: Pack): void {
+    pack.register(this.#registries);
+    this.#registries.packs.register(pack);
+  }
+
+  /** Create a draft pipeline (all phases pending) and persist it. Supply either
+   *  `phases` or an installed `pack` id. Throws if a phase references a
+   *  kind/gate/skill that isn't registered, a `skill` phase has no skill id, or
+   *  two phases share an id (fail fast). */
   create(opts: CreatePipelineOpts): PipelineState {
-    this.#validate(opts.phases);
+    const phases = this.#resolvePhases(opts);
+    this.#validate(phases);
     const ts = Date.now();
     const state: PipelineState = {
       id: randomUUID(),
       name: opts.name,
       spec: opts.spec,
       workdir: opts.workdir,
-      phases: opts.phases.map((def) => ({ def, state: { status: "pending" } })),
+      phases: phases.map((def) => ({ def, state: { status: "pending" } })),
       cursor: 0,
       status: "draft",
       accountId: opts.accountId,
@@ -198,6 +210,20 @@ export class PipelineManager {
     s.updatedAt = Date.now();
     this.#persist(s);
     return s;
+  }
+
+  /** Resolve the phase plan from either explicit `phases` or an installed pack. */
+  #resolvePhases(opts: CreatePipelineOpts): PhaseDef[] {
+    if (opts.pack && opts.phases) {
+      throw new Error("create: provide either `phases` or `pack`, not both");
+    }
+    if (opts.pack) {
+      const pack = this.#registries.packs.resolve(opts.pack);
+      if (!pack) throw new Error(`create: unknown pack "${opts.pack}" — install it first (installPack)`);
+      return pack.pipeline;
+    }
+    if (opts.phases) return opts.phases;
+    throw new Error("create: provide `phases` or `pack`");
   }
 
   #validate(phases: PhaseDef[]): void {
