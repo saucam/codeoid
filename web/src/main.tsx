@@ -2,6 +2,13 @@
 import { render } from "solid-js/web";
 import "./index.css";
 import App from "./App.tsx";
+import { consumeEmbedToken } from "./lib/auth.ts";
+
+// Embedded-handoff: when framed by a host app (Highflame Studio), pick up the
+// short-lived ZeroID token handed off in the URL hash BEFORE the app boots, so
+// the user lands on the workspace instead of codeoid's own sign-in. No-op at the
+// top level. Must run before render() so the first auth resolve already sees it.
+consumeEmbedToken();
 
 // Telegram Mini App init: when running inside Telegram, expand to full height
 // (it otherwise opens as a short dialog) and disable swipe-down-to-minimize so
