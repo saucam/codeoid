@@ -46,6 +46,8 @@ import {
   NonRetryableDispatchError,
   type DispatcherHost,
 } from "./dispatch.js";
+import { createPipelineManagerFromConfig } from "./pipeline/wiring.js";
+import type { PipelineManager } from "./pipeline/manager.js";
 import type { DispatchEventRow, DispatchTaskRow } from "./store.js";
 import { type MemoryEngine, type MemoryMcpMount, workspaceIdFromPath } from "./memory/index.js";
 import type { McpRegistry } from "./mcp/registry.js";
@@ -163,6 +165,8 @@ export class SessionManager {
   #config?: CodeoidConfig;
   #compressionRegistry?: CompressionRegistry;
   #dispatcher: Dispatcher;
+  /** SDLC pipeline manager — undefined when the pipeline is disabled (default). */
+  #pipelines?: PipelineManager;
   /** The daemon's provider catalog — one registry, shared by every session. */
   #providers: ProviderRegistry;
   /** The daemon's hook bus — one instance, shared by every session. */
@@ -216,11 +220,21 @@ export class SessionManager {
       this.#makeDispatcherHost(),
       opts?.config?.dispatch,
     );
+    // SDLC pipeline (docs/sdlc-pipeline.md) — off by default; when enabled, the
+    // manager shares the daemon DB and rehydrates non-terminal pipelines on
+    // construction (resume). Undefined when disabled ⇒ the daemon stays dark.
+    this.#pipelines = createPipelineManagerFromConfig(opts?.config);
   }
 
   /** The dispatch queue driver (P4). Exposed for server lifecycle + tests. */
   get dispatcher(): Dispatcher {
     return this.#dispatcher;
+  }
+
+  /** The SDLC pipeline manager, or undefined when the pipeline is disabled
+   *  (the default). Exposed for the pipeline control surface + tests. */
+  get pipelines(): PipelineManager | undefined {
+    return this.#pipelines;
   }
 
   /**

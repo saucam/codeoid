@@ -523,6 +523,20 @@ const McpServersSchema = z.record(z.string(), McpServerSchema).default({});
  *  `mcpServers` block. Normalized into an `McpServerSpec` by `McpRegistry`. */
 export type RawMcpServerConfig = z.infer<typeof McpServerSchema>;
 
+/**
+ * SDLC pipeline (docs/sdlc-pipeline.md). OFF by default — the daemon stays
+ * methodology-agnostic; nothing runs until this is enabled. When enabled, the
+ * daemon builds a PipelineManager sharing its DB and rehydrates non-terminal
+ * pipelines on boot. `defaultPack` is the methodology pack a pipeline runs when
+ * created without one (null = none / freestyle).
+ */
+const PipelineSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    defaultPack: z.string().nullable().default(null),
+  })
+  .default({ enabled: false, defaultPack: null });
+
 const RootSchema = z.object({
   daemonUrl: z.string().default("ws://127.0.0.1:7400"),
   dbPath: z.string().default("codeoid.db"),
@@ -544,6 +558,7 @@ const RootSchema = z.object({
   session: SessionSchema,
   conductor: ConductorSchema,
   dispatch: DispatchSchema,
+  pipeline: PipelineSchema,
   providers: ProvidersSchema,
   mcpServers: McpServersSchema,
   hooks: HooksSchema,
@@ -679,6 +694,16 @@ export interface CodeoidConfig {
     retryBaseMs: number;
   };
   /**
+   * SDLC pipeline — OFF by default (docs/sdlc-pipeline.md). When enabled, a
+   * PipelineManager is constructed at boot sharing the daemon DB, and
+   * non-terminal pipelines are rehydrated (resume). Optional in the type so
+   * hand-built test configs stay minimal; loadConfig always populates it.
+   */
+  pipeline?: {
+    enabled: boolean;
+    defaultPack: string | null;
+  };
+  /**
    * Per-backend provider settings. Optional in the type so hand-built test
    * configs stay minimal; loadConfig always populates it (schema defaults).
    */
@@ -777,6 +802,10 @@ const ENV_OVERRIDES: readonly EnvOverride[] = [
   // without touching config.json. Other dispatch knobs are file-config only,
   // matching the conductor block's convention.
   { env: "CODEOID_DISPATCH_ENABLED", path: "dispatch.enabled", kind: "boolean" },
+  // Pipeline enable/kill switch — turn the SDLC pipeline on/off per-invocation
+  // without touching config.json (off by default). Other pipeline knobs are
+  // file-config only, matching the dispatch/conductor convention.
+  { env: "CODEOID_PIPELINE_ENABLED", path: "pipeline.enabled", kind: "boolean" },
   { env: "CODEOID_FALLBACK_MODEL", path: "session.fallbackModel", kind: "string" },
   // Hooks kill switch — disable every configured hook per-invocation without
   // touching config.json. Entries themselves are file-config only.
@@ -978,6 +1007,7 @@ export function loadConfig(opts: LoadOptions = {}): CodeoidConfig {
     session: parsed.session,
     conductor: parsed.conductor,
     dispatch: parsed.dispatch,
+    pipeline: parsed.pipeline,
     providers: parsed.providers,
     mcpServers: parsed.mcpServers,
     hooks: parsed.hooks,
