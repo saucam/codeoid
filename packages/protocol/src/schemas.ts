@@ -346,6 +346,7 @@ const phaseDefSchema = z.object({
   entryGate: z.string().max(64).optional(),
   provider: z.string().max(64).optional(),
   model: z.string().max(LIMITS.MODEL_MAX).optional(),
+  role: z.string().max(64).optional(),
   reads: z.array(z.string().max(256)).max(128).optional(),
   writes: z.string().max(256).optional(),
   onFail: z
@@ -357,11 +358,15 @@ const phaseDefSchema = z.object({
     .optional(),
 });
 
+// `phases` XOR `pack` is enforced in the handler/manager (not the schema): this
+// object is a member of the `type`-discriminated union, which requires plain
+// ZodObjects — a `.refine()` here would break discrimination.
 export const pipelineCreateSchema = z.object({
   ...base,
   type: z.literal("pipeline.create"),
   name: nameField,
-  phases: z.array(phaseDefSchema).min(1).max(64),
+  phases: z.array(phaseDefSchema).min(1).max(64).optional(),
+  pack: z.string().max(64).optional(),
   spec: z.string().max(LIMITS.SEND_TEXT_MAX).optional(),
   workdir: pathField.optional(),
 });

@@ -7,14 +7,22 @@
 
 import type { Database } from "bun:sqlite";
 import { PipelineManager } from "./manager";
+import { loadPack } from "./pack";
 import type { PhaseRunner } from "./runner";
 import { PipelineStore } from "./store";
+
+/** A pack to load + install at boot. `trusted` (default false) lets the pack's
+ *  `command` gates execute on this host. */
+export interface PackConfigEntry {
+  dir: string;
+  trusted?: boolean;
+}
 
 /** The minimal structural slice of CodeoidConfig this factory needs — kept
  *  narrow so the pipeline package doesn't depend on the full config type. */
 export interface PipelineWiringConfig {
   dbPath: string;
-  pipeline?: { enabled: boolean };
+  pipeline?: { enabled: boolean; packs?: PackConfigEntry[] };
 }
 
 export interface PipelineWiringOptions {
@@ -36,5 +44,16 @@ export function createPipelineManagerFromConfig(
 ): PipelineManager | undefined {
   if (!config?.pipeline?.enabled) return undefined;
   const store = opts.db ? new PipelineStore(opts.db) : new PipelineStore(config.dbPath);
-  return new PipelineManager(store, { runner: opts.runner });
+  const manager = new PipelineManager(store, { runner: opts.runner });
+  // Install configured packs. Fail SOFT per pack: a malformed / missing pack
+  // logs and is skipped rather than taking down the daemon boot.
+  for (const p of config.pipeline.packs ?? []) {
+    try {
+      const pack = loadPack(p.dir, { trusted: p.trusted ?? false });
+      manager.installPack(pack);
+    } catch (e) {
+      console.error(`[pipeline] failed to load pack "${p.dir}": ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  return manager;
 }

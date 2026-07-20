@@ -86,7 +86,7 @@ function mkConfig(dbPath: string, pipelineEnabled: boolean): CodeoidConfig {
       workerToolBudget: 7,
       retryBaseMs: 0,
     },
-    pipeline: { enabled: pipelineEnabled, defaultPack: null },
+    pipeline: { enabled: pipelineEnabled, defaultPack: null, packs: [] },
   };
 }
 

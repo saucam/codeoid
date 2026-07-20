@@ -528,14 +528,19 @@ export type RawMcpServerConfig = z.infer<typeof McpServerSchema>;
  * methodology-agnostic; nothing runs until this is enabled. When enabled, the
  * daemon builds a PipelineManager sharing its DB and rehydrates non-terminal
  * pipelines on boot. `defaultPack` is the methodology pack a pipeline runs when
- * created without one (null = none / freestyle).
+ * created without one (null = none / freestyle). `packs` are directories loaded
+ * + installed on boot (each a `pack.yaml` dir); `trusted` (default false) lets a
+ * pack's `command` gates execute on this host — leave off for fetched packs.
  */
 const PipelineSchema = z
   .object({
     enabled: z.boolean().default(false),
     defaultPack: z.string().nullable().default(null),
+    packs: z
+      .array(z.object({ dir: z.string().min(1), trusted: z.boolean().default(false) }))
+      .default([]),
   })
-  .default({ enabled: false, defaultPack: null });
+  .default({ enabled: false, defaultPack: null, packs: [] });
 
 const RootSchema = z.object({
   daemonUrl: z.string().default("ws://127.0.0.1:7400"),
@@ -702,6 +707,7 @@ export interface CodeoidConfig {
   pipeline?: {
     enabled: boolean;
     defaultPack: string | null;
+    packs: { dir: string; trusted: boolean }[];
   };
   /**
    * Per-backend provider settings. Optional in the type so hand-built test
