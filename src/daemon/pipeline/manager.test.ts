@@ -42,14 +42,14 @@ describe("PipelineManager", () => {
     expect(mgr.list("acct", "proj")).toHaveLength(1);
   });
 
-  test("abort marks a pipeline abandoned; unknown ids return undefined", () => {
+  test("abort marks a pipeline abandoned; unknown ids return undefined", async () => {
     const store = new PipelineStore(new Database(":memory:"));
     const mgr = new PipelineManager(store);
     const p = mgr.create({ name: "a", phases, ...tenant });
-    const gone = mgr.abort(p.id);
+    const gone = await mgr.abort(p.id);
     expect(gone?.status).toBe("abandoned");
     expect(store.get(p.id)?.status).toBe("abandoned");
-    expect(mgr.abort("missing")).toBeUndefined();
+    expect(await mgr.abort("missing")).toBeUndefined();
   });
 
   test("resume rehydrates a halted pipeline into a fresh manager (restart survival)", async () => {

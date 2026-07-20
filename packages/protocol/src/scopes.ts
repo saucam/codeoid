@@ -38,6 +38,12 @@ export const SCOPES = {
   SETTINGS_READ: "settings:read",
   /** Write daemon configuration (config.json + .env), including secrets */
   SETTINGS_WRITE: "settings:write",
+  /** Create + drive SDLC pipelines */
+  PIPELINE_CREATE: "pipeline:create",
+  /** List + read SDLC pipelines */
+  PIPELINE_READ: "pipeline:read",
+  /** Answer a halted pipeline phase (a human decision) */
+  PIPELINE_ANSWER: "pipeline:answer",
 } as const;
 
 export type Scope = (typeof SCOPES)[keyof typeof SCOPES];
@@ -67,6 +73,9 @@ export const OPERATOR_SCOPES: readonly Scope[] = [
   SCOPES.SESSION_APPROVE,
   SCOPES.FS_READ,
   SCOPES.SETTINGS_READ,
+  SCOPES.PIPELINE_CREATE,
+  SCOPES.PIPELINE_READ,
+  SCOPES.PIPELINE_ANSWER,
 ];
 
 /** All scopes as a space-delimited string (for OAuth scope parameter) */

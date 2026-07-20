@@ -335,6 +335,69 @@ export const settingsSetSchema = z.object({
 
 // ── The unions ────────────────────────────────────────────────────────────────
 
+// ── SDLC pipeline ─────────────────────────────────────────────────────────────
+
+const phaseDefSchema = z.object({
+  id: z.string().min(1).max(LIMITS.ID_MAX),
+  name: z.string().max(LIMITS.NAME_MAX).optional(),
+  kind: z.string().min(1).max(64),
+  skill: z.string().max(64).optional(),
+  gate: z.string().max(64).optional(),
+  entryGate: z.string().max(64).optional(),
+  provider: z.string().max(64).optional(),
+  model: z.string().max(LIMITS.MODEL_MAX).optional(),
+  reads: z.array(z.string().max(256)).max(128).optional(),
+  writes: z.string().max(256).optional(),
+  onFail: z
+    .union([
+      z.object({ action: z.literal("halt") }),
+      z.object({ action: z.literal("retry"), max: z.number().int().positive().max(100) }),
+      z.object({ action: z.literal("abort") }),
+    ])
+    .optional(),
+});
+
+export const pipelineCreateSchema = z.object({
+  ...base,
+  type: z.literal("pipeline.create"),
+  name: nameField,
+  phases: z.array(phaseDefSchema).min(1).max(64),
+  spec: z.string().max(LIMITS.SEND_TEXT_MAX).optional(),
+  workdir: pathField.optional(),
+});
+
+export const pipelineListSchema = z.object({
+  ...base,
+  type: z.literal("pipeline.list"),
+});
+
+export const pipelineGetSchema = z.object({
+  ...base,
+  type: z.literal("pipeline.get"),
+  pipelineId: idField,
+});
+
+export const pipelineAdvanceSchema = z.object({
+  ...base,
+  type: z.literal("pipeline.advance"),
+  pipelineId: idField,
+});
+
+export const pipelineAnswerSchema = z.object({
+  ...base,
+  type: z.literal("pipeline.answer"),
+  pipelineId: idField,
+  requestId: z.string().min(1).max(LIMITS.ID_MAX),
+  approved: z.boolean(),
+  value: z.string().max(LIMITS.SEND_TEXT_MAX).optional(),
+});
+
+export const pipelineAbortSchema = z.object({
+  ...base,
+  type: z.literal("pipeline.abort"),
+  pipelineId: idField,
+});
+
 export const clientMessageSchema = z.discriminatedUnion("type", [
   pingSchema,
   sessionCreateSchema,
@@ -369,6 +432,12 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
   settingsGetSchema,
   settingsSetSchema,
   usageDailySchema,
+  pipelineCreateSchema,
+  pipelineListSchema,
+  pipelineGetSchema,
+  pipelineAdvanceSchema,
+  pipelineAnswerSchema,
+  pipelineAbortSchema,
 ]);
 
 /**

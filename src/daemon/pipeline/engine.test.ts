@@ -51,7 +51,7 @@ describe("PipelineEngine.run", () => {
     expect(out.status).toBe("halted");
     const st = out.phases[0].state;
     expect(st.status).toBe("halted");
-    if (st.status === "halted") expect(st.requestId).toBe("gate:one");
+    if (st.status === "halted") expect(st.requestId).toBe("exit:one");
   });
 
   test("a failing gate with onFail:abort fails the pipeline", async () => {
@@ -165,5 +165,53 @@ describe("PipelineEngine.run", () => {
     expect(out.status).toBe("failed");
     const st = out.phases[0].state;
     if (st.status === "failed") expect(st.reason).toContain("gate-boom");
+  });
+
+  test("retry exhaustion via a failing GATE (not kind) fails the phase", async () => {
+    const out = await new PipelineEngine(regs()).run(
+      pipeline([{ id: "one", kind: "noop", gate: "manual", onFail: { action: "retry", max: 2 } }]),
+    );
+    expect(out.status).toBe("failed");
+    const st = out.phases[0].state;
+    if (st.status === "failed") expect(st.attempts).toBe(2);
+  });
+
+  test("MAX_STEPS exhaustion fails the pipeline terminally (no stuck 'running')", async () => {
+    const r = regs();
+    r.phases.register({
+      id: "alwaysfail",
+      async run() {
+        return { outcome: "failed", reason: "never" };
+      },
+    });
+    // A retry budget far above MAX_STEPS ⇒ the step guard trips first.
+    const out = await new PipelineEngine(r).run(
+      pipeline([{ id: "one", kind: "alwaysfail", onFail: { action: "retry", max: 1_000_000 } }]),
+    );
+    expect(out.status).toBe("failed");
+    const st = out.phases[0].state;
+    if (st.status === "failed") expect(st.reason).toContain("exceeded");
+  });
+
+  test("a phase kind mutating its ctx.pipeline cannot corrupt the engine", async () => {
+    const r = regs();
+    r.phases.register({
+      id: "vandal",
+      async run(ctx) {
+        ctx.pipeline.cursor = 999;
+        ctx.pipeline.status = "abandoned";
+        ctx.pipeline.phases = [];
+        return { outcome: "passed" };
+      },
+    });
+    const out = await new PipelineEngine(r).run(
+      pipeline([
+        { id: "one", kind: "vandal" },
+        { id: "two", kind: "noop" },
+      ]),
+    );
+    expect(out.status).toBe("done");
+    expect(out.cursor).toBe(2);
+    expect(out.phases).toHaveLength(2);
   });
 });

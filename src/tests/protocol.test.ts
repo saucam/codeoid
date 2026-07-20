@@ -444,6 +444,10 @@ describe("DaemonMessage routing", () => {
           return `settings.get:${Object.keys(msg.snapshot.values).length}`;
         case "settings.set.result":
           return `settings.set:${msg.ok}`;
+        case "pipeline.snapshot":
+          return `pipeline:${msg.pipeline.id}`;
+        case "pipeline.list.result":
+          return `pipeline.list:${msg.pipelines.length}`;
       }
     };
 

@@ -21,6 +21,7 @@ import type {
   PipelineState,
 } from "./interface";
 import { isTerminal } from "./interface";
+import { errMessage } from "./errors";
 
 /** Defensive cap against a mis-authored retry loop (each retry is one step). */
 const MAX_STEPS = 10_000;
@@ -60,7 +61,7 @@ export class PipelineEngine {
     // Entry (grounding) gate — read-only probe before the phase acts (§5a.3).
     if (phase.def.entryGate) {
       const v = await this.#gate(phase.def.entryGate, s, phase.def, "entry");
-      if (!v.pass) return applyFail(s, phase, v, attempts);
+      if (!v.pass) return applyFail(s, phase, v, attempts, "entry");
     }
 
     // Run the phase kind. A throwing plugin must not crash the run and leave
@@ -72,7 +73,10 @@ export class PipelineEngine {
       res = { outcome: "failed", reason: `unknown phase kind "${phase.def.kind}"` };
     } else {
       try {
-        res = await kind.run({ pipeline: s, phase: phase.def, registries: this.#registries });
+        // Hand plugins a clone — a buggy/hostile kind mutating our working
+        // state must not corrupt the engine's transition (the "returns a NEW
+        // state" guarantee).
+        res = await kind.run({ pipeline: clone(s), phase: phase.def, registries: this.#registries });
       } catch (err) {
         res = { outcome: "failed", reason: `phase kind "${phase.def.kind}" threw: ${errMessage(err)}` };
       }
@@ -89,13 +93,13 @@ export class PipelineEngine {
       return touch(s);
     }
     if (res.outcome === "failed") {
-      return applyFail(s, phase, { pass: false, reason: res.reason }, attempts);
+      return applyFail(s, phase, { pass: false, reason: res.reason }, attempts, "kind");
     }
 
     // Exit gate — acceptance predicate on the phase output (§5, §5a.5).
     if (phase.def.gate) {
       const v = await this.#gate(phase.def.gate, s, phase.def, "exit");
-      if (!v.pass) return applyFail(s, phase, v, attempts);
+      if (!v.pass) return applyFail(s, phase, v, attempts, "exit");
     }
 
     // Passed → record the result and advance the cursor.
@@ -116,6 +120,18 @@ export class PipelineEngine {
       s = await this.step(s);
       if (onProgress) await onProgress(s);
     }
+    // Guard tripped (a mis-authored retry loop) — fail terminally rather than
+    // leave the pipeline stuck non-terminal forever (nothing re-drives it).
+    if (s.status === "draft" || s.status === "running") {
+      s = clone(s);
+      const cur = s.phases[s.cursor];
+      if (cur && cur.state.status === "running") {
+        cur.state = { status: "failed", reason: `pipeline exceeded ${MAX_STEPS} steps`, attempts: cur.state.attempts };
+      }
+      s.status = "failed";
+      touch(s);
+      if (onProgress) await onProgress(s);
+    }
     return s;
   }
 
@@ -128,7 +144,7 @@ export class PipelineEngine {
     const g = this.#registries.gates.resolve(id);
     if (!g) return { pass: false, reason: `unknown ${at} gate "${id}"` };
     try {
-      return await g.evaluate({ pipeline, phase });
+      return await g.evaluate({ pipeline: clone(pipeline), phase });
     } catch (err) {
       // A throwing gate is a failing verdict, not a crash — same reasoning as
       // the phase kind above: never leave the pipeline stuck mid-advance.
@@ -136,8 +152,6 @@ export class PipelineEngine {
     }
   }
 }
-
-const errMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 function touch(s: PipelineState): PipelineState {
   s.updatedAt = now();
@@ -155,6 +169,7 @@ function applyFail(
   phase: PipelinePhase,
   verdict: GateVerdict,
   attempts: number,
+  source: "entry" | "exit" | "kind",
 ): PipelineState {
   const onFail: PhaseFailAction = phase.def.onFail ?? { action: "halt" };
   const reason = verdict.reason ?? "phase gate failed";
@@ -168,7 +183,9 @@ function applyFail(
   if (onFail.action === "halt") {
     phase.state = {
       status: "halted",
-      requestId: `gate:${phase.def.id}`,
+      // Source-qualified so a phase with both an entry and an exit gate produces
+      // distinct halt ids (no collision when answering).
+      requestId: `${source}:${phase.def.id}`,
       reason,
       questions: verdict.questions,
     };

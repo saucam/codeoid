@@ -13,7 +13,17 @@ export { MapRegistry, createRegistries } from "./registry";
 export { alwaysGate, manualGate, noopPhaseKind, registerBuiltins } from "./builtin";
 export { PipelineEngine } from "./engine";
 export { PipelineStore } from "./store";
-export { type CreatePipelineOpts, PipelineManager } from "./manager";
-export { createPipelineManagerFromConfig, type PipelineWiringConfig } from "./wiring";
+export { type CreatePipelineOpts, type PipelineManagerOptions, PipelineManager } from "./manager";
 export { makeSkillPhaseKind } from "./skill-kind";
-export type { PhaseRunner, PhaseRunRequest, PhaseRunOutput } from "./runner";
+export {
+  SessionPhaseRunner,
+  type PhaseRunner,
+  type PhaseRunRequest,
+  type PhaseRunOutput,
+  type PhaseTurnHost,
+} from "./runner";
+export {
+  createPipelineManagerFromConfig,
+  type PipelineWiringConfig,
+  type PipelineWiringOptions,
+} from "./wiring";

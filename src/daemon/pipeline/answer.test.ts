@@ -25,7 +25,7 @@ describe("PipelineManager.answer (halt → resume)", () => {
     expect(halted.status).toBe("halted");
     expect(halted.phases[0].state.status).toBe("halted");
 
-    const done = await m.answer(p.id, "gate:gate", { approved: true, value: "LGTM" });
+    const done = await m.answer(p.id, "exit:gate", { approved: true, value: "LGTM" });
     expect(done.status).toBe("done");
     expect(done.phases[0].state).toMatchObject({ status: "passed", summary: "LGTM" });
     expect(done.phases[1].state.status).toBe("passed");
@@ -35,7 +35,7 @@ describe("PipelineManager.answer (halt → resume)", () => {
     const m = mgr();
     const p = m.create({ name: "REQ-1", phases: halting, ...tenant });
     await m.advance(p.id);
-    const failed = await m.answer(p.id, "gate:gate", { approved: false, value: "nope" });
+    const failed = await m.answer(p.id, "exit:gate", { approved: false, value: "nope" });
     expect(failed.status).toBe("failed");
     expect(failed.phases[0].state).toMatchObject({ status: "failed", reason: "nope" });
   });
@@ -44,7 +44,7 @@ describe("PipelineManager.answer (halt → resume)", () => {
     const m = mgr();
     const p = m.create({ name: "REQ-1", phases: [{ id: "only", kind: "noop", gate: "manual" }], ...tenant });
     await m.advance(p.id);
-    const done = await m.answer(p.id, "gate:only", { approved: true });
+    const done = await m.answer(p.id, "exit:only", { approved: true });
     expect(done.status).toBe("done");
     expect(done.phases[0].state).toMatchObject({ status: "passed", summary: "approved" });
   });
@@ -72,7 +72,7 @@ describe("PipelineManager.answer (halt → resume)", () => {
     const m = new PipelineManager(store);
     const p = m.create({ name: "REQ-1", phases: halting, ...tenant });
     await m.advance(p.id);
-    await m.answer(p.id, "gate:gate", { approved: true });
+    await m.answer(p.id, "exit:gate", { approved: true });
     // Fresh manager over the same store sees the completed pipeline.
     expect(new PipelineManager(store).get(p.id)?.status).toBe("done");
   });
