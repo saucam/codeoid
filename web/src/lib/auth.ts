@@ -160,6 +160,63 @@ export function rememberApiKey(apiKey: string): void {
   localStorage.setItem(STORAGE_KEY_API_KEY, apiKey);
 }
 
+/**
+ * Persist a ZeroID JWT in the OAuth-token slot so `resolveToken` picks it up and
+ * reloads stay signed in. Used by the OAuth callback and the embed handoff.
+ */
+export function rememberOAuthToken(token: string): void {
+  localStorage.setItem(STORAGE_KEY_TOKEN, token);
+}
+
+/** Minimal window surface consumeEmbedToken needs — so it's unit-testable. */
+interface EmbedWindowLike {
+  parent: unknown;
+  location: { hash: string; pathname: string; search: string };
+  history: { replaceState: (data: unknown, unused: string, url: string) => void };
+}
+
+/**
+ * Embedded-handoff bootstrap. When codeoid's web UI is framed by a host app
+ * (Highflame Studio), that host hands us a short-lived ZeroID token in the URL
+ * hash (`#codeoid_token=…`) so the user never sees codeoid's own sign-in — the
+ * platform already authenticated them. Capture it into the OAuth-token slot
+ * (`resolveToken` then uses it) and scrub it from the address bar / history.
+ *
+ * Runs ONLY when actually framed (`window.parent !== window`): at the top level
+ * ("Open in new tab") no token is handed off, so we never consume one outside
+ * the embed path. The token is still verified by the daemon on every WebSocket
+ * (signature via JWKS, tenancy, expiry), so this only skips the *interactive*
+ * sign-in — it does not bypass authorization.
+ *
+ * @returns true if a token was consumed.
+ */
+export function consumeEmbedToken(
+  win: EmbedWindowLike = window as unknown as EmbedWindowLike,
+): boolean {
+  if (win.parent === win) return false;
+  const raw = win.location.hash.startsWith("#")
+    ? win.location.hash.slice(1)
+    : win.location.hash;
+  if (!raw) return false;
+
+  const params = new URLSearchParams(raw);
+  const token = params.get("codeoid_token");
+  if (!token) return false;
+
+  rememberOAuthToken(token);
+
+  // Scrub only our param from the URL; preserve any other hash state the app
+  // may rely on. History is replaced so the token never lingers in the bar.
+  params.delete("codeoid_token");
+  const rest = params.toString();
+  win.history.replaceState(
+    null,
+    "",
+    `${win.location.pathname}${win.location.search}${rest ? `#${rest}` : ""}`,
+  );
+  return true;
+}
+
 /** Forget all persisted credentials (sign-out). */
 export function forgetApiKey(): void {
   localStorage.removeItem(STORAGE_KEY_API_KEY);

@@ -19,6 +19,7 @@ import {
   forgetApiKey,
   rememberedOAuthToken,
   fetchOAuthProvider,
+  consumeEmbedToken,
   AuthError,
 } from "./auth";
 
@@ -214,5 +215,56 @@ describe("AuthError", () => {
     expect(err.kind).toBe("missing");
     expect(err.name).toBe("AuthError");
     expect(err.message).toBe("test");
+  });
+});
+
+// ── G. Embedded-handoff token (Studio → codeoid iframe) ───────────────────────
+
+/** A framed window whose hash carries the handed-off token. */
+function fakeWin(hash: string, framed = true) {
+  const replaced: string[] = [];
+  const win = {
+    parent: {} as unknown, // distinct object → framed
+    location: { hash, pathname: "/ui/", search: "" },
+    history: {
+      replaceState: (_d: unknown, _u: string, url: string) => replaced.push(url),
+    },
+  };
+  if (!framed) win.parent = win; // parent === self → top-level
+  return { win, replaced };
+}
+
+describe("consumeEmbedToken", () => {
+  it("stores the hash token in the OAuth slot and scrubs the URL when framed", () => {
+    const { win, replaced } = fakeWin("#codeoid_token=jwt-abc");
+    expect(consumeEmbedToken(win)).toBe(true);
+    // resolveToken now finds it via the OAuth-token fallback.
+    expect(rememberedOAuthToken()).toBe("jwt-abc");
+    expect(replaced).toEqual(["/ui/"]); // token scrubbed from the address bar
+  });
+
+  it("resolveToken picks up the token consumed from the hash", async () => {
+    consumeEmbedToken(fakeWin("#codeoid_token=jwt-xyz").win);
+    const res = await resolveToken({});
+    expect(res).toEqual({ token: "jwt-xyz", exchanged: false });
+  });
+
+  it("preserves other hash state while removing only codeoid_token", () => {
+    const { win, replaced } = fakeWin("#codeoid_token=jwt-abc&view=files");
+    expect(consumeEmbedToken(win)).toBe(true);
+    expect(replaced).toEqual(["/ui/#view=files"]);
+  });
+
+  it("does nothing at the top level (never consume outside the embed path)", () => {
+    const { win } = fakeWin("#codeoid_token=jwt-abc", /* framed */ false);
+    expect(consumeEmbedToken(win)).toBe(false);
+    expect(rememberedOAuthToken()).toBeNull();
+  });
+
+  it("is a no-op when the hash carries no token", () => {
+    const { win, replaced } = fakeWin("#view=files");
+    expect(consumeEmbedToken(win)).toBe(false);
+    expect(rememberedOAuthToken()).toBeNull();
+    expect(replaced).toEqual([]);
   });
 });
