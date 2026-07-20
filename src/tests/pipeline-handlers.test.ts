@@ -12,7 +12,7 @@ import type { CodeoidConfig } from "../config.js";
 import { SessionManager } from "../daemon/session-manager.js";
 import { Store } from "../daemon/store.js";
 import { TranscriptStore } from "../daemon/transcript.js";
-import { ALL_SCOPES } from "../protocol/scopes.js";
+import { ALL_SCOPES, SCOPES } from "../protocol/scopes.js";
 import type { AuthContext, DaemonMessage, PipelineWire } from "../protocol/types.js";
 
 const AUTH: AuthContext = {
@@ -115,6 +115,116 @@ describe("pipeline.* handlers", () => {
 
     const aborted = snapshot(await manager.handle({ type: "pipeline.abort", id: "4", pipelineId: pid }, AUTH, CLIENT));
     expect(aborted.status).toBe("abandoned");
+  });
+
+  test("advance + halt→answer→resume round-trip over the wire", async () => {
+    const created = snapshot(
+      await manager.handle(
+        {
+          type: "pipeline.create",
+          id: "1",
+          name: "R",
+          phases: [
+            { id: "gate", kind: "noop", gate: "manual" },
+            { id: "tail", kind: "noop", gate: "always" },
+          ],
+          workdir: join(tmp, "repo"),
+        },
+        AUTH,
+        CLIENT,
+      ),
+    );
+    expect(created.status).toBe("draft");
+    const pid = created.id;
+
+    const advanced = snapshot(await manager.handle({ type: "pipeline.advance", id: "2", pipelineId: pid }, AUTH, CLIENT));
+    expect(advanced.status).toBe("halted");
+    const halted = advanced.phases[0];
+    expect(halted.status).toBe("halted");
+    expect(halted.requestId).toBe("exit:gate");
+    expect(halted.reason).toBeDefined();
+
+    const done = snapshot(
+      await manager.handle(
+        { type: "pipeline.answer", id: "3", pipelineId: pid, requestId: halted.requestId ?? "", approved: true, value: "ok" },
+        AUTH,
+        CLIENT,
+      ),
+    );
+    expect(done.status).toBe("done");
+    expect(done.phases[0].status).toBe("passed");
+    expect(done.phases[0].summary).toBe("ok");
+  });
+
+  test("advance requires the PIPELINE_CREATE scope", async () => {
+    const created = snapshot(
+      await manager.handle(
+        { type: "pipeline.create", id: "1", name: "R", phases: [{ id: "one", kind: "noop" }], workdir: join(tmp, "repo") },
+        AUTH,
+        CLIENT,
+      ),
+    );
+    const readOnly: AuthContext = { ...AUTH, scopes: [SCOPES.PIPELINE_READ] as AuthContext["scopes"] };
+    const r = await manager.handle({ type: "pipeline.advance", id: "2", pipelineId: created.id }, readOnly, CLIENT);
+    expect(r.type).toBe("response.error");
+    if (r.type === "response.error") expect(r.code).toBe("forbidden");
+  });
+
+  test("cross-tenant answer / abort → not_found", async () => {
+    const created = snapshot(
+      await manager.handle(
+        {
+          type: "pipeline.create",
+          id: "1",
+          name: "R",
+          phases: [{ id: "one", kind: "noop", gate: "manual" }],
+          workdir: join(tmp, "repo"),
+        },
+        AUTH,
+        CLIENT,
+      ),
+    );
+    const other: AuthContext = { ...AUTH, accountId: "other-acc" };
+    const a = await manager.handle(
+      { type: "pipeline.answer", id: "2", pipelineId: created.id, requestId: "exit:one", approved: true },
+      other,
+      CLIENT,
+    );
+    expect(a.type).toBe("response.error");
+    if (a.type === "response.error") expect(a.code).toBe("not_found");
+    const b = await manager.handle({ type: "pipeline.abort", id: "3", pipelineId: created.id }, other, CLIENT);
+    expect(b.type).toBe("response.error");
+    if (b.type === "response.error") expect(b.code).toBe("not_found");
+  });
+
+  test("create rejects an unusable workdir and an unknown provider", async () => {
+    const badWd = await manager.handle(
+      {
+        type: "pipeline.create",
+        id: "1",
+        name: "R",
+        phases: [{ id: "one", kind: "noop" }],
+        workdir: "/nonexistent/does/not/exist",
+      },
+      AUTH,
+      CLIENT,
+    );
+    expect(badWd.type).toBe("response.error");
+    if (badWd.type === "response.error") expect(badWd.code).toBe("invalid_request");
+
+    const badProv = await manager.handle(
+      {
+        type: "pipeline.create",
+        id: "2",
+        name: "R",
+        phases: [{ id: "one", kind: "noop", provider: "nope-provider" }],
+        workdir: join(tmp, "repo"),
+      },
+      AUTH,
+      CLIENT,
+    );
+    expect(badProv.type).toBe("response.error");
+    if (badProv.type === "response.error") expect(badProv.error).toContain("provider");
   });
 
   test("create validation surfaces as response.error", async () => {

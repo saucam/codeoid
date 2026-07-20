@@ -48,7 +48,7 @@ import {
 } from "./dispatch.js";
 import { createPipelineManagerFromConfig } from "./pipeline/wiring.js";
 import type { PipelineManager } from "./pipeline/manager.js";
-import { SessionPhaseRunner } from "./pipeline/runner.js";
+import { SessionPhaseRunner, type PhaseTurnResult } from "./pipeline/runner.js";
 import type { DispatchEventRow, DispatchTaskRow } from "./store.js";
 import { type MemoryEngine, type MemoryMcpMount, workspaceIdFromPath } from "./memory/index.js";
 import type { McpRegistry } from "./mcp/registry.js";
@@ -68,6 +68,11 @@ import type {
 } from "../protocol/types.js";
 import type { Scope } from "../protocol/scopes.js";
 import type { PipelineState } from "./pipeline/interface.js";
+
+/** Wall-clock cap for a single SDLC pipeline phase turn — a clientless worker
+ *  can otherwise hang forever (a model dialog / a tool without its own timeout
+ *  never reaches a resting status). Mirrors the dispatcher's lease intent. */
+const PHASE_TURN_TIMEOUT_MS = 10 * 60_000;
 import { randomUUID } from "node:crypto";
 import {
   createForkWorktree,
@@ -270,6 +275,17 @@ export class SessionManager {
 
   stopDispatcher(): void {
     this.#dispatcher.stop();
+  }
+
+  /** Re-drive SDLC pipelines interrupted mid-run at a restart (no-op when the
+   *  pipeline is disabled). Fire-and-forget: a failure is logged, not thrown.
+   *  Call after resumeSessions on boot. */
+  startPipelines(): void {
+    const pm = this.#pipelines;
+    if (!pm) return;
+    void pm.driveResumable().catch((err) => {
+      console.error("[pipeline] driveResumable failed on boot:", err);
+    });
   }
 
   /**
@@ -527,6 +543,8 @@ mcpHub: this.#mcpHub,
         return this.#pipelineList(msg, auth);
       case "pipeline.get":
         return this.#pipelineGet(msg, auth);
+      case "pipeline.advance":
+        return this.#pipelineAdvance(msg, auth);
       case "pipeline.answer":
         return this.#pipelineAnswer(msg, auth);
       case "pipeline.abort":
@@ -1653,7 +1671,7 @@ mcpHub: this.#mcpHub,
     accountId: string;
     projectId: string;
     createdBy: string;
-  }): Promise<string> {
+  }): Promise<PhaseTurnResult> {
     const workdir = normalizeWorkdir(req.workdir);
     if (!workdir) throw new Error(`workdir not usable: ${req.workdir}`);
     const auth: AuthContext = {
@@ -1663,10 +1681,14 @@ mcpHub: this.#mcpHub,
       accountId: req.accountId,
       projectId: req.projectId,
     };
-    let resolveDone: () => void = () => {};
-    const done = new Promise<void>((r) => {
+    let resolveDone: (s: PhaseTurnResult["finalStatus"]) => void = () => {};
+    const done = new Promise<PhaseTurnResult["finalStatus"]>((r) => {
       resolveDone = r;
     });
+    // Backstop: a worker with no attached client can hang forever (a model
+    // dialog / a tool with no timeout never reaches a resting status). The
+    // dispatcher relies on lease/reclaim; a single-turn phase needs its own cap.
+    const timer = setTimeout(() => resolveDone("timeout"), PHASE_TURN_TIMEOUT_MS);
     const session = new Session({
       name: `phase-${randomUUID().slice(0, 8)}`,
       workdir,
@@ -1689,10 +1711,10 @@ mcpHub: this.#mcpHub,
       _testProvider: this.#testProviderFactory?.(),
       onStatusChange: (id, status) => {
         this.#statusObserver(id, status);
-        // Resolve on any resting state: idle/error, or waiting_approval when the
-        // autonomous budget is spent (the phase didn't finish — return partial).
+        // Resolve on any resting status. Only "idle" is success — the runner
+        // fails the phase on error/waiting_approval/timeout (see PhaseTurnResult).
         if (status === "idle" || status === "error" || status === "waiting_approval") {
-          resolveDone();
+          resolveDone(status);
         }
       },
       onModels: (providerId, m) => this._cacheModels(providerId, m),
@@ -1700,9 +1722,10 @@ mcpHub: this.#mcpHub,
     this.#sessions.set(session.id, session);
     try {
       await session.send(req.prompt, auth);
-      await done;
-      return session.lastAssistantText ?? "";
+      const finalStatus = await done;
+      return { finalStatus, text: session.lastAssistantText ?? "" };
     } finally {
+      clearTimeout(timer);
       try {
         await session.destroy(this.#dispatchSystemAuth(req.accountId, req.projectId));
       } catch {
@@ -1779,6 +1802,17 @@ mcpHub: this.#mcpHub,
   #pipelineCreate(msg: Extract<ClientMessage, { type: "pipeline.create" }>, auth: AuthContext): DaemonMessage {
     const g = this.#pipelineGuard(msg.id, auth, SCOPES.PIPELINE_CREATE);
     if ("error" in g) return g.error;
+    // Fail fast at create (like session.create): a usable workdir + known
+    // per-phase provider — otherwise the failure only surfaces at run time.
+    if (msg.workdir !== undefined && !normalizeWorkdir(msg.workdir)) {
+      return { type: "response.error", requestId: msg.id, error: `workdir not usable: ${msg.workdir}`, code: "invalid_request" };
+    }
+    const providerIds = this.#providers.ids();
+    for (const p of msg.phases) {
+      if (p.provider && !providerIds.includes(p.provider)) {
+        return { type: "response.error", requestId: msg.id, error: `phase "${p.id}": unknown provider "${p.provider}"`, code: "invalid_request" };
+      }
+    }
     try {
       const state = g.pm.create({
         name: msg.name,
@@ -1830,12 +1864,33 @@ mcpHub: this.#mcpHub,
     }
   }
 
-  #pipelineAbort(msg: Extract<ClientMessage, { type: "pipeline.abort" }>, auth: AuthContext): DaemonMessage {
+  /** Advance a pipeline until it halts or reaches a terminal status. */
+  async #pipelineAdvance(
+    msg: Extract<ClientMessage, { type: "pipeline.advance" }>,
+    auth: AuthContext,
+  ): Promise<DaemonMessage> {
+    const g = this.#pipelineGuard(msg.id, auth, SCOPES.PIPELINE_CREATE);
+    if ("error" in g) return g.error;
+    if (!this.#ownedPipeline(g.pm, msg.pipelineId, auth)) {
+      return { type: "response.error", requestId: msg.id, error: "Pipeline not found", code: "not_found" };
+    }
+    try {
+      const next = await g.pm.advance(msg.pipelineId);
+      return { type: "pipeline.snapshot", requestId: msg.id, pipeline: this.#pipelineToWire(next) };
+    } catch (e) {
+      return this.#pipelineError(msg.id, e);
+    }
+  }
+
+  async #pipelineAbort(
+    msg: Extract<ClientMessage, { type: "pipeline.abort" }>,
+    auth: AuthContext,
+  ): Promise<DaemonMessage> {
     const g = this.#pipelineGuard(msg.id, auth, SCOPES.PIPELINE_CREATE);
     if ("error" in g) return g.error;
     const s = this.#ownedPipeline(g.pm, msg.pipelineId, auth);
     if (!s) return { type: "response.error", requestId: msg.id, error: "Pipeline not found", code: "not_found" };
-    const next = g.pm.abort(msg.pipelineId) ?? s;
+    const next = (await g.pm.abort(msg.pipelineId)) ?? s;
     return { type: "pipeline.snapshot", requestId: msg.id, pipeline: this.#pipelineToWire(next) };
   }
 

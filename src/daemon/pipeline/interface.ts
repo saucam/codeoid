@@ -10,14 +10,6 @@
 
 // ── Phase definition (the static plan) ────────────────────────────────────
 
-/** Per-phase tool scope, enforced at the tool fence — the hard tier (§5a.1). */
-export interface ToolPolicy {
-  /** tool / file globs allowed in this phase, e.g. ["Read","Write(**\/*_test.*)"]. */
-  allow?: string[];
-  /** hard block — wins over `allow` and over the session mode, e.g. ["Edit"]. */
-  deny?: string[];
-}
-
 /**
  * What to do when a phase's gate (or its kind) fails.
  *   - "halt"  — park at a human decision point; `PipelineManager.answer(approved)`
@@ -50,11 +42,11 @@ export interface PhaseDef {
   gate?: string;
   /** entry (grounding) gate id — a read-only probe before the phase acts (§5a.3). */
   entryGate?: string;
-  /** per-phase tool scope, enforced at the `canUseTool` fence (§5a.1). */
-  tools?: ToolPolicy;
-  /** typed artifact ids this phase consumes (§5a.2). */
+  /** Reserved metadata (not yet consumed): typed artifact ids this phase reads
+   *  / writes (§5a.2). Kept for pack authoring; artifact I/O lands with its
+   *  enforcement. Per-phase tool scoping (§5a.1) was removed until the worker
+   *  `canUseTool` fence enforces it — an unenforced field is false security. */
   reads?: string[];
-  /** typed artifact id this phase produces (§5a.2). */
   writes?: string;
   /** failure policy for this phase. Defaults to `{ action: "halt" }`. */
   onFail?: PhaseFailAction;

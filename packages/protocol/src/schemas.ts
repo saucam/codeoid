@@ -346,12 +346,6 @@ const phaseDefSchema = z.object({
   entryGate: z.string().max(64).optional(),
   provider: z.string().max(64).optional(),
   model: z.string().max(LIMITS.MODEL_MAX).optional(),
-  tools: z
-    .object({
-      allow: z.array(z.string().max(256)).max(128).optional(),
-      deny: z.array(z.string().max(256)).max(128).optional(),
-    })
-    .optional(),
   reads: z.array(z.string().max(256)).max(128).optional(),
   writes: z.string().max(256).optional(),
   onFail: z
@@ -380,6 +374,12 @@ export const pipelineListSchema = z.object({
 export const pipelineGetSchema = z.object({
   ...base,
   type: z.literal("pipeline.get"),
+  pipelineId: idField,
+});
+
+export const pipelineAdvanceSchema = z.object({
+  ...base,
+  type: z.literal("pipeline.advance"),
   pipelineId: idField,
 });
 
@@ -435,6 +435,7 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
   pipelineCreateSchema,
   pipelineListSchema,
   pipelineGetSchema,
+  pipelineAdvanceSchema,
   pipelineAnswerSchema,
   pipelineAbortSchema,
 ]);

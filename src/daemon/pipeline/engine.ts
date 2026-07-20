@@ -73,7 +73,10 @@ export class PipelineEngine {
       res = { outcome: "failed", reason: `unknown phase kind "${phase.def.kind}"` };
     } else {
       try {
-        res = await kind.run({ pipeline: s, phase: phase.def, registries: this.#registries });
+        // Hand plugins a clone — a buggy/hostile kind mutating our working
+        // state must not corrupt the engine's transition (the "returns a NEW
+        // state" guarantee).
+        res = await kind.run({ pipeline: clone(s), phase: phase.def, registries: this.#registries });
       } catch (err) {
         res = { outcome: "failed", reason: `phase kind "${phase.def.kind}" threw: ${errMessage(err)}` };
       }
@@ -117,6 +120,18 @@ export class PipelineEngine {
       s = await this.step(s);
       if (onProgress) await onProgress(s);
     }
+    // Guard tripped (a mis-authored retry loop) — fail terminally rather than
+    // leave the pipeline stuck non-terminal forever (nothing re-drives it).
+    if (s.status === "draft" || s.status === "running") {
+      s = clone(s);
+      const cur = s.phases[s.cursor];
+      if (cur && cur.state.status === "running") {
+        cur.state = { status: "failed", reason: `pipeline exceeded ${MAX_STEPS} steps`, attempts: cur.state.attempts };
+      }
+      s.status = "failed";
+      touch(s);
+      if (onProgress) await onProgress(s);
+    }
     return s;
   }
 
@@ -129,7 +144,7 @@ export class PipelineEngine {
     const g = this.#registries.gates.resolve(id);
     if (!g) return { pass: false, reason: `unknown ${at} gate "${id}"` };
     try {
-      return await g.evaluate({ pipeline, phase });
+      return await g.evaluate({ pipeline: clone(pipeline), phase });
     } catch (err) {
       // A throwing gate is a failing verdict, not a crash — same reasoning as
       // the phase kind above: never leave the pipeline stuck mid-advance.

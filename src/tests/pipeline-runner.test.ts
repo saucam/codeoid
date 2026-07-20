@@ -36,6 +36,25 @@ function turnDone(): ProviderEvent {
 function sayTurn(text: string): ProviderEvent[] {
   return [{ type: "text_done", content: text } as ProviderEvent, turnDone()];
 }
+function errorTurn(): ProviderEvent[] {
+  return [
+    {
+      type: "turn_done",
+      result: {
+        providerId: "mock",
+        model: "mock",
+        inputTokens: 1,
+        outputTokens: 1,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        totalCostUsd: 0,
+        durationMs: 1,
+        isError: true,
+        errorMessage: "backend blew up",
+      },
+    } as ProviderEvent,
+  ];
+}
 
 function mkConfig(dbPath: string, pipelineEnabled: boolean): CodeoidConfig {
   return {
@@ -114,6 +133,30 @@ describe("pipeline runtime (real SessionManager + mock backend)", () => {
     const st = done.phases[0].state;
     expect(st.status).toBe("passed");
     if (st.status === "passed") expect(st.summary).toContain("phase complete");
+  });
+
+  test("an errored backend turn fails the phase instead of passing it", async () => {
+    const store2 = new Store(join(tmp, "codeoid-err.db"));
+    const m2 = new SessionManager(store2, transcript, undefined, undefined, undefined, {
+      config: mkConfig(join(tmp, "codeoid-err.db"), true),
+      _testProviderFactory: () => new MockSessionProvider("mock", [errorTurn()]),
+    });
+    const pm = m2.pipelines;
+    expect(pm).toBeDefined();
+    if (!pm) return;
+    pm.registries.skills.register({ id: "impl", kind: "slash", command: "/impl" });
+    const p = pm.create({
+      name: "R",
+      workdir: join(tmp, "repo"),
+      phases: [{ id: "impl", kind: "skill", skill: "impl", onFail: { action: "abort" } }],
+      ...tenant,
+    });
+    const out = await pm.advance(p.id);
+    expect(out.status).toBe("failed");
+    const st = out.phases[0].state;
+    expect(st.status).toBe("failed");
+    if (st.status === "failed") expect(st.reason).toContain("error");
+    await m2.drain(3_000);
   });
 
   test("get pipelines() is undefined when the pipeline is disabled", () => {

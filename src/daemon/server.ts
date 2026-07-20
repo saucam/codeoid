@@ -350,6 +350,10 @@ export class DaemonServer {
     // back in the session map for continuation to find them.
     this.#manager.startDispatcher();
 
+    // Re-drive any SDLC pipelines interrupted mid-run before the restart
+    // (no-op when the pipeline feature is disabled).
+    this.#manager.startPipelines();
+
     // Start Bun HTTP + WebSocket server
     const self = this;
     const authConfig = this.#config.auth;

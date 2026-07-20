@@ -137,6 +137,7 @@ const samples: { [T in ClientTypes]: Extract<ClientMessage, { type: T }> } = {
   },
   "pipeline.list": { type: "pipeline.list", id: "r33" },
   "pipeline.get": { type: "pipeline.get", id: "r34", pipelineId: "p1" },
+  "pipeline.advance": { type: "pipeline.advance", id: "r37", pipelineId: "p1" },
   "pipeline.answer": {
     type: "pipeline.answer",
     id: "r35",

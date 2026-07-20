@@ -28,10 +28,19 @@ export interface PhaseRunner {
   runPrompt(req: PhaseRunRequest): Promise<PhaseRunOutput>;
 }
 
+/** The resting outcome of a worker turn: the terminal status it reached plus the
+ *  assistant's final text. Only `idle` is a success — `error` (turn failed),
+ *  `waiting_approval` (autonomous budget exhausted mid-turn ⇒ incomplete), and
+ *  `timeout` (never rested) are failures the runner surfaces to the engine. */
+export interface PhaseTurnResult {
+  finalStatus: "idle" | "error" | "waiting_approval" | "timeout";
+  text: string;
+}
+
 /**
  * The minimal daemon capability a SessionPhaseRunner needs: run one turn on a
- * disposable worker session and return the assistant's final text. Defined here
- * (not imported from the daemon) so the pipeline package stays free of a
+ * disposable worker session and return its resting status + final text. Defined
+ * here (not imported from the daemon) so the pipeline package stays free of a
  * SessionManager dependency; SessionManager satisfies it structurally.
  */
 export interface PhaseTurnHost {
@@ -43,7 +52,7 @@ export interface PhaseTurnHost {
     accountId: string;
     projectId: string;
     createdBy: string;
-  }): Promise<string>;
+  }): Promise<PhaseTurnResult>;
 }
 
 /**
@@ -61,7 +70,7 @@ export class SessionPhaseRunner implements PhaseRunner {
   }
 
   async runPrompt(req: PhaseRunRequest): Promise<PhaseRunOutput> {
-    const summary = await this.#host().runPhaseTurn({
+    const { finalStatus, text } = await this.#host().runPhaseTurn({
       prompt: req.prompt,
       provider: req.provider,
       model: req.model,
@@ -70,6 +79,13 @@ export class SessionPhaseRunner implements PhaseRunner {
       projectId: req.pipeline.projectId,
       createdBy: req.pipeline.createdBy,
     });
-    return { summary };
+    // Only `idle` is success. A non-idle turn (error / budget-exhausted /
+    // timed-out) is a phase FAILURE — throw so the engine applies onFail rather
+    // than silently marking the phase passed with a partial/empty summary.
+    if (finalStatus !== "idle") {
+      const detail = text ? `: ${text.slice(0, 300)}` : "";
+      throw new Error(`phase turn ended in "${finalStatus}"${detail}`);
+    }
+    return { summary: text };
   }
 }

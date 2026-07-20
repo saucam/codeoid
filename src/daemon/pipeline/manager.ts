@@ -4,9 +4,10 @@
  * on construction so a pipeline halted at phase N comes back halted at phase N
  * after a daemon restart (§5.2).
  *
- * Mutating operations for a given pipeline are serialized through a per-id
- * promise chain, so an `advance` awaiting a real backend turn can't interleave
- * with another `advance`/`answer` and clobber persisted state (lost update).
+ * All mutating operations for a given pipeline are serialized through a per-id
+ * promise chain (`advance`/`answer`/`abort`), so an op awaiting a real backend
+ * turn can't interleave with another and clobber persisted state (lost update).
+ * Returned states and `get()` hand out clones so a caller can't mutate the cache.
  */
 
 import { randomUUID } from "node:crypto";
@@ -57,7 +58,8 @@ export class PipelineManager {
   }
 
   /** Create a draft pipeline (all phases pending) and persist it. Throws if a
-   *  phase references a kind/gate/skill that isn't registered (fail fast). */
+   *  phase references a kind/gate/skill that isn't registered, a `skill` phase
+   *  has no skill id, or two phases share an id (fail fast). */
   create(opts: CreatePipelineOpts): PipelineState {
     this.#validate(opts.phases);
     const ts = Date.now();
@@ -75,13 +77,14 @@ export class PipelineManager {
       createdAt: ts,
       updatedAt: ts,
     };
-    this.#store.save(state);
-    this.#cache.set(state.id, state);
-    return state;
+    this.#persist(state);
+    return cloneState(state);
   }
 
+  /** Look up a pipeline; returns a clone so the caller can't mutate the cache. */
   get(id: string): PipelineState | undefined {
-    return this.#cache.get(id) ?? this.#store.get(id);
+    const s = this.#cache.get(id) ?? this.#store.get(id);
+    return s ? cloneState(s) : undefined;
   }
 
   list(accountId: string, projectId: string): PipelineState[] {
@@ -90,7 +93,7 @@ export class PipelineManager {
 
   /** Drive the pipeline until it is terminal or halted, persisting each step. */
   advance(id: string): Promise<PipelineState> {
-    return this.#serialize(id, () => this.#advanceInner(id));
+    return this.#serialize(id, async () => cloneState(await this.#advanceInner(id)));
   }
 
   /**
@@ -98,29 +101,20 @@ export class PipelineManager {
    * `approved` marks the phase passed (its `value` becomes the summary) and
    * advances; otherwise the phase — and the pipeline — fail. Approving is a
    * deliberate human **override** (even of a deterministic gate); use
-   * `onFail:"abort"` for failures that must be final. This is the daemon side of
-   * halt → answer-from-a-frontend → resume (§4.1, §5.3).
+   * `onFail:"abort"` for failures that must be final (§4.1, §5.3).
    */
   answer(id: string, requestId: string, opts: { approved: boolean; value?: string }): Promise<PipelineState> {
-    return this.#serialize(id, () => this.#answerInner(id, requestId, opts));
+    return this.#serialize(id, async () => cloneState(await this.#answerInner(id, requestId, opts)));
   }
 
   /** Mark a pipeline abandoned (terminal). No-op if unknown or already terminal;
-   *  the active phase (if unresolved) is failed so the record isn't left mid-run. */
-  abort(id: string): PipelineState | undefined {
-    const s = this.get(id);
-    if (!s) return undefined;
-    if (isTerminal(s.status)) return s;
-    const next = cloneState(s);
-    const cur = next.phases[next.cursor];
-    if (cur && cur.state.status !== "passed" && cur.state.status !== "failed") {
-      cur.state = { status: "failed", reason: "pipeline aborted", attempts: 0 };
-    }
-    next.status = "abandoned";
-    next.updatedAt = Date.now();
-    this.#store.save(next);
-    this.#cache.set(id, next);
-    return next;
+   *  the active phase (if unresolved) is failed so the record isn't left mid-run.
+   *  Serialized like advance/answer so it can't be clobbered by an in-flight op. */
+  abort(id: string): Promise<PipelineState | undefined> {
+    return this.#serialize(id, async () => {
+      const r = await this.#abortInner(id);
+      return r ? cloneState(r) : undefined;
+    });
   }
 
   /** Rehydrate non-terminal pipelines from the store into the in-memory cache.
@@ -138,21 +132,26 @@ export class PipelineManager {
    * interrupted while executing re-runs (at-least-once — same as the dispatcher).
    */
   async driveResumable(): Promise<PipelineState[]> {
-    const resumable = [...this.#cache.values()].filter(
-      (s) => s.status === "draft" || s.status === "running",
-    );
-    return Promise.all(resumable.map((s) => this.advance(s.id)));
+    const ids = [...this.#cache.values()]
+      .filter((s) => s.status === "draft" || s.status === "running")
+      .map((s) => s.id);
+    return Promise.all(ids.map((id) => this.advance(id)));
   }
 
   // ── internals ────────────────────────────────────────────────────────────
 
+  /** Persist + keep the cache coherent: active pipelines are cached; terminal
+   *  ones are evicted (still readable via the store) so the cache stays bounded. */
+  #persist(s: PipelineState): void {
+    this.#store.save(s);
+    if (isTerminal(s.status)) this.#cache.delete(s.id);
+    else this.#cache.set(s.id, s);
+  }
+
   async #advanceInner(id: string): Promise<PipelineState> {
     const start = this.get(id);
     if (!start) throw new Error(`pipeline "${id}" not found`);
-    return this.#engine.run(start, (s) => {
-      this.#store.save(s);
-      this.#cache.set(s.id, s);
-    });
+    return this.#engine.run(start, (s) => this.#persist(s));
   }
 
   async #answerInner(
@@ -160,7 +159,7 @@ export class PipelineManager {
     requestId: string,
     opts: { approved: boolean; value?: string },
   ): Promise<PipelineState> {
-    const s = this.get(id);
+    const s = this.get(id); // a clone — safe to mutate
     if (!s) throw new Error(`pipeline "${id}" not found`);
     if (s.status !== "halted") throw new Error(`pipeline "${id}" is not halted (status: ${s.status})`);
     const current = s.phases[s.cursor];
@@ -171,28 +170,42 @@ export class PipelineManager {
       throw new Error(`stale requestId "${requestId}" for pipeline "${id}"`);
     }
 
-    const next = cloneState(s);
-    const phase = next.phases[next.cursor];
     if (opts.approved) {
-      phase.state = { status: "passed", summary: opts.value ?? "approved" };
-      next.cursor += 1;
-      next.status = next.cursor >= next.phases.length ? "done" : "running";
+      current.state = { status: "passed", summary: opts.value ?? "approved" };
+      s.cursor += 1;
+      s.status = s.cursor >= s.phases.length ? "done" : "running";
     } else {
-      phase.state = { status: "failed", reason: opts.value ?? "rejected by human", attempts: 1 };
-      next.status = "failed";
+      current.state = { status: "failed", reason: opts.value ?? "rejected by human", attempts: 1 };
+      s.status = "failed";
     }
-    next.updatedAt = Date.now();
-    this.#store.save(next);
-    this.#cache.set(id, next);
+    s.updatedAt = Date.now();
+    this.#persist(s);
 
     // Approving a non-final phase resumes the run to the next halt / terminal.
     // Call the inner advance directly — we already hold this id's chain slot.
-    return next.status === "running" ? this.#advanceInner(id) : next;
+    return s.status === "running" ? this.#advanceInner(id) : s;
+  }
+
+  async #abortInner(id: string): Promise<PipelineState | undefined> {
+    const s = this.get(id); // a clone — safe to mutate
+    if (!s) return undefined;
+    if (isTerminal(s.status)) return s;
+    const cur = s.phases[s.cursor];
+    if (cur && cur.state.status !== "passed" && cur.state.status !== "failed") {
+      cur.state = { status: "failed", reason: "pipeline aborted", attempts: 0 };
+    }
+    s.status = "abandoned";
+    s.updatedAt = Date.now();
+    this.#persist(s);
+    return s;
   }
 
   #validate(phases: PhaseDef[]): void {
     if (phases.length === 0) throw new Error("pipeline must declare at least one phase");
+    const seen = new Set<string>();
     for (const p of phases) {
+      if (seen.has(p.id)) throw new Error(`duplicate phase id "${p.id}"`);
+      seen.add(p.id);
       if (!this.#registries.phases.has(p.kind)) {
         throw new Error(`phase "${p.id}": unknown kind "${p.kind}"`);
       }
@@ -202,8 +215,11 @@ export class PipelineManager {
       if (p.entryGate && !this.#registries.gates.has(p.entryGate)) {
         throw new Error(`phase "${p.id}": unknown entry gate "${p.entryGate}"`);
       }
-      if (p.kind === "skill" && p.skill && !this.#registries.skills.has(p.skill)) {
-        throw new Error(`phase "${p.id}": unknown skill "${p.skill}"`);
+      if (p.kind === "skill") {
+        if (!p.skill) throw new Error(`phase "${p.id}": kind "skill" requires a skill id`);
+        if (!this.#registries.skills.has(p.skill)) {
+          throw new Error(`phase "${p.id}": unknown skill "${p.skill}"`);
+        }
       }
     }
   }

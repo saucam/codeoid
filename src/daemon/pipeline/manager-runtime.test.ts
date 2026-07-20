@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import type { SkillPlugin } from "./interface";
+import type { PipelineState, SkillPlugin } from "./interface";
 import { PipelineManager } from "./manager";
 import { PipelineStore } from "./store";
 
@@ -34,13 +34,45 @@ describe("create() validation", () => {
       "draft",
     );
   });
+  test("rejects kind:skill with no skill id", () => {
+    expect(() => mgr().create({ name: "x", phases: [{ id: "one", kind: "skill" }], ...tenant })).toThrow(
+      /requires a skill id/,
+    );
+  });
+  test("rejects duplicate phase ids", () => {
+    expect(() =>
+      mgr().create({
+        name: "x",
+        phases: [
+          { id: "dup", kind: "noop" },
+          { id: "dup", kind: "noop" },
+        ],
+        ...tenant,
+      }),
+    ).toThrow(/duplicate phase id/);
+  });
+});
+
+describe("get() isolation", () => {
+  test("mutating a returned pipeline does not corrupt the cache", () => {
+    const m = mgr();
+    const p = m.create({ name: "x", phases: [{ id: "one", kind: "noop", gate: "always" }], ...tenant });
+    const got = m.get(p.id);
+    if (got) {
+      got.status = "failed";
+      got.name = "hacked";
+    }
+    const again = m.get(p.id);
+    expect(again?.status).toBe("draft");
+    expect(again?.name).toBe("x");
+  });
 });
 
 describe("abort()", () => {
-  test("marks the pipeline abandoned and fails the unresolved active phase", () => {
+  test("marks the pipeline abandoned and fails the unresolved active phase", async () => {
     const m = mgr();
     const p = m.create({ name: "x", phases: [{ id: "one", kind: "noop", gate: "manual" }], ...tenant });
-    const gone = m.abort(p.id);
+    const gone = await m.abort(p.id);
     expect(gone?.status).toBe("abandoned");
     expect(gone?.phases[0].state.status).toBe("failed");
   });
@@ -48,7 +80,7 @@ describe("abort()", () => {
     const m = mgr();
     const p = m.create({ name: "x", phases: [{ id: "one", kind: "noop", gate: "always" }], ...tenant });
     await m.advance(p.id); // → done
-    expect(m.abort(p.id)?.status).toBe("done");
+    expect((await m.abort(p.id))?.status).toBe("done");
   });
 });
 
@@ -65,6 +97,30 @@ describe("driveResumable()", () => {
     await revived.driveResumable();
     expect(revived.get(draft.id)?.status).toBe("done");
     expect(revived.get(halting.id)?.status).toBe("halted");
+  });
+
+  test("re-drives a persisted 'running' pipeline (crash mid-run)", async () => {
+    const store = new PipelineStore(new Database(":memory:"));
+    // A pipeline persisted mid-run at a crash: status running, next phase pending.
+    const running: PipelineState = {
+      id: "r1",
+      name: "x",
+      phases: [
+        { def: { id: "one", kind: "noop", gate: "always" }, state: { status: "passed", summary: "" } },
+        { def: { id: "two", kind: "noop", gate: "always" }, state: { status: "pending" } },
+      ],
+      cursor: 1,
+      status: "running",
+      accountId: "a",
+      projectId: "p",
+      createdBy: "u",
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    store.save(running);
+    const revived = new PipelineManager(store);
+    await revived.driveResumable();
+    expect(revived.get("r1")?.status).toBe("done");
   });
 });
 

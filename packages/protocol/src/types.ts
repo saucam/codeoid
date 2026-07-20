@@ -778,6 +778,7 @@ export type ClientMessage =
   | PipelineCreateMsg
   | PipelineListMsg
   | PipelineGetMsg
+  | PipelineAdvanceMsg
   | PipelineAnswerMsg
   | PipelineAbortMsg;
 
@@ -1594,7 +1595,7 @@ export interface PhaseDefWire {
   entryGate?: string;
   provider?: string;
   model?: string;
-  tools?: { allow?: string[]; deny?: string[] };
+  /** Reserved metadata (not yet consumed): typed artifact ids (§5a.2). */
   reads?: string[];
   writes?: string;
   onFail?: { action: "halt" } | { action: "retry"; max: number } | { action: "abort" };
@@ -1612,6 +1613,11 @@ export interface PipelineListMsg extends BaseClientMsg {
 }
 export interface PipelineGetMsg extends BaseClientMsg {
   type: "pipeline.get";
+  pipelineId: string;
+}
+/** Drive a pipeline until it halts or reaches a terminal status. */
+export interface PipelineAdvanceMsg extends BaseClientMsg {
+  type: "pipeline.advance";
   pipelineId: string;
 }
 export interface PipelineAbortMsg extends BaseClientMsg {

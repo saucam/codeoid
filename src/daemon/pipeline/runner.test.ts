@@ -26,7 +26,7 @@ describe("SessionPhaseRunner", () => {
     const host: PhaseTurnHost = {
       async runPhaseTurn(req) {
         calls.push(req);
-        return "the result";
+        return { finalStatus: "idle", text: "the result" };
       },
     };
     const out = await new SessionPhaseRunner(() => host).runPrompt({
@@ -48,12 +48,29 @@ describe("SessionPhaseRunner", () => {
     });
   });
 
+  test("throws when the turn ends non-idle (error / waiting_approval / timeout)", async () => {
+    for (const finalStatus of ["error", "waiting_approval", "timeout"] as const) {
+      const host: PhaseTurnHost = {
+        async runPhaseTurn() {
+          return { finalStatus, text: "partial output" };
+        },
+      };
+      await expect(
+        new SessionPhaseRunner(() => host).runPrompt({
+          prompt: "x",
+          pipeline: fakePipeline(),
+          phase: { id: "one", kind: "skill" },
+        }),
+      ).rejects.toThrow(finalStatus);
+    }
+  });
+
   test("falls back to process.cwd() when the pipeline has no workdir", async () => {
     let seen = "";
     const host: PhaseTurnHost = {
       async runPhaseTurn(req) {
         seen = req.workdir;
-        return "";
+        return { finalStatus: "idle", text: "" };
       },
     };
     await new SessionPhaseRunner(() => host).runPrompt({
