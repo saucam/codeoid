@@ -6,6 +6,65 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-21
+
+### Added
+
+- **SDLC pipeline primitive** (`pipeline.*` control plane, off by default): a
+  methodology-agnostic pipeline engine that advances a session through declared
+  phases behind entry/exit gates. Ships as four plugin seams (`PhaseKind`,
+  `GatePlugin`, `SkillPlugin`, `Pack`) over a Map-backed registry, with durable
+  `bun:sqlite` state and boot-time `resume()` / `driveResumable()` so in-flight
+  pipelines survive daemon restarts. A `skill` phase kind runs `fn` skills
+  natively and drives prompt/slash skills on a disposable worker session
+  (`SessionPhaseRunner`, honoring per-phase provider/model); a non-idle worker
+  turn fails the phase closed. The wire adds `pipeline.create` / `list` / `get`
+  / `answer` / `abort` / `advance` (`pipeline:create` / `read` / `answer`
+  scopes, tenancy-checked) plus `SessionInfo.phase` / `profile`. Gated on
+  `config.pipeline.enabled` (default `false`) — the daemon stays freestyle
+  until a pack is selected.
+
+- **Declarative pack loader + create-from-pack** (`pipeline.packs` config): a
+  pack is a directory of DATA (`pack.yaml` + role files + constitution), not
+  code, so a whole team can share a methodology by fetching it from a registry.
+  `loadPack(dir)` validates and compiles a pack into a runtime `Pack`, and
+  `create({ pack })` runs it by id (phases XOR pack; `defaultPack` fallback).
+  Packs load from config at boot (fail-soft — a malformed pack is skipped, not
+  fatal) and create-from-pack works over the wire. Untrusted packs (the
+  registry default) fail command gates closed and run no host commands; pack
+  paths are realpath-confined so a symlink or `..` can't escape the pack dir.
+  `PhaseDef.role` carries a per-phase capability role onto snapshots (→ Cedar /
+  Shield enforcement in a later slice).
+
+- **MCP Servers settings surface** (`/settings`): a read-only "🔌 MCP Servers"
+  view listing every registry server (from config + imported from
+  `~/.claude.json`) with its transport, trust, scope, backends, and live
+  health. Health is observed from normal use — opening settings runs no probe
+  and has zero side effects. Backed by `McpServerStatus` and an optional
+  `mcpServers` field on `SettingsSnapshot`.
+
+- **Embedded-handoff ZeroID token from the URL hash**: when the web UI is framed
+  by a host app (Highflame Studio), it consumes a short-lived
+  `#codeoid_token=…` from the iframe URL, stores it, and scrubs it from the
+  address bar — skipping codeoid's own sign-in inside the frame. It is a no-op
+  at the top level, and the daemon still verifies the token (JWKS signature,
+  tenancy, expiry) on every WebSocket, so this skips only interactive sign-in,
+  never authorization.
+
+### Fixed
+
+- **Cross-cutting audit fixes** across pipeline, protocol, store, and session.
+  `session.fork` regained `isolate` / `workdir` / `baseBranch` (dropped from the
+  wire schema, which had forced isolation on and left bind-mode / clean-base
+  fork dead); `usage.daily` is now scope-gated (`SESSION_LIST`) instead of
+  readable by any token; `findByName` is tenant-scoped (closing a cross-tenant
+  name probe and a Telegram `/attach` self-detach). Runtime: the Gemini
+  provider's MCP tool-discovery rejection is guarded (previously an unhandled
+  rejection that hung the turn); dispatch event delivery gained a re-entrancy
+  guard (no double token spend); a corrupt or version-drifted pipeline-store row
+  is skipped rather than sinking boot resume; and pack `retry:N` now means N
+  retries (was N total attempts, so `retry:1` aborted immediately).
+
 ## [0.3.0] - 2026-07-14
 
 ### Added
