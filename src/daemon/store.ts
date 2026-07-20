@@ -614,7 +614,10 @@ export class Store {
     const stmt = this.#db.prepare(
       "UPDATE dispatch_tasks SET claimed_at = ? WHERE id = ?",
     );
-    for (const id of ids) stmt.run(now, id);
+    // One transaction: the batch is atomic (all-or-nothing) and commits once.
+    this.#db.transaction(() => {
+      for (const id of ids) stmt.run(now, id);
+    })();
   }
 
   dispatchComplete(id: string, digest: string, now: number): void {
@@ -769,7 +772,11 @@ export class Store {
     const stmt = this.#db.prepare(
       "UPDATE dispatch_events SET delivered_at = ? WHERE id = ?",
     );
-    for (const id of ids) stmt.run(now, id);
+    // Atomic batch: a partial mark-delivered would re-surface some events to the
+    // conductor as duplicate notifications (the design promises one batched turn).
+    this.#db.transaction(() => {
+      for (const id of ids) stmt.run(now, id);
+    })();
   }
 
   /** Tenants that have undelivered events — the delivery pump's work list. */

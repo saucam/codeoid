@@ -26,7 +26,10 @@ import { errMessage } from "./errors";
 /** Defensive cap against a mis-authored retry loop (each retry is one step). */
 const MAX_STEPS = 10_000;
 
-const clone = <T>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
+// structuredClone is faster than a JSON round-trip and doesn't silently coerce
+// (PipelineState is plain data, so both are safe — this just avoids the double
+// serialize/parse on every step and gate).
+const clone = <T>(x: T): T => structuredClone(x);
 const now = (): number => Date.now();
 
 export class PipelineEngine {

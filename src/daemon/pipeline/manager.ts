@@ -20,6 +20,9 @@ import type { PhaseRunner } from "./runner";
 import { makeSkillPhaseKind } from "./skill-kind";
 import type { PipelineStore } from "./store";
 
+/** Max pipelines re-driven concurrently on boot (each may spawn a worker turn). */
+const RESUME_CONCURRENCY = 4;
+
 export interface CreatePipelineOpts {
   name: string;
   /** Explicit phase plan, OR provide `pack` to use an installed pack's pipeline. */
@@ -147,7 +150,15 @@ export class PipelineManager {
     const ids = [...this.#cache.values()]
       .filter((s) => s.status === "draft" || s.status === "running")
       .map((s) => s.id);
-    return Promise.all(ids.map((id) => this.advance(id)));
+    // Bound concurrency: each advance may spawn a real worker turn, so a restart
+    // with many interrupted pipelines must not launch them all at once (a
+    // boot-time resource storm). Drive in fixed-size batches.
+    const results: PipelineState[] = [];
+    for (let i = 0; i < ids.length; i += RESUME_CONCURRENCY) {
+      const batch = ids.slice(i, i + RESUME_CONCURRENCY);
+      results.push(...(await Promise.all(batch.map((id) => this.advance(id)))));
+    }
+    return results;
   }
 
   // ── internals ────────────────────────────────────────────────────────────

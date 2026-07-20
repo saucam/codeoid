@@ -184,6 +184,60 @@ describe("pipeline.create — pack / role / optional phases", () => {
     const r = parseClientMessage({ type: "pipeline.create", id: "x", name: "R" });
     expect(r.ok).toBe(true);
   });
+
+  test("REJECTS both phases and pack (mutually exclusive)", () => {
+    const r = parseClientMessage({
+      type: "pipeline.create",
+      id: "x",
+      name: "R",
+      phases: [{ id: "a", kind: "noop" }],
+      pack: "aif-sdlc",
+    });
+    expect(r.ok).toBe(false);
+  });
+});
+
+describe("session.fork — isolation fields survive validation (must not be stripped)", () => {
+  // Regression guard: these fields were absent from the schema, so the wire
+  // layer stripped them and the fork handler always saw `undefined` (isolation
+  // forced, bind-mode + clean-base-fork dead).
+  test("isolate / workdir / baseBranch round-trip through parseClientMessage", () => {
+    const r = parseClientMessage({
+      type: "session.fork",
+      id: "f1",
+      sessionId: "s1",
+      isolate: false,
+      workdir: "/tmp/repo",
+      baseBranch: "main",
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok && r.value.type === "session.fork") {
+      expect(r.value.isolate).toBe(false);
+      expect(r.value.workdir).toBe("/tmp/repo");
+      expect(r.value.baseBranch).toBe("main");
+    }
+  });
+});
+
+describe("session.import — inline source requires a bundle", () => {
+  test("inline without bundle is rejected", () => {
+    const r = parseClientMessage({
+      type: "session.import",
+      id: "i1",
+      source: { kind: "inline" },
+      targetWorkdir: "/tmp/repo",
+    });
+    expect(r.ok).toBe(false);
+  });
+  test("inline with bundle is accepted", () => {
+    const r = parseClientMessage({
+      type: "session.import",
+      id: "i2",
+      source: { kind: "inline", bundle: { any: "thing" } },
+      targetWorkdir: "/tmp/repo",
+    });
+    expect(r.ok).toBe(true);
+  });
 });
 
 // ── 3. Forward-compat + rejection behaviour ───────────────────────────────────

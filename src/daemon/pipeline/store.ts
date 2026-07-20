@@ -73,20 +73,20 @@ export class PipelineStore {
   }
 
   get(id: string): PipelineState | undefined {
-    const row = this.#db.prepare("SELECT state_json FROM pipelines WHERE id = ?").get(id) as
-      | { state_json: string }
+    const row = this.#db.prepare("SELECT id, state_json FROM pipelines WHERE id = ?").get(id) as
+      | { id: string; state_json: string }
       | undefined;
-    return row ? (JSON.parse(row.state_json) as PipelineState) : undefined;
+    return row ? parseRow(row) : undefined;
   }
 
   /** Tenant-scoped list, newest first. */
   listByTenant(accountId: string, projectId: string): PipelineState[] {
     const rows = this.#db
       .prepare(
-        "SELECT state_json FROM pipelines WHERE account_id = ? AND project_id = ? ORDER BY created_at DESC",
+        "SELECT id, state_json FROM pipelines WHERE account_id = ? AND project_id = ? ORDER BY created_at DESC",
       )
-      .all(accountId, projectId) as Array<{ state_json: string }>;
-    return rows.map((r) => JSON.parse(r.state_json) as PipelineState);
+      .all(accountId, projectId) as Array<{ id: string; state_json: string }>;
+    return rows.map(parseRow).filter((s): s is PipelineState => s !== undefined);
   }
 
   /** Non-terminal pipelines — the set a fresh daemon rehydrates on boot. A
@@ -95,12 +95,25 @@ export class PipelineStore {
   listActive(): PipelineState[] {
     const placeholders = ACTIVE_STATUSES.map(() => "?").join(", ");
     const rows = this.#db
-      .prepare(`SELECT state_json FROM pipelines WHERE status IN (${placeholders})`)
-      .all(...ACTIVE_STATUSES) as Array<{ state_json: string }>;
-    return rows.map((r) => JSON.parse(r.state_json) as PipelineState);
+      .prepare(`SELECT id, state_json FROM pipelines WHERE status IN (${placeholders})`)
+      .all(...ACTIVE_STATUSES) as Array<{ id: string; state_json: string }>;
+    return rows.map(parseRow).filter((s): s is PipelineState => s !== undefined);
   }
 
   delete(id: string): void {
     this.#db.prepare("DELETE FROM pipelines WHERE id = ?").run(id);
+  }
+}
+
+/** Parse a persisted row, returning undefined (and logging) on corrupt JSON.
+ *  A single bad row must NOT throw out of listActive() — that runs on every boot
+ *  via resume(), so one unparseable/version-drifted row would sink rehydration
+ *  of ALL pipelines rather than just itself (sibling stores skip+log likewise). */
+function parseRow(row: { id: string; state_json: string }): PipelineState | undefined {
+  try {
+    return JSON.parse(row.state_json) as PipelineState;
+  } catch (e) {
+    console.error(`[pipeline] skipping unparseable pipeline row ${row.id}: ${e instanceof Error ? e.message : String(e)}`);
+    return undefined;
   }
 }

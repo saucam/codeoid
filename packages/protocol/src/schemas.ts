@@ -146,7 +146,7 @@ export const sessionPartActionSchema = z.object({
   type: z.literal("session.part_action"),
   sessionId: sessionIdField,
   messageId: z.string().min(1).max(LIMITS.ID_MAX),
-  action: z.string().min(1).max(256),
+  action: z.string().min(1).max(LIMITS.NAME_MAX),
   data: z.record(z.string(), z.unknown()).optional(),
 });
 
@@ -222,13 +222,19 @@ export const sessionForkSchema = z.object({
   sessionId: sessionIdField,
   name: nameField.optional(),
   providerId: z.string().min(1).max(64).optional(),
+  // Git-isolation controls — MUST be validated here or parseClientMessage
+  // strips them and the fork handler always sees `undefined` (isolation forced,
+  // bind-mode + clean-base-fork dead). Kept in sync with SessionForkMsg.
+  isolate: z.boolean().optional(),
+  workdir: pathField.optional(),
+  baseBranch: nameField.optional(),
 });
 
 export const scrollbackPageSchema = z.object({
   ...base,
   type: z.literal("scrollback.page"),
   sessionId: sessionIdField,
-  beforeMessageId: z.string().min(1).max(128),
+  beforeMessageId: z.string().min(1).max(LIMITS.ID_MAX),
   maxBytes: z.number().int().min(1).optional(),
 });
 
@@ -282,17 +288,23 @@ export const sessionExportSchema = z.object({
   toFile: z.boolean().optional(),
 });
 
-export const sessionImportSchema = z.object({
-  ...base,
-  type: z.literal("session.import"),
-  source: z.discriminatedUnion("kind", [
-    z.object({ kind: z.literal("inline"), bundle: z.unknown() }),
-    z.object({ kind: z.literal("file"), path: pathField }),
-  ]),
-  targetWorkdir: pathField,
-  nameOverride: nameField.optional(),
-  writePinnedFiles: z.boolean().optional(),
-});
+export const sessionImportSchema = z
+  .object({
+    ...base,
+    type: z.literal("session.import"),
+    source: z.discriminatedUnion("kind", [
+      z.object({ kind: z.literal("inline"), bundle: z.unknown() }),
+      z.object({ kind: z.literal("file"), path: pathField }),
+    ]),
+    targetWorkdir: pathField,
+    nameOverride: nameField.optional(),
+    writePinnedFiles: z.boolean().optional(),
+  })
+  // z.unknown() treats an absent `bundle` as valid; SessionImportMsg requires it.
+  // Enforce presence so the import handler never dereferences an undefined bundle.
+  .refine((m) => m.source.kind !== "inline" || m.source.bundle !== undefined, {
+    message: "inline source requires `bundle`",
+  });
 
 export const usageDailySchema = z.object({
   ...base,
@@ -358,18 +370,23 @@ const phaseDefSchema = z.object({
     .optional(),
 });
 
-// `phases` XOR `pack` is enforced in the handler/manager (not the schema): this
-// object is a member of the `type`-discriminated union, which requires plain
-// ZodObjects — a `.refine()` here would break discrimination.
-export const pipelineCreateSchema = z.object({
-  ...base,
-  type: z.literal("pipeline.create"),
-  name: nameField,
-  phases: z.array(phaseDefSchema).min(1).max(64).optional(),
-  pack: z.string().max(64).optional(),
-  spec: z.string().max(LIMITS.SEND_TEXT_MAX).optional(),
-  workdir: pathField.optional(),
-});
+// `phases` and `pack` are mutually exclusive; neither is allowed too (the daemon
+// falls back to its configured defaultPack). A `.refine()` on a discriminated-
+// union member is fine under Zod 4 (see sessionUiResponseSchema above), so we
+// enforce the constraint at the schema layer rather than only in the handler.
+export const pipelineCreateSchema = z
+  .object({
+    ...base,
+    type: z.literal("pipeline.create"),
+    name: nameField,
+    phases: z.array(phaseDefSchema).min(1).max(64).optional(),
+    pack: z.string().max(64).optional(),
+    spec: z.string().max(LIMITS.SEND_TEXT_MAX).optional(),
+    workdir: pathField.optional(),
+  })
+  .refine((m) => !(m.phases !== undefined && m.pack !== undefined), {
+    message: "provide either `phases` or `pack`, not both",
+  });
 
 export const pipelineListSchema = z.object({
   ...base,

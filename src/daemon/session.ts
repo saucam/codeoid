@@ -107,6 +107,10 @@ const MEMORY_SYSTEM_PROMPT_APPEND = [
  * bounds how stale a crashed daemon's view of an in-flight turn can be.
  */
 const STATUS_PERSIST_DEBOUNCE_MS = 500;
+/** Max wait for a sub-agent's ZeroID registration before attributing its tool
+ *  call — a hung identity service must not stall the event loop; we fall back to
+ *  the session identity (mis-attribution, logged at debug) rather than block. */
+const SUBAGENT_REGISTRATION_FENCE_MS = 5_000;
 
 /**
  * Max serialized message payload per scrollback.replay frame (#84). Kept well
@@ -3231,13 +3235,31 @@ export class Session {
         // silently kills parallel tool calls from concurrent subagents.
         // Cleanup is handled solely by the #consumeEvents finally block.
         // Await the ZeroID registration fence so sub-agent identity is resolved
-        // before we attribute this tool call. Bounded by a 5s timeout so a
-        // hung ZeroID service can't stall the event loop indefinitely.
+        // before we attribute this tool call. Bounded so a hung ZeroID service
+        // can't stall the event loop; on timeout/failure we fall back to the
+        // session identity — logged (not swallowed) so mis-attribution is
+        // diagnosable.
         if (event.sdkAgentId) {
           const fence = this.#subagentRegistrations.get(event.sdkAgentId);
           if (fence) {
-            const timeout = new Promise<void>((resolve) => setTimeout(resolve, 5000));
-            try { await Promise.race([fence, timeout]); } catch { /* use placeholder */ }
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const timeout = new Promise<"timeout">((resolve) => {
+              timer = setTimeout(() => resolve("timeout"), SUBAGENT_REGISTRATION_FENCE_MS);
+            });
+            try {
+              const raced = await Promise.race([fence.then(() => "ok" as const), timeout]);
+              if (raced === "timeout") {
+                console.debug(
+                  `[codeoid] subagent registration fence timed out for ${event.sdkAgentId} after ${SUBAGENT_REGISTRATION_FENCE_MS}ms; attributing to session identity`,
+                );
+              }
+            } catch (err) {
+              console.debug(
+                `[codeoid] subagent registration failed for ${event.sdkAgentId}: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            } finally {
+              clearTimeout(timer);
+            }
           }
         }
         const emittingIdentity = event.sdkAgentId

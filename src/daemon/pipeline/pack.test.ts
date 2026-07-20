@@ -6,7 +6,7 @@
 
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PipelineManager } from "./manager";
@@ -111,7 +111,8 @@ describe("loadPack", () => {
     expect(pack.pipeline).toHaveLength(2);
     expect(pack.pipeline[0]).toMatchObject({ id: "explore", kind: "skill", skill: "spec", role: "explorer" });
     expect(pack.pipeline[1]).toMatchObject({ id: "implement", gate: "tests_pass", role: "implementer" });
-    expect(pack.pipeline[1].onFail).toEqual({ action: "retry", max: 2 });
+    // pack `retry: 2` → 2 retries → 3 total attempts (engine `max` is total).
+    expect(pack.pipeline[1].onFail).toEqual({ action: "retry", max: 3 });
   });
 
   test("register() installs the pack's skills + gates into the registries", () => {
@@ -207,6 +208,25 @@ phases:
   - id: a
     kind: noop
 `);
+    expect(() => loadPack(dir)).toThrow("escapes the pack directory");
+  });
+
+  test("rejects a symlinked file that escapes the pack dir (symlink confinement)", () => {
+    const dir = writePack(`schema: codeoid/pack@v1
+id: p
+name: P
+version: 0.1.0
+constitution: ./leak.md
+phases:
+  - id: a
+    kind: noop
+`);
+    // A secret outside the pack, and a symlink INSIDE the pack pointing at it —
+    // lexically the path is under the pack dir, so only realpath catches it.
+    const outside = mkdtempSync(join(tmpdir(), "codeoid-outside-"));
+    dirs.push(outside);
+    writeFileSync(join(outside, "secret.md"), "TOP SECRET");
+    symlinkSync(join(outside, "secret.md"), join(dir, "leak.md"));
     expect(() => loadPack(dir)).toThrow("escapes the pack directory");
   });
 

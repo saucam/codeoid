@@ -1176,10 +1176,19 @@ mcpHub: this.#mcpHub,
     }
   }
 
-  /** Get a session by name (for Telegram convenience). */
-  findByName(name: string): Session | undefined {
+  /** Get a session by name within the caller's tenant (for Telegram convenience).
+   *  Tenant-scoped like #getOwnedSession — a bare name scan would otherwise match
+   *  another tenant's session (a cross-tenant name probe + a self-detach side
+   *  effect in the /attach path). */
+  findByName(name: string, auth: AuthContext): Session | undefined {
     for (const session of this.#sessions.values()) {
-      if (session.name === name) return session;
+      if (
+        session.name === name &&
+        session.accountId === auth.accountId &&
+        session.projectId === auth.projectId
+      ) {
+        return session;
+      }
     }
     return undefined;
   }
@@ -1804,8 +1813,16 @@ mcpHub: this.#mcpHub,
     if ("error" in g) return g.error;
     // Fail fast at create (like session.create): a usable workdir + known
     // per-phase provider — otherwise the failure only surfaces at run time.
-    if (msg.workdir !== undefined && !normalizeWorkdir(msg.workdir)) {
-      return { type: "response.error", requestId: msg.id, error: `workdir not usable: ${msg.workdir}`, code: "invalid_request" };
+    // Normalize ONCE and persist the canonical path: the command-gate cwd and
+    // the phase-turn workdir must agree (a raw "~/repo" or relative path would
+    // validate but then break the gate's Bun.spawn cwd).
+    let workdir = msg.workdir;
+    if (msg.workdir !== undefined) {
+      const normalized = normalizeWorkdir(msg.workdir);
+      if (!normalized) {
+        return { type: "response.error", requestId: msg.id, error: `workdir not usable: ${msg.workdir}`, code: "invalid_request" };
+      }
+      workdir = normalized;
     }
     // Resolve the plan: explicit `pack`, else explicit `phases`, else the
     // configured default pack. `phases` XOR `pack` is enforced in create().
@@ -1823,7 +1840,7 @@ mcpHub: this.#mcpHub,
         phases: msg.phases,
         pack,
         spec: msg.spec,
-        workdir: msg.workdir,
+        workdir,
         accountId: auth.accountId,
         projectId: auth.projectId,
         createdBy: auth.sub,
@@ -2887,6 +2904,12 @@ mcpHub: this.#mcpHub,
     msg: Extract<ClientMessage, { type: "usage.daily" }>,
     auth: AuthContext,
   ): DaemonMessage {
+    // Cost/token/turn aggregates are tenant data — gate on the read scope, like
+    // the other read handlers (session.search/commands). Without this, a token
+    // holding no session scope could still read its tenant's billing totals.
+    if (!hasScope(auth.scopes as string[], SCOPES.SESSION_LIST)) {
+      return { type: "response.error", requestId: msg.id, error: "Missing scope: session:list", code: "forbidden" };
+    }
     if (!this.#memory) {
       return this.#emptyUsageResponse(msg.id);
     }

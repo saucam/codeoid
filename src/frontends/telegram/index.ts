@@ -401,7 +401,7 @@ export class TelegramFrontend implements Frontend {
       return;
     }
 
-    const session = this.#manager.findByName(name);
+    const session = this.#manager.findByName(name, state.auth!);
     if (!session) {
       await ctx.reply(`Session not found: ${name}`);
       return;
@@ -519,7 +519,7 @@ export class TelegramFrontend implements Frontend {
       return;
     }
 
-    const session = this.#manager.findByName(name);
+    const session = this.#manager.findByName(name, state.auth!);
     if (!session) {
       await ctx.reply(`Session not found: ${name}`);
       return;

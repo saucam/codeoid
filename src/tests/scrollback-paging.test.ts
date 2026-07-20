@@ -354,7 +354,7 @@ describe("SessionManager scrollback.page", () => {
       c,
     )) as { data: { id: string } };
     const sessionId = created.data.id;
-    const session = manager.findByName("paged")!;
+    const session = manager.findByName("paged", TEST_AUTH)!;
     session.restoreScrollback(
       Array.from({ length: 6 }, (_, i) => msg(`m${i}`, `c${i}`, sessionId)),
     );

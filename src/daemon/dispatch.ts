@@ -110,6 +110,7 @@ export class Dispatcher {
   #watched = new Map<string, string>();
   /** Re-entrancy guard — a slow tick must not overlap the next. */
   #ticking = false;
+  #deliveringEvents = false;
 
   constructor(store: Store, host: DispatcherHost, config?: Partial<DispatchConfig>) {
     this.#store = store;
@@ -434,29 +435,41 @@ export class Dispatcher {
   }
 
   async #deliverPendingEvents(): Promise<void> {
-    for (const tenant of this.#store.dispatchEventTenants()) {
-      const events = this.#store.dispatchEventsPending(
-        tenant.accountId,
-        tenant.projectId,
-      );
-      if (events.length === 0) continue;
-      try {
-        const delivered = await this.#host.deliverEvents(
+    // Re-entrancy guard (mirrors #ticking): the periodic tick() and the eager
+    // void-call from #emitEvent can both land here. Without this, both read the
+    // same pending batch (events are marked delivered only AFTER an awaited
+    // conductor.send, and the conductor's status hasn't flipped off "idle" yet),
+    // so the conductor gets the same <fleet_events> batch twice — duplicate
+    // token spend and a duplicate owner summary.
+    if (this.#deliveringEvents) return;
+    this.#deliveringEvents = true;
+    try {
+      for (const tenant of this.#store.dispatchEventTenants()) {
+        const events = this.#store.dispatchEventsPending(
           tenant.accountId,
           tenant.projectId,
-          events,
         );
-        if (delivered) {
-          this.#store.dispatchEventsMarkDelivered(
-            events.map((e) => e.id),
-            Date.now(),
+        if (events.length === 0) continue;
+        try {
+          const delivered = await this.#host.deliverEvents(
+            tenant.accountId,
+            tenant.projectId,
+            events,
+          );
+          if (delivered) {
+            this.#store.dispatchEventsMarkDelivered(
+              events.map((e) => e.id),
+              Date.now(),
+            );
+          }
+        } catch (err) {
+          console.error(
+            `[codeoid/dispatch] event delivery failed (kept pending): ${err instanceof Error ? err.message : String(err)}`,
           );
         }
-      } catch (err) {
-        console.error(
-          `[codeoid/dispatch] event delivery failed (kept pending): ${err instanceof Error ? err.message : String(err)}`,
-        );
       }
+    } finally {
+      this.#deliveringEvents = false;
     }
   }
 }

@@ -7,7 +7,7 @@
  * fetch from a shared registry: nothing executable travels with it.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { z } from "zod";
 import type {
@@ -114,21 +114,45 @@ export interface LoadPackOptions {
 
 // ── Loader ────────────────────────────────────────────────────────────────
 
+/** Cap on any single pack file (manifest, role, constitution) — these are small
+ *  by nature; the bound stops a hostile/broken pack from OOMing the daemon by
+ *  referencing a multi-GB file. */
+const MAX_PACK_FILE_BYTES = 1_000_000;
+
+/** Hard bound on a `command` gate's runtime. A gate command that hangs (blocks
+ *  on network/stdin, `sleep infinity`, a wedged test) must not wedge the phase
+ *  forever and leak the child — on timeout we kill it and fail the gate. */
+const GATE_COMMAND_TIMEOUT_MS = 120_000;
+
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /** Resolve a pack-relative path, CONFINED to the pack directory. A manifest may
- *  only reference files it ships: absolute paths and `..` traversal are rejected,
- *  so a hostile pack can't read `/etc/shadow` or `../../secrets` into a prompt.
- *  (Boundary is `base + sep` so a sibling like `pack-evil` can't masquerade.) */
+ *  only reference files it ships: absolute paths and `..` traversal are rejected
+ *  lexically, and the resolved path is then canonicalized with `realpathSync` and
+ *  re-checked so a symlink INSIDE the pack can't point outside it (e.g. `evil ->
+ *  /etc`). Boundary is `base + sep` so a sibling like `pack-evil` can't
+ *  masquerade. A missing file makes `realpathSync` throw ENOENT — surfaced as a
+ *  read error by the caller. */
 const underDir = (dir: string, rel: string): string => {
-  const base = resolve(dir);
+  const base = realpathSync(resolve(dir));
   const resolved = resolve(base, rel);
   if (isAbsolute(rel) || (resolved !== base && !resolved.startsWith(base + sep))) {
     throw new Error(`path "${rel}" escapes the pack directory`);
   }
-  return resolved;
+  const real = realpathSync(resolved);
+  if (real !== base && !real.startsWith(base + sep)) {
+    throw new Error(`path "${rel}" escapes the pack directory (symlink)`);
+  }
+  return real;
 };
-const readText = (path: string): string => readFileSync(path, "utf8");
+
+const readText = (path: string): string => {
+  const { size } = statSync(path);
+  if (size > MAX_PACK_FILE_BYTES) {
+    throw new Error(`file exceeds ${MAX_PACK_FILE_BYTES} bytes (${size})`);
+  }
+  return readFileSync(path, "utf8");
+};
 const readYaml = (path: string): unknown => Bun.YAML.parse(readText(path));
 
 /**
@@ -234,7 +258,10 @@ function toOnFail(v: PackManifest["phases"][number]["onFail"]): PhaseFailAction 
   if (v === undefined) return undefined;
   if (v === "halt") return { action: "halt" };
   if (v === "abort") return { action: "abort" };
-  return { action: "retry", max: v.retry };
+  // Pack `retry: N` means N *retries* (N+1 total attempts). The engine's `max`
+  // is total-attempts and it retries while attempts < max, so map N → N+1
+  // (otherwise `retry: 1` would be 1 attempt = indistinguishable from abort).
+  return { action: "retry", max: v.retry + 1 };
 }
 
 // ── Gate builders ─────────────────────────────────────────────────────────
@@ -261,10 +288,25 @@ function buildGate(g: PackManifest["gates"][number], dir: string, trusted: boole
       async evaluate(ctx) {
         const cwd = ctx.pipeline.workdir ?? dir;
         const proc = Bun.spawn(["sh", "-c", run], { cwd, stdout: "ignore", stderr: "ignore" });
-        const code = await proc.exited;
-        return code === 0
-          ? { pass: true }
-          : { pass: false, reason: `command gate "${g.id}" failed (exit ${code}): ${run}` };
+        const TIMED_OUT = Symbol("timeout");
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const result = await Promise.race<number | typeof TIMED_OUT>([
+            proc.exited,
+            new Promise((res) => {
+              timer = setTimeout(() => res(TIMED_OUT), GATE_COMMAND_TIMEOUT_MS);
+            }),
+          ]);
+          if (result === TIMED_OUT) {
+            proc.kill();
+            return { pass: false, reason: `command gate "${g.id}" timed out after ${GATE_COMMAND_TIMEOUT_MS}ms: ${run}` };
+          }
+          return result === 0
+            ? { pass: true }
+            : { pass: false, reason: `command gate "${g.id}" failed (exit ${result}): ${run}` };
+        } finally {
+          clearTimeout(timer);
+        }
       },
     };
   }
