@@ -78,6 +78,47 @@ export class PipelineManager {
     });
   }
 
+  /**
+   * Resolve a halted phase with a human decision, then resume the pipeline.
+   * `approved` marks the phase passed (its `value` becomes the summary) and
+   * advances; otherwise the phase — and the pipeline — fail. This is the
+   * daemon-side of the halt → answer-from-a-frontend → resume path (§4.1, §5.3):
+   * a `ui_response` lands here to unblock a pipeline that a gate parked.
+   */
+  async answer(
+    id: string,
+    requestId: string,
+    opts: { approved: boolean; value?: string },
+  ): Promise<PipelineState> {
+    const s = this.get(id);
+    if (!s) throw new Error(`pipeline "${id}" not found`);
+    if (s.status !== "halted") throw new Error(`pipeline "${id}" is not halted (status: ${s.status})`);
+    const current = s.phases[s.cursor];
+    if (!current || current.state.status !== "halted") {
+      throw new Error(`pipeline "${id}" has no halted phase at the cursor`);
+    }
+    if (current.state.requestId !== requestId) {
+      throw new Error(`stale requestId "${requestId}" for pipeline "${id}"`);
+    }
+
+    const next = cloneState(s);
+    const phase = next.phases[next.cursor];
+    if (opts.approved) {
+      phase.state = { status: "passed", summary: opts.value ?? "approved" };
+      next.cursor += 1;
+      next.status = next.cursor >= next.phases.length ? "done" : "running";
+    } else {
+      phase.state = { status: "failed", reason: opts.value ?? "rejected by human", attempts: 1 };
+      next.status = "failed";
+    }
+    next.updatedAt = Date.now();
+    this.#store.save(next);
+    this.#cache.set(id, next);
+
+    // Approving a non-final phase resumes the run to the next halt / terminal.
+    return next.status === "running" ? this.advance(id) : next;
+  }
+
   /** Mark a pipeline abandoned (terminal). Returns undefined if unknown. */
   abort(id: string): PipelineState | undefined {
     const s = this.get(id);
