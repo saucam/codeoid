@@ -12,6 +12,7 @@ import { join } from "node:path";
 import type { CodeoidConfig } from "../config.js";
 import type { ProviderEvent } from "../daemon/providers/interface.js";
 import { MockSessionProvider } from "../daemon/providers/mock/session-provider.js";
+import { PHASE_COMPLETE_MARKER } from "../daemon/pipeline/phase-completion.js";
 import { SessionManager } from "../daemon/session-manager.js";
 import { Store } from "../daemon/store.js";
 import { TranscriptStore } from "../daemon/transcript.js";
@@ -43,7 +44,13 @@ function turnDone(): ProviderEvent {
   } as ProviderEvent;
 }
 function sayTurn(text: string): ProviderEvent[] {
-  return [{ type: "text_done", content: text } as ProviderEvent, turnDone()];
+  // Every turn here represents a phase the model has COMPLETED, so emit the
+  // completion marker — runPhaseOnSession only ends a phase when it sees it
+  // (otherwise it nudges the model to keep going).
+  return [
+    { type: "text_done", content: `${text}\n${PHASE_COMPLETE_MARKER}` } as ProviderEvent,
+    turnDone(),
+  ];
 }
 
 const IMPLEMENTER_ROLE = `name: implementer

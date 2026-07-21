@@ -323,6 +323,11 @@ export class Session {
   #hookBus?: HookBus;
 
   #status: SessionStatus = "idle";
+  /** True from an interrupt() until the next turn STARTS. An interrupt leaves
+   *  the session `idle` (indistinguishable from a normal turn rest), so a driver
+   *  awaiting the turn (a pipeline phase) needs this to tell "the user stopped"
+   *  from "the model finished" and NOT re-drive over a stop. */
+  #turnInterrupted = false;
   /** Trailing-debounce timer coalescing persistence of ACTIVE status flips
    * (thinking ↔ tool_running). See #setStatus. */
   #statusPersistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -909,6 +914,9 @@ export class Session {
   }
 
   get status(): SessionStatus { return this.#status; }
+  /** True if the most recent turn was interrupted (until the next turn starts).
+   *  Lets a phase driver stop cleanly instead of re-driving over a user's Stop. */
+  get turnInterrupted(): boolean { return this.#turnInterrupted; }
   /** Id of the provider backing this session (e.g. "claude"). */
   get providerId(): string { return this.#provider.id; }
   /** Tenant-scoped memory workspace id (for fleet views / cross-session search). */
@@ -1468,6 +1476,8 @@ export class Session {
     priority?: "now" | "next" | "later",
   ): Promise<void> {
     this.#store.audit(sender.sub, "session.send", this.id);
+    // A new turn is starting — clear any interrupt from the previous one.
+    this.#turnInterrupted = false;
 
     // Fork-setup gate: on a freshly-forked worktree the first turn must wait
     // for `fork.setup` (e.g. `bun install`) to finish, so the agent never
@@ -1745,6 +1755,9 @@ export class Session {
    */
   async interrupt(sender: AuthContext): Promise<void> {
     this.#store.audit(sender.sub, "session.interrupt", this.id);
+    // Mark BEFORE cancelling dialogs, so a driver whose requestUserInput resolves
+    // cancelled sees the interrupt and stops rather than treating it as a dismiss.
+    this.#turnInterrupted = true;
     this.#pendingMidTurnCount = 0; // cancel pending mid-turn continuations
     // Finalize any in-flight streaming messages RIGHT NOW so the UI's live
     // region stops spinning on content the model won't finish emitting,

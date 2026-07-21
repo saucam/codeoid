@@ -55,6 +55,16 @@ import {
   type PackServiceConfig,
 } from "./pipeline/pack-service.js";
 import { SessionPhaseRunner, type PhaseTurnResult } from "./pipeline/runner.js";
+import {
+  isNeedInput,
+  isPhaseComplete,
+  MAX_PHASE_NUDGES,
+  PHASE_COMPLETION_CONTRACT,
+  PHASE_CONTINUE_NUDGE,
+  PHASE_NO_INPUT_NUDGE,
+  stripNeedInputMarker,
+  stripPhaseCompleteMarker,
+} from "./pipeline/phase-completion.js";
 import { roleEnforcement } from "./providers/tool-safety.js";
 import type { DispatchEventRow, DispatchTaskRow } from "./store.js";
 import { type MemoryEngine, type MemoryMcpMount, workspaceIdFromPath } from "./memory/index.js";
@@ -203,7 +213,13 @@ export class SessionManager {
     this.#dispatcher.onSessionStatus(sessionId, status);
     // A pipeline phase driving this session awaits its next rest; resolve it.
     // (Non-run sessions never have a waiter, so this is a no-op for them.)
-    if (status === "idle" || status === "error" || status === "waiting_approval") {
+    //
+    // `waiting_approval` is deliberately NOT a rest: the SDK turn is still ALIVE
+    // (session.ts) — the model called a tool that needs a decision. Ending the
+    // phase there would guillotine it mid-work (the bug this used to cause).
+    // A tool approval is a tool-level interaction; the phase resumes once the
+    // tool is approved and the turn goes on to actually rest (idle).
+    if (status === "idle" || status === "error") {
       const waiter = this.#phaseWaiters.get(sessionId);
       if (waiter) {
         this.#phaseWaiters.delete(sessionId);
@@ -1794,13 +1810,61 @@ mcpHub: this.#mcpHub,
     // fresh generous budget each phase. The human gate is the phase boundary,
     // not each tool; the user can watch + interrupt; nothing times out.
     session.setMode("autonomous", PIPELINE_PHASE_MAX_TURNS, auth);
-    const done = new Promise<PhaseTurnResult["finalStatus"]>((resolve) => {
-      this.#phaseWaiters.set(req.sessionId, resolve);
-    });
+    // A phase is complete only when the model emits the completion marker — NOT
+    // on the first `idle` (a turn rests whenever the model stops calling tools:
+    // done, planning, or asking). On a bare rest we NUDGE it to continue rather
+    // than halting the phase for review mid-work; after MAX_PHASE_NUDGES we hand
+    // whatever it produced to the human boundary so a never-completing model
+    // still reaches Approve/Reject instead of looping. A non-idle rest
+    // (error / budget-exhausted) is a real phase failure, surfaced as-is.
+    let message = `${req.prompt}\n${PHASE_COMPLETION_CONTRACT}`;
+    let nudges = 0;
     try {
-      await session.send(req.prompt, auth);
-      const finalStatus = await done;
-      return { finalStatus, text: session.lastAssistantText ?? "" };
+      while (true) {
+        const done = new Promise<PhaseTurnResult["finalStatus"]>((resolve) => {
+          this.#phaseWaiters.set(req.sessionId, resolve);
+        });
+        await session.send(message, auth);
+        const finalStatus = await done;
+        const text = session.lastAssistantText ?? "";
+        // A non-idle rest (error / budget-exhausted) is a real phase failure.
+        if (finalStatus !== "idle") return { finalStatus, text };
+        // The user interrupted (Stop) — an interrupt leaves the session idle,
+        // so without this we'd re-drive a nudge over the stop. Hand the partial
+        // to the review boundary instead.
+        if (session.turnInterrupted) return { finalStatus: "idle", text };
+        // Deliverable complete → done, marker stripped from the summary.
+        if (isPhaseComplete(text)) return { finalStatus: "idle", text: stripPhaseCompleteMarker(text) };
+        // The model needs the user's input. Surface the question as an input
+        // dialog and feed the answer back as the next turn — a REAL answer is a
+        // legitimate pause (not a nudge), so it resets the give-up budget; a
+        // dismissed / interrupted dialog falls through to the bounded nudge path
+        // so repeated dismissals can't loop forever.
+        if (isNeedInput(text)) {
+          const resp = await session.requestUserInput({
+            method: "input",
+            title: "The agent needs your input to continue this phase",
+            message: stripNeedInputMarker(text),
+            placeholder: "Type your answer…",
+          });
+          if (session.turnInterrupted) return { finalStatus: "idle", text };
+          if (!resp.cancelled && resp.value && resp.value.trim().length > 0) {
+            message = resp.value;
+            nudges = 0;
+            continue;
+          }
+          if (nudges >= MAX_PHASE_NUDGES) return { finalStatus: "idle", text };
+          nudges += 1;
+          message = PHASE_NO_INPUT_NUDGE;
+          continue;
+        }
+        // Rested without any marker (an intermediate pause). Nudge to continue,
+        // bounded; after the cap, hand what it has to the human review boundary
+        // so a never-completing model still reaches Approve/Reject.
+        if (nudges >= MAX_PHASE_NUDGES) return { finalStatus: "idle", text };
+        nudges += 1;
+        message = PHASE_CONTINUE_NUDGE;
+      }
     } finally {
       this.#phaseWaiters.delete(req.sessionId);
     }
