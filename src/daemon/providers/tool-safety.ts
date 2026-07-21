@@ -35,3 +35,48 @@ export function isSafeTool(name: string): boolean {
   }
   return false;
 }
+
+// ── Capability-role enforcement (ambient pack activation — docs/pack-loading.md)
+
+/** Built-in file-mutation tools. A `write:false` capability role (e.g. the
+ *  reviewer) may not use these. Bash is deliberately NOT here — a reviewer keeps
+ *  shell for read-only inspection (matching the ai-factory reviewer envelope
+ *  `[read, grep, glob, bash]`); gating all of Bash would break inspection. */
+const WRITE_TOOLS = new Set<string>(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
+
+/** Built-in network tools. A role with `network:false` may not use these;
+ *  `read-only` and `true` allow them (both built-ins are read-only fetches). */
+const NETWORK_TOOLS = new Set<string>(["WebFetch", "WebSearch"]);
+
+export function isWriteTool(name: string): boolean {
+  return WRITE_TOOLS.has(name);
+}
+export function isNetworkTool(name: string): boolean {
+  return NETWORK_TOOLS.has(name);
+}
+
+/** A capability role's tool envelope (subset of the pack role schema). */
+export interface ToolRole {
+  write: boolean;
+  network: boolean | "read-only";
+  envelope: "all" | string[];
+}
+
+/**
+ * If a capability role forbids `toolName`, returns a human reason; otherwise
+ * null. Enforced at the `canUseTool` gate (call-time deny, cross-backend) —
+ * NOT a static sandbox (the model still sees the tool and may attempt it). Only
+ * the high-signal, cleanly-mapped rules are enforced: `write:false` blocks
+ * file-mutation tools and `network:false` blocks the network tools. The role's
+ * `envelope` allow-list is carried for display but not gated here (its category
+ * names don't map 1:1 to concrete backend tool names); tighten in a later slice.
+ */
+export function roleDeniesTool(role: ToolRole, toolName: string): string | null {
+  if (role.write === false && isWriteTool(toolName)) {
+    return `capability role is read-only (write: false) — "${toolName}" is not permitted`;
+  }
+  if (role.network === false && isNetworkTool(toolName)) {
+    return `capability role forbids network access (network: false) — "${toolName}" is not permitted`;
+  }
+  return null;
+}

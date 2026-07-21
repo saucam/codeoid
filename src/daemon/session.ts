@@ -71,7 +71,8 @@ import {
   type MemoryEngine,
   type MemoryMcpMount,
 } from "./memory/index.js";
-import { isSafeTool } from "./providers/tool-safety.js";
+import { isSafeTool, roleDeniesTool } from "./providers/tool-safety.js";
+import type { PackActivation } from "./pipeline/index.js";
 import type { McpRegistry } from "./mcp/registry.js";
 import type { McpHub } from "./mcp/hub.js";
 import type { Attachment } from "../protocol/types.js";
@@ -204,6 +205,13 @@ export interface SessionCreateOptions {
    */
   role?: "conductor" | "worker";
   /**
+   * Ambient pack activation (docs/pack-loading.md): the resolved pack whose
+   * constitution is injected into the system prompt, whose subagents are handed
+   * to the backend, and whose (optional) capability role gates this session's
+   * tools. Resolved by the SessionManager from `session.create.pack`.
+   */
+  pack?: PackActivation;
+  /**
    * Provider id backing this session ("claude" | "gemini" | "openai").
    * Absent = claude. Every session carries its own selection so any session
    * — the conductor included — can run on a different backend (e.g. an
@@ -285,6 +293,8 @@ export class Session {
   readonly workdir: string;
   /** "conductor" = fleet supervisor; "worker" = dispatch-spawned; undefined = normal. */
   readonly role?: "conductor" | "worker";
+  /** Ambient-activated pack (constitution + capability role + subagents). */
+  readonly #pack?: PackActivation;
   /** Fork lineage (set from opts / restored from meta). */
   readonly forkedFrom?: { sessionId: string; name: string; atTurn: number };
   /** Git worktree backing workdir, when isolated (set from opts / meta). */
@@ -562,6 +572,7 @@ export class Session {
     this.name = opts.name;
     this.workdir = opts.workdir;
     this.role = opts.role;
+    this.#pack = opts.pack;
     this.forkedFrom = opts.forkedFrom;
     this.worktree = opts.worktree;
     this.#onStatusChange = opts.onStatusChange;
@@ -1649,6 +1660,7 @@ export class Session {
           requestUserInput: (req) => this.requestUserInput(req),
           sender: recoverySender,
           mode: this.#mode,
+          subagents: this.#pack?.subagents,
         });
         this.#activeRun = recoveryRun;
         this.#eventConsumerTask = this.#consumeEvents(recoveryRun, recoverySender);
@@ -1680,6 +1692,7 @@ export class Session {
       requestUserInput: (req) => this.requestUserInput(req),
       sender,
       mode: this.#mode,
+      subagents: this.#pack?.subagents,
     });
     this.#activeRun = run;
     this.#eventConsumerTask = this.#consumeEvents(run, sender);
@@ -2130,6 +2143,11 @@ export class Session {
       fallbackModel: this.#fallbackModel ?? undefined,
       forkedFrom: this.forkedFrom,
       worktree: this.worktree,
+      // Ambient pack driving this session (docs/pack-loading.md) — id, or
+      // "id (role)" when a capability role is active.
+      ...(this.#pack
+        ? { profile: this.#pack.roleName ? `${this.#pack.id} (${this.#pack.roleName})` : this.#pack.id }
+        : {}),
     };
   }
 
@@ -2607,6 +2625,9 @@ export class Session {
   #buildPromptAppend(): string | undefined {
     const parts: string[] = [];
     if (this.role === "conductor") parts.push(CONDUCTOR_SYSTEM_PROMPT_APPEND);
+    // Ambient pack (docs/pack-loading.md): compose the pack's constitution +
+    // the active capability role into every turn's system prompt.
+    if (this.#pack) parts.push(this.#buildPackPromptAppend(this.#pack));
     if (this.#memory) parts.push(this.#buildMemoryPromptAppend());
     return parts.length > 0 ? parts.join("\n\n") : undefined;
   }
@@ -2619,6 +2640,25 @@ export class Session {
     const base = this.#buildPromptAppend();
     if (!hookAppend) return base;
     return base ? `${base}\n\n${hookAppend}` : hookAppend;
+  }
+
+  /** The ambient pack's system-prompt contribution: its constitution, plus the
+   *  active capability role's contract (so the model self-limits, complementing
+   *  the hard canUseTool deny). Stable per session → cache-friendly prefix. */
+  #buildPackPromptAppend(pack: PackActivation): string {
+    const parts: string[] = [`# Methodology pack: ${pack.id}`];
+    if (pack.constitution) parts.push(pack.constitution.trim());
+    if (pack.role && pack.roleName) {
+      const r = pack.role;
+      const envelope = r.envelope === "all" ? "all tools" : r.envelope.join(", ");
+      const rules = [
+        r.write === false ? "This session is READ-ONLY — do not attempt to modify files (write/edit tools are denied)." : "",
+        r.network === false ? "Network access is denied — do not attempt to fetch or browse." : "",
+      ].filter(Boolean).join(" ");
+      const roleBlock = `## Capability role: ${pack.roleName}\nYou operate under the "${pack.roleName}" role (write=${r.write}, network=${r.network}, envelope=${envelope}).`;
+      parts.push(rules ? `${roleBlock} ${rules}` : roleBlock);
+    }
+    return parts.join("\n\n");
   }
 
   #buildMemoryPromptAppend(): string {
@@ -2825,6 +2865,35 @@ export class Session {
           );
           this.#persistAndBuffer(infoMsg);
           this.#broadcastRaw(infoMsg);
+        }
+      }
+
+      // Capability-role gate (ambient pack — docs/pack-loading.md). A role like
+      // reviewer (write:false) denies file-mutation / network tools up front —
+      // like a hook block: never prompts, never burns the autonomous budget.
+      // Runs after the hook gate so an explicit hook decision still wins first.
+      if (this.#pack?.role) {
+        const reason = roleDeniesTool(this.#pack.role, toolName);
+        if (reason) {
+          const label = `role "${this.#pack.roleName}"`;
+          this.#approvalPatchKeys.delete(approvalId);
+          this.#resolveToolCallMessage(approvalId, {
+            phase: "cancelled",
+            reason: "denied",
+            message: `${label}: ${reason}`,
+          });
+          this.#store.audit(sender.sub, "session.role_deny", this.id, `tool=${toolName} role=${this.#pack.roleName}`);
+          const infoMsg = this.#makeMessage(
+            "info",
+            `🔒 ${label} blocked ${toolName}: ${reason}`,
+            SYSTEM_IDENTITY,
+            undefined,
+            undefined,
+            { event: "role.denied", tool: toolName, role: this.#pack.roleName },
+          );
+          this.#persistAndBuffer(infoMsg);
+          this.#broadcastRaw(infoMsg);
+          return { behavior: "deny" as const, message: `${label}: ${reason}` };
         }
       }
 

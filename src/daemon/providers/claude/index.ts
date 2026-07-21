@@ -44,6 +44,20 @@ import type { SessionProvider, ModelInfo, NormalizedTurnResult, ProviderEvent, T
 import { renderHistorySeed, type CanonicalTurn, type HistorySeedResult } from "../canonical.js";
 import { buildSubprocessEnv } from "../env.js";
 import type { LLMCallUsage } from "../../context-math.js";
+import type { PackSubagent } from "../../pipeline/subagents.js";
+
+/** Map ambient-pack subagents to the Claude Agent SDK's programmatic `agents`
+ *  option (keyed by name). Empty → no `agents` key at all. */
+function packAgentsOption(
+  subs?: readonly PackSubagent[],
+): { agents?: Record<string, { description: string; prompt: string; tools?: string[] }> } {
+  if (!subs || subs.length === 0) return {};
+  const agents: Record<string, { description: string; prompt: string; tools?: string[] }> = {};
+  for (const a of subs) {
+    agents[a.name] = { description: a.description, prompt: a.prompt, ...(a.tools ? { tools: a.tools } : {}) };
+  }
+  return { agents };
+}
 
 // ── Initialisation options ────────────────────────────────────────────────────
 
@@ -382,6 +396,10 @@ export class ClaudeProvider implements SessionProvider {
               },
             }
           : {}),
+        // Ambient-pack subagents → the SDK's programmatic `agents` option, so
+        // they're available for auto-selection. (A `~/.claude/agents` symlink
+        // wouldn't be read — settingSources excludes the user tier.)
+        ...packAgentsOption(opts.subagents),
         ...sessionOpts,
         settingSources: ["project"],
 

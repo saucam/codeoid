@@ -48,7 +48,7 @@ import {
 } from "./dispatch.js";
 import { createPipelineManagerFromConfig } from "./pipeline/wiring.js";
 import type { PipelineManager } from "./pipeline/manager.js";
-import { PackService, type PackServiceConfig } from "./pipeline/pack-service.js";
+import { PackService, type PackActivation, type PackServiceConfig } from "./pipeline/pack-service.js";
 import { SessionPhaseRunner, type PhaseTurnResult } from "./pipeline/runner.js";
 import type { DispatchEventRow, DispatchTaskRow } from "./store.js";
 import { type MemoryEngine, type MemoryMcpMount, workspaceIdFromPath } from "./memory/index.js";
@@ -1342,6 +1342,19 @@ mcpHub: this.#mcpHub,
       };
     }
 
+    // Ambient pack activation (docs/pack-loading.md): resolve the requested pack
+    // (+ optional capability role) up front; fail-closed on an unknown pack/role.
+    let pack: PackActivation | undefined;
+    if (msg.pack) {
+      try {
+        pack = this.#packs.resolveActivation(msg.pack, msg.packRole);
+      } catch (e) {
+        return { type: "response.error", requestId: msg.id, error: e instanceof Error ? e.message : String(e), code: "invalid_request" };
+      }
+    } else if (msg.packRole) {
+      return { type: "response.error", requestId: msg.id, error: "packRole requires pack", code: "invalid_request" };
+    }
+
     const session = new Session({
       name: msg.name,
       workdir,
@@ -1351,6 +1364,7 @@ mcpHub: this.#mcpHub,
       providers: this.#providers,
       hooks: this.#hooks,
       providerId: msg.providerId,
+      pack,
       identityManager: this.#identityManager,
       memory: this.#memory,
       memoryMcp: this.#memoryMcp,

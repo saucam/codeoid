@@ -19,7 +19,20 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { AvailablePackWire, PackWire, RegistryWire } from "@codeoid/protocol";
 import type { Pack } from "./interface";
-import { loadPack, type LoadedPack } from "./pack";
+import { loadPack, type LoadedPack, type RoleDef } from "./pack";
+import { loadSubagents, type PackSubagent } from "./subagents";
+
+/** A pack resolved for ambient activation on a session (docs/pack-loading.md):
+ *  its constitution, an optional capability role to run under, and the
+ *  subagents its registry ships. */
+export interface PackActivation {
+  id: string;
+  constitution?: string;
+  /** The capability role named at activation (undefined = no tool restriction). */
+  role?: RoleDef;
+  roleName?: string;
+  subagents: PackSubagent[];
+}
 
 /** The minimal slice of PipelineManager the service needs to (un)register packs
  *  for live effect — kept structural so tests can inject a fake. `installPack`
@@ -370,6 +383,30 @@ export class PackService {
   /** The currently selected (default) pack id, or null. */
   get selectedPack(): string | null {
     return this.#defaultPack;
+  }
+
+  /**
+   * Resolve an installed pack for ambient session activation: its constitution,
+   * an optional capability role (by name), and the subagents its registry
+   * ships. Throws if the pack isn't installed, won't load, or (when `roleName`
+   * is given) the pack doesn't declare that role — the daemon fail-closes.
+   */
+  resolveActivation(packId: string, roleName?: string): PackActivation {
+    const entry = this.#packs.find((p) => this.#idOf(p) === packId);
+    if (!entry) throw new Error(`pack "${packId}" is not installed`);
+    const loaded = loadPack(entry.dir, { trusted: entry.trusted });
+    let role: RoleDef | undefined;
+    if (roleName) {
+      role = loaded.roles[roleName];
+      if (!role) {
+        const have = Object.keys(loaded.roles).join(", ") || "none";
+        throw new Error(`pack "${packId}" has no role "${roleName}" (roles: ${have})`);
+      }
+    }
+    // Subagents ship at the registry root's `agents/` dir (like skills). A
+    // local-dir install has no registry → no subagents.
+    const subagents = entry.registry ? loadSubagents(join(this.#cachePath(entry.registry), "agents")) : [];
+    return { id: loaded.id, constitution: loaded.constitution, role, roleName, subagents };
   }
 
   // ── internals ───────────────────────────────────────────────────────────────

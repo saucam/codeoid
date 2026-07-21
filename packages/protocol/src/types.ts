@@ -814,6 +814,15 @@ export interface SessionCreateMsg extends BaseClientMsg {
    * the daemon default.
    */
   providerId?: string;
+  /**
+   * Activate an installed SDLC pack on this session (ambient mode): inject its
+   * constitution, expose its skills/subagents, and — with `packRole` — run
+   * under that capability role. The daemon fail-closes on an unknown pack.
+   */
+  pack?: string;
+  /** Capability role (declared by `pack`) to run under, e.g. "reviewer"
+   *  (read-only). Requires `pack`. */
+  packRole?: string;
 }
 
 /**
