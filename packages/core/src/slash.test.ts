@@ -183,6 +183,24 @@ describe("dispatchSlash", () => {
     expect(c.sent).toEqual([]);
   });
 
+  it("parses /pipeline with and without a goal", () => {
+    expect(parseSlash("/pipeline")).toEqual({ kind: "pipeline" });
+    expect(parseSlash("/pipeline add a widget")).toEqual({
+      kind: "pipeline",
+      goal: "add a widget",
+    });
+  });
+
+  it("/pipeline invokes the pipeline hook with the goal and emits nothing", () => {
+    const showPipeline = mock();
+    const c = { ...ctx(), showPipeline };
+    dispatchSlash({ kind: "pipeline", goal: "add a widget" }, c);
+    dispatchSlash({ kind: "pipeline" }, c);
+    expect(showPipeline).toHaveBeenNthCalledWith(1, "add a widget");
+    expect(showPipeline).toHaveBeenNthCalledWith(2, undefined);
+    expect(c.sent).toEqual([]);
+  });
+
   it("parses capabilities aliases into the right tab", () => {
     expect(parseSlash("/agents")).toEqual({ kind: "capabilities", tab: "agents" });
     expect(parseSlash("/agent")).toEqual({ kind: "capabilities", tab: "agents" });

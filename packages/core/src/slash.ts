@@ -36,6 +36,7 @@ export type SlashCommand =
   | { kind: "capabilities"; tab: "agents" | "skills" | "mcp" | "hooks" }
   | { kind: "settings" }
   | { kind: "packs" }
+  | { kind: "pipeline"; goal?: string }
   | { kind: "export" }
   | { kind: "import" }
   | { kind: "fork"; providerId?: string };
@@ -142,6 +143,9 @@ export function parseSlash(raw: string, opts?: ParseSlashOptions): SlashCommand 
     case "packs":
     case "pack":
       return { kind: "packs" };
+    case "pipeline":
+      // `/pipeline` opens the runner; `/pipeline <goal…>` prefills the goal.
+      return { kind: "pipeline", ...(rest.length > 0 ? { goal: rest.join(" ") } : {}) };
     case "export":
     case "share":
       return { kind: "export" };
@@ -182,6 +186,9 @@ export interface SlashContext {
   showSettings?: () => void;
   /** Open the pack browser (dynamic pack loading — docs/pack-loading.md). */
   showPacks?: () => void;
+  /** Open the pipeline runner, optionally prefilling the goal
+   *  (governed SDLC run — docs/pipeline-run.md). */
+  showPipeline?: (goal?: string) => void;
   showExport?: () => void;
   showImport?: () => void;
   /**
@@ -292,6 +299,9 @@ export function dispatchSlash(cmd: SlashCommand, ctx: SlashContext): void {
       return;
     case "packs":
       ctx.showPacks?.();
+      return;
+    case "pipeline":
+      ctx.showPipeline?.(cmd.goal);
       return;
     case "export":
       ctx.showExport?.();

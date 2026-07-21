@@ -24,6 +24,7 @@ import HelpModal from "./HelpModal";
 import IdentityDrawer from "./IdentityDrawer";
 import NewSessionModal from "./NewSessionModal";
 import PackBrowser from "./PackBrowser";
+import PipelineRunner from "./PipelineRunner";
 import ResizeHandle from "./ResizeHandle";
 import SearchModal from "./SearchModal";
 import SessionExportModal from "./SessionExportModal";
@@ -63,6 +64,7 @@ const Shell: Component = () => {
       <SessionImportModal />
       <SettingsDrawer />
       <PackBrowser />
+      <PipelineRunner />
       <HelpModal />
     </>
   );

@@ -39,6 +39,7 @@ import {
   selectPack,
   trustPack,
 } from "../state/packs";
+import { openPipelineRunner } from "./PipelineRunner";
 import type {
   AvailablePackWire,
   PackWire,
@@ -127,6 +128,10 @@ const PackBrowser: Component = () => {
                 onRemove={(packId) => void removePack(packId)}
                 onTrust={(packId, trusted) => void trustPack(packId, trusted)}
                 onSelect={(packId) => void selectPack(packId)}
+                onRun={() => {
+                  setOpenSignal(false);
+                  openPipelineRunner();
+                }}
               />
             </Show>
           </div>
@@ -156,6 +161,9 @@ export interface PackBrowserViewProps {
   onTrust: (packId: string, trusted: boolean) => void;
   /** `null` clears the selected default pack. */
   onSelect: (packId: string | null) => void;
+  /** Start a pipeline run from an installed + active pack (opens the runner).
+   *  Optional — omitted in isolated render tests. */
+  onRun?: (packId: string) => void;
 }
 
 /** Pure body — no daemon calls. Exported for a render test. */
@@ -175,6 +183,7 @@ export const PackBrowserView: Component<PackBrowserViewProps> = (props) => {
         onRemove={props.onRemove}
         onTrust={props.onTrust}
         onSelect={props.onSelect}
+        onRun={props.onRun}
       />
       <AvailableSection
         available={available()}
@@ -331,6 +340,7 @@ const InstalledSection: Component<{
   onRemove: (packId: string) => void;
   onTrust: (packId: string, trusted: boolean) => void;
   onSelect: (packId: string | null) => void;
+  onRun?: (packId: string) => void;
 }> = (props) => (
   <section>
     <SectionHeader
@@ -354,6 +364,7 @@ const InstalledSection: Component<{
               onRemove={props.onRemove}
               onTrust={props.onTrust}
               onSelect={props.onSelect}
+              onRun={props.onRun}
             />
           )}
         </For>
@@ -368,6 +379,7 @@ const InstalledCard: Component<{
   onRemove: (packId: string) => void;
   onTrust: (packId: string, trusted: boolean) => void;
   onSelect: (packId: string | null) => void;
+  onRun?: (packId: string) => void;
 }> = (props) => {
   const p = () => props.pack;
   const btn =
@@ -439,6 +451,17 @@ const InstalledCard: Component<{
             </span>
           </Show>
           <span class="ml-auto flex items-center gap-1.5">
+            <Show when={props.onRun && p().active}>
+              <button
+                type="button"
+                class={`${btn} border-accent/50 text-accent hover:border-accent hover:bg-accent/10`}
+                disabled={props.busy}
+                onClick={() => props.onRun?.(p().id)}
+                title="Start a governed pipeline run from this pack"
+              >
+                Run
+              </button>
+            </Show>
             <button
               type="button"
               class={`${btn} hover:border-accent/40`}
