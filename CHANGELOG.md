@@ -65,6 +65,72 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is skipped rather than sinking boot resume; and pack `retry:N` now means N
   retries (was N total attempts, so `retry:1` aborted immediately).
 
+## [0.3.1] - 2026-07-19
+
+> Backfilled: 0.3.1 was cut as a version-bump-only release and shipped without
+> a CHANGELOG entry. This section documents what it carried.
+
+### Added
+
+- **Registry-driven cross-backend MCP mounter**: declare an external MCP server
+  once in config and it mounts across every backend (claude, openai, gemini,
+  codex, gemini-cli, pi) under one canonical `mcp__<server>__<tool>` name and a
+  single `canUseTool` approval gate. Daemon-owns-client by default with a
+  native-passthrough escape hatch, a transport-neutral config schema, per-server
+  health/observability, and import of servers from `~/.claude.json`. (#197 design
+  + foundation, #198 claude/openai/gemini, #199 codex/gemini-cli natives, #201 pi
+  backend + import + observability)
+
+- **Verbatim Working Set (VWS) memory across all backends**: a context-strategy
+  seam plus a shared, transport-neutral recall registry (`recall`, `recall_file`,
+  `timeline`, `get_episode`) so every backend can page the verbatim store on
+  demand — rolled out claude → gemini-cli/codex (via a shared in-daemon MCP
+  endpoint) → pi/openai/gemini. Opt-in via `CODEOID_CONTEXT_STRATEGY=vws`; the
+  default stays `transcript`. (#179 seam, #180 Claude, #182 gemini-cli/codex,
+  #183 pi/openai/gemini)
+
+- **Provider dialogs + `ask_user` on non-Claude backends**: `session.ui_request`
+  now renders on Telegram too (web + codeoid-ui already did), and openai/gemini
+  gained an `ask_user` tool, so any backend can ask the user an open-ended
+  question mid-turn rather than only Claude (`AskUserQuestion`) and codex/pi
+  (native dialogs). (#184, #185)
+
+- **Config-file-driven settings surface**: a declarative settings manifest
+  (every knob, including a per-backend tab) served over `settings.schema`, a
+  daemon settings store with `env > config.json > default` precedence +
+  provenance, a tabbed Settings drawer in the web client (a pure manifest
+  renderer), and a `/settings` command (web opens the drawer; Telegram summarizes
+  non-default config, never secret values). (#186 manifest + RPC, #187 web
+  drawer, #188 `/settings` command)
+
+- **Per-sandbox ZeroID registrar-key auth**: a `ZEROID_REGISTRAR_KEY` per-sandbox
+  credential lets the daemon register REAL agent identities against a secured
+  ZeroID instead of degrading to `anonymous:*` — the build Forge pins for its
+  agent-workspace image. (#200)
+
+- **Embed SSO via URL-hash handoff**: an embedding parent (e.g. Highflame Studio)
+  can pre-authenticate the web UI by handing a short-lived
+  `#codeoid_token` / `#codeoid_key` in the URL hash; the UI persists it into the
+  normal sign-in slot and scrubs it from the URL/history. (#195)
+
+### Fixed
+
+- **codex MCP tool calls were auto-denied in guarded/interactive mode**: codex
+  gates every MCP call behind `mcpServer/elicitation/request`, which codeoid did
+  not handle, so the elicitation fell through, threw, and codex read it as a
+  declined call — auto-denying every MCP tool, including read-only memory recall.
+  Now handled. (#196)
+
+- **codex's native approval policy now follows the session mode**: switching a
+  codex session to autonomous now maps onto codex's own `approvalPolicy` +
+  sandbox (previously pinned to `untrusted` from env), so autonomous codex stops
+  asking per action. (#181)
+
+- **Forks inherit the parent's execution mode**: `session.fork` always built the
+  child in `guarded`, so a fork of an autonomous session stalled behind approval
+  prompts (auto-denied when unattended). Forks now inherit the parent's mode +
+  remaining autonomous budget, including cross-backend (metaharness) forks. (#194)
+
 ## [0.3.0] - 2026-07-14
 
 ### Added
