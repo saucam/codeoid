@@ -554,4 +554,32 @@ describe("AgentIdentityManager session + sub-agent registration", () => {
     // The retired ad-hoc key must be gone.
     expect(meta.parent_agent).toBeUndefined();
   });
+
+  test("registerSubagent delegates from the parent's scoped token (real parent_jti edge, no root fallback)", async () => {
+    const manager = new AgentIdentityManager(config, store);
+    const parent = await manager.registerSessionAgent(
+      "sess-1234abcd",
+      "my-session",
+      "user:owner@test",
+    );
+    // Ignore the session agent's own api_key mint — we care about the
+    // sub-agent token flow.
+    zeroid.tokenCalls.length = 0;
+
+    await manager.registerSubagent("sess-1234abcd", "agentABCDEF012345", "Explore");
+
+    // The sub-agent token must be minted by RFC 8693 token-exchange with the
+    // parent's already-scoped access token as the subject — NOT the SDK's
+    // implicit delegate (which mints an unscoped subject) and NOT a root
+    // api_key fallback.
+    const exchange = zeroid.tokenCalls.find((c) =>
+      String(c.grant_type).includes("token-exchange"),
+    );
+    expect(exchange).toBeDefined();
+    expect(exchange!.subject_token).toBe(parent.token);
+    expect(exchange!.actor_token).toBeTruthy();
+    // No silent root-token fallback happened.
+    const rootFallback = zeroid.tokenCalls.find((c) => c.grant_type === "api_key");
+    expect(rootFallback).toBeUndefined();
+  });
 });

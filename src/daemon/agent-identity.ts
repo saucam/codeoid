@@ -406,34 +406,52 @@ export class AgentIdentityManager {
 
       // Real RFC 8693 delegation: the sub-agent self-signs an actor assertion
       // (iss = its WIMSE URI); the parent session agent (orchestrator) is the
-      // *subject* and grants delegated authority via `tokens.delegate`. The
-      // result carries a verifiable `act` chain (session-agent ← sub-agent)
-      // and an incremented `delegation_depth`, and ZeroID enforces scope as the
-      // intersection of the subject's grant and the requested `scope` — true
-      // attenuation, not a cosmetic map. Deactivating the parent then
-      // invalidates this token by construction (revocation-aware).
+      // *subject*. We pass the parent's ALREADY-SCOPED access token
+      // (`parent.token`, minted with the agent tool ceiling) explicitly as the
+      // subject_token — the proven flow from the live integration test
+      // (conductor-zeroid.test.ts: `issueTokenExchange(subjectToken, actor)`).
+      //
+      // This replaces `parent.client.tokens.delegate()`, which let the SDK mint
+      // the subject token implicitly via an api_key exchange WITHOUT requesting
+      // the tool scopes — so the three-way intersection (requested ∩ subject ∩
+      // actor) stripped everything and the exchange failed, silently degrading
+      // every sub-agent to an orphaned root token (no `parent_jti` edge). The
+      // result carries a verifiable `act` chain (session-agent ← sub-agent) and
+      // an incremented `delegation_depth`; deactivating the parent invalidates
+      // it by construction (revocation-aware).
       let token = "";
       let delegated = false;
-      if (parent.client) {
+      if (parent.token) {
         try {
           const assertion = await signActorAssertion(
             keypair.privateKey,
             resp.identity.wimse_uri,
             this.#config.auth.baseUrl,
           );
-          const delegatedResp = await parent.client.tokens.delegate({
-            actor_token: assertion,
-            scope: scopes.join(" "),
-          });
+          const delegatedResp = await this.#client.tokens.issueTokenExchange(
+            parent.token,
+            assertion,
+            { scope: scopes.join(" ") },
+          );
           token = delegatedResp.access_token;
           delegated = true;
         } catch (err) {
-          // Delegation failed — fall back to the sub-agent's own (non-
-          // delegated) token so the session keeps working. The chain degrades
-          // to metadata-only attribution for this sub-agent.
+          // Delegation failed. This is now a LOUD, audited degradation — not a
+          // silent one: falling back to an undelegated root token keeps the
+          // session working, but the sub-agent has NO `parent_jti` edge and so
+          // appears orphaned in the delegation graph. Surface it so operators
+          // can see and fix the underlying cause instead of it passing quietly.
           console.error(
-            `[codeoid] delegation failed for subagent ${agentType}, using direct token:`,
+            `[codeoid] subagent delegation FAILED for ${agentType} (parent=${parent.wimseUri}) — falling back to an UNDELEGATED root token; the sub-agent will be ORPHANED in the delegation graph. cause:`,
             err instanceof Error ? err.message : err,
+          );
+          this.#store.audit(
+            resp.identity.wimse_uri,
+            "subagent.delegation.failed",
+            sessionId,
+            `type=${agentType} parent=${parent.wimseUri} cause=${
+              err instanceof Error ? err.message : String(err)
+            }`,
           );
         }
       }
