@@ -14,7 +14,7 @@
  * truth for packs at runtime — this service is.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { AvailablePackWire, PackWire, RegistryWire } from "@codeoid/protocol";
@@ -164,11 +164,16 @@ export class PackService {
     } else {
       const args = ["clone", "--depth", "1"];
       if (opts.ref) args.push("--branch", opts.ref);
-      args.push(opts.url, dir);
+      // `--` before the positionals so a url beginning with `-` can't be parsed
+      // as a git flag (option injection).
+      args.push("--", opts.url, dir);
       const clone = await this.#git(args);
       if (!clone.ok) throw new Error(`git clone failed for "${opts.url}": ${clone.stderr}`);
     }
-    if (!existing) this.#registries.push({ name, url: opts.url, ref: opts.ref });
+    // Re-check presence AFTER the async git boundary: two concurrent addRegistry
+    // calls for the same name could both have seen it absent above, so guard the
+    // push against a duplicate entry.
+    if (!this.#registries.some((r) => r.name === name)) this.#registries.push({ name, url: opts.url, ref: opts.ref });
     this.#save();
   }
 
@@ -398,7 +403,11 @@ export class PackService {
       const from = join(src, name);
       const to = join(this.#skillsDir, name);
       try {
-        if (!statSync(from).isDirectory() || existsSync(to)) continue;
+        // lstatSync (NOT statSync): a `skills/<name>` that is itself a symlink in
+        // an untrusted registry must NOT be treated as a directory and propagated
+        // into the host skills dir (it could point at /etc, ~/.ssh, …). A real
+        // directory links; a symlink is skipped.
+        if (!lstatSync(from).isDirectory() || existsSync(to)) continue;
         symlinkSync(from, to, "dir");
         linked.push(name);
       } catch (e) {

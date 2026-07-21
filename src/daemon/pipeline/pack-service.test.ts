@@ -6,7 +6,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Pack } from "./interface";
@@ -86,6 +86,7 @@ function makeService(opts: {
   initial?: Partial<PackServiceConfig>;
 }) {
   const persisted: PackServiceConfig[] = [];
+  const gitCalls: string[][] = [];
   const svc = new PackService({
     config: {
       defaultPack: opts.initial?.defaultPack ?? null,
@@ -97,6 +98,7 @@ function makeService(opts: {
     manager: opts.sink ? () => opts.sink! : undefined,
     persist: (s) => persisted.push(structuredClone(s)),
     git: async (args, _cwd) => {
+      gitCalls.push(args);
       if (args[0] === "clone" && opts.fixture) {
         const dest = args[args.length - 1]!;
         // Emulate a clone by copying the fixture tree into the target.
@@ -107,7 +109,7 @@ function makeService(opts: {
       return { ok: false, stderr: `unexpected git ${args.join(" ")}` };
     },
   });
-  return { svc, persisted };
+  return { svc, persisted, gitCalls };
 }
 
 function cpDir(from: string, to: string): void {
@@ -217,6 +219,32 @@ describe("install / trust / select / remove", () => {
     const installed = svc.install({ dir });
     expect(installed.find((p) => p.id === "local")!.registry).toBeUndefined();
     expect(sink._packs.has("local")).toBe(true);
+  });
+
+  test("clones with `--` before the url (option-injection guard)", async () => {
+    const fixture = tmp();
+    writeRegistry(fixture, ["p"]);
+    const { svc, gitCalls } = makeService({ cacheDir: join(tmp(), "c"), fixture });
+    await svc.addRegistry({ url: "https://github.com/a/reg.git", name: "reg" });
+    const clone = gitCalls.find((a) => a[0] === "clone")!;
+    const sep = clone.indexOf("--");
+    expect(sep).toBeGreaterThan(0);
+    // url + dir come strictly after the `--` separator.
+    expect(clone[sep + 1]).toBe("https://github.com/a/reg.git");
+  });
+
+  test("skill-linking does NOT propagate a symlinked skill dir (lstat, not stat)", async () => {
+    const fixture = tmp();
+    writeRegistry(fixture, ["p"], ["real"]);
+    // Add a hostile symlink INSIDE the registry's skills/: skills/evil -> /etc.
+    // statSync would resolve it to a dir and link it; lstatSync must skip it.
+    symlinkSync("/etc", join(fixture, "skills", "evil"), "dir");
+    const skillsDir = join(tmp(), "skills");
+    const { svc } = makeService({ cacheDir: join(tmp(), "c"), skillsDir, fixture });
+    await svc.addRegistry({ url: "https://github.com/a/reg.git" });
+    svc.install({ packId: "p" });
+    expect(existsSync(join(skillsDir, "real"))).toBe(true); // a real skill dir is linked
+    expect(existsSync(join(skillsDir, "evil"))).toBe(false); // the symlink is NOT
   });
 
   test("skill-linking never clobbers an existing skill", async () => {
