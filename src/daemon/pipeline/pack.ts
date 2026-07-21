@@ -314,8 +314,18 @@ function buildGate(g: PackManifest["gates"][number], dir: string, trusted: boole
       },
     };
   }
-  // self / skill / review gates are declared in the schema but not yet enforced
-  // end-to-end. Fail CLOSED (never silently pass), so a pack using them halts for
-  // a human until the gate-execution slice lands.
-  return failClosedGate(g.id, at, `gate "${g.id}" (kind "${g.kind}") is not yet enforced`);
+  // self / skill / review gates carry no AUTOMATED verdict yet. They no longer
+  // fail closed (that surfaced a confusing "not yet enforced" halt): every phase
+  // already halts at its boundary for a human decision (see engine.ts), so these
+  // gates simply pass and defer to that human review. S4 may turn them into real
+  // subagent verdicts shown alongside the human decision.
+  return humanReviewGate(g.id, at);
+}
+
+/** A gate with no automated verdict — it passes, deferring acceptance to the
+ *  universal human boundary halt. Distinct from failClosedGate: this is not a
+ *  silent success that skips review, because the phase halts for the human
+ *  regardless (engine.ts). Used for self/skill/review gate kinds. */
+function humanReviewGate(id: string, at: "entry" | "exit"): GatePlugin {
+  return { id, at, async evaluate() { return { pass: true }; } };
 }

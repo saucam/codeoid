@@ -293,8 +293,10 @@ export class Session {
   readonly workdir: string;
   /** "conductor" = fleet supervisor; "worker" = dispatch-spawned; undefined = normal. */
   readonly role?: "conductor" | "worker";
-  /** Ambient-activated pack (constitution + capability role + subagents). */
-  readonly #pack?: PackActivation;
+  /** Active pack activation (constitution + capability role + subagents). Not
+   *  readonly: a pipeline run swaps this between phases via applyPhaseActivation
+   *  so one bound session runs each phase under its own role. */
+  #pack?: PackActivation;
   /** Fork lineage (set from opts / restored from meta). */
   readonly forkedFrom?: { sessionId: string; name: string; atTurn: number };
   /** Git worktree backing workdir, when isolated (set from opts / meta). */
@@ -2622,6 +2624,18 @@ export class Session {
    * role:"conductor" sessions) plus the memory recall guidance (when memory
    * is enabled). Stable per session so it stays in the cached prompt prefix.
    */
+  /**
+   * Swap the active pack activation on a *live* session — used by a pipeline run
+   * to apply the current phase's capability role (+ constitution + subagents)
+   * before that phase's turn. The role gate (canUseTool) reads `#pack` per tool
+   * call and the system-prompt append + subagents are rebuilt per turn, so the
+   * swap takes effect on the very next turn without recreating the session.
+   * Pass `undefined` to clear (run under no role).
+   */
+  applyPhaseActivation(pack: PackActivation | undefined): void {
+    this.#pack = pack;
+  }
+
   #buildPromptAppend(): string | undefined {
     const parts: string[] = [];
     if (this.role === "conductor") parts.push(CONDUCTOR_SYSTEM_PROMPT_APPEND);

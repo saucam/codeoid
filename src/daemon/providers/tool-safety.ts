@@ -84,3 +84,17 @@ export function roleDeniesTool(role: ToolRole, toolName: string): string | null 
   }
   return null;
 }
+
+/** Backends that HARD-enforce a capability role via the canUseTool deny above.
+ *  Only the Claude SDK routes every tool through canUseTool under the canonical
+ *  tool names this file keys off. Other backends use their own tool names, skip
+ *  canUseTool in autonomous mode (codex), or expose no write tools — so a role
+ *  there is ADVISORY: the constitution + role-contract system prompt guide the
+ *  model, but nothing hard-denies. See docs/pipeline-run.md (enforcement matrix). */
+const HARD_ROLE_ENFORCEMENT = new Set(["claude"]);
+
+/** Whether the capability-role tool gate is HARD-enforced on `providerId`, or
+ *  only ADVISORY (soft, prompt-contract-only). */
+export function roleEnforcement(providerId: string | undefined): "hard" | "advisory" {
+  return providerId !== undefined && HARD_ROLE_ENFORCEMENT.has(providerId) ? "hard" : "advisory";
+}

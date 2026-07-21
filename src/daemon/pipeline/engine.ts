@@ -104,16 +104,39 @@ export class PipelineEngine {
     // halted state itself doesn't carry a summary).
     if (res.summary !== undefined) phase.lastSummary = res.summary;
 
-    // Exit gate — acceptance predicate on the phase output (§5, §5a.5).
+    // Exit boundary — two DISTINCT things happen here:
+    //
+    //   1. An optional automated CHECK. A `command` gate produces a real pass/
+    //      fail verdict. A failing check still honors onFail:retry (machine loop
+    //      within budget) or onFail:abort (hard fail); with the default halt it
+    //      just carries its reason to the human. `skill`/`review`/`self` gates
+    //      carry no automated verdict yet — they pass, and the human is the
+    //      reviewer (S4 may add subagent verdicts). See pack.ts.
+    //   2. The phase then HALTS for a human decision (Approve / Revise / Reject).
+    //      This boundary halt is UNIVERSAL: a run never rolls into the next phase
+    //      on its own — the human always decides (docs/pipeline-run.md).
+    let gateReason: string | undefined;
     if (phase.def.gate) {
       const v = await this.#gate(phase.def.gate, s, phase.def, "exit");
-      if (!v.pass) return applyFail(s, phase, v, attempts, "exit");
+      if (!v.pass) {
+        const onFail = phase.def.onFail ?? { action: "halt" };
+        // A machine retry/abort short-circuits the human boundary.
+        if (onFail.action === "retry" || onFail.action === "abort") {
+          return applyFail(s, phase, v, attempts, "exit");
+        }
+        gateReason = v.reason ?? "gate check failed";
+      }
     }
 
-    // Passed → record the result and advance the cursor.
-    phase.state = { status: "passed", summary: res.summary, artifacts: res.artifacts };
-    s.cursor += 1;
-    s.status = s.cursor >= s.phases.length ? "done" : "running";
+    // The phase's work is done (kept in lastSummary); halt for the human.
+    phase.state = {
+      status: "halted",
+      requestId: `exit:${phase.def.id}`,
+      reason: gateReason
+        ? `phase "${phase.def.id}" complete — gate not satisfied: ${gateReason}`
+        : `phase "${phase.def.id}" complete — review and approve`,
+    };
+    s.status = "halted";
     return touch(s);
   }
 

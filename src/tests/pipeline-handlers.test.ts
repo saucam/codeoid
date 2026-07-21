@@ -144,16 +144,28 @@ describe("pipeline.* handlers", () => {
     expect(halted.requestId).toBe("exit:gate");
     expect(halted.reason).toBeDefined();
 
-    const done = snapshot(
+    // Approving "gate" records "ok" and resumes into "tail", which runs and then
+    // halts at its own boundary (every phase halts for a human).
+    const resumed = snapshot(
       await manager.handle(
         { type: "pipeline.answer", id: "3", pipelineId: pid, requestId: halted.requestId ?? "", approved: true, value: "ok" },
         AUTH,
         CLIENT,
       ),
     );
+    expect(resumed.status).toBe("halted");
+    expect(resumed.phases[0].status).toBe("passed");
+    expect(resumed.phases[0].summary).toBe("ok");
+    // Approve the "tail" boundary → done.
+    const done = snapshot(
+      await manager.handle(
+        { type: "pipeline.answer", id: "4", pipelineId: pid, requestId: resumed.phases[resumed.cursor].requestId ?? "", approved: true },
+        AUTH,
+        CLIENT,
+      ),
+    );
     expect(done.status).toBe("done");
-    expect(done.phases[0].status).toBe("passed");
-    expect(done.phases[0].summary).toBe("ok");
+    expect(done.phases[1].status).toBe("passed");
   });
 
   test("advance requires the PIPELINE_CREATE scope", async () => {

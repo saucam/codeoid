@@ -18,93 +18,87 @@
  * presentational body, exported for a render test (mirrors PackBrowserView).
  */
 
-import {
-  Component,
-  For,
-  Show,
-  createMemo,
-  createSignal,
-  onCleanup,
-  onMount,
-} from "solid-js";
+import { Component, For, Show, createSignal, onCleanup, onMount } from "solid-js";
 
-import { fetchPacks, packsState } from "../state/packs";
-import {
-  abort,
-  approve,
-  pipelinesState,
-  reject,
-  revise,
-  runPipeline,
-} from "../state/pipelines";
-import type { PackWire, PipelinePhaseWire, PipelineWire } from "../protocol/types";
+import { openPipelineModal } from "./NewSessionModal";
+import { abort, approve, pipelinesState, reject, revise } from "../state/pipelines";
+import { focusedSessionId } from "../state/sessions";
+import type { PipelinePhaseWire, PipelineWire } from "../protocol/types";
 
-const [openSignal, setOpenSignal] = createSignal(false);
-const [goalPrefill, setGoalPrefill] = createSignal("");
+// The cockpit can collapse to a thin tab so the run's chat gets the full pane.
+const [collapsed, setCollapsed] = createSignal(false);
 
-/** Open the pipeline runner, optionally prefilling the goal. Refreshes the pack
- *  list so the Start panel's pack picker is current. Wired to `/pipeline`. */
+/** `/pipeline` (and the Pack Browser's Run action) open the START DIALOG — the
+ *  extended create-session modal in pipeline mode. The cockpit itself auto-
+ *  appears once a run is created and its bound session is focused. Kept as a thin
+ *  alias so existing call sites (PromptBox, PackBrowser) need no change. */
 export function openPipelineRunner(goal?: string): void {
-  setGoalPrefill(goal ?? "");
-  setOpenSignal(true);
-  void fetchPacks();
+  setCollapsed(false);
+  openPipelineModal(goal);
 }
 
 export function closePipelineRunner(): void {
-  setOpenSignal(false);
+  setCollapsed(true);
 }
 
 const PipelineRunner: Component = () => {
+  // The cockpit overlays the RUN's chat: it appears only when the focused
+  // session is the run's bound session (a run is a conductor over that live
+  // session — docs/pipeline-run.md). Switching sessions hides it; switching
+  // back reveals it. The run keeps polling in the background either way.
+  const pipeline = () => pipelinesState().pipeline;
+  const visible = () => {
+    const p = pipeline();
+    return !!p && !!p.sessionId && p.sessionId === focusedSessionId();
+  };
+
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && openSignal()) {
+      if (e.key === "Escape" && visible() && !collapsed()) {
         e.preventDefault();
-        setOpenSignal(false);
+        setCollapsed(true);
       }
     };
     window.addEventListener("keydown", onKey);
     onCleanup(() => window.removeEventListener("keydown", onKey));
   });
 
-  // Only installed packs that are registered into the live pipeline manager
-  // (active) — an inactive/broken pack can't back a run.
-  const runnablePacks = createMemo(() =>
-    packsState().installed.filter((p) => p.active && !p.error),
-  );
-
   return (
-    <Show when={openSignal()}>
-      <div
-        class="fixed inset-0 z-50 flex items-start justify-end bg-bg/60 backdrop-blur-sm"
-        onClick={(e) => {
-          if (e.target === e.currentTarget) setOpenSignal(false);
-        }}
+    <Show when={visible()}>
+      <Show
+        when={!collapsed()}
+        fallback={
+          <button
+            type="button"
+            onClick={() => setCollapsed(false)}
+            class="fixed right-0 top-24 z-30 rounded-l border border-r-0 border-border bg-bg-elev px-2 py-2 text-[11px] text-fg-muted shadow-lg hover:text-fg"
+            title="Show pipeline cockpit"
+          >
+            ▸ pipeline
+          </button>
+        }
       >
-        <aside class="flex h-full w-full max-w-3xl flex-col border-l border-border bg-bg-elev shadow-2xl">
-          <header class="flex items-center gap-3 border-b border-border px-4 py-3">
-            <h2 class="text-base font-semibold tracking-tight text-fg">
-              Pipeline Run
-            </h2>
-            <span class="font-mono text-[11px] text-fg-faint">
-              governed SDLC — spec → ship
-            </span>
-            <span class="ml-auto flex items-center gap-2">
-              <Show when={pipelinesState().pipeline}>
-                <button
-                  type="button"
-                  onClick={() => abort()}
-                  class="rounded border border-border px-2 py-0.5 text-[11px] text-fg-muted hover:border-danger/40 hover:text-danger disabled:opacity-50"
-                  disabled={pipelinesState().busy}
-                  title="Abort this run"
-                >
-                  Abort
-                </button>
-              </Show>
+        {/* Non-modal right dock: no backdrop, so the run's chat stays interactive
+            on the left while the cockpit overlays the right edge. */}
+        <aside class="fixed right-0 top-0 z-30 flex h-full w-full max-w-sm flex-col border-l border-border bg-bg-elev/95 shadow-2xl backdrop-blur-sm">
+          <header class="flex items-center gap-2 border-b border-border px-3 py-2">
+            <h2 class="text-[13px] font-semibold tracking-tight text-fg">Pipeline</h2>
+            <span class="font-mono text-[10px] text-fg-faint">spec → ship</span>
+            <span class="ml-auto flex items-center gap-1.5">
               <button
                 type="button"
-                onClick={() => setOpenSignal(false)}
+                onClick={() => abort()}
+                class="rounded border border-border px-2 py-0.5 text-[11px] text-fg-muted hover:border-danger/40 hover:text-danger disabled:opacity-50"
+                disabled={pipelinesState().busy}
+                title="Abort this run"
+              >
+                Abort
+              </button>
+              <button
+                type="button"
+                onClick={() => setCollapsed(true)}
                 class="text-fg-faint hover:text-fg"
-                title="Close (Esc)"
+                title="Collapse (Esc)"
               >
                 ✕
               </button>
@@ -112,32 +106,27 @@ const PipelineRunner: Component = () => {
           </header>
 
           <Show when={pipelinesState().error}>
-            <div class="border-b border-danger/40 bg-danger/10 px-4 py-2 text-[12px] text-danger">
+            <div class="border-b border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger">
               {pipelinesState().error}
             </div>
           </Show>
 
-          <div class="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          <div class="min-h-0 flex-1 overflow-y-auto px-4 py-3">
             <PipelineRunnerView
-              pipeline={pipelinesState().pipeline}
-              packs={runnablePacks()}
-              goalPrefill={goalPrefill()}
+              pipeline={pipeline()}
               busy={pipelinesState().busy}
-              loading={pipelinesState().loading}
-              onRun={(args) => void runPipeline(args)}
               onApprove={(reqId, value) => approve(reqId, value)}
               onReject={(reqId, value) => reject(reqId, value)}
               onRevise={(reqId, feedback) => revise(reqId, feedback)}
             />
           </div>
 
-          <footer class="border-t border-border px-4 py-2 text-[11px] text-fg-faint">
-            A run advances on its own, pausing at each gate for you to Approve,
-            Revise, or Reject. Phases run under their pack role (a reviewer can't
-            write).
+          <footer class="border-t border-border px-3 py-2 text-[10px] text-fg-faint">
+            The run drives this session's chat, halting at each phase for your
+            Approve / Revise / Reject. Phases run under their pack role.
           </footer>
         </aside>
-      </div>
+      </Show>
     </Show>
   );
 };
@@ -145,33 +134,19 @@ const PipelineRunner: Component = () => {
 // ── Presentational body ───────────────────────────────────────────────────────
 
 export interface PipelineRunnerViewProps {
-  /** The active run, or null → show the Start panel. */
+  /** The active run, or null → a subtle "no active run" note. */
   pipeline: PipelineWire | null;
-  /** Installed + active packs the Start panel picks from. */
-  packs: PackWire[];
-  goalPrefill?: string;
-  /** A create/steer is in flight — disable actions. */
+  /** A steer is in flight — disable actions. */
   busy?: boolean;
-  loading?: boolean;
-  onRun: (args: { pack: string; goal: string; workdir: string }) => void;
   onApprove: (requestId: string, value?: string) => void;
   onReject: (requestId: string, value?: string) => void;
   onRevise: (requestId: string, feedback: string) => void;
 }
 
-/** Pure body — no daemon calls. Exported for a render test. */
+/** Pure body — no daemon calls. Exported for a render test. The run is STARTED
+ *  from the create-session dialog (pipeline mode); this only renders + steers. */
 export const PipelineRunnerView: Component<PipelineRunnerViewProps> = (props) => (
-  <Show
-    when={props.pipeline}
-    fallback={
-      <StartPanel
-        packs={props.packs}
-        goalPrefill={props.goalPrefill}
-        busy={props.busy || props.loading}
-        onRun={props.onRun}
-      />
-    }
-  >
+  <Show when={props.pipeline} fallback={<p class="text-[12px] text-fg-faint">No active run.</p>}>
     {(pipeline) => (
       <RunView
         pipeline={pipeline()}
@@ -184,128 +159,13 @@ export const PipelineRunnerView: Component<PipelineRunnerViewProps> = (props) =>
   </Show>
 );
 
-// ── Start panel ────────────────────────────────────────────────────────────────
+// ── Run view ─────────────────────────────────────────────────────────────────
 
 const inputClass =
   "w-full rounded border border-border bg-bg px-2.5 py-1.5 font-mono text-[12px] text-fg outline-none focus:border-accent disabled:opacity-50";
 
 const labelClass =
   "text-[10px] font-semibold uppercase tracking-wider text-fg-faint";
-
-const StartPanel: Component<{
-  packs: PackWire[];
-  goalPrefill?: string;
-  busy?: boolean;
-  onRun: (args: { pack: string; goal: string; workdir: string }) => void;
-}> = (props) => {
-  // The chosen pack, or "" until the user picks. `effectivePack` resolves the
-  // real selection — falling back to the default (selected) pack, else the
-  // first — so a pack list that loads AFTER first paint still yields a valid
-  // choice without a stale empty signal.
-  const [pack, setPack] = createSignal("");
-  const effectivePack = () => {
-    const cur = pack();
-    if (cur && props.packs.some((p) => p.id === cur)) return cur;
-    return props.packs.find((p) => p.selected)?.id ?? props.packs[0]?.id ?? "";
-  };
-  const [workdir, setWorkdir] = createSignal("");
-  const [goal, setGoal] = createSignal(props.goalPrefill ?? "");
-
-  const canStart = () =>
-    !props.busy && !!effectivePack() && !!workdir().trim() && !!goal().trim();
-
-  const submit = (e: Event) => {
-    e.preventDefault();
-    if (!canStart()) return;
-    props.onRun({
-      pack: effectivePack(),
-      goal: goal().trim(),
-      workdir: workdir().trim(),
-    });
-  };
-
-  return (
-    <form onSubmit={submit} class="flex flex-col gap-4">
-      <div>
-        <h3 class="text-[15px] font-semibold text-fg">Start a run</h3>
-        <p class="mt-0.5 text-[12px] text-fg-muted">
-          Pick an installed pack, a working directory, and a feature goal. The
-          run seeds its spec phase from the goal and auto-advances through the
-          pack's phases.
-        </p>
-      </div>
-
-      <Show
-        when={props.packs.length > 0}
-        fallback={
-          <div class="rounded border border-warn/40 bg-warn/10 px-3 py-3 text-[12px] text-warn">
-            No active packs. Install and activate one via{" "}
-            <code class="font-mono">/packs</code> first.
-          </div>
-        }
-      >
-        <label class="flex flex-col gap-1">
-          <span class={labelClass}>Pack</span>
-          <select
-            value={effectivePack()}
-            onChange={(e) => setPack(e.currentTarget.value)}
-            class={inputClass}
-            disabled={props.busy}
-            aria-label="Pack"
-          >
-            <For each={props.packs}>
-              {(p) => (
-                <option value={p.id}>
-                  {p.name} (v{p.version})
-                </option>
-              )}
-            </For>
-          </select>
-        </label>
-
-        <label class="flex flex-col gap-1">
-          <span class={labelClass}>Workdir</span>
-          <input
-            type="text"
-            autocomplete="off"
-            spellcheck={false}
-            placeholder="/abs/path/to/repo"
-            value={workdir()}
-            onInput={(e) => setWorkdir(e.currentTarget.value)}
-            class={inputClass}
-            disabled={props.busy}
-            aria-label="Workdir"
-          />
-        </label>
-
-        <label class="flex flex-col gap-1">
-          <span class={labelClass}>Goal</span>
-          <textarea
-            rows={5}
-            placeholder="Describe the feature to build…"
-            value={goal()}
-            onInput={(e) => setGoal(e.currentTarget.value)}
-            class={`${inputClass} resize-y leading-6`}
-            disabled={props.busy}
-            aria-label="Goal"
-          />
-        </label>
-
-        <div>
-          <button
-            type="submit"
-            class="rounded bg-accent px-4 py-1.5 text-[12px] font-semibold text-bg transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={!canStart()}
-          >
-            Start
-          </button>
-        </div>
-      </Show>
-    </form>
-  );
-};
-
-// ── Run view ─────────────────────────────────────────────────────────────────
 
 const TERMINAL: readonly PipelineWire["status"][] = [
   "merged",

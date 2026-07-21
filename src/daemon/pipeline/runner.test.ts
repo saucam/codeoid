@@ -9,6 +9,7 @@ function fakePipeline(over: Partial<PipelineState> = {}): PipelineState {
     phases: [],
     cursor: 0,
     status: "running",
+    sessionId: "sess-1",
     accountId: "a",
     projectId: "pr",
     createdBy: "u",
@@ -18,13 +19,13 @@ function fakePipeline(over: Partial<PipelineState> = {}): PipelineState {
   };
 }
 
-type Req = Parameters<PhaseTurnHost["runPhaseTurn"]>[0];
+type Req = Parameters<PhaseTurnHost["runPhaseOnSession"]>[0];
 
 describe("SessionPhaseRunner", () => {
-  test("forwards prompt + provider/model + tenant to the host and returns the summary", async () => {
+  test("drives the phase on the run's bound session (sessionId + prompt + pack/role) and returns the summary", async () => {
     const calls: Req[] = [];
     const host: PhaseTurnHost = {
-      async runPhaseTurn(req) {
+      async runPhaseOnSession(req) {
         calls.push(req);
         return { finalStatus: "idle", text: "the result" };
       },
@@ -33,25 +34,24 @@ describe("SessionPhaseRunner", () => {
       prompt: "/spec",
       provider: "gemini",
       model: "flash",
-      pipeline: fakePipeline({ workdir: "/repo", accountId: "acc", projectId: "prj", createdBy: "usr" }),
-      phase: { id: "one", kind: "skill", skill: "spec" },
+      pipeline: fakePipeline({ sessionId: "run-session", packId: "aif-sdlc" }),
+      phase: { id: "one", kind: "skill", skill: "spec", role: "implementer" },
     });
     expect(out).toEqual({ summary: "the result" });
     expect(calls[0]).toMatchObject({
+      sessionId: "run-session",
       prompt: "/spec",
       provider: "gemini",
       model: "flash",
-      workdir: "/repo",
-      accountId: "acc",
-      projectId: "prj",
-      createdBy: "usr",
+      packId: "aif-sdlc",
+      roleName: "implementer",
     });
   });
 
   test("throws when the turn ends non-idle (error / waiting_approval / timeout)", async () => {
     for (const finalStatus of ["error", "waiting_approval", "timeout"] as const) {
       const host: PhaseTurnHost = {
-        async runPhaseTurn() {
+        async runPhaseOnSession() {
           return { finalStatus, text: "partial output" };
         },
       };
@@ -65,19 +65,21 @@ describe("SessionPhaseRunner", () => {
     }
   });
 
-  test("falls back to process.cwd() when the pipeline has no workdir", async () => {
-    let seen = "";
+  test("throws when the run has no bound session (misconfiguration, fail loud — never runs a phase unbound)", async () => {
+    let called = false;
     const host: PhaseTurnHost = {
-      async runPhaseTurn(req) {
-        seen = req.workdir;
+      async runPhaseOnSession() {
+        called = true;
         return { finalStatus: "idle", text: "" };
       },
     };
-    await new SessionPhaseRunner(() => host).runPrompt({
-      prompt: "x",
-      pipeline: fakePipeline(),
-      phase: { id: "one", kind: "skill" },
-    });
-    expect(seen).toBe(process.cwd());
+    await expect(
+      new SessionPhaseRunner(() => host).runPrompt({
+        prompt: "x",
+        pipeline: fakePipeline({ sessionId: undefined }),
+        phase: { id: "one", kind: "skill" },
+      }),
+    ).rejects.toThrow(/no bound session/);
+    expect(called).toBe(false);
   });
 });

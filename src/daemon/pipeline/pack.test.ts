@@ -275,14 +275,29 @@ phases:
 `);
   }
 
-  test("runs a pack-defined pipeline to done (trusted command gate passes)", async () => {
+  test("walks a pack-defined pipeline: halts at each boundary, approving each reaches done", async () => {
     const mgr = new PipelineManager(new PipelineStore(new Database(":memory:")));
     mgr.installPack(loadPack(noopPack('  - id: green\n    kind: command\n    run: "true"', "green"), { trusted: true }));
     const p = mgr.create({ name: "run", pack: "noop-pack", ...tenant });
     expect(p.status).toBe("draft");
     expect(p.phases.map((ph) => ph.def.id)).toEqual(["a", "b"]);
-    const done = await mgr.advance(p.id);
-    expect(done.status).toBe("done");
+    // Phase "a" runs, its command gate passes, then it HALTS for human review
+    // (a passing gate does not auto-advance).
+    let s = await mgr.advance(p.id);
+    expect(s.status).toBe("halted");
+    expect(s.cursor).toBe(0);
+    let st = s.phases[s.cursor].state;
+    if (st.status !== "halted") throw new Error("expected halt at phase a");
+    // Approve → phase "b" runs + halts.
+    s = await mgr.answer(p.id, st.requestId, { approved: true });
+    expect(s.status).toBe("halted");
+    expect(s.cursor).toBe(1);
+    st = s.phases[s.cursor].state;
+    if (st.status !== "halted") throw new Error("expected halt at phase b");
+    // Approve the last boundary → done.
+    s = await mgr.answer(p.id, st.requestId, { approved: true });
+    expect(s.status).toBe("done");
+    expect(s.phases.every((ph) => ph.state.status === "passed")).toBe(true);
   });
 
   test("a failing trusted command gate halts the pipeline with the gate reason", async () => {
@@ -309,7 +324,7 @@ phases:
     }
   });
 
-  test("a not-yet-enforced gate (self/skill/review) fails closed", async () => {
+  test("a self/skill/review gate carries no automated verdict — the phase halts for human review (no 'not yet enforced')", async () => {
     const dir = writePack(`schema: codeoid/pack@v1
 id: self-pack
 name: Self
@@ -327,8 +342,12 @@ phases:
     const p = mgr.create({ name: "run", pack: "self-pack", ...tenant });
     const halted = await mgr.advance(p.id);
     expect(halted.status).toBe("halted");
-    if (halted.phases[0].state.status === "halted") {
-      expect(halted.phases[0].state.reason).toContain("not yet enforced");
+    const st = halted.phases[0].state;
+    expect(st.status).toBe("halted");
+    if (st.status === "halted") {
+      // No fake "not yet enforced" fail-closed halt — a clean human-review boundary.
+      expect(st.reason).not.toContain("not yet enforced");
+      expect(st.reason).toContain("review and approve");
     }
   });
 

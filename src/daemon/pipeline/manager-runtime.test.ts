@@ -79,24 +79,32 @@ describe("abort()", () => {
   test("is a no-op on an already-terminal pipeline", async () => {
     const m = mgr();
     const p = m.create({ name: "x", phases: [{ id: "one", kind: "noop", gate: "always" }], ...tenant });
-    await m.advance(p.id); // → done
-    expect((await m.abort(p.id))?.status).toBe("done");
+    const halted = await m.advance(p.id); // runs phase → halts for human review
+    const st = halted.phases[0].state;
+    if (st.status !== "halted") throw new Error("expected a boundary halt");
+    const done = await m.answer(p.id, st.requestId, { approved: true }); // approve → done
+    expect(done.status).toBe("done");
+    expect((await m.abort(p.id))?.status).toBe("done"); // abort no-ops on terminal
   });
 });
 
 describe("driveResumable()", () => {
-  test("re-drives draft/running but leaves halted parked", async () => {
+  test("re-drives draft/running to their next boundary but leaves halted parked", async () => {
     const store = new PipelineStore(new Database(":memory:"));
     const m = new PipelineManager(store);
     const draft = m.create({ name: "d", phases: [{ id: "one", kind: "noop", gate: "always" }], ...tenant });
     const halting = m.create({ name: "h", phases: [{ id: "one", kind: "noop", gate: "manual" }], ...tenant });
     await m.advance(halting.id); // → halted
 
-    // Fresh manager (restart): resume() caches both; driveResumable advances the draft only.
+    // Fresh manager (restart): resume() caches both; driveResumable re-drives the
+    // draft. Every phase halts for a human, so the draft advances from draft to
+    // its first boundary halt (it ran) rather than auto-completing.
     const revived = new PipelineManager(store);
     await revived.driveResumable();
-    expect(revived.get(draft.id)?.status).toBe("done");
-    expect(revived.get(halting.id)?.status).toBe("halted");
+    const d = revived.get(draft.id);
+    expect(d?.status).toBe("halted");
+    expect(d?.phases[0].state.status).toBe("halted"); // the phase actually ran
+    expect(revived.get(halting.id)?.status).toBe("halted"); // already halted → parked
   });
 
   test("re-drives a persisted 'running' pipeline (crash mid-run)", async () => {
@@ -120,7 +128,11 @@ describe("driveResumable()", () => {
     store.save(running);
     const revived = new PipelineManager(store);
     await revived.driveResumable();
-    expect(revived.get("r1")?.status).toBe("done");
+    // Phase "two" runs on resume and halts at its boundary (never auto-done).
+    const r = revived.get("r1");
+    expect(r?.status).toBe("halted");
+    expect(r?.cursor).toBe(1);
+    expect(r?.phases[1].state.status).toBe("halted");
   });
 });
 
@@ -140,8 +152,10 @@ describe("advance() serialization", () => {
     m.registries.skills.register(skill);
     const p = m.create({ name: "x", phases: [{ id: "one", kind: "skill", skill: "work" }], ...tenant });
     const [a, b] = await Promise.all([m.advance(p.id), m.advance(p.id)]);
-    expect(a.status).toBe("done");
-    expect(b.status).toBe("done");
-    expect(calls).toBe(1); // serialized → the second advance saw a completed pipeline
+    // The phase runs once and halts for review; serialization means the second
+    // advance saw the already-halted pipeline (no double-run).
+    expect(a.status).toBe("halted");
+    expect(b.status).toBe("halted");
+    expect(calls).toBe(1);
   });
 });

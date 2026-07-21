@@ -88,6 +88,12 @@ export class GeminiAcpProvider implements SessionProvider {
   #authenticated = false;
   #hasQueried = false;
   #pendingHistorySeed: string | null = null;
+  /** ACP/gemini-cli has no system-prompt channel (session/new takes only cwd +
+   *  MCP servers), so systemPromptAppend — the pack constitution + capability-
+   *  role contract + memory guidance — is delivered as a prompt preamble. Track
+   *  the last one delivered so a stable session sends it once, but a pipeline
+   *  phase's role swap (a changed append) re-delivers it. */
+  #lastSystemPromptAppend: string | null = null;
 
   // Per-turn wiring.
   #turnQueue: AsyncQueue<ProviderEvent> | null = null;
@@ -211,7 +217,15 @@ export class GeminiAcpProvider implements SessionProvider {
     await this.#ensureSession(opts);
     const seed = this.#pendingHistorySeed;
     this.#pendingHistorySeed = null;
-    const text = seed ? `${seed}\n\n${opts.userMessage}` : opts.userMessage;
+    // Deliver systemPromptAppend as a preamble (no native channel). Send it when
+    // it first appears or changes (a pipeline role swap), so a read-only reviewer
+    // phase's contract + constitution actually reach gemini-cli.
+    const append = opts.systemPromptAppend ?? "";
+    const deliverAppend = append.length > 0 && append !== this.#lastSystemPromptAppend;
+    if (append.length > 0) this.#lastSystemPromptAppend = append;
+    const text = [deliverAppend ? append : "", seed ?? "", opts.userMessage]
+      .filter((p) => p.length > 0)
+      .join("\n\n");
 
     // session/prompt resolves when the TURN ends — it IS the turn boundary.
     const result = (await this.#proc!.request(

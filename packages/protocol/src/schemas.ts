@@ -397,6 +397,8 @@ export const pipelineCreateSchema = z
     pack: z.string().max(64).optional(),
     spec: z.string().max(LIMITS.SEND_TEXT_MAX).optional(),
     workdir: pathField.optional(),
+    /** Backend for the run's bound session (default: the daemon's default provider). */
+    providerId: z.string().max(64).optional(),
   })
   .refine((m) => !(m.phases !== undefined && m.pack !== undefined), {
     message: "provide either `phases` or `pack`, not both",

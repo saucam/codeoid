@@ -52,6 +52,39 @@ network: read-only
 envelope: all
 `;
 
+const REVIEWER_ROLE = `name: reviewer
+write: false
+network: read-only
+envelope: [read, grep, glob, bash]
+`;
+
+/** A gateless 2-phase pack: build (implementer) then check (reviewer). With no
+ *  gates the run drives BOTH phases on one bound session, swapping the role. */
+function writeTwoPhasePack(): string {
+  const dir = mkdtempSync(join(tmpdir(), "codeoid-2phase-"));
+  mkdirSync(join(dir, "roles"), { recursive: true });
+  writeFileSync(join(dir, "roles", "implementer.yaml"), IMPLEMENTER_ROLE);
+  writeFileSync(join(dir, "roles", "reviewer.yaml"), REVIEWER_ROLE);
+  writeFileSync(
+    join(dir, "pack.yaml"),
+    `schema: codeoid/pack@v1
+id: two-phase
+name: Two Phase
+version: 0.0.1
+roles:
+  - ./roles/implementer.yaml
+  - ./roles/reviewer.yaml
+skills:
+  - { id: build, kind: slash, command: /build }
+  - { id: check, kind: slash, command: /check }
+phases:
+  - { id: build, skill: build, role: implementer }
+  - { id: check, skill: check, role: reviewer }
+`,
+  );
+  return dir;
+}
+
 /** Write a fixture pack whose single skill phase is gated by a command gate. */
 function writeE2EPack(gateRun: string): string {
   const dir = mkdtempSync(join(tmpdir(), "codeoid-e2e-pack-"));
@@ -115,6 +148,16 @@ function snapshot(m: DaemonMessage): PipelineWire {
   return m.pipeline;
 }
 
+/** The requestId of the phase currently halted at the cursor (every phase halts
+ *  for a human decision — see docs/pipeline-run.md). */
+function haltedReqId(w: PipelineWire): string {
+  const ph = w.phases[w.cursor];
+  if (!ph || ph.status !== "halted" || !ph.requestId) {
+    throw new Error(`pipeline ${w.id} is not halted at cursor ${w.cursor} (status ${ph?.status})`);
+  }
+  return ph.requestId;
+}
+
 let tmp: string;
 let store: Store;
 let transcript: TranscriptStore;
@@ -138,7 +181,7 @@ afterEach(() => {
 });
 
 describe("pack E2E (config → wire create-from-pack → advance)", () => {
-  test("a trusted pack loaded from config runs to done over the wire, carrying the phase role", async () => {
+  test("a trusted pack: phase runs, its command gate passes, then halts for review; approve → done", async () => {
     const packDir = writeE2EPack("true");
     const manager = makeManager(packDir, true, null);
     try {
@@ -157,10 +200,76 @@ describe("pack E2E (config → wire create-from-pack → advance)", () => {
       // The pack's capability role is projected onto the wire.
       expect(created.phases[0].role).toBe("implementer");
 
-      const done = snapshot(await manager.handle({ type: "pipeline.advance", id: "2", pipelineId: created.id }, AUTH, CLIENT));
+      // Even though the command gate passes, the phase HALTS for human review;
+      // its produced output is surfaced at the halt.
+      const halted = snapshot(await manager.handle({ type: "pipeline.advance", id: "2", pipelineId: created.id }, AUTH, CLIENT));
+      expect(halted.status).toBe("halted");
+      expect(halted.phases[0].summary).toContain("phase complete");
+
+      // Approve the boundary → done.
+      const done = snapshot(
+        await manager.handle(
+          { type: "pipeline.answer", id: "3", pipelineId: created.id, requestId: haltedReqId(halted), approved: true },
+          AUTH,
+          CLIENT,
+        ),
+      );
       expect(done.status).toBe("done");
       expect(done.phases[0].status).toBe("passed");
-      if (done.phases[0].status === "passed") expect(done.phases[0].summary).toContain("phase complete");
+      rmSync(packDir, { recursive: true, force: true });
+    } finally {
+      await manager.drain(3_000);
+    }
+  });
+
+  test("a run binds a real attachable session and drives every phase on it, swapping the role per phase", async () => {
+    const packDir = writeTwoPhasePack();
+    const manager = new SessionManager(store, transcript, undefined, undefined, undefined, {
+      config: mkConfig(join(tmp, "codeoid.db"), packDir, true, null),
+      _testProviderFactory: () => new MockSessionProvider("mock", [sayTurn("built it"), sayTurn("checked it")]),
+    });
+    try {
+      const created = snapshot(
+        await manager.handle(
+          { type: "pipeline.create", id: "1", name: "R", pack: "two-phase", workdir: join(tmp, "repo") },
+          AUTH,
+          CLIENT,
+        ),
+      );
+      // The run is bound to a real session (not a headless, disposable worker).
+      expect(created.sessionId).toBeTruthy();
+
+      // Phase "build" runs + halts; approve → phase "check" runs + halts; approve → done.
+      const h0 = snapshot(await manager.handle({ type: "pipeline.advance", id: "2", pipelineId: created.id }, AUTH, CLIENT));
+      expect(h0.status).toBe("halted");
+      expect(h0.cursor).toBe(0);
+      const h1 = snapshot(
+        await manager.handle(
+          { type: "pipeline.answer", id: "3", pipelineId: created.id, requestId: haltedReqId(h0), approved: true },
+          AUTH,
+          CLIENT,
+        ),
+      );
+      expect(h1.status).toBe("halted");
+      expect(h1.cursor).toBe(1);
+      const done = snapshot(
+        await manager.handle(
+          { type: "pipeline.answer", id: "4", pipelineId: created.id, requestId: haltedReqId(h1), approved: true },
+          AUTH,
+          CLIENT,
+        ),
+      );
+      expect(done.status).toBe("done");
+      expect(done.phases.map((p) => p.status)).toEqual(["passed", "passed"]);
+
+      // The bound session is attachable (present in the session list), and its
+      // ACTIVE role ended as the last phase's role — proving the one live
+      // session ran both phases with the role swapped between them.
+      const list = await manager.handle({ type: "session.list", id: "5" }, AUTH, CLIENT);
+      if (list.type !== "session.list.result") throw new Error(`expected session.list.result, got ${list.type}`);
+      const runSession = list.sessions.find((s) => s.id === created.sessionId);
+      expect(runSession).toBeDefined();
+      expect(runSession?.profile).toBe("two-phase (reviewer)");
       rmSync(packDir, { recursive: true, force: true });
     } finally {
       await manager.drain(3_000);
@@ -179,7 +288,15 @@ describe("pack E2E (config → wire create-from-pack → advance)", () => {
         ),
       );
       expect(created.phases.map((p) => p.id)).toEqual(["impl"]);
-      const done = snapshot(await manager.handle({ type: "pipeline.advance", id: "2", pipelineId: created.id }, AUTH, CLIENT));
+      const halted = snapshot(await manager.handle({ type: "pipeline.advance", id: "2", pipelineId: created.id }, AUTH, CLIENT));
+      expect(halted.status).toBe("halted");
+      const done = snapshot(
+        await manager.handle(
+          { type: "pipeline.answer", id: "3", pipelineId: created.id, requestId: haltedReqId(halted), approved: true },
+          AUTH,
+          CLIENT,
+        ),
+      );
       expect(done.status).toBe("done");
       rmSync(packDir, { recursive: true, force: true });
     } finally {

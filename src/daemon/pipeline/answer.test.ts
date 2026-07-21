@@ -25,9 +25,15 @@ describe("PipelineManager.answer (halt → resume)", () => {
     expect(halted.status).toBe("halted");
     expect(halted.phases[0].state.status).toBe("halted");
 
-    const done = await m.answer(p.id, "exit:gate", { approved: true, value: "LGTM" });
+    // Approving "gate" records LGTM and resumes into "tail", which runs and then
+    // halts at its own boundary (every phase halts for a human).
+    const h1 = await m.answer(p.id, "exit:gate", { approved: true, value: "LGTM" });
+    expect(h1.status).toBe("halted");
+    expect(h1.phases[0].state).toMatchObject({ status: "passed", summary: "LGTM" });
+    expect(h1.cursor).toBe(1);
+    // Approving "tail" → done.
+    const done = await m.answer(p.id, "exit:tail", { approved: true });
     expect(done.status).toBe("done");
-    expect(done.phases[0].state).toMatchObject({ status: "passed", summary: "LGTM" });
     expect(done.phases[1].state.status).toBe("passed");
   });
 
@@ -56,11 +62,12 @@ describe("PipelineManager.answer (halt → resume)", () => {
     await expect(m.answer(p.id, "gate:wrong", { approved: true })).rejects.toThrow("stale requestId");
   });
 
-  test("throws when the pipeline is not halted", async () => {
+  test("throws when the pipeline is not halted (terminal)", async () => {
     const m = mgr();
     const p = m.create({ name: "REQ-1", phases: [{ id: "one", kind: "noop", gate: "always" }], ...tenant });
-    await m.advance(p.id); // runs straight to done
-    await expect(m.answer(p.id, "gate:one", { approved: true })).rejects.toThrow("not halted");
+    await m.advance(p.id); // runs → halts for review
+    await m.answer(p.id, "exit:one", { approved: true }); // approve → done
+    await expect(m.answer(p.id, "exit:one", { approved: true })).rejects.toThrow("not halted");
   });
 
   test("throws on an unknown pipeline id", async () => {
@@ -72,7 +79,8 @@ describe("PipelineManager.answer (halt → resume)", () => {
     const m = new PipelineManager(store);
     const p = m.create({ name: "REQ-1", phases: halting, ...tenant });
     await m.advance(p.id);
-    await m.answer(p.id, "exit:gate", { approved: true });
+    await m.answer(p.id, "exit:gate", { approved: true }); // resumes into tail (halts)
+    await m.answer(p.id, "exit:tail", { approved: true }); // → done
     // Fresh manager over the same store sees the completed pipeline.
     expect(new PipelineManager(store).get(p.id)?.status).toBe("done");
   });

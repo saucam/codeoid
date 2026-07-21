@@ -1602,6 +1602,9 @@ export interface PipelineWire {
   phases: PipelinePhaseWire[];
   spec?: string;
   workdir?: string;
+  /** The bound run-session the phases stream into — a client can auto-attach it
+   *  so the run shows up as a normal, interruptible chat. */
+  sessionId?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -1636,6 +1639,8 @@ export interface PipelineCreateMsg extends BaseClientMsg {
   pack?: string;
   spec?: string;
   workdir?: string;
+  /** Backend for the run's bound session (default: the daemon's default provider). */
+  providerId?: string;
 }
 export interface PipelineListMsg extends BaseClientMsg {
   type: "pipeline.list";

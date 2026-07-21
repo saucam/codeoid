@@ -114,6 +114,11 @@ export interface PipelineState {
   phases: PipelinePhase[];
   /** index of the active phase. */
   cursor: number;
+  /** The bound run-session this pipeline drives. A run is a *conductor over a
+   *  live, attached session*: each phase is injected as a streamed turn on this
+   *  session (visible + interruptible), not a headless worker. Set at create.
+   *  Optional so an explicit-`phases` plan without a session still validates. */
+  sessionId?: string;
   /** the pipeline's own durable session (set when wired to a conductor — a
    *  later slice; optional here so the primitive is session-free). */
   conductorSessionId?: string;
