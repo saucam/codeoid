@@ -22,7 +22,7 @@ import { Component, For, Show, createSignal, onCleanup, onMount } from "solid-js
 
 import { openPipelineModal } from "./NewSessionModal";
 import { abort, approve, pipelinesState, reject, revise } from "../state/pipelines";
-import { focusedSessionId } from "../state/sessions";
+import { focusSession, focusedSessionId } from "../state/sessions";
 import type { PipelinePhaseWire, PipelineWire } from "../protocol/types";
 
 // The cockpit can collapse to a thin tab so the run's chat gets the full pane.
@@ -42,19 +42,36 @@ export function closePipelineRunner(): void {
 }
 
 const PipelineRunner: Component = () => {
-  // The cockpit overlays the RUN's chat: it appears only when the focused
-  // session is the run's bound session (a run is a conductor over that live
-  // session — docs/pipeline-run.md). Switching sessions hides it; switching
-  // back reveals it. The run keeps polling in the background either way.
+  // The cockpit overlays the RUN's chat: the full dock appears only when the
+  // focused session is the run's bound session (a run is a conductor over that
+  // live session — docs/pipeline-run.md). Collapsed, or viewing another session,
+  // it falls back to a thin reopen tab (so it's never unreachable). The run keeps
+  // polling in the background either way.
   const pipeline = () => pipelinesState().pipeline;
-  const visible = () => {
-    const p = pipeline();
-    return !!p && !!p.sessionId && p.sessionId === focusedSessionId();
+  const runSessionId = () => pipeline()?.sessionId ?? null;
+  // The full dock overlays the RUN's own session chat, so it shows only when
+  // that session is focused and the user hasn't collapsed it.
+  const onRunSession = () => !!runSessionId() && runSessionId() === focusedSessionId();
+  const dockOpen = () => onRunSession() && !collapsed();
+  // A reopen affordance must persist whenever a run EXISTS — not just while its
+  // session is focused. Collapsing with Esc (or switching to another session)
+  // must never strand the user with no way back: the old tab only rendered on
+  // the run's own session, so navigating away after collapsing left nothing to
+  // click, and `/pipeline` starts a NEW run rather than restoring this one.
+  const hasRun = () => !!runSessionId();
+
+  // Bring the cockpit back: jump to the run's own session (so the dock can
+  // overlay its chat) AND expand it. Works from any session and any collapsed
+  // state — this is the guaranteed path back that the plain tab lacked.
+  const reopen = () => {
+    const id = runSessionId();
+    if (id) focusSession(id);
+    setCollapsed(false);
   };
 
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && visible() && !collapsed()) {
+      if (e.key === "Escape" && dockOpen()) {
         e.preventDefault();
         setCollapsed(true);
       }
@@ -64,15 +81,15 @@ const PipelineRunner: Component = () => {
   });
 
   return (
-    <Show when={visible()}>
+    <Show when={hasRun()}>
       <Show
-        when={!collapsed()}
+        when={dockOpen()}
         fallback={
           <button
             type="button"
-            onClick={() => setCollapsed(false)}
+            onClick={reopen}
             class="fixed right-0 top-24 z-30 rounded-l border border-r-0 border-border bg-bg-elev px-2 py-2 text-[11px] text-fg-muted shadow-lg hover:text-fg"
-            title="Show pipeline cockpit"
+            title="Show pipeline cockpit (Esc to collapse)"
           >
             ▸ pipeline
           </button>
