@@ -116,11 +116,15 @@ async function pollOnce(pipelineId: string): Promise<void> {
         timeoutMs: READ_TIMEOUT_MS,
       },
     );
+    // A poll for the previous run can resolve after the user started a new one;
+    // dropping it here keeps a stale snapshot from clobbering the active run.
+    if (currentPipelineId() !== pipelineId) return;
     applySnapshot(snap);
     if (snap?.pipeline && isTerminal(snap.pipeline.status)) stopPoll();
   } catch (e) {
     // A blip (socket reconnecting) — surface but keep polling; a later success
-    // clears the error via applySnapshot.
+    // clears the error via applySnapshot. Same superseded-run guard as above.
+    if (currentPipelineId() !== pipelineId) return;
     setState((s) => ({ ...s, error: errMessage(e) }));
   }
 }
@@ -148,11 +152,21 @@ function fireSteer(build: (id: string) => ClientMessage, pipelineId: string): vo
         m.type === "pipeline.snapshot" && m.requestId === id ? m : undefined,
       timeoutMs: STEER_TIMEOUT_MS,
     })
-    .then((snap) => applySnapshot(snap))
-    .catch((e) => {
-      if (!isClientTimeout(e)) setState((s) => ({ ...s, error: errMessage(e) }));
+    // A steer runs server-side for minutes; if the user switches to another run
+    // before it settles, its late resolution must not touch the new run's view
+    // (snapshot, error, or the shared `busy` flag). Guard every mutation on the
+    // run still being current.
+    .then((snap) => {
+      if (currentPipelineId() === pipelineId) applySnapshot(snap);
     })
-    .finally(() => setState((s) => ({ ...s, busy: false })));
+    .catch((e) => {
+      if (currentPipelineId() === pipelineId && !isClientTimeout(e)) {
+        setState((s) => ({ ...s, error: errMessage(e) }));
+      }
+    })
+    .finally(() => {
+      if (currentPipelineId() === pipelineId) setState((s) => ({ ...s, busy: false }));
+    });
   // Reflect whatever the steer kicks off (the phase running → its next halt).
   startPoll(pipelineId);
 }

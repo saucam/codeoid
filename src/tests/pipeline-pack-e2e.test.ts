@@ -207,6 +207,59 @@ describe("pack E2E (config → wire create-from-pack → advance)", () => {
     }
   });
 
+  test("revise re-runs a halted phase with feedback recorded, then approve → done", async () => {
+    // Exit gate FAILS ("false") → the phase halts at its gate after each run.
+    const packDir = writeE2EPack("false");
+    const manager = new SessionManager(store, transcript, undefined, undefined, undefined, {
+      config: mkConfig(join(tmp, "codeoid.db"), packDir, true, null),
+      _testProviderFactory: () => new MockSessionProvider("mock", [sayTurn("attempt one"), sayTurn("attempt two")]),
+    });
+    try {
+      const created = snapshot(
+        await manager.handle(
+          { type: "pipeline.create", id: "1", name: "R", pack: "e2e-pack", spec: "add a flag", workdir: join(tmp, "repo") },
+          AUTH,
+          CLIENT,
+        ),
+      );
+      const halted = snapshot(await manager.handle({ type: "pipeline.advance", id: "2", pipelineId: created.id }, AUTH, CLIENT));
+      expect(halted.status).toBe("halted");
+      expect(halted.phases[0].status).toBe("halted");
+      const reqId = halted.phases[0].requestId;
+      expect(reqId).toBeTruthy();
+
+      // Revise: re-run the SAME phase with feedback (a fresh attempt; the gate
+      // still fails, so it halts again with a NEW requestId).
+      const revised = snapshot(
+        await manager.handle(
+          { type: "pipeline.revise", id: "3", pipelineId: created.id, requestId: reqId as string, feedback: "handle the empty case" },
+          AUTH,
+          CLIENT,
+        ),
+      );
+      expect(revised.status).toBe("halted");
+      expect(revised.phases[0].feedback).toEqual(["handle the empty case"]);
+      // A halt id is derived from the phase/gate, so it's stable across the
+      // re-run — the client answers the revised halt with the same requestId.
+      const reqId2 = revised.phases[0].requestId;
+      expect(reqId2).toBe(reqId);
+
+      // Approve = human override of the failing gate → single-phase pack → done.
+      const done = snapshot(
+        await manager.handle(
+          { type: "pipeline.answer", id: "4", pipelineId: created.id, requestId: reqId2 as string, approved: true, value: "looks good" },
+          AUTH,
+          CLIENT,
+        ),
+      );
+      expect(done.status).toBe("done");
+      expect(done.phases[0].status).toBe("passed");
+      rmSync(packDir, { recursive: true, force: true });
+    } finally {
+      await manager.drain(3_000);
+    }
+  });
+
   test("create with an unknown pack → invalid_request", async () => {
     const packDir = writeE2EPack("true");
     const manager = makeManager(packDir, true, null);

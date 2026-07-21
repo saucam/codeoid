@@ -459,6 +459,43 @@ export class PackService {
   }
 }
 
+/** The pack-resolution capability a pipeline phase needs — satisfied by
+ *  PackService, stubbable in tests. */
+export interface PackActivator {
+  resolveActivation(packId: string, roleName?: string): PackActivation;
+}
+
+/**
+ * Resolve the pack activation for one pipeline phase, applying the per-phase
+ * failure policy. A declared capability role is a SECURITY BOUNDARY: if it
+ * can't be applied we fail CLOSED (throw) rather than silently run the worker
+ * unrestricted — that would escalate a read-only phase to full write. Without a
+ * role, activation only adds the constitution (guidance), so a resolution error
+ * fails SOFT (logged) and the phase runs unactivated.
+ *
+ * A thrown error is caught upstream by the pipeline engine (→ phase failure →
+ * onFail halt for a human); it never crashes the daemon.
+ */
+export function resolvePhaseActivation(
+  packs: PackActivator,
+  packId: string | undefined,
+  roleName: string | undefined,
+): PackActivation | undefined {
+  if (!packId) return undefined;
+  try {
+    return packs.resolveActivation(packId, roleName);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (roleName) {
+      throw new Error(
+        `pipeline phase pack activation failed for role "${roleName}" (pack="${packId}"): ${msg}`,
+      );
+    }
+    console.warn(`[pipeline] phase pack activation failed (pack="${packId}"): ${msg}`);
+    return undefined;
+  }
+}
+
 /** Parse just enough of a pack.yaml to identify it — no role/constitution IO,
  *  so an available-pack listing stays cheap and never fails on a missing skill. */
 function readPackMeta(dir: string): PackMeta | undefined {

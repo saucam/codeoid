@@ -48,7 +48,12 @@ import {
 } from "./dispatch.js";
 import { createPipelineManagerFromConfig } from "./pipeline/wiring.js";
 import type { PipelineManager } from "./pipeline/manager.js";
-import { PackService, type PackActivation, type PackServiceConfig } from "./pipeline/pack-service.js";
+import {
+  PackService,
+  resolvePhaseActivation,
+  type PackActivation,
+  type PackServiceConfig,
+} from "./pipeline/pack-service.js";
 import { SessionPhaseRunner, type PhaseTurnResult } from "./pipeline/runner.js";
 import type { DispatchEventRow, DispatchTaskRow } from "./store.js";
 import { type MemoryEngine, type MemoryMcpMount, workspaceIdFromPath } from "./memory/index.js";
@@ -1754,18 +1759,13 @@ mcpHub: this.#mcpHub,
     if (!workdir) throw new Error(`workdir not usable: ${req.workdir}`);
     // Per-phase governance: run this phase's worker under the pack's
     // constitution + the phase's capability role (a reviewer phase can't write).
-    // Fail-soft — a resolution error must not crash the phase; it just runs
-    // without pack activation (logged).
-    let pack: PackActivation | undefined;
-    if (req.packId) {
-      try {
-        pack = this.#packs.resolveActivation(req.packId, req.roleName);
-      } catch (e) {
-        console.warn(
-          `[pipeline] phase pack activation failed (pack="${req.packId}" role="${req.roleName ?? ""}"): ${e instanceof Error ? e.message : String(e)}`,
-        );
-      }
-    }
+    // resolvePhaseActivation fails CLOSED when a role is declared but can't be
+    // applied (no silent escalation) and SOFT otherwise — see its doc comment.
+    const pack: PackActivation | undefined = resolvePhaseActivation(
+      this.#packs,
+      req.packId,
+      req.roleName,
+    );
     const auth: AuthContext = {
       sub: req.createdBy,
       scopes: [],
