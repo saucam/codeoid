@@ -59,6 +59,7 @@ import {
   isNeedInput,
   isPhaseComplete,
   MAX_PHASE_NUDGES,
+  MAX_SPURIOUS_RESTS,
   PHASE_COMPLETION_CONTRACT,
   PHASE_CONTINUE_NUDGE,
   PHASE_NO_INPUT_NUDGE,
@@ -1817,14 +1818,24 @@ mcpHub: this.#mcpHub,
     // whatever it produced to the human boundary so a never-completing model
     // still reaches Approve/Reject instead of looping. A non-idle rest
     // (error / budget-exhausted) is a real phase failure, surfaced as-is.
-    let message = `${req.prompt}\n${PHASE_COMPLETION_CONTRACT}`;
+    let pendingSend: string | null = `${req.prompt}\n${PHASE_COMPLETION_CONTRACT}`;
+    // The assistant text as of the last turn we ACTED on. A rest whose text is
+    // unchanged produced no new model output (a spurious rebuild idle, not a
+    // real turn) — we skip it rather than nudge over the model mid-work.
+    let lastActedText = session.lastAssistantText ?? "";
     let nudges = 0;
+    let spurious = 0;
     try {
       while (true) {
         const done = new Promise<PhaseTurnResult["finalStatus"]>((resolve) => {
           this.#phaseWaiters.set(req.sessionId, resolve);
         });
-        await session.send(message, auth);
+        // Only (re)drive the turn when we have something to say — a spurious
+        // rest below loops back with nothing pending, just awaiting the real turn.
+        if (pendingSend !== null) {
+          await session.send(pendingSend, auth);
+          pendingSend = null;
+        }
         const finalStatus = await done;
         const text = session.lastAssistantText ?? "";
         // A non-idle rest (error / budget-exhausted) is a real phase failure.
@@ -1833,6 +1844,15 @@ mcpHub: this.#mcpHub,
         // so without this we'd re-drive a nudge over the stop. Hand the partial
         // to the review boundary instead.
         if (session.turnInterrupted) return { finalStatus: "idle", text };
+        // A rest with NO new model output is spurious (e.g. a query-loop
+        // rebuild) — the real turn hasn't run yet. Don't nudge; wait for it.
+        // Tool calls happen WITHIN a turn, so they never surface here.
+        if (text === lastActedText) {
+          if (++spurious > MAX_SPURIOUS_RESTS) return { finalStatus: "idle", text };
+          continue;
+        }
+        lastActedText = text;
+        spurious = 0;
         // Deliverable complete → done, marker stripped from the summary.
         if (isPhaseComplete(text)) return { finalStatus: "idle", text: stripPhaseCompleteMarker(text) };
         // The model needs the user's input. Surface the question as an input
@@ -1849,21 +1869,21 @@ mcpHub: this.#mcpHub,
           });
           if (session.turnInterrupted) return { finalStatus: "idle", text };
           if (!resp.cancelled && resp.value && resp.value.trim().length > 0) {
-            message = resp.value;
+            pendingSend = resp.value;
             nudges = 0;
             continue;
           }
           if (nudges >= MAX_PHASE_NUDGES) return { finalStatus: "idle", text };
           nudges += 1;
-          message = PHASE_NO_INPUT_NUDGE;
+          pendingSend = PHASE_NO_INPUT_NUDGE;
           continue;
         }
-        // Rested without any marker (an intermediate pause). Nudge to continue,
-        // bounded; after the cap, hand what it has to the human review boundary
-        // so a never-completing model still reaches Approve/Reject.
+        // Rested with new output but no marker (an intermediate pause). Nudge to
+        // continue, bounded; after the cap, hand what it has to the human review
+        // boundary so a never-completing model still reaches Approve/Reject.
         if (nudges >= MAX_PHASE_NUDGES) return { finalStatus: "idle", text };
         nudges += 1;
-        message = PHASE_CONTINUE_NUDGE;
+        pendingSend = PHASE_CONTINUE_NUDGE;
       }
     } finally {
       this.#phaseWaiters.delete(req.sessionId);
