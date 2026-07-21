@@ -434,6 +434,15 @@ export const pipelineAbortSchema = z.object({
   pipelineId: idField,
 });
 
+// Revise a halted phase: re-run it with human feedback (docs/pipeline-run.md).
+export const pipelineReviseSchema = z.object({
+  ...base,
+  type: z.literal("pipeline.revise"),
+  pipelineId: idField,
+  requestId: z.string().min(1).max(LIMITS.ID_MAX),
+  feedback: z.string().min(1).max(LIMITS.SEND_TEXT_MAX),
+});
+
 // ── Pack management (dynamic pack loading — docs/pack-loading.md) ──────────────
 
 /** A git URL (registry) or a filesystem path — bounded, not otherwise validated
@@ -527,6 +536,7 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
   pipelineAdvanceSchema,
   pipelineAnswerSchema,
   pipelineAbortSchema,
+  pipelineReviseSchema,
   pipelinePackListSchema,
   pipelineRegistryAddSchema,
   pipelinePackInstallSchema,

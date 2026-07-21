@@ -147,6 +147,7 @@ const samples: { [T in ClientTypes]: Extract<ClientMessage, { type: T }> } = {
     value: "LGTM",
   },
   "pipeline.abort": { type: "pipeline.abort", id: "r36", pipelineId: "p1" },
+  "pipeline.revise": { type: "pipeline.revise", id: "r36b", pipelineId: "p1", requestId: "exit:impl", feedback: "add error handling" },
   "pipeline.pack.list": { type: "pipeline.pack.list", id: "r38" },
   "pipeline.registry.add": {
     type: "pipeline.registry.add",

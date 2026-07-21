@@ -90,6 +90,13 @@ export const ACTIVE_STATUSES: readonly PipelineStatus[] = ["draft", "running", "
 export interface PipelinePhase {
   def: PhaseDef;
   state: PhaseState;
+  /** Human revise notes accumulated across re-runs of THIS phase (newest last).
+   *  Threaded into the phase prompt so the agent re-iterates per the feedback
+   *  (docs/pipeline-run.md — the Approve/Revise/Reject loop). */
+  feedback?: string[];
+  /** The phase's most recent run output — kept so a revise re-run can show the
+   *  agent its prior attempt (a halt otherwise drops the summary). */
+  lastSummary?: string;
 }
 
 /** The full, daemon-owned pipeline state — the source of truth persisted per
@@ -100,6 +107,10 @@ export interface PipelineState {
   spec?: string;
   /** Repo/workdir the phases operate in (worker sessions run here). */
   workdir?: string;
+  /** Id of the pack this run was created from (when created via `pack`, not an
+   *  explicit `phases` plan). Lets the phase runner resolve the pack's
+   *  constitution + each phase's capability role for per-phase governance. */
+  packId?: string;
   phases: PipelinePhase[];
   /** index of the active phase. */
   cursor: number;

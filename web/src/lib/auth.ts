@@ -60,6 +60,10 @@ export const DEFAULT_WEB_SCOPES = [
   // verb is rejected "Missing scope: pipeline:read".
   "pipeline:read",
   "pipeline:manage",
+  // Pipeline RUNS — the /pipeline runner creates + advances + aborts
+  // (pipeline:create) and answers / revises halts (pipeline:answer).
+  "pipeline:create",
+  "pipeline:answer",
 ].join(" ");
 
 export interface ResolvedAuth {

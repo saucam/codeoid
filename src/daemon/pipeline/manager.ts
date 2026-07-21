@@ -83,6 +83,7 @@ export class PipelineManager {
       name: opts.name,
       spec: opts.spec,
       workdir: opts.workdir,
+      packId: opts.pack,
       phases: phases.map((def) => ({ def, state: { status: "pending" } })),
       cursor: 0,
       status: "draft",
@@ -120,6 +121,17 @@ export class PipelineManager {
    */
   answer(id: string, requestId: string, opts: { approved: boolean; value?: string }): Promise<PipelineState> {
     return this.#serialize(id, async () => cloneState(await this.#answerInner(id, requestId, opts)));
+  }
+
+  /**
+   * Revise a halted phase: record the human's `feedback`, re-run the SAME phase
+   * with it (and the phase's prior output) threaded into the phase prompt, then
+   * drive to the next halt/terminal. The Approve / Revise / Reject loop
+   * (docs/pipeline-run.md) — call it repeatedly until you approve. Serialized
+   * like answer/advance.
+   */
+  revise(id: string, requestId: string, feedback: string): Promise<PipelineState> {
+    return this.#serialize(id, async () => cloneState(await this.#reviseInner(id, requestId, feedback)));
   }
 
   /** Mark a pipeline abandoned (terminal). No-op if unknown or already terminal;
@@ -218,6 +230,34 @@ export class PipelineManager {
     // Approving a non-final phase resumes the run to the next halt / terminal.
     // Call the inner advance directly — we already hold this id's chain slot.
     return s.status === "running" ? this.#advanceInner(id) : s;
+  }
+
+  async #reviseInner(id: string, requestId: string, feedback: string): Promise<PipelineState> {
+    const s = this.get(id); // a clone — safe to mutate
+    if (!s) throw new Error(`pipeline "${id}" not found`);
+    if (s.status !== "halted") throw new Error(`pipeline "${id}" is not halted (status: ${s.status})`);
+    const current = s.phases[s.cursor];
+    if (!current || current.state.status !== "halted") {
+      throw new Error(`pipeline "${id}" has no halted phase at the cursor`);
+    }
+    if (current.state.requestId !== requestId) {
+      throw new Error(`stale requestId "${requestId}" for pipeline "${id}"`);
+    }
+    const note = feedback.trim();
+    if (!note) throw new Error("revise requires non-empty feedback");
+
+    // Record the human's note and re-run THIS phase with it. attempts resets to
+    // 0 — a human revise is a fresh, deliberate attempt, not counted against the
+    // machine `onFail: retry` budget. The skill kind reads phase.feedback +
+    // phase.lastSummary from the pipeline state to build the revised prompt.
+    current.feedback = [...(current.feedback ?? []), note];
+    current.state = { status: "running", startedAt: Date.now(), attempts: 0 };
+    s.status = "running";
+    s.updatedAt = Date.now();
+    this.#persist(s);
+
+    // Re-drive to the next halt / terminal (we already hold this id's chain slot).
+    return this.#advanceInner(id);
   }
 
   async #abortInner(id: string): Promise<PipelineState | undefined> {
