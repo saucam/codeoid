@@ -29,6 +29,9 @@ export interface CreatePipelineOpts {
   phases?: PhaseDef[];
   /** Id of an installed pack (via installPack) whose pipeline this run uses. */
   pack?: string;
+  /** The bound run-session the phases are driven on (created by the daemon
+   *  before create; the run injects each phase as a turn on this session). */
+  sessionId?: string;
   accountId: string;
   projectId: string;
   createdBy: string;
@@ -84,6 +87,7 @@ export class PipelineManager {
       spec: opts.spec,
       workdir: opts.workdir,
       packId: opts.pack,
+      sessionId: opts.sessionId,
       phases: phases.map((def) => ({ def, state: { status: "pending" } })),
       cursor: 0,
       status: "draft",

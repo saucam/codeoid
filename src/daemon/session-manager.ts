@@ -75,10 +75,12 @@ import type {
 import type { Scope } from "../protocol/scopes.js";
 import type { PipelineState } from "./pipeline/interface.js";
 
-/** Wall-clock cap for a single SDLC pipeline phase turn — a clientless worker
- *  can otherwise hang forever (a model dialog / a tool without its own timeout
- *  never reaches a resting status). Mirrors the dispatcher's lease intent. */
-const PHASE_TURN_TIMEOUT_MS = 10 * 60_000;
+/** Per-phase autonomous turn budget for a pipeline run. A phase runs the model
+ *  to completion within its role (the human gate is the phase boundary, not each
+ *  tool), so this is a generous safety cap, refreshed at the start of every
+ *  phase. There is no wall-clock timeout: the run session is attended, so the
+ *  user watches + can interrupt — nothing hangs headless. */
+const PIPELINE_PHASE_MAX_TURNS = 200;
 import { randomUUID } from "node:crypto";
 import {
   createForkWorktree,
@@ -191,9 +193,22 @@ export class SessionManager {
   /** The daemon's hook bus — one instance, shared by every session. */
   #hooks?: HookBus;
   #testProviderFactory?: () => SessionProvider;
+  /** Bound run-sessions awaiting a phase turn to rest, keyed by session id. A
+   *  pipeline run drives phases on a live session; the phase resolves when that
+   *  session next reaches a resting status (see #statusObserver). */
+  #phaseWaiters = new Map<string, (status: PhaseTurnResult["finalStatus"]) => void>();
   /** Stable observer identity — every Session reports status transitions here. */
   #statusObserver = (sessionId: string, status: SessionInfo["status"]): void => {
     this.#dispatcher.onSessionStatus(sessionId, status);
+    // A pipeline phase driving this session awaits its next rest; resolve it.
+    // (Non-run sessions never have a waiter, so this is a no-op for them.)
+    if (status === "idle" || status === "error" || status === "waiting_approval") {
+      const waiter = this.#phaseWaiters.get(sessionId);
+      if (waiter) {
+        this.#phaseWaiters.delete(sessionId);
+        waiter(status);
+      }
+    }
   };
 
   constructor(
@@ -1738,58 +1753,69 @@ mcpHub: this.#mcpHub,
   }
 
   /**
-   * Run one turn for an SDLC pipeline phase on a disposable worker session and
-   * return the assistant's final text. Mirrors the dispatcher's spawn path but
-   * honors a per-phase provider/model and is a single request/await (no queue).
-   * Used by SessionPhaseRunner (the pipeline PhaseRunner). The worker is always
-   * torn down, even on error. Satisfies the pipeline package's PhaseTurnHost.
+   * Drive one SDLC pipeline phase as a turn on the run's BOUND session — the one
+   * the user is attached to — instead of a headless worker. Applies the phase's
+   * capability role (+ constitution + subagents) to the live session, refreshes
+   * the autonomous turn budget, injects the phase prompt (streamed to attached
+   * clients), and resolves when the session next rests. There is NO per-phase
+   * timeout (the session is attended) and the session is NOT torn down between
+   * phases. Satisfies the pipeline package's PhaseTurnHost.
+   *
+   * `provider`/`model` on the request are not applied here: a run drives ONE
+   * session with one provider, so per-phase provider overrides are out of scope
+   * for the single-session model (see docs/pipeline-run.md open questions).
    */
-  async runPhaseTurn(req: {
+  async runPhaseOnSession(req: {
+    sessionId: string;
     prompt: string;
     provider?: string;
     model?: string;
-    workdir: string;
-    accountId: string;
-    projectId: string;
-    createdBy: string;
     packId?: string;
     roleName?: string;
   }): Promise<PhaseTurnResult> {
-    const workdir = normalizeWorkdir(req.workdir);
-    if (!workdir) throw new Error(`workdir not usable: ${req.workdir}`);
-    // Per-phase governance: run this phase's worker under the pack's
-    // constitution + the phase's capability role (a reviewer phase can't write).
-    // resolvePhaseActivation fails CLOSED when a role is declared but can't be
-    // applied (no silent escalation) and SOFT otherwise — see its doc comment.
-    const pack: PackActivation | undefined = resolvePhaseActivation(
-      this.#packs,
-      req.packId,
-      req.roleName,
-    );
-    const auth: AuthContext = {
-      sub: req.createdBy,
-      scopes: [],
-      delegationDepth: 1,
-      accountId: req.accountId,
-      projectId: req.projectId,
-    };
-    let resolveDone: (s: PhaseTurnResult["finalStatus"]) => void = () => {};
-    const done = new Promise<PhaseTurnResult["finalStatus"]>((r) => {
-      resolveDone = r;
+    const session = this.#sessions.get(req.sessionId);
+    if (!session) throw new Error(`pipeline bound session "${req.sessionId}" not found`);
+    // Per-phase governance: apply this phase's role (+ constitution + subagents)
+    // to the live session before its turn. resolvePhaseActivation fails CLOSED
+    // when a declared role can't be applied (no silent escalation), SOFT otherwise.
+    session.applyPhaseActivation(resolvePhaseActivation(this.#packs, req.packId, req.roleName));
+    const auth = this.#dispatchSystemAuth(session.accountId, session.projectId);
+    // Run the phase autonomously within the role (no per-tool prompt), with a
+    // fresh generous budget each phase. The human gate is the phase boundary,
+    // not each tool; the user can watch + interrupt; nothing times out.
+    session.setMode("autonomous", PIPELINE_PHASE_MAX_TURNS, auth);
+    const done = new Promise<PhaseTurnResult["finalStatus"]>((resolve) => {
+      this.#phaseWaiters.set(req.sessionId, resolve);
     });
-    // Backstop: a worker with no attached client can hang forever (a model
-    // dialog / a tool with no timeout never reaches a resting status). The
-    // dispatcher relies on lease/reclaim; a single-turn phase needs its own cap.
-    const timer = setTimeout(() => resolveDone("timeout"), PHASE_TURN_TIMEOUT_MS);
+    try {
+      await session.send(req.prompt, auth);
+      const finalStatus = await done;
+      return { finalStatus, text: session.lastAssistantText ?? "" };
+    } finally {
+      this.#phaseWaiters.delete(req.sessionId);
+    }
+  }
+
+  /**
+   * Create the durable, attachable session a pipeline run drives. Unlike the old
+   * phase worker it is registered in #sessions (so any client can attach it),
+   * streams status via #statusObserver, carries no pack at birth (each phase's
+   * role is applied via applyPhaseActivation in runPhaseOnSession), and is never
+   * auto-destroyed — the run's whole spec→ship conversation lives in it.
+   */
+  #createBoundRunSession(opts: {
+    name: string;
+    workdir: string;
+    provider?: string;
+    model?: string;
+    auth: AuthContext;
+  }): Session {
     const session = new Session({
-      name: `phase-${randomUUID().slice(0, 8)}`,
-      workdir,
-      role: "worker",
-      pack,
-      initialMode: { mode: "autonomous", maxTurns: this.#dispatcher.config.workerToolBudget },
-      providerId: req.provider,
-      defaultModel: req.model,
-      auth,
+      name: opts.name,
+      workdir: opts.workdir,
+      providerId: opts.provider,
+      defaultModel: opts.model,
+      auth: opts.auth,
       store: this.#store,
       transcriptStore: this.#transcriptStore,
       providers: this.#providers,
@@ -1802,30 +1828,11 @@ mcpHub: this.#mcpHub,
       config: this.#config,
       compressionRegistry: this.#compressionRegistry,
       _testProvider: this.#testProviderFactory?.(),
-      onStatusChange: (id, status) => {
-        this.#statusObserver(id, status);
-        // Resolve on any resting status. Only "idle" is success — the runner
-        // fails the phase on error/waiting_approval/timeout (see PhaseTurnResult).
-        if (status === "idle" || status === "error" || status === "waiting_approval") {
-          resolveDone(status);
-        }
-      },
+      onStatusChange: this.#statusObserver,
       onModels: (providerId, m) => this._cacheModels(providerId, m),
     });
     this.#sessions.set(session.id, session);
-    try {
-      await session.send(req.prompt, auth);
-      const finalStatus = await done;
-      return { finalStatus, text: session.lastAssistantText ?? "" };
-    } finally {
-      clearTimeout(timer);
-      try {
-        await session.destroy(this.#dispatchSystemAuth(req.accountId, req.projectId));
-      } catch {
-        // Best-effort teardown.
-      }
-      this.#sessions.delete(session.id);
-    }
+    return session;
   }
 
   // ── SDLC pipeline handlers (docs/sdlc-pipeline.md) ─────────────────────
@@ -1875,6 +1882,7 @@ mcpHub: this.#mcpHub,
       cursor: s.cursor,
       spec: s.spec,
       workdir: s.workdir,
+      sessionId: s.sessionId,
       createdAt: s.createdAt,
       updatedAt: s.updatedAt,
       phases: s.phases.map((p) => {
@@ -1893,7 +1901,10 @@ mcpHub: this.#mcpHub,
     };
   }
 
-  #pipelineCreate(msg: Extract<ClientMessage, { type: "pipeline.create" }>, auth: AuthContext): DaemonMessage {
+  async #pipelineCreate(
+    msg: Extract<ClientMessage, { type: "pipeline.create" }>,
+    auth: AuthContext,
+  ): Promise<DaemonMessage> {
     const g = this.#pipelineGuard(msg.id, auth, SCOPES.PIPELINE_CREATE);
     if ("error" in g) return g.error;
     // Fail fast at create (like session.create): a usable workdir + known
@@ -1919,11 +1930,21 @@ mcpHub: this.#mcpHub,
         return { type: "response.error", requestId: msg.id, error: `phase "${p.id}": unknown provider "${p.provider}"`, code: "invalid_request" };
       }
     }
+    // A run is a conductor over a live, attached session (docs/pipeline-run.md):
+    // create the bound run-session up front so its phases stream into a real
+    // session the client can attach. Created before pm.create so its id is part
+    // of the run; torn down if create validation fails (no orphan session).
+    const runSession = this.#createBoundRunSession({
+      name: msg.name,
+      workdir: workdir ?? process.cwd(),
+      auth,
+    });
     try {
       const state = g.pm.create({
         name: msg.name,
         phases: msg.phases,
         pack,
+        sessionId: runSession.id,
         spec: msg.spec,
         workdir,
         accountId: auth.accountId,
@@ -1932,6 +1953,12 @@ mcpHub: this.#mcpHub,
       });
       return { type: "pipeline.snapshot", requestId: msg.id, pipeline: this.#pipelineToWire(state) };
     } catch (e) {
+      this.#sessions.delete(runSession.id);
+      try {
+        await runSession.destroy(this.#dispatchSystemAuth(auth.accountId, auth.projectId));
+      } catch {
+        // Best-effort teardown of the orphan session.
+      }
       return this.#pipelineError(msg.id, e);
     }
   }

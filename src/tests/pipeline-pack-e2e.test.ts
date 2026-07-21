@@ -52,6 +52,39 @@ network: read-only
 envelope: all
 `;
 
+const REVIEWER_ROLE = `name: reviewer
+write: false
+network: read-only
+envelope: [read, grep, glob, bash]
+`;
+
+/** A gateless 2-phase pack: build (implementer) then check (reviewer). With no
+ *  gates the run drives BOTH phases on one bound session, swapping the role. */
+function writeTwoPhasePack(): string {
+  const dir = mkdtempSync(join(tmpdir(), "codeoid-2phase-"));
+  mkdirSync(join(dir, "roles"), { recursive: true });
+  writeFileSync(join(dir, "roles", "implementer.yaml"), IMPLEMENTER_ROLE);
+  writeFileSync(join(dir, "roles", "reviewer.yaml"), REVIEWER_ROLE);
+  writeFileSync(
+    join(dir, "pack.yaml"),
+    `schema: codeoid/pack@v1
+id: two-phase
+name: Two Phase
+version: 0.0.1
+roles:
+  - ./roles/implementer.yaml
+  - ./roles/reviewer.yaml
+skills:
+  - { id: build, kind: slash, command: /build }
+  - { id: check, kind: slash, command: /check }
+phases:
+  - { id: build, skill: build, role: implementer }
+  - { id: check, skill: check, role: reviewer }
+`,
+  );
+  return dir;
+}
+
 /** Write a fixture pack whose single skill phase is gated by a command gate. */
 function writeE2EPack(gateRun: string): string {
   const dir = mkdtempSync(join(tmpdir(), "codeoid-e2e-pack-"));
@@ -161,6 +194,41 @@ describe("pack E2E (config → wire create-from-pack → advance)", () => {
       expect(done.status).toBe("done");
       expect(done.phases[0].status).toBe("passed");
       if (done.phases[0].status === "passed") expect(done.phases[0].summary).toContain("phase complete");
+      rmSync(packDir, { recursive: true, force: true });
+    } finally {
+      await manager.drain(3_000);
+    }
+  });
+
+  test("a run binds a real attachable session and drives every phase on it, swapping the role per phase", async () => {
+    const packDir = writeTwoPhasePack();
+    const manager = new SessionManager(store, transcript, undefined, undefined, undefined, {
+      config: mkConfig(join(tmp, "codeoid.db"), packDir, true, null),
+      _testProviderFactory: () => new MockSessionProvider("mock", [sayTurn("built it"), sayTurn("checked it")]),
+    });
+    try {
+      const created = snapshot(
+        await manager.handle(
+          { type: "pipeline.create", id: "1", name: "R", pack: "two-phase", workdir: join(tmp, "repo") },
+          AUTH,
+          CLIENT,
+        ),
+      );
+      // The run is bound to a real session (not a headless, disposable worker).
+      expect(created.sessionId).toBeTruthy();
+
+      const done = snapshot(await manager.handle({ type: "pipeline.advance", id: "2", pipelineId: created.id }, AUTH, CLIENT));
+      expect(done.status).toBe("done");
+      expect(done.phases.map((p) => p.status)).toEqual(["passed", "passed"]);
+
+      // The bound session is attachable (present in the session list), and its
+      // ACTIVE role ended as the last phase's role — proving the one live
+      // session ran both phases with the role swapped between them.
+      const list = await manager.handle({ type: "session.list", id: "3" }, AUTH, CLIENT);
+      if (list.type !== "session.list.result") throw new Error(`expected session.list.result, got ${list.type}`);
+      const runSession = list.sessions.find((s) => s.id === created.sessionId);
+      expect(runSession).toBeDefined();
+      expect(runSession?.profile).toBe("two-phase (reviewer)");
       rmSync(packDir, { recursive: true, force: true });
     } finally {
       await manager.drain(3_000);

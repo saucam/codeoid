@@ -38,23 +38,25 @@ export interface PhaseTurnResult {
 }
 
 /**
- * The minimal daemon capability a SessionPhaseRunner needs: run one turn on a
- * disposable worker session and return its resting status + final text. Defined
- * here (not imported from the daemon) so the pipeline package stays free of a
+ * The minimal daemon capability a SessionPhaseRunner needs: drive one phase as a
+ * streamed turn on the run's BOUND session (the one the user is attached to),
+ * returning its resting status + final text. The host applies the phase's
+ * capability role to the session first, injects the prompt as a normal turn
+ * (visible, interruptible), and resolves when the session rests — no headless
+ * worker, no per-phase timeout, and the session is NOT torn down. Defined here
+ * (not imported from the daemon) so the pipeline package stays free of a
  * SessionManager dependency; SessionManager satisfies it structurally.
  */
 export interface PhaseTurnHost {
-  runPhaseTurn(req: {
+  runPhaseOnSession(req: {
+    /** The run's bound session — created + attached before the phase runs. */
+    sessionId: string;
     prompt: string;
     provider?: string;
     model?: string;
-    workdir: string;
-    accountId: string;
-    projectId: string;
-    createdBy: string;
-    /** Pack this run came from + the phase's capability role — the host
-     *  activates them on the worker session (per-phase constitution + role tool
-     *  gate). Absent when the run used an explicit phase plan (no pack). */
+    /** Pack this run came from + the phase's capability role — the host applies
+     *  them to the bound session for this phase (constitution + role tool gate),
+     *  swapping the role between phases. Absent for an explicit phase plan. */
     packId?: string;
     roleName?: string;
   }): Promise<PhaseTurnResult>;
@@ -75,14 +77,17 @@ export class SessionPhaseRunner implements PhaseRunner {
   }
 
   async runPrompt(req: PhaseRunRequest): Promise<PhaseRunOutput> {
-    const { finalStatus, text } = await this.#host().runPhaseTurn({
+    const sessionId = req.pipeline.sessionId;
+    if (!sessionId) {
+      // A run must be bound to a session before it advances (the daemon creates
+      // + attaches it at create). No session ⇒ misconfiguration, fail loud.
+      throw new Error(`pipeline "${req.pipeline.id}" has no bound session — cannot run phase "${req.phase.id}"`);
+    }
+    const { finalStatus, text } = await this.#host().runPhaseOnSession({
+      sessionId,
       prompt: req.prompt,
       provider: req.provider,
       model: req.model,
-      workdir: req.pipeline.workdir ?? process.cwd(),
-      accountId: req.pipeline.accountId,
-      projectId: req.pipeline.projectId,
-      createdBy: req.pipeline.createdBy,
       packId: req.pipeline.packId,
       roleName: req.phase.role,
     });

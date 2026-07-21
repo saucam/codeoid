@@ -1,8 +1,10 @@
 /**
  * Pipeline runtime integration — the REAL SessionManager driving a pipeline
- * phase through a worker turn, with a MockSessionProvider (no SDK subprocess).
- * Exercises PR4: skill phase → SessionPhaseRunner → runPhaseTurn → worker
- * session → mock backend → lastAssistantText → phase summary.
+ * phase through a turn on the run's BOUND session, with a MockSessionProvider
+ * (no SDK subprocess). Exercises: pipeline.create binds a session → advance →
+ * SessionPhaseRunner → runPhaseOnSession → bound session → mock backend →
+ * lastAssistantText → phase summary. (No headless worker; the run drives a real
+ * attachable session — see docs/pipeline-run.md.)
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -15,8 +17,18 @@ import { MockSessionProvider } from "../daemon/providers/mock/session-provider.j
 import { SessionManager } from "../daemon/session-manager.js";
 import { Store } from "../daemon/store.js";
 import { TranscriptStore } from "../daemon/transcript.js";
+import { ALL_SCOPES } from "../protocol/scopes.js";
+import type { AuthContext } from "../protocol/types.js";
 
 const tenant = { accountId: "acc", projectId: "proj", createdBy: "user:test" };
+const AUTH: AuthContext = {
+  sub: tenant.createdBy,
+  scopes: [...ALL_SCOPES] as AuthContext["scopes"],
+  delegationDepth: 0,
+  accountId: tenant.accountId,
+  projectId: tenant.projectId,
+};
+const CLIENT = { id: "c", auth: AUTH, send: () => {} };
 
 function turnDone(): ProviderEvent {
   return {
@@ -117,22 +129,32 @@ afterEach(async () => {
 });
 
 describe("pipeline runtime (real SessionManager + mock backend)", () => {
-  test("a skill phase drives a worker turn and captures its final text as the summary", async () => {
+  test("a skill phase drives a turn on the bound session and captures its final text as the summary", async () => {
     const pm = manager.pipelines;
     expect(pm).toBeDefined();
     if (!pm) return;
     pm.registries.skills.register({ id: "implement", kind: "slash", command: "/implement" });
-    const p = pm.create({
-      name: "REQ-1",
-      workdir: join(tmp, "repo"),
-      phases: [{ id: "impl", kind: "skill", skill: "implement" }],
-      ...tenant,
-    });
-    const done = await pm.advance(p.id);
-    expect(done.status).toBe("done");
-    const st = done.phases[0].state;
-    expect(st.status).toBe("passed");
-    if (st.status === "passed") expect(st.summary).toContain("phase complete");
+    // Go through the wire handler so a run-session is created + bound (the real
+    // path); driving pm.create directly would leave the run session-less.
+    const created = await manager.handle(
+      {
+        type: "pipeline.create",
+        id: "1",
+        name: "REQ-1",
+        workdir: join(tmp, "repo"),
+        phases: [{ id: "impl", kind: "skill", skill: "implement" }],
+      },
+      AUTH,
+      CLIENT,
+    );
+    if (created.type !== "pipeline.snapshot") throw new Error(`create failed: ${JSON.stringify(created)}`);
+    expect(created.pipeline.sessionId).toBeTruthy();
+    const done = await manager.handle({ type: "pipeline.advance", id: "2", pipelineId: created.pipeline.id }, AUTH, CLIENT);
+    if (done.type !== "pipeline.snapshot") throw new Error(`advance failed: ${JSON.stringify(done)}`);
+    expect(done.pipeline.status).toBe("done");
+    const ph = done.pipeline.phases[0];
+    expect(ph.status).toBe("passed");
+    expect(ph.summary).toContain("phase complete");
   });
 
   test("an errored backend turn fails the phase instead of passing it", async () => {
@@ -145,17 +167,24 @@ describe("pipeline runtime (real SessionManager + mock backend)", () => {
     expect(pm).toBeDefined();
     if (!pm) return;
     pm.registries.skills.register({ id: "impl", kind: "slash", command: "/impl" });
-    const p = pm.create({
-      name: "R",
-      workdir: join(tmp, "repo"),
-      phases: [{ id: "impl", kind: "skill", skill: "impl", onFail: { action: "abort" } }],
-      ...tenant,
-    });
-    const out = await pm.advance(p.id);
-    expect(out.status).toBe("failed");
-    const st = out.phases[0].state;
-    expect(st.status).toBe("failed");
-    if (st.status === "failed") expect(st.reason).toContain("error");
+    const created = await m2.handle(
+      {
+        type: "pipeline.create",
+        id: "1",
+        name: "R",
+        workdir: join(tmp, "repo"),
+        phases: [{ id: "impl", kind: "skill", skill: "impl", onFail: { action: "abort" } }],
+      },
+      AUTH,
+      CLIENT,
+    );
+    if (created.type !== "pipeline.snapshot") throw new Error(`create failed: ${JSON.stringify(created)}`);
+    const out = await m2.handle({ type: "pipeline.advance", id: "2", pipelineId: created.pipeline.id }, AUTH, CLIENT);
+    if (out.type !== "pipeline.snapshot") throw new Error(`advance failed: ${JSON.stringify(out)}`);
+    expect(out.pipeline.status).toBe("failed");
+    const ph = out.pipeline.phases[0];
+    expect(ph.status).toBe("failed");
+    if (ph.status === "failed") expect(ph.reason).toContain("error");
     await m2.drain(3_000);
   });
 
