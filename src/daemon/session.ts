@@ -933,6 +933,17 @@ export class Session {
     }
     return null;
   }
+  /**
+   * Number of turns in the canonical history. A monotonic watermark: it grows
+   * by exactly one whenever a turn is COMMITTED (an agent loop — text and/or
+   * tool calls — is flattened into one CanonicalTurn and flushed before the
+   * turn's idle status is emitted). A transient query-loop rebuild that rests
+   * WITHOUT committing a turn leaves it unchanged. The pipeline phase driver
+   * uses this to tell a real turn (even a tools-only one, whose assistant text
+   * is empty so `lastAssistantText` can't see it) from a content-free rebuild
+   * idle — without it, a tools-only rest would be mistaken for spurious.
+   */
+  get historyLength(): number { return this.#accumulator.history.length; }
   get attachedClientCount(): number { return this.#clients.size; }
 
   /**

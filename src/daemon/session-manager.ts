@@ -1819,10 +1819,15 @@ mcpHub: this.#mcpHub,
     // still reaches Approve/Reject instead of looping. A non-idle rest
     // (error / budget-exhausted) is a real phase failure, surfaced as-is.
     let pendingSend: string | null = `${req.prompt}\n${PHASE_COMPLETION_CONTRACT}`;
-    // The assistant text as of the last turn we ACTED on. A rest whose text is
-    // unchanged produced no new model output (a spurious rebuild idle, not a
-    // real turn) — we skip it rather than nudge over the model mid-work.
-    let lastActedText = session.lastAssistantText ?? "";
+    // Watermark of the canonical history as of the last turn we ACTED on. A rest
+    // that hasn't grown the history COMMITTED no turn — it's a transient query-
+    // loop rebuild idle, not the model resting — so we skip it and wait for the
+    // real turn instead of nudging over the model mid-work. We key off history
+    // length (turns committed), NOT assistant text: a real turn that only called
+    // tools has empty assistant text (invisible to lastAssistantText) yet still
+    // grows the history, so a text check would mistake it for spurious and skip
+    // a genuine rest — hanging the loop waiting for an idle that never comes.
+    let actedHistoryLen = session.historyLength;
     let nudges = 0;
     let spurious = 0;
     try {
@@ -1844,14 +1849,18 @@ mcpHub: this.#mcpHub,
         // so without this we'd re-drive a nudge over the stop. Hand the partial
         // to the review boundary instead.
         if (session.turnInterrupted) return { finalStatus: "idle", text };
-        // A rest with NO new model output is spurious (e.g. a query-loop
-        // rebuild) — the real turn hasn't run yet. Don't nudge; wait for it.
-        // Tool calls happen WITHIN a turn, so they never surface here.
-        if (text === lastActedText) {
+        // A rest that COMMITTED no new turn is spurious (e.g. a query-loop
+        // rebuild that rests transiently before the real turn runs) — the real
+        // turn is still in flight and will emit its own idle. Don't nudge; wait
+        // for it, bounded by MAX_SPURIOUS_RESTS so a backend that somehow never
+        // commits a turn still hands off to the human boundary instead of
+        // looping. (Tool calls happen WITHIN a turn, so a tools-only turn still
+        // grows the history and is NOT treated as spurious.)
+        if (session.historyLength === actedHistoryLen) {
           if (++spurious > MAX_SPURIOUS_RESTS) return { finalStatus: "idle", text };
           continue;
         }
-        lastActedText = text;
+        actedHistoryLen = session.historyLength;
         spurious = 0;
         // Deliverable complete → done, marker stripped from the summary.
         if (isPhaseComplete(text)) return { finalStatus: "idle", text: stripPhaseCompleteMarker(text) };

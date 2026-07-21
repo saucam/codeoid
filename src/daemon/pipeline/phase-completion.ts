@@ -85,12 +85,14 @@ export const PHASE_NO_INPUT_NUDGE = [
  *  emits the marker still reaches Approve/Reject instead of looping forever. */
 export const MAX_PHASE_NUDGES = 3;
 
-/** A phase turn can rest WITHOUT the model producing any new assistant text —
- *  e.g. the Claude provider rebuilds its query loop on a phase-activation
+/** A phase turn can rest WITHOUT committing any new turn to the history — e.g.
+ *  the Claude provider rebuilds its query loop on a phase-activation
  *  systemPromptAppend change, which surfaces as a transient `idle` before the
- *  real turn runs. Such a rest is NOT a place to nudge (the model hasn't spoken
- *  yet); the driver waits for the real turn instead. This bounds how many
- *  content-free rests it will skip before giving up (so it can't wait forever). */
+ *  real turn runs. Such a rest is NOT a place to nudge (the model hasn't done
+ *  anything yet); the driver waits for the real turn instead. This bounds how
+ *  many content-free rests it will skip before handing off to the human
+ *  boundary — a backstop so a backend that somehow never commits a turn can't
+ *  wedge the phase loop. */
 export const MAX_SPURIOUS_RESTS = 5;
 
 /** True when the model's final message signals phase completion. */
