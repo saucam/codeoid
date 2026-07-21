@@ -404,3 +404,18 @@ describe("provider commands (session.commands)", () => {
     await brokenSession.destroy(TEST_AUTH);
   });
 });
+
+describe("turn interrupt signal", () => {
+  it("turnInterrupted is set by interrupt() and cleared when the next turn starts", async () => {
+    const session = makeSession(new MockSessionProvider("mock"));
+    expect(session.turnInterrupted).toBe(false);
+    // Interrupt leaves the session idle but flags the interrupt so a driver
+    // (a pipeline phase) can stop instead of re-driving over the Stop.
+    await session.interrupt(TEST_AUTH);
+    expect(session.turnInterrupted).toBe(true);
+    // Starting the next turn clears it.
+    await session.send("go", TEST_AUTH);
+    expect(session.turnInterrupted).toBe(false);
+    await session.destroy(TEST_AUTH);
+  });
+});

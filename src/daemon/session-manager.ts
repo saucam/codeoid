@@ -1829,11 +1829,17 @@ mcpHub: this.#mcpHub,
         const text = session.lastAssistantText ?? "";
         // A non-idle rest (error / budget-exhausted) is a real phase failure.
         if (finalStatus !== "idle") return { finalStatus, text };
+        // The user interrupted (Stop) — an interrupt leaves the session idle,
+        // so without this we'd re-drive a nudge over the stop. Hand the partial
+        // to the review boundary instead.
+        if (session.turnInterrupted) return { finalStatus: "idle", text };
         // Deliverable complete → done, marker stripped from the summary.
         if (isPhaseComplete(text)) return { finalStatus: "idle", text: stripPhaseCompleteMarker(text) };
         // The model needs the user's input. Surface the question as an input
-        // dialog and feed the answer back as the next turn — a legitimate pause,
-        // NOT a nudge, so a genuine Q&A round never burns the give-up budget.
+        // dialog and feed the answer back as the next turn — a REAL answer is a
+        // legitimate pause (not a nudge), so it resets the give-up budget; a
+        // dismissed / interrupted dialog falls through to the bounded nudge path
+        // so repeated dismissals can't loop forever.
         if (isNeedInput(text)) {
           const resp = await session.requestUserInput({
             method: "input",
@@ -1841,11 +1847,15 @@ mcpHub: this.#mcpHub,
             message: stripNeedInputMarker(text),
             placeholder: "Type your answer…",
           });
-          message =
-            !resp.cancelled && resp.value && resp.value.trim().length > 0
-              ? resp.value
-              : PHASE_NO_INPUT_NUDGE;
-          nudges = 0;
+          if (session.turnInterrupted) return { finalStatus: "idle", text };
+          if (!resp.cancelled && resp.value && resp.value.trim().length > 0) {
+            message = resp.value;
+            nudges = 0;
+            continue;
+          }
+          if (nudges >= MAX_PHASE_NUDGES) return { finalStatus: "idle", text };
+          nudges += 1;
+          message = PHASE_NO_INPUT_NUDGE;
           continue;
         }
         // Rested without any marker (an intermediate pause). Nudge to continue,
