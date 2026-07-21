@@ -100,6 +100,9 @@ export interface LoadedPack extends Pack {
   /** Constitution text composed into every phase prompt, if declared. */
   constitution?: string;
   dir: string;
+  /** Declared gates (id + kind) — surfaced for pack browsing without re-parsing
+   *  the manifest. Whether a `command` gate actually runs still depends on trust. */
+  gateSpecs: { id: string; kind: "command" | "self" | "skill" | "review" }[];
 }
 
 export interface LoadPackOptions {
@@ -246,6 +249,7 @@ export function loadPack(dir: string, opts: LoadPackOptions = {}): LoadedPack {
     roles,
     constitution,
     dir,
+    gateSpecs: m.gates.map((g) => ({ id: g.id, kind: g.kind })),
     pipeline,
     register(r: PipelineRegistries): void {
       for (const s of skills) r.skills.register(s);

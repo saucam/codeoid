@@ -48,12 +48,13 @@ import {
 } from "./dispatch.js";
 import { createPipelineManagerFromConfig } from "./pipeline/wiring.js";
 import type { PipelineManager } from "./pipeline/manager.js";
+import { PackService, type PackServiceConfig } from "./pipeline/pack-service.js";
 import { SessionPhaseRunner, type PhaseTurnResult } from "./pipeline/runner.js";
 import type { DispatchEventRow, DispatchTaskRow } from "./store.js";
 import { type MemoryEngine, type MemoryMcpMount, workspaceIdFromPath } from "./memory/index.js";
 import type { McpRegistry } from "./mcp/registry.js";
 import type { McpHub } from "./mcp/hub.js";
-import type { CodeoidConfig } from "../config.js";
+import { type CodeoidConfig, mutateConfigFile } from "../config.js";
 import type { CompressionRegistry } from "./compress/index.js";
 import type {
   AuthContext,
@@ -177,6 +178,9 @@ export class SessionManager {
   #dispatcher: Dispatcher;
   /** SDLC pipeline manager — undefined when the pipeline is disabled (default). */
   #pipelines?: PipelineManager;
+  /** Pack curation surface (registries + install/trust/select) — always present,
+   *  so packs can be managed even before the pipeline runtime is enabled. */
+  #packs: PackService;
   /** The daemon's provider catalog — one registry, shared by every session. */
   #providers: ProviderRegistry;
   /** The daemon's hook bus — one instance, shared by every session. */
@@ -239,6 +243,35 @@ export class SessionManager {
       runner: new SessionPhaseRunner(() => this),
       db: store.database,
     });
+    // Pack curation surface (docs/pack-loading.md) — always constructed (cheap:
+    // no DB / runner). Reads the boot pack config; each mutation persists to
+    // config.json AND (if the pipeline is enabled) registers into the manager.
+    const p = opts?.config?.pipeline;
+    this.#packs = new PackService({
+      config: {
+        defaultPack: p?.defaultPack ?? null,
+        packs: p?.packs ?? [],
+        registries: p?.registries ?? [],
+      },
+      manager: () => this.#pipelines,
+      persist: (state) => this.#persistPackConfig(state),
+    });
+  }
+
+  /** Persist the pack state (registries + installed packs + selection) back into
+   *  config.json under `pipeline`, preserving any other pipeline fields. */
+  #persistPackConfig(state: PackServiceConfig): void {
+    mutateConfigFile((raw) => {
+      const existing = raw.pipeline;
+      const pipeline: Record<string, unknown> =
+        existing && typeof existing === "object" && !Array.isArray(existing)
+          ? (existing as Record<string, unknown>)
+          : {};
+      pipeline.packs = state.packs;
+      pipeline.registries = state.registries;
+      pipeline.defaultPack = state.defaultPack;
+      raw.pipeline = pipeline;
+    });
   }
 
   /** The dispatch queue driver (P4). Exposed for server lifecycle + tests. */
@@ -250,6 +283,12 @@ export class SessionManager {
    *  (the default). Exposed for the pipeline control surface + tests. */
   get pipelines(): PipelineManager | undefined {
     return this.#pipelines;
+  }
+
+  /** The pack curation service (registries + install/trust/select). Exposed for
+   *  the CLI + tests. */
+  get packs(): PackService {
+    return this.#packs;
   }
 
   /**
@@ -549,6 +588,18 @@ mcpHub: this.#mcpHub,
         return this.#pipelineAnswer(msg, auth);
       case "pipeline.abort":
         return this.#pipelineAbort(msg, auth);
+      case "pipeline.pack.list":
+        return this.#packList(msg, auth);
+      case "pipeline.registry.add":
+        return this.#registryAdd(msg, auth);
+      case "pipeline.pack.install":
+        return this.#packInstall(msg, auth);
+      case "pipeline.pack.remove":
+        return this.#packRemove(msg, auth);
+      case "pipeline.pack.trust":
+        return this.#packTrust(msg, auth);
+      case "pipeline.pack.select":
+        return this.#packSelect(msg, auth);
       default: {
         // Inbound messages are cast from raw JSON at the transport, so an
         // unknown/malformed `type` reaches here. Without this the function
@@ -1914,6 +1965,89 @@ mcpHub: this.#mcpHub,
     if (!s) return { type: "response.error", requestId: msg.id, error: "Pipeline not found", code: "not_found" };
     const next = (await g.pm.abort(msg.pipelineId)) ?? s;
     return { type: "pipeline.snapshot", requestId: msg.id, pipeline: this.#pipelineToWire(next) };
+  }
+
+  // ── Pack management (dynamic pack loading — docs/pack-loading.md) ───────
+
+  /** The full pack state reply — returned by list AND every mutating verb so a
+   *  client always receives the refreshed state. */
+  #packListResult(reqId: string): DaemonMessage {
+    const snap = this.#packs.snapshot();
+    return { type: "pipeline.pack.list.result", requestId: reqId, ...snap };
+  }
+
+  #packList(msg: Extract<ClientMessage, { type: "pipeline.pack.list" }>, auth: AuthContext): DaemonMessage {
+    if (!hasScope(auth.scopes as string[], SCOPES.PIPELINE_READ)) {
+      return { type: "response.error", requestId: msg.id, error: `Missing scope: ${SCOPES.PIPELINE_READ}`, code: "forbidden" };
+    }
+    return this.#packListResult(msg.id);
+  }
+
+  /** Guard for the mutating pack verbs — owner-tier `pipeline:manage` (these
+   *  rewrite config.json + toggle host command-gate execution). */
+  #packManageGuard(reqId: string, auth: AuthContext): DaemonMessage | undefined {
+    if (!hasScope(auth.scopes as string[], SCOPES.PIPELINE_MANAGE)) {
+      return { type: "response.error", requestId: reqId, error: `Missing scope: ${SCOPES.PIPELINE_MANAGE}`, code: "forbidden" };
+    }
+    return undefined;
+  }
+
+  async #registryAdd(
+    msg: Extract<ClientMessage, { type: "pipeline.registry.add" }>,
+    auth: AuthContext,
+  ): Promise<DaemonMessage> {
+    const denied = this.#packManageGuard(msg.id, auth);
+    if (denied) return denied;
+    try {
+      await this.#packs.addRegistry({ url: msg.url, name: msg.name, ref: msg.ref });
+      return this.#packListResult(msg.id);
+    } catch (e) {
+      return this.#pipelineError(msg.id, e);
+    }
+  }
+
+  #packInstall(msg: Extract<ClientMessage, { type: "pipeline.pack.install" }>, auth: AuthContext): DaemonMessage {
+    const denied = this.#packManageGuard(msg.id, auth);
+    if (denied) return denied;
+    try {
+      this.#packs.install({ packId: msg.packId, dir: msg.dir, trusted: msg.trusted });
+      return this.#packListResult(msg.id);
+    } catch (e) {
+      return this.#pipelineError(msg.id, e);
+    }
+  }
+
+  #packRemove(msg: Extract<ClientMessage, { type: "pipeline.pack.remove" }>, auth: AuthContext): DaemonMessage {
+    const denied = this.#packManageGuard(msg.id, auth);
+    if (denied) return denied;
+    try {
+      this.#packs.remove(msg.packId);
+      return this.#packListResult(msg.id);
+    } catch (e) {
+      return this.#pipelineError(msg.id, e);
+    }
+  }
+
+  #packTrust(msg: Extract<ClientMessage, { type: "pipeline.pack.trust" }>, auth: AuthContext): DaemonMessage {
+    const denied = this.#packManageGuard(msg.id, auth);
+    if (denied) return denied;
+    try {
+      this.#packs.trust(msg.packId, msg.trusted);
+      return this.#packListResult(msg.id);
+    } catch (e) {
+      return this.#pipelineError(msg.id, e);
+    }
+  }
+
+  #packSelect(msg: Extract<ClientMessage, { type: "pipeline.pack.select" }>, auth: AuthContext): DaemonMessage {
+    const denied = this.#packManageGuard(msg.id, auth);
+    if (denied) return denied;
+    try {
+      this.#packs.select(msg.packId);
+      return this.#packListResult(msg.id);
+    } catch (e) {
+      return this.#pipelineError(msg.id, e);
+    }
   }
 
   // ── Dispatcher host (P4) ──────────────────────────────────────────────

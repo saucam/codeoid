@@ -780,7 +780,13 @@ export type ClientMessage =
   | PipelineGetMsg
   | PipelineAdvanceMsg
   | PipelineAnswerMsg
-  | PipelineAbortMsg;
+  | PipelineAbortMsg
+  | PipelinePackListMsg
+  | PipelineRegistryAddMsg
+  | PipelinePackInstallMsg
+  | PipelinePackRemoveMsg
+  | PipelinePackTrustMsg
+  | PipelinePackSelectMsg;
 
 interface BaseClientMsg {
   /** Request ID for correlating responses */
@@ -1658,6 +1664,112 @@ export interface PipelineListResultMsg {
   pipelines: PipelineWire[];
 }
 
+// ── Pack management (dynamic pack loading — docs/pack-loading.md) ──────────────
+
+/** A phase of a pack's pipeline, projected for a pack card. */
+export interface PackPhaseWire {
+  id: string;
+  name?: string;
+  /** Capability role (e.g. reviewer = read-only) — lets the UI show the envelope. */
+  role?: string;
+  /** Exit-gate id, if the phase declares one. */
+  gate?: string;
+}
+
+/** An installed pack + its metadata + trust/selected state, for the browser. */
+export interface PackWire {
+  id: string;
+  name: string;
+  version: string;
+  description?: string;
+  /** Absolute directory the pack loaded from. */
+  dir: string;
+  /** Whether the host trusts this pack to run shell `command` gates. */
+  trusted: boolean;
+  /** True when this is the selected (default) pack. */
+  selected: boolean;
+  /** Registry name this pack came from, if it was installed from one. */
+  registry?: string;
+  phases: PackPhaseWire[];
+  /** Capability role names the pack declares. */
+  roles: string[];
+  /** Gate ids + kinds the pack declares. */
+  gates: { id: string; kind: string }[];
+  /** Whether the pack is registered into the live pipeline manager (runnable). */
+  active: boolean;
+  /** Present when the configured pack dir could not be loaded (bad/missing
+   *  pack.yaml) — the card renders as broken rather than vanishing silently. */
+  error?: string;
+}
+
+/** A pack found in a cached registry but not yet installed. */
+export interface AvailablePackWire {
+  id: string;
+  name: string;
+  version: string;
+  description?: string;
+  /** Registry name it was discovered in. */
+  registry: string;
+  /** Absolute directory in the registry cache. */
+  dir: string;
+  /** True when a pack with this id is already installed. */
+  installed: boolean;
+}
+
+/** A configured pack registry (a git repo) + its cache status. */
+export interface RegistryWire {
+  name: string;
+  url: string;
+  ref?: string;
+  /** True once the registry has been cloned into the local cache. */
+  cached: boolean;
+  /** Number of packs discovered in the cache (undefined if not cached). */
+  packCount?: number;
+}
+
+export interface PipelinePackListMsg extends BaseClientMsg {
+  type: "pipeline.pack.list";
+}
+export interface PipelineRegistryAddMsg extends BaseClientMsg {
+  type: "pipeline.registry.add";
+  url: string;
+  name?: string;
+  ref?: string;
+}
+export interface PipelinePackInstallMsg extends BaseClientMsg {
+  type: "pipeline.pack.install";
+  /** Install a pack discovered in a registry cache by its id … */
+  packId?: string;
+  /** … or install directly from a local pack directory. Exactly one of the two. */
+  dir?: string;
+  /** Trust the pack to run host `command` gates. Default false. */
+  trusted?: boolean;
+}
+export interface PipelinePackRemoveMsg extends BaseClientMsg {
+  type: "pipeline.pack.remove";
+  packId: string;
+}
+export interface PipelinePackTrustMsg extends BaseClientMsg {
+  type: "pipeline.pack.trust";
+  packId: string;
+  trusted: boolean;
+}
+export interface PipelinePackSelectMsg extends BaseClientMsg {
+  type: "pipeline.pack.select";
+  /** null clears the selected (default) pack. */
+  packId: string | null;
+}
+
+/** Reply to pipeline.pack.list — and to every mutating pack verb, so a client
+ *  always receives the refreshed pack state after an add/install/remove/etc. */
+export interface PackListResultMsg {
+  type: "pipeline.pack.list.result";
+  requestId: string;
+  installed: PackWire[];
+  available: AvailablePackWire[];
+  registries: RegistryWire[];
+}
+
 // =============================================================================
 
 export type DaemonMessage =
@@ -1686,7 +1798,8 @@ export type DaemonMessage =
   | SettingsGetResultMsg
   | SettingsSetResultMsg
   | PipelineSnapshotMsg
-  | PipelineListResultMsg;
+  | PipelineListResultMsg
+  | PackListResultMsg;
 
 export interface AuthOkMsg {
   type: "auth.ok";

@@ -14,8 +14,8 @@
  *      the parsed config, not env vars, so we can mock cleanly in tests.
  */
 
-import { existsSync, readFileSync, mkdirSync } from "node:fs";
-import { join, isAbsolute, resolve } from "node:path";
+import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync, chmodSync } from "node:fs";
+import { join, isAbsolute, resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import { z } from "zod";
 import type { AuthConfig } from "./daemon/auth.js";
@@ -537,10 +537,30 @@ const PipelineSchema = z
     enabled: z.boolean().default(false),
     defaultPack: z.string().nullable().default(null),
     packs: z
-      .array(z.object({ dir: z.string().min(1), trusted: z.boolean().default(false) }))
+      .array(
+        z.object({
+          dir: z.string().min(1),
+          trusted: z.boolean().default(false),
+          // Provenance: the registry name a pack was installed from (dynamic
+          // pack loading — docs/pack-loading.md). Absent for a hand-added dir.
+          registry: z.string().optional(),
+        }),
+      )
+      .default([]),
+    // Pack registries (git repos laid out like ai-factory: packs/<id>/pack.yaml).
+    // codeoid clones each into ~/.codeoid/packs/<name>/ so packs can be
+    // discovered + installed at runtime (docs/pack-loading.md).
+    registries: z
+      .array(
+        z.object({
+          name: z.string().min(1),
+          url: z.string().min(1),
+          ref: z.string().optional(),
+        }),
+      )
       .default([]),
   })
-  .default({ enabled: false, defaultPack: null, packs: [] });
+  .default({ enabled: false, defaultPack: null, packs: [], registries: [] });
 
 const RootSchema = z.object({
   daemonUrl: z.string().default("ws://127.0.0.1:7400"),
@@ -707,7 +727,12 @@ export interface CodeoidConfig {
   pipeline?: {
     enabled: boolean;
     defaultPack: string | null;
-    packs: { dir: string; trusted: boolean }[];
+    packs: { dir: string; trusted: boolean; registry?: string }[];
+    /** Pack registries (git repos) — cloned into the pack cache so packs can be
+     *  discovered + installed at runtime (docs/pack-loading.md). Optional in the
+     *  type so hand-built test configs stay minimal; loadConfig always populates
+     *  it (schema default []). */
+    registries?: { name: string; url: string; ref?: string }[];
   };
   /**
    * Per-backend provider settings. Optional in the type so hand-built test
@@ -1110,4 +1135,58 @@ export function validateConfigObject(
       message: i.message,
     })),
   };
+}
+
+// ── Config persistence ──────────────────────────────────────────────────────
+
+/**
+ * Atomically write a file (temp + rename) with the given mode. The single
+ * atomic-write primitive shared by config.json / .env writers so the tmp+rename
+ * + best-effort chmod behavior lives in one place.
+ */
+export function atomicWrite(path: string, contents: string, mode: number): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, contents, { encoding: "utf8", mode });
+  try {
+    chmodSync(tmp, mode);
+  } catch {
+    /* best-effort on platforms without POSIX perms */
+  }
+  renameSync(tmp, path);
+}
+
+/** Read `config.json` as a raw object (empty object if absent). Throws if the
+ *  file is present but not a JSON object. */
+export function readRawConfigFile(): Record<string, unknown> {
+  const { configPath } = configFilePaths();
+  if (!existsSync(configPath)) return {};
+  const parsed: unknown = JSON.parse(readFileSync(configPath, "utf8"));
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("config.json must be a JSON object");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/**
+ * Read → mutate → validate → atomically persist `config.json`. The mutator
+ * edits the raw object in place; the WHOLE result is validated against
+ * `RootSchema` before the atomic `0o600` write, so a bad mutation rejects the
+ * batch (no partial write). The single runtime config-write path shared by the
+ * settings surface and dynamic pack management (docs/pack-loading.md), keeping
+ * config integrity enforced in one place. Returns the mutated raw config.
+ */
+export function mutateConfigFile(
+  mutate: (raw: Record<string, unknown>) => void,
+): Record<string, unknown> {
+  const raw = readRawConfigFile();
+  mutate(raw);
+  const validation = validateConfigObject(raw);
+  if (!validation.ok) {
+    const detail = validation.issues.map((i) => `${i.path}: ${i.message}`).join("; ");
+    throw new Error(`config change rejected: ${detail}`);
+  }
+  const { configPath } = configFilePaths();
+  atomicWrite(configPath, `${JSON.stringify(raw, null, 2)}\n`, 0o600);
+  return raw;
 }

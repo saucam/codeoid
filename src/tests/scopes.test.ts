@@ -15,8 +15,8 @@ import {
 } from "../protocol/scopes.js";
 
 describe("SCOPES constants", () => {
-  test("all 16 scopes are defined", () => {
-    expect(Object.keys(SCOPES)).toHaveLength(16);
+  test("all 17 scopes are defined", () => {
+    expect(Object.keys(SCOPES)).toHaveLength(17);
     expect(SCOPES.SESSION_CREATE).toBe("session:create");
     expect(SCOPES.SESSION_ATTACH).toBe("session:attach");
     expect(SCOPES.SESSION_WATCH).toBe("session:watch");
@@ -33,10 +33,11 @@ describe("SCOPES constants", () => {
     expect(SCOPES.PIPELINE_CREATE).toBe("pipeline:create");
     expect(SCOPES.PIPELINE_READ).toBe("pipeline:read");
     expect(SCOPES.PIPELINE_ANSWER).toBe("pipeline:answer");
+    expect(SCOPES.PIPELINE_MANAGE).toBe("pipeline:manage");
   });
 
-  test("ALL_SCOPES contains all 16", () => {
-    expect(ALL_SCOPES).toHaveLength(16);
+  test("ALL_SCOPES contains all 17", () => {
+    expect(ALL_SCOPES).toHaveLength(17);
     for (const scope of Object.values(SCOPES)) {
       expect(ALL_SCOPES).toContain(scope);
     }
@@ -44,7 +45,7 @@ describe("SCOPES constants", () => {
 
   test("ALL_SCOPES_STRING is space-delimited", () => {
     const parts = ALL_SCOPES_STRING.split(" ");
-    expect(parts).toHaveLength(16);
+    expect(parts).toHaveLength(17);
     for (const scope of ALL_SCOPES) {
       expect(parts).toContain(scope);
     }
@@ -92,6 +93,12 @@ describe("OPERATOR_SCOPES", () => {
   test("can read settings but not write them (config is owner-only)", () => {
     expect(OPERATOR_SCOPES).toContain(SCOPES.SETTINGS_READ);
     expect(OPERATOR_SCOPES).not.toContain(SCOPES.SETTINGS_WRITE);
+  });
+
+  test("can create/read pipelines but not manage packs (owner-only, like settings:write)", () => {
+    expect(OPERATOR_SCOPES).toContain(SCOPES.PIPELINE_CREATE);
+    expect(OPERATOR_SCOPES).toContain(SCOPES.PIPELINE_READ);
+    expect(OPERATOR_SCOPES).not.toContain(SCOPES.PIPELINE_MANAGE);
   });
 });
 

@@ -448,6 +448,8 @@ describe("DaemonMessage routing", () => {
           return `pipeline:${msg.pipeline.id}`;
         case "pipeline.list.result":
           return `pipeline.list:${msg.pipelines.length}`;
+        case "pipeline.pack.list.result":
+          return `pack.list:${msg.installed.length}/${msg.available.length}`;
       }
     };
 
