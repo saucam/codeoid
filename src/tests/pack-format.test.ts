@@ -4,7 +4,7 @@
 
 import { describe, expect, test } from "bun:test";
 import type { PackListResultMsg, PackWire } from "../protocol/types";
-import { formatPackList, formatPackShow } from "./pack-format";
+import { formatPackList, formatPackShow } from "../terminal/pack-format";
 
 const pack = (over: Partial<PackWire> = {}): PackWire => ({
   id: "aif-sdlc",
