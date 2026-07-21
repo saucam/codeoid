@@ -6,6 +6,76 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-07-22
+
+The governed SDLC pipeline goes live end-to-end: fetch a methodology pack from a
+registry, activate it on a session, and drive a real, attached run through its
+phases with a human decision at every boundary.
+
+### Added
+
+- **Dynamic pack loading** (`pipeline.registries`): turn pack loading from a
+  boot-only config read into a live, curatable surface. Add a git pack REGISTRY,
+  discover its packs, and install / remove / trust / select them at runtime —
+  each change registered into the live pipeline manager and persisted to
+  `config.json`. Untrusted by default, so a fetched pack's shell command-gates
+  stay fail-closed until an explicit trust. Ships over the wire
+  (`pipeline.pack.*` + `pipeline.registry.add`, new owner-tier `pipeline:manage`
+  scope), as a `codeoid pack …` CLI group, and as a web Pack Browser. (#214, #215)
+
+- **Ambient pack activation** (`session.create --pack [--pack-role]`): activate
+  an installed pack on a session, separate from a governed run. Its constitution
+  is injected into the system prompt, its subagents are handed to the backend,
+  and an optional capability role gates the session's tools — a read-only role
+  (`write:false` / `network:false`) denies write/network tools at the call-time
+  `canUseTool` gate, cross-backend. `SessionInfo.profile` shows the active pack
+  and role, and a web new-session pack/role selector rides the same verbs. (#216)
+
+- **Governed run cockpit** (`/pipeline`): trigger a governed run with a goal and
+  auto-advance through the pack's phases, steering each at its boundary with
+  Approve / Revise / Reject. Revise records the human feedback on the halted
+  phase and re-runs it with the feedback + prior output threaded into the prompt.
+  Each phase runs under its own capability role (a reviewer phase is read-only,
+  an implementer phase can write). Adds `pipeline.revise` (`pipeline:answer`) and
+  a `codeoid pipeline run/status/list/approve/reject/revise` CLI. (#217)
+
+- **Conductor over a live session**: a governed run now drives its phases on one
+  real, attached session instead of a headless per-phase worker — so the run is
+  visible, you can talk to it, and there is no per-phase timeout on an attended
+  session. Every phase halts at its boundary for a human decision (a passing gate
+  no longer auto-advances), the bound session swaps capability role per phase,
+  and the web `/pipeline` cockpit opens the extended create-session dialog
+  (name / workdir / goal / pack), auto-attaches the run session, and is
+  chat-primary with the cockpit as an overlay. (#219)
+
+### Fixed
+
+- **Agent identity & delegation in the ZeroID registry**: codeoid identities now
+  render correctly in the Highflame identity registry / delegation explorer.
+  Session and sub-agents register as owner-attributed code agents
+  (`identity_type: "agent"`, `sub_type: "code_agent"`), a sub-agent is attributed
+  to the human owner (not the parent WIMSE URI) so Studio's code-agent roster
+  surfaces it, and the canonical `parent_*` linkage keys are written. Sub-agent
+  tokens are delegated from the parent's already-scoped subject token via an
+  RFC 8693 token-exchange, restoring the real `parent_jti` delegation edge; a
+  genuine delegation failure is now a loud, audited degradation instead of a
+  silent root-token fallback. (#218, #220)
+
+- **A phase execution error fails the run** instead of halting to a green
+  "passed": an errored phase kind / runner (a thrown or non-idle turn) used to be
+  parked as "halted" and could be approved into `status: "passed"` — showing a
+  phase that never ran as green. An execution error is not a reviewable gate
+  verdict, so it now fails the pipeline (after any retry budget); gate rejections
+  still halt for the Approve / Revise / Reject decision. (#221)
+
+- **Pack skills resolve on the Claude backend**: an installed pack links its
+  runnable skills into `~/.claude/skills/`, but the backend ran with
+  `settingSources: ["project"]` and never discovered them, so a `/spec`-style
+  invocation came back "Unknown command". The backend now loads the user tier as
+  well (`settingSources: ["project", "user"]`) and enables every discovered skill
+  (`skills: "all"`); pack subagents are still injected programmatically, so
+  nothing double-loads. (#222)
+
 ## [0.3.2] - 2026-07-21
 
 ### Added
