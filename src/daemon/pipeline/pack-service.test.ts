@@ -152,6 +152,34 @@ describe("addRegistry + discovery", () => {
     await svc.addRegistry({ url: "https://github.com/a/reg.git" });
     await expect(svc.addRegistry({ url: "https://github.com/b/reg.git" })).rejects.toThrow(/different url/);
   });
+
+  test("re-adding the same registry pulls (not clone) and doesn't duplicate", async () => {
+    const fixture = tmp();
+    writeRegistry(fixture, ["p"]);
+    const cacheDir = join(tmp(), "c");
+    const { svc } = makeService({ cacheDir, fixture });
+    await svc.addRegistry({ url: "https://github.com/a/reg.git" });
+    // Second add with the SAME url: the cache exists, so it pulls (fake git
+    // returns ok for pull), and the registry list stays length 1.
+    await svc.addRegistry({ url: "https://github.com/a/reg.git" });
+    expect(svc.listRegistries()).toHaveLength(1);
+  });
+
+  test("refresh pulls a cached registry (and no-ops an uncached one)", async () => {
+    const fixture = tmp();
+    writeRegistry(fixture, ["p"]);
+    const { svc } = makeService({
+      cacheDir: join(tmp(), "c"),
+      fixture,
+      initial: { registries: [{ name: "reg", url: "https://github.com/a/reg.git" }] },
+    });
+    // Not cached yet → refresh is a no-op (doesn't throw).
+    await svc.refresh("reg");
+    // After adding (clone), refresh pulls it.
+    await svc.addRegistry({ url: "https://github.com/a/reg.git", name: "reg" });
+    await svc.refresh("reg");
+    await svc.refresh(); // all
+  });
 });
 
 describe("install / trust / select / remove", () => {
@@ -243,6 +271,27 @@ describe("install / trust / select / remove", () => {
   test("install of an unknown packId throws", () => {
     const { svc } = makeService({ cacheDir: join(tmp(), "c") });
     expect(() => svc.install({ packId: "ghost" })).toThrow(/not found in any registry/);
+  });
+
+  test("install with neither packId nor dir throws", () => {
+    const { svc } = makeService({ cacheDir: join(tmp(), "c") });
+    expect(() => svc.install({})).toThrow(/provide `packId` or `dir`/);
+  });
+
+  test("trust of an uninstalled pack throws", () => {
+    const { svc } = makeService({ cacheDir: join(tmp(), "c") });
+    expect(() => svc.trust("ghost", true)).toThrow(/not installed/);
+  });
+
+  test("select(null) clears the default", () => {
+    const dir = join(tmp(), "p");
+    writePack(dir, "d");
+    const { svc } = makeService({ cacheDir: join(tmp(), "c") });
+    svc.install({ dir });
+    svc.select("d");
+    expect(svc.selectedPack).toBe("d");
+    svc.select(null);
+    expect(svc.selectedPack).toBeNull();
   });
 });
 

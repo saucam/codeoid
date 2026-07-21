@@ -144,4 +144,36 @@ describe("install → select → remove flow (local dir)", () => {
     const after = packs(await run({ type: "pipeline.pack.remove", id: "r11", packId: "bye" }, OWNER));
     expect(after.installed.find((x) => x.id === "bye")).toBeUndefined();
   });
+
+  test("trust toggles the pack's trust state", async () => {
+    const dir = join(tmp, "trusty");
+    writePack(dir, "trusty");
+    await run({ type: "pipeline.pack.install", id: "r12", dir }, OWNER);
+    const after = packs(await run({ type: "pipeline.pack.trust", id: "r13", packId: "trusty", trusted: true }, OWNER));
+    expect(after.installed.find((x) => x.id === "trusty")!.trusted).toBe(true);
+  });
+});
+
+describe("error + guard branches", () => {
+  test("registry.add is rejected without pipeline:manage (before any git)", async () => {
+    const denied = await run(
+      { type: "pipeline.registry.add", id: "r14", url: "https://example.com/x.git" },
+      auth([SCOPES.PIPELINE_READ]),
+    );
+    expect(denied.type).toBe("response.error");
+    if (denied.type === "response.error") expect(denied.code).toBe("forbidden");
+  });
+
+  test("installing a non-pack directory returns an invalid_request error", async () => {
+    const bad = join(tmp, "not-a-pack");
+    mkdirSync(bad, { recursive: true }); // no pack.yaml
+    const resp = await run({ type: "pipeline.pack.install", id: "r15", dir: bad }, OWNER);
+    expect(resp.type).toBe("response.error");
+    if (resp.type === "response.error") expect(resp.code).toBe("invalid_request");
+  });
+
+  test("selecting an uninstalled pack errors", async () => {
+    const resp = await run({ type: "pipeline.pack.select", id: "r16", packId: "ghost" }, OWNER);
+    expect(resp.type).toBe("response.error");
+  });
 });
