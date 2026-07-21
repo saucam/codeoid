@@ -44,6 +44,13 @@ export const SCOPES = {
   PIPELINE_READ: "pipeline:read",
   /** Answer a halted pipeline phase (a human decision) */
   PIPELINE_ANSWER: "pipeline:answer",
+  /**
+   * Manage SDLC packs + registries — add a registry, install / remove / trust /
+   * select a pack. Owner-tier (kept out of OPERATOR_SCOPES): these verbs rewrite
+   * config.json and toggle host command-gate execution, the same trust class as
+   * settings:write.
+   */
+  PIPELINE_MANAGE: "pipeline:manage",
 } as const;
 
 export type Scope = (typeof SCOPES)[keyof typeof SCOPES];

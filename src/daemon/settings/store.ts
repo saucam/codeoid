@@ -15,16 +15,8 @@
  * apply to new sessions without a restart.
  */
 
-import {
-  existsSync,
-  readFileSync,
-  writeFileSync,
-  renameSync,
-  chmodSync,
-  mkdirSync,
-} from "node:fs";
-import { dirname } from "node:path";
-import { configFilePaths, validateConfigObject } from "../../config.js";
+import { existsSync, readFileSync } from "node:fs";
+import { atomicWrite, configFilePaths, validateConfigObject } from "../../config.js";
 import { fieldByKey, manifestFields, SETTINGS_MANIFEST } from "./manifest.js";
 import type {
   SecretStatus,
@@ -276,18 +268,6 @@ function quoteEnv(value: string): string {
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
-
-function atomicWrite(path: string, contents: string, mode: number): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp`;
-  writeFileSync(tmp, contents, { encoding: "utf8", mode });
-  try {
-    chmodSync(tmp, mode);
-  } catch {
-    /* best-effort on platforms without POSIX perms */
-  }
-  renameSync(tmp, path);
-}
 
 function isEnvSet(key: string): boolean {
   const v = process.env[key];

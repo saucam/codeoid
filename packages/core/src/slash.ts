@@ -35,6 +35,7 @@ export type SlashCommand =
   | { kind: "who" }
   | { kind: "capabilities"; tab: "agents" | "skills" | "mcp" | "hooks" }
   | { kind: "settings" }
+  | { kind: "packs" }
   | { kind: "export" }
   | { kind: "import" }
   | { kind: "fork"; providerId?: string };
@@ -138,6 +139,9 @@ export function parseSlash(raw: string, opts?: ParseSlashOptions): SlashCommand 
     case "config":
     case "prefs":
       return { kind: "settings" };
+    case "packs":
+    case "pack":
+      return { kind: "packs" };
     case "export":
     case "share":
       return { kind: "export" };
@@ -176,6 +180,8 @@ export interface SlashContext {
   showIdentity?: () => void;
   showCapabilities?: (tab: "agents" | "skills" | "mcp" | "hooks") => void;
   showSettings?: () => void;
+  /** Open the pack browser (dynamic pack loading — docs/pack-loading.md). */
+  showPacks?: () => void;
   showExport?: () => void;
   showImport?: () => void;
   /**
@@ -283,6 +289,9 @@ export function dispatchSlash(cmd: SlashCommand, ctx: SlashContext): void {
       return;
     case "settings":
       ctx.showSettings?.();
+      return;
+    case "packs":
+      ctx.showPacks?.();
       return;
     case "export":
       ctx.showExport?.();

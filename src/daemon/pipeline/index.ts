@@ -36,3 +36,12 @@ export {
   type PipelineWiringConfig,
   type PipelineWiringOptions,
 } from "./wiring";
+export {
+  PackService,
+  registryNameFromUrl,
+  type PackServiceConfig,
+  type PackServiceDeps,
+  type RegistryEntry,
+  type InstalledPackEntry,
+  type GitResult,
+} from "./pack-service";

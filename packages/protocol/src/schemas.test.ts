@@ -147,6 +147,17 @@ const samples: { [T in ClientTypes]: Extract<ClientMessage, { type: T }> } = {
     value: "LGTM",
   },
   "pipeline.abort": { type: "pipeline.abort", id: "r36", pipelineId: "p1" },
+  "pipeline.pack.list": { type: "pipeline.pack.list", id: "r38" },
+  "pipeline.registry.add": {
+    type: "pipeline.registry.add",
+    id: "r39",
+    url: "git@github.com:highflame-ai/ai-factory.git",
+    name: "ai-factory",
+  },
+  "pipeline.pack.install": { type: "pipeline.pack.install", id: "r40", packId: "aif-sdlc", trusted: false },
+  "pipeline.pack.remove": { type: "pipeline.pack.remove", id: "r41", packId: "aif-sdlc" },
+  "pipeline.pack.trust": { type: "pipeline.pack.trust", id: "r42", packId: "aif-sdlc", trusted: true },
+  "pipeline.pack.select": { type: "pipeline.pack.select", id: "r43", packId: "aif-sdlc" },
 };
 
 describe("fidelity — valid samples round-trip unchanged", () => {

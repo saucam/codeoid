@@ -170,6 +170,19 @@ describe("dispatchSlash", () => {
     expect(c.sent).toEqual([]);
   });
 
+  it("parses /packs and its /pack alias", () => {
+    expect(parseSlash("/packs")).toEqual({ kind: "packs" });
+    expect(parseSlash("/pack")).toEqual({ kind: "packs" });
+  });
+
+  it("/packs invokes the packs hook and emits nothing", () => {
+    const showPacks = mock();
+    const c = { ...ctx(), showPacks };
+    dispatchSlash({ kind: "packs" }, c);
+    expect(showPacks).toHaveBeenCalledTimes(1);
+    expect(c.sent).toEqual([]);
+  });
+
   it("parses capabilities aliases into the right tab", () => {
     expect(parseSlash("/agents")).toEqual({ kind: "capabilities", tab: "agents" });
     expect(parseSlash("/agent")).toEqual({ kind: "capabilities", tab: "agents" });

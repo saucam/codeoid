@@ -41,6 +41,7 @@ const COMMANDS: readonly CommandDoc[] = [
   { usage: "/hooks", desc: "Show configured hooks" },
   { usage: "/who", desc: "Show the connected ZeroID identity" },
   { usage: "/settings", desc: "Open the settings drawer" },
+  { usage: "/packs", desc: "Browse, install, trust & select SDLC packs" },
   { usage: "/fork", desc: "Branch the session — optionally continue on another backend" },
   { usage: "/export", desc: "Export / share the focused session" },
   { usage: "/import", desc: "Import (fork) a session from a share" },

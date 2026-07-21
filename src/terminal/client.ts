@@ -10,6 +10,7 @@ import type { CodeoidConfig } from "../config.js";
 import type { ClientMessage, DaemonMessage, SessionInfo } from "../protocol/types.js";
 import { ALL_SCOPES_STRING } from "../protocol/scopes.js";
 import { sanitizeTerminalOutput } from "../tui/ansi/codes.js";
+import { formatPackList, formatPackShow } from "./pack-format.js";
 
 // ── Stream rendering (pure, exported for tests) ───────────────────────────────
 
@@ -207,6 +208,59 @@ export class TerminalClient {
     } else {
       this.#printError(resp);
     }
+  }
+
+  // ── Packs (dynamic pack loading — docs/pack-loading.md) ──────────────────
+
+  async packList(): Promise<void> {
+    this.#renderPacks(await this.#request({ type: "pipeline.pack.list", id: randomUUID() }));
+  }
+
+  async packRegistryAdd(url: string, opts: { name?: string; ref?: string }): Promise<void> {
+    this.#renderPacks(
+      await this.#request({ type: "pipeline.registry.add", id: randomUUID(), url, name: opts.name, ref: opts.ref }),
+    );
+  }
+
+  async packInstall(ref: string, opts: { trusted?: boolean; dir?: boolean }): Promise<void> {
+    const msg = opts.dir
+      ? ({ type: "pipeline.pack.install", id: randomUUID(), dir: ref, trusted: opts.trusted } as const)
+      : ({ type: "pipeline.pack.install", id: randomUUID(), packId: ref, trusted: opts.trusted } as const);
+    this.#renderPacks(await this.#request(msg));
+  }
+
+  async packRemove(id: string): Promise<void> {
+    this.#renderPacks(await this.#request({ type: "pipeline.pack.remove", id: randomUUID(), packId: id }));
+  }
+
+  async packTrust(id: string, trusted: boolean): Promise<void> {
+    this.#renderPacks(await this.#request({ type: "pipeline.pack.trust", id: randomUUID(), packId: id, trusted }));
+  }
+
+  async packSelect(id: string | null): Promise<void> {
+    this.#renderPacks(await this.#request({ type: "pipeline.pack.select", id: randomUUID(), packId: id }));
+  }
+
+  async packShow(id: string): Promise<void> {
+    const resp = await this.#request({ type: "pipeline.pack.list", id: randomUUID() });
+    if (resp.type !== "pipeline.pack.list.result") {
+      this.#printError(resp);
+      return;
+    }
+    const lines = formatPackShow(resp, id);
+    if (lines === null) {
+      console.error(`Pack "${id}" not found (installed or available).`);
+      return;
+    }
+    for (const line of lines) console.log(line);
+  }
+
+  #renderPacks(resp: DaemonMessage): void {
+    if (resp.type !== "pipeline.pack.list.result") {
+      this.#printError(resp);
+      return;
+    }
+    for (const line of formatPackList(resp)) console.log(line);
   }
 
   async createSession(name: string, workdir: string): Promise<void> {

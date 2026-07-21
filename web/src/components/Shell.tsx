@@ -23,6 +23,7 @@ import FileViewer from "./files/FileViewer";
 import HelpModal from "./HelpModal";
 import IdentityDrawer from "./IdentityDrawer";
 import NewSessionModal from "./NewSessionModal";
+import PackBrowser from "./PackBrowser";
 import ResizeHandle from "./ResizeHandle";
 import SearchModal from "./SearchModal";
 import SessionExportModal from "./SessionExportModal";
@@ -61,6 +62,7 @@ const Shell: Component = () => {
       <SessionExportModal />
       <SessionImportModal />
       <SettingsDrawer />
+      <PackBrowser />
       <HelpModal />
     </>
   );

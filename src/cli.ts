@@ -390,4 +390,62 @@ program
     client.disconnect();
   });
 
+// ── Packs (dynamic pack loading — docs/pack-loading.md) ─────────────────────
+
+/** Connect, run one pack command, disconnect. */
+async function withClient(fn: (c: TerminalClient) => Promise<void>): Promise<void> {
+  const client = new TerminalClient(loadConfig());
+  await client.connect();
+  try {
+    await fn(client);
+  } finally {
+    client.disconnect();
+  }
+}
+
+const pack = program.command("pack").description("Manage SDLC packs + registries (docs/pack-loading.md)");
+
+pack
+  .command("list")
+  .description("List installed + available packs and configured registries")
+  .action(() => withClient((c) => c.packList()));
+
+const registry = pack.command("registry").description("Manage pack registries (git repos of packs)");
+registry
+  .command("add <git-url>")
+  .description("Clone/cache a pack registry so its packs become installable")
+  .option("--name <name>", "Registry name (default: derived from the URL)")
+  .option("--ref <ref>", "Git branch/tag/commit to clone")
+  .action((url: string, opts: { name?: string; ref?: string }) => withClient((c) => c.packRegistryAdd(url, opts)));
+
+pack
+  .command("install <id>")
+  .description("Install a pack — by its registry id, or with --dir treat <id> as a local pack directory")
+  .option("--trust", "Trust the pack to run host `command` gates (default: untrusted)")
+  .option("--dir", "Interpret <id> as a local pack directory path instead of a registry id")
+  .action((id: string, opts: { trust?: boolean; dir?: boolean }) =>
+    withClient((c) => c.packInstall(id, { trusted: opts.trust, dir: opts.dir })),
+  );
+
+pack
+  .command("show <id>")
+  .description("Show a pack's phases, roles, gates, and trust state")
+  .action((id: string) => withClient((c) => c.packShow(id)));
+
+pack
+  .command("trust <id>")
+  .description("Trust an installed pack to run host command gates")
+  .option("--off", "Remove trust instead of granting it")
+  .action((id: string, opts: { off?: boolean }) => withClient((c) => c.packTrust(id, !opts.off)));
+
+pack
+  .command("select <id>")
+  .description("Set the default pack (a pipeline created without one uses it). Pass 'none' to clear.")
+  .action((id: string) => withClient((c) => c.packSelect(id === "none" ? null : id)));
+
+pack
+  .command("remove <id>")
+  .description("Uninstall a pack")
+  .action((id: string) => withClient((c) => c.packRemove(id)));
+
 program.parse();

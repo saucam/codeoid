@@ -420,6 +420,59 @@ export const pipelineAbortSchema = z.object({
   pipelineId: idField,
 });
 
+// ── Pack management (dynamic pack loading — docs/pack-loading.md) ──────────────
+
+/** A git URL (registry) or a filesystem path — bounded, not otherwise validated
+ *  (git itself rejects a bad URL; the handler confines dir installs). */
+const gitUrlField = z.string().min(1).max(512);
+const gitRefField = z.string().min(1).max(256);
+
+export const pipelinePackListSchema = z.object({
+  ...base,
+  type: z.literal("pipeline.pack.list"),
+});
+
+export const pipelineRegistryAddSchema = z.object({
+  ...base,
+  type: z.literal("pipeline.registry.add"),
+  url: gitUrlField,
+  name: nameField.optional(),
+  ref: gitRefField.optional(),
+});
+
+// Install a pack by its registry `id` OR from a local `dir` — exactly one.
+export const pipelinePackInstallSchema = z
+  .object({
+    ...base,
+    type: z.literal("pipeline.pack.install"),
+    packId: idField.optional(),
+    dir: pathField.optional(),
+    trusted: z.boolean().optional(),
+  })
+  .refine((m) => (m.packId === undefined) !== (m.dir === undefined), {
+    message: "provide either `packId` or `dir`, not both",
+  });
+
+export const pipelinePackRemoveSchema = z.object({
+  ...base,
+  type: z.literal("pipeline.pack.remove"),
+  packId: idField,
+});
+
+export const pipelinePackTrustSchema = z.object({
+  ...base,
+  type: z.literal("pipeline.pack.trust"),
+  packId: idField,
+  trusted: z.boolean(),
+});
+
+export const pipelinePackSelectSchema = z.object({
+  ...base,
+  type: z.literal("pipeline.pack.select"),
+  // `null` clears the selected (default) pack.
+  packId: idField.nullable(),
+});
+
 export const clientMessageSchema = z.discriminatedUnion("type", [
   pingSchema,
   sessionCreateSchema,
@@ -460,6 +513,12 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
   pipelineAdvanceSchema,
   pipelineAnswerSchema,
   pipelineAbortSchema,
+  pipelinePackListSchema,
+  pipelineRegistryAddSchema,
+  pipelinePackInstallSchema,
+  pipelinePackRemoveSchema,
+  pipelinePackTrustSchema,
+  pipelinePackSelectSchema,
 ]);
 
 /**
