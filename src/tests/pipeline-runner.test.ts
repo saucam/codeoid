@@ -14,6 +14,7 @@ import { join } from "node:path";
 import type { CodeoidConfig } from "../config.js";
 import type { ProviderEvent } from "../daemon/providers/interface.js";
 import { MockSessionProvider } from "../daemon/providers/mock/session-provider.js";
+import { PHASE_COMPLETE_MARKER } from "../daemon/pipeline/phase-completion.js";
 import { SessionManager } from "../daemon/session-manager.js";
 import { Store } from "../daemon/store.js";
 import { TranscriptStore } from "../daemon/transcript.js";
@@ -114,7 +115,8 @@ beforeEach(() => {
   transcript = new TranscriptStore(join(tmp, "transcripts"));
   manager = new SessionManager(store, transcript, undefined, undefined, undefined, {
     config: mkConfig(join(tmp, "codeoid.db"), true),
-    _testProviderFactory: () => new MockSessionProvider("mock", [sayTurn("phase complete: implemented X")]),
+    _testProviderFactory: () =>
+      new MockSessionProvider("mock", [sayTurn(`phase complete: implemented X\n${PHASE_COMPLETE_MARKER}`)]),
   });
 });
 
@@ -199,6 +201,46 @@ describe("pipeline runtime (real SessionManager + mock backend)", () => {
     const ph = out.pipeline.phases[0];
     expect(ph.status).toBe("failed");
     if (ph.status === "failed") expect(ph.reason).toContain("error");
+    await m2.drain(3_000);
+  });
+
+  test("a phase that rests WITHOUT the completion marker is nudged to continue, not halted mid-work", async () => {
+    const store2 = new Store(join(tmp, "codeoid-nudge.db"));
+    const m2 = new SessionManager(store2, transcript, undefined, undefined, undefined, {
+      config: mkConfig(join(tmp, "codeoid-nudge.db"), true),
+      // Turn 1 rests with NO marker (the model paused mid-work) — the phase must
+      // NOT halt here. It gets nudged; turn 2 finishes and emits the marker.
+      _testProviderFactory: () =>
+        new MockSessionProvider("mock", [
+          sayTurn("Here's my plan — I'll start implementing now."),
+          sayTurn(`implemented the feature\n${PHASE_COMPLETE_MARKER}`),
+        ]),
+    });
+    const pm = m2.pipelines;
+    expect(pm).toBeDefined();
+    if (!pm) return;
+    pm.registries.skills.register({ id: "impl", kind: "slash", command: "/impl" });
+    const created = await m2.handle(
+      {
+        type: "pipeline.create",
+        id: "1",
+        name: "R",
+        workdir: join(tmp, "repo"),
+        phases: [{ id: "impl", kind: "skill", skill: "impl" }],
+      },
+      AUTH,
+      CLIENT,
+    );
+    if (created.type !== "pipeline.snapshot") throw new Error(`create failed: ${JSON.stringify(created)}`);
+    const out = await m2.handle({ type: "pipeline.advance", id: "2", pipelineId: created.pipeline.id }, AUTH, CLIENT);
+    if (out.type !== "pipeline.snapshot") throw new Error(`advance failed: ${JSON.stringify(out)}`);
+    // Only halts AFTER the marker turn — and the summary is the completed
+    // turn's text, with the marker stripped.
+    expect(out.pipeline.status).toBe("halted");
+    const ph = out.pipeline.phases[0];
+    expect(ph.status).toBe("halted");
+    expect(ph.summary).toContain("implemented the feature");
+    expect(ph.summary ?? "").not.toContain(PHASE_COMPLETE_MARKER);
     await m2.drain(3_000);
   });
 

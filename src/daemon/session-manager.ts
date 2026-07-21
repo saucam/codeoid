@@ -55,6 +55,13 @@ import {
   type PackServiceConfig,
 } from "./pipeline/pack-service.js";
 import { SessionPhaseRunner, type PhaseTurnResult } from "./pipeline/runner.js";
+import {
+  isPhaseComplete,
+  MAX_PHASE_NUDGES,
+  PHASE_COMPLETION_CONTRACT,
+  PHASE_CONTINUE_NUDGE,
+  stripPhaseCompleteMarker,
+} from "./pipeline/phase-completion.js";
 import { roleEnforcement } from "./providers/tool-safety.js";
 import type { DispatchEventRow, DispatchTaskRow } from "./store.js";
 import { type MemoryEngine, type MemoryMcpMount, workspaceIdFromPath } from "./memory/index.js";
@@ -203,7 +210,13 @@ export class SessionManager {
     this.#dispatcher.onSessionStatus(sessionId, status);
     // A pipeline phase driving this session awaits its next rest; resolve it.
     // (Non-run sessions never have a waiter, so this is a no-op for them.)
-    if (status === "idle" || status === "error" || status === "waiting_approval") {
+    //
+    // `waiting_approval` is deliberately NOT a rest: the SDK turn is still ALIVE
+    // (session.ts) — the model called a tool that needs a decision. Ending the
+    // phase there would guillotine it mid-work (the bug this used to cause).
+    // A tool approval is a tool-level interaction; the phase resumes once the
+    // tool is approved and the turn goes on to actually rest (idle).
+    if (status === "idle" || status === "error") {
       const waiter = this.#phaseWaiters.get(sessionId);
       if (waiter) {
         this.#phaseWaiters.delete(sessionId);
@@ -1794,13 +1807,27 @@ mcpHub: this.#mcpHub,
     // fresh generous budget each phase. The human gate is the phase boundary,
     // not each tool; the user can watch + interrupt; nothing times out.
     session.setMode("autonomous", PIPELINE_PHASE_MAX_TURNS, auth);
-    const done = new Promise<PhaseTurnResult["finalStatus"]>((resolve) => {
-      this.#phaseWaiters.set(req.sessionId, resolve);
-    });
+    // A phase is complete only when the model emits the completion marker — NOT
+    // on the first `idle` (a turn rests whenever the model stops calling tools:
+    // done, planning, or asking). On a bare rest we NUDGE it to continue rather
+    // than halting the phase for review mid-work; after MAX_PHASE_NUDGES we hand
+    // whatever it produced to the human boundary so a never-completing model
+    // still reaches Approve/Reject instead of looping. A non-idle rest
+    // (error / budget-exhausted) is a real phase failure, surfaced as-is.
+    let message = `${req.prompt}\n${PHASE_COMPLETION_CONTRACT}`;
     try {
-      await session.send(req.prompt, auth);
-      const finalStatus = await done;
-      return { finalStatus, text: session.lastAssistantText ?? "" };
+      for (let nudge = 0; ; nudge++) {
+        const done = new Promise<PhaseTurnResult["finalStatus"]>((resolve) => {
+          this.#phaseWaiters.set(req.sessionId, resolve);
+        });
+        await session.send(message, auth);
+        const finalStatus = await done;
+        const text = session.lastAssistantText ?? "";
+        if (finalStatus !== "idle") return { finalStatus, text };
+        if (isPhaseComplete(text)) return { finalStatus: "idle", text: stripPhaseCompleteMarker(text) };
+        if (nudge >= MAX_PHASE_NUDGES) return { finalStatus: "idle", text };
+        message = PHASE_CONTINUE_NUDGE;
+      }
     } finally {
       this.#phaseWaiters.delete(req.sessionId);
     }
