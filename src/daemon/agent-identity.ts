@@ -49,6 +49,20 @@ interface RegisteredAgent {
   token: string;
   apiKey: string;
   /**
+   * The human owner (owner_user_id) this agent was registered for. Threaded to
+   * sub-agents so they attribute to the SAME human owner — ZeroID derives
+   * owner_user_id from `created_by`, and Studio's code-agent roster filters
+   * `?owner_user_id=<human>`, so a sub-agent created_by the parent's WIMSE URI
+   * would never surface there. Optional: worker identities (conductor dispatch)
+   * carry a lineage `created_by`, not a human owner.
+   */
+  ownerSub?: string;
+  /**
+   * This agent's ZeroID `external_id` — used as the canonical
+   * `parent_external_id` when registering its sub-agents.
+   */
+  externalId?: string;
+  /**
    * For session agents: a ZeroID client authed with THIS agent's api_key, so
    * it can act as the delegation *subject* (orchestrator) when minting
    * delegated tokens for its sub-agents via `tokens.delegate`. Undefined for
@@ -196,15 +210,24 @@ export class AgentIdentityManager {
       const registerReq = {
         name: `codeoid/${sessionName}`,
         external_id: externalId,
-        sub_type: "autonomous" as const,
+        // A coding agent — `identity_type=agent` types the node in the ZeroID
+        // registry / delegation explorer, and `sub_type=code_agent` (accepted
+        // by ZeroID's register enum) is the accurate role, matching how
+        // Cerberus registers Overwatch coding agents. Without these the node
+        // rendered with no/wrong type.
+        identity_type: "agent" as const,
+        sub_type: "code_agent" as const,
         trust_level: "first_party" as const,
         framework: "claude-agent-sdk",
         publisher: "codeoid",
+        // created_by = the human owner ⇒ ZeroID stamps owner_user_id, so the
+        // agent surfaces in Studio's code-agent roster (filters owner_user_id).
         created_by: ownerSub,
         allowed_scopes: [...AGENT_TOOL_SCOPES],
         metadata: JSON.stringify({
           session_id: sessionId,
           session_name: sessionName,
+          owner_user_id: ownerSub,
         }),
       };
       const resp = await this.#client.agents.register(
@@ -221,6 +244,10 @@ export class AgentIdentityManager {
         wimseUri: resp.identity.wimse_uri,
         token: tokenResp.access_token,
         apiKey: resp.api_key,
+        // Threaded to sub-agents: the human owner + this agent's external_id,
+        // so a sub-agent attributes to the same owner and links back here.
+        ownerSub,
+        externalId,
         // Orchestrator client — lets this session agent grant delegated
         // authority to its sub-agents (it is the delegation subject).
         client: this.#clientForAgent(resp.api_key),
@@ -267,6 +294,7 @@ export class AgentIdentityManager {
       const registerReq = {
         name: `codeoid/worker/${shape}/${sessionName}`,
         external_id: externalId,
+        identity_type: "agent" as const,
         sub_type: "tool_agent" as const,
         trust_level: "first_party" as const,
         framework: "claude-agent-sdk",
@@ -344,16 +372,31 @@ export class AgentIdentityManager {
       const registerReq = {
         name: `codeoid/${agentType}/${agentId.slice(0, 8)}`,
         external_id: externalId,
+        identity_type: "agent" as const,
         sub_type: "tool_agent" as const,
         trust_level: "first_party" as const,
         framework: "claude-agent-sdk",
         publisher: "codeoid",
-        created_by: parent.wimseUri,
+        // owner_user_id (ZeroID derives it from created_by) must be the HUMAN
+        // owner — not the parent agent's WIMSE URI, or the sub-agent is
+        // attributed to the parent and never appears in Studio's code-agent
+        // roster (?owner_user_id=<human>). The parent-agent linkage is carried
+        // separately: the canonical parent_* metadata below (for the registry)
+        // and the real RFC 8693 delegation credential (parent_jti) minted just
+        // after. Fall back to the parent's WIMSE URI only if no owner is known
+        // (e.g. a worker-spawned sub-agent), preserving prior behavior.
+        created_by: parent.ownerSub ?? parent.wimseUri,
         allowed_scopes: [...scopes],
         public_key_pem: keypair.publicKeyPem,
         metadata: JSON.stringify({
           session_id: sessionId,
-          parent_agent: parent.wimseUri,
+          owner_user_id: parent.ownerSub,
+          // Canonical parent-linkage keys the ZeroID registry / delegation
+          // explorer read (previously an ad-hoc `parent_agent`, which nothing
+          // consumed).
+          parent_wimse_uri: parent.wimseUri,
+          parent_external_id: parent.externalId,
+          parent_session_id: sessionId,
           agent_type: agentType,
         }),
       };
@@ -541,6 +584,7 @@ export class AgentIdentityManager {
       const registerReq = {
         name: "codeoid/conductor",
         external_id: externalId,
+        identity_type: "agent" as const,
         sub_type: "orchestrator" as const,
         trust_level: "first_party" as const,
         framework: "claude-agent-sdk",

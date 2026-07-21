@@ -487,3 +487,71 @@ describe("Store conductor_identity persistence", () => {
     expect(store.getConductorIdentity("acct_b", "proj_a")).not.toBeNull();
   });
 });
+
+describe("AgentIdentityManager session + sub-agent registration", () => {
+  let tmpDir: string;
+  let store: Store;
+  let zeroid: FakeZeroID;
+
+  const config = {
+    auth: { baseUrl: BASE_URL },
+    accountId: ACCOUNT,
+    projectId: PROJECT,
+  };
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "codeoid-registration-unit-"));
+    store = new Store(join(tmpDir, "store.db"));
+    zeroid = new FakeZeroID();
+    zeroid.install();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    store.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("registerSessionAgent registers a code_agent owned by the human", async () => {
+    const manager = new AgentIdentityManager(config, store);
+    await manager.registerSessionAgent("sess-1234abcd", "my-session", "user:owner@test");
+
+    expect(zeroid.registerCalls).toHaveLength(1);
+    const req = zeroid.registerCalls[0]!;
+    // Types the node in the ZeroID registry / delegation explorer.
+    expect(req.identity_type).toBe("agent");
+    expect(req.sub_type).toBe("code_agent");
+    // created_by ⇒ ZeroID owner_user_id ⇒ Studio code-agent roster.
+    expect(req.created_by).toBe("user:owner@test");
+    const meta = JSON.parse(String(req.metadata));
+    expect(meta.owner_user_id).toBe("user:owner@test");
+  });
+
+  test("registerSubagent attributes to the human owner and links to the parent agent", async () => {
+    const manager = new AgentIdentityManager(config, store);
+    const parent = await manager.registerSessionAgent(
+      "sess-1234abcd",
+      "my-session",
+      "user:owner@test",
+    );
+
+    await manager.registerSubagent("sess-1234abcd", "agentABCDEF012345", "Explore");
+
+    expect(zeroid.registerCalls).toHaveLength(2);
+    const req = zeroid.registerCalls[1]!;
+    expect(req.identity_type).toBe("agent");
+    expect(req.sub_type).toBe("tool_agent");
+    // The sub-agent must be owned by the HUMAN, not the parent agent's WIMSE
+    // URI — otherwise it never surfaces in the owner-filtered roster.
+    expect(req.created_by).toBe("user:owner@test");
+
+    const meta = JSON.parse(String(req.metadata));
+    expect(meta.owner_user_id).toBe("user:owner@test");
+    // Canonical parent-linkage keys the registry / delegation explorer read.
+    expect(meta.parent_wimse_uri).toBe(parent.wimseUri);
+    expect(meta.parent_session_id).toBe("sess-1234abcd");
+    expect(String(meta.parent_external_id)).toStartWith("codeoid-session-");
+    // The retired ad-hoc key must be gone.
+    expect(meta.parent_agent).toBeUndefined();
+  });
+});
