@@ -127,6 +127,7 @@ describe("PipelineEngine.run", () => {
     const out = await new PipelineEngine(r).run(pipeline([{ id: "one", kind: "nope" }]));
     expect(out.status).toBe("failed");
     const st = out.phases[0].state;
+    expect(st.status).toBe("failed");
     if (st.status === "failed") expect(st.reason).toContain("explicit failure");
   });
 
