@@ -399,12 +399,21 @@ export class ClaudeProvider implements SessionProvider {
               },
             }
           : {}),
-        // Ambient-pack subagents → the SDK's programmatic `agents` option, so
-        // they're available for auto-selection. (A `~/.claude/agents` symlink
-        // wouldn't be read — settingSources excludes the user tier.)
+        // Ambient-pack subagents → the SDK's programmatic `agents` option.
+        // (Pack subagents live in the registry cache, not a `.claude/agents`
+        // tier, so they're injected rather than discovered.)
         ...packAgentsOption(opts.subagents),
         ...sessionOpts,
-        settingSources: ["project"],
+        // Load BOTH the project tier (`<workdir>/.claude`) and the user tier
+        // (`~/.claude`). A pack installs its runnable skills into
+        // `~/.claude/skills/` (pack-service #linkSkills), so a project-only
+        // source silently dropped them and `/spec`-style skill invocations came
+        // back "Unknown command". `skills: "all"` then enables every discovered
+        // skill for auto-selection + slash invocation. In the sandbox `~/.claude`
+        // is codeoid-controlled; in local mode this also surfaces the user's own
+        // skills, which is the intended behaviour.
+        settingSources: ["project", "user"],
+        skills: "all",
 
         hooks: {
           PreToolUse: [{
