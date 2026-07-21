@@ -193,6 +193,14 @@ function touch(s: PipelineState): PipelineState {
  * Apply a phase failure per its `onFail` policy:
  *   retry (within budget) → re-run; halt (the default) → wait for a human;
  *   abort or retries-exhausted → fail the pipeline.
+ *
+ * EXCEPTION — a phase EXECUTION error (`source: "kind"`: the phase kind or its
+ * runner threw / the turn ended non-idle) is NOT a reviewable gate verdict. A
+ * human can't "approve" a crashed turn into success — approval would mark it
+ * `passed` (green) even though it never ran. So an execution error never halts:
+ * it fails the pipeline (after exhausting any retry budget), which is the
+ * intended "a phase error should fail the run" behavior. Gate rejections
+ * (entry/exit review + command gates) still halt for the human decision.
  * Mutates + returns the already-cloned state.
  */
 function applyFail(
@@ -211,7 +219,7 @@ function applyFail(
     s.status = "running";
     return touch(s);
   }
-  if (onFail.action === "halt") {
+  if (onFail.action === "halt" && source !== "kind") {
     phase.state = {
       status: "halted",
       // Source-qualified so a phase with both an entry and an exit gate produces
@@ -223,7 +231,8 @@ function applyFail(
     s.status = "halted";
     return touch(s);
   }
-  // abort, or a retry budget that has now been exhausted.
+  // abort; a retry budget that has now been exhausted; or a phase EXECUTION
+  // error (source="kind"), which never halts (see the note above).
   phase.state = { status: "failed", reason, attempts: nextAttempts };
   s.status = "failed";
   return touch(s);
