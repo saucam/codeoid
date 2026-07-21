@@ -54,6 +54,12 @@ export const DEFAULT_WEB_SCOPES = [
   "session:read",
   "session:dispatch",
   "fs:read",
+  // Pipeline / pack management — the /packs Pack Browser lists packs
+  // (pipeline:read) and adds registries / installs / trusts / selects them
+  // (pipeline:manage, owner-tier). Without these the browser renders but every
+  // verb is rejected "Missing scope: pipeline:read".
+  "pipeline:read",
+  "pipeline:manage",
 ].join(" ");
 
 export interface ResolvedAuth {
