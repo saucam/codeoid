@@ -6,8 +6,22 @@
  * usable in pure tests and degrades safely when no backend is wired.
  */
 
-import type { PhaseCtx, PhaseKind, PhaseRunResult, SkillPlugin } from "./interface";
+import type { PhaseCtx, PhaseKind, PhaseRunResult, PipelinePhase, SkillPlugin } from "./interface";
 import type { PhaseRunner } from "./runner";
+
+/** Compose a phase's prompt: the skill command/template, the run's goal, and —
+ *  on a revise re-run — the phase's prior output + the accumulated human
+ *  feedback so the agent re-iterates on the same phase (docs/pipeline-run.md). */
+function composePhasePrompt(base: string, spec: string | undefined, phase: PipelinePhase | undefined): string {
+  const parts = [base];
+  if (spec) parts.push(`## Goal / feature\n${spec}`);
+  const feedback = phase?.feedback ?? [];
+  if (feedback.length > 0) {
+    if (phase?.lastSummary) parts.push(`## Your previous output for this phase\n${phase.lastSummary}`);
+    parts.push(`## Reviewer feedback — revise this phase accordingly\n${feedback.map((f, i) => `${i + 1}. ${f}`).join("\n")}`);
+  }
+  return parts.join("\n\n");
+}
 
 export function makeSkillPhaseKind(runner?: PhaseRunner): PhaseKind {
   return {
@@ -46,7 +60,8 @@ async function runSkill(
       reason: `skill "${skill.id}" (${skill.kind}) needs a phase runner, but none is configured`,
     };
   }
-  const prompt = skill.kind === "slash" ? skill.command : skill.template;
+  const base = skill.kind === "slash" ? skill.command : skill.template;
+  const prompt = composePhasePrompt(base, ctx.pipeline.spec, ctx.pipeline.phases[ctx.pipeline.cursor]);
   const res = await runner.runPrompt({
     prompt,
     provider: ctx.phase.provider,

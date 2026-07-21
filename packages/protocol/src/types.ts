@@ -781,6 +781,7 @@ export type ClientMessage =
   | PipelineAdvanceMsg
   | PipelineAnswerMsg
   | PipelineAbortMsg
+  | PipelineReviseMsg
   | PipelinePackListMsg
   | PipelineRegistryAddMsg
   | PipelinePackInstallMsg
@@ -1584,9 +1585,12 @@ export interface PipelinePhaseWire {
   role?: string;
   summary?: string;
   reason?: string;
-  /** Set when status==="halted" — echo back in pipeline.answer. */
+  /** Set when status==="halted" — echo back in pipeline.answer / pipeline.revise. */
   requestId?: string;
   questions?: string[];
+  /** Human revise notes accumulated on this phase (newest last) — the client
+   *  renders the revision history. */
+  feedback?: string[];
 }
 
 /** A pipeline projected for the wire (serializable subset of PipelineState). */
@@ -1648,6 +1652,16 @@ export interface PipelineAdvanceMsg extends BaseClientMsg {
 export interface PipelineAbortMsg extends BaseClientMsg {
   type: "pipeline.abort";
   pipelineId: string;
+}
+/** Revise a halted phase — re-run it with human feedback (the Approve / Revise /
+ *  Reject loop, docs/pipeline-run.md). */
+export interface PipelineReviseMsg extends BaseClientMsg {
+  type: "pipeline.revise";
+  pipelineId: string;
+  /** Echoes the halted phase's requestId. */
+  requestId: string;
+  /** The feedback/opinions the phase should re-iterate on. */
+  feedback: string;
 }
 /** Answer a halted phase (mirrors session.ui_response). */
 export interface PipelineAnswerMsg extends BaseClientMsg {

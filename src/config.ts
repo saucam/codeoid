@@ -524,8 +524,12 @@ const McpServersSchema = z.record(z.string(), McpServerSchema).default({});
 export type RawMcpServerConfig = z.infer<typeof McpServerSchema>;
 
 /**
- * SDLC pipeline (docs/sdlc-pipeline.md). OFF by default — the daemon stays
- * methodology-agnostic; nothing runs until this is enabled. When enabled, the
+ * SDLC pipeline (docs/sdlc-pipeline.md). ON by default — a run is user-initiated
+ * (nothing starts until `pipeline.create`), halts at every gate, and is already
+ * gated by scopes + pack trust, so there's nothing for an off-by-default to
+ * protect; keeping it off only adds friction. The flag survives as an operator
+ * opt-out (`enabled: false` / `CODEOID_PIPELINE_ENABLED=false`) for hardened /
+ * sandbox deployments that want no pipeline runtime at all. When enabled, the
  * daemon builds a PipelineManager sharing its DB and rehydrates non-terminal
  * pipelines on boot. `defaultPack` is the methodology pack a pipeline runs when
  * created without one (null = none / freestyle). `packs` are directories loaded
@@ -534,7 +538,7 @@ export type RawMcpServerConfig = z.infer<typeof McpServerSchema>;
  */
 const PipelineSchema = z
   .object({
-    enabled: z.boolean().default(false),
+    enabled: z.boolean().default(true),
     defaultPack: z.string().nullable().default(null),
     packs: z
       .array(
@@ -560,7 +564,7 @@ const PipelineSchema = z
       )
       .default([]),
   })
-  .default({ enabled: false, defaultPack: null, packs: [], registries: [] });
+  .default({ enabled: true, defaultPack: null, packs: [], registries: [] });
 
 const RootSchema = z.object({
   daemonUrl: z.string().default("ws://127.0.0.1:7400"),
@@ -719,10 +723,11 @@ export interface CodeoidConfig {
     retryBaseMs: number;
   };
   /**
-   * SDLC pipeline — OFF by default (docs/sdlc-pipeline.md). When enabled, a
-   * PipelineManager is constructed at boot sharing the daemon DB, and
-   * non-terminal pipelines are rehydrated (resume). Optional in the type so
-   * hand-built test configs stay minimal; loadConfig always populates it.
+   * SDLC pipeline — ON by default (docs/sdlc-pipeline.md); a PipelineManager is
+   * constructed at boot sharing the daemon DB, and non-terminal pipelines are
+   * rehydrated (resume). Runs are user-initiated + gate-halted + scope/trust
+   * gated, so this is an operator opt-out, not a safety gate. Optional in the
+   * type so hand-built test configs stay minimal; loadConfig always populates it.
    */
   pipeline?: {
     enabled: boolean;
@@ -834,8 +839,8 @@ const ENV_OVERRIDES: readonly EnvOverride[] = [
   // matching the conductor block's convention.
   { env: "CODEOID_DISPATCH_ENABLED", path: "dispatch.enabled", kind: "boolean" },
   // Pipeline enable/kill switch — turn the SDLC pipeline on/off per-invocation
-  // without touching config.json (off by default). Other pipeline knobs are
-  // file-config only, matching the dispatch/conductor convention.
+  // without touching config.json (on by default; set false to opt out). Other
+  // pipeline knobs are file-config only, matching the dispatch/conductor convention.
   { env: "CODEOID_PIPELINE_ENABLED", path: "pipeline.enabled", kind: "boolean" },
   { env: "CODEOID_FALLBACK_MODEL", path: "session.fallbackModel", kind: "string" },
   // Hooks kill switch — disable every configured hook per-invocation without

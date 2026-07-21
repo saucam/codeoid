@@ -52,6 +52,11 @@ export interface PhaseTurnHost {
     accountId: string;
     projectId: string;
     createdBy: string;
+    /** Pack this run came from + the phase's capability role — the host
+     *  activates them on the worker session (per-phase constitution + role tool
+     *  gate). Absent when the run used an explicit phase plan (no pack). */
+    packId?: string;
+    roleName?: string;
   }): Promise<PhaseTurnResult>;
 }
 
@@ -78,6 +83,8 @@ export class SessionPhaseRunner implements PhaseRunner {
       accountId: req.pipeline.accountId,
       projectId: req.pipeline.projectId,
       createdBy: req.pipeline.createdBy,
+      packId: req.pipeline.packId,
+      roleName: req.phase.role,
     });
     // Only `idle` is success. A non-idle turn (error / budget-exhausted /
     // timed-out) is a phase FAILURE — throw so the engine applies onFail rather

@@ -456,4 +456,47 @@ pack
   .description("Uninstall a pack")
   .action((id: string) => withClient((c) => c.packRemove(id)));
 
+// ── Pipeline runs (docs/pipeline-run.md) ────────────────────────────────────
+
+const pipeline = program
+  .command("pipeline")
+  .description("Run a governed SDLC pipeline from an installed pack (spec → ship, gated)");
+
+pipeline
+  .command("run")
+  .description("Start a run: create from a pack with a goal, then auto-advance through the phases")
+  .requiredOption("--pack <id>", "Installed pack to run")
+  .requiredOption("--goal <text>", "The feature / goal seeding the run")
+  .option("--workdir <path>", "Repo the phases operate in (default: current directory)")
+  .action((opts: { pack: string; goal: string; workdir?: string }) =>
+    withClient((c) => c.pipelineRun(opts.pack, opts.goal, opts.workdir ?? process.cwd())),
+  );
+
+pipeline
+  .command("list")
+  .description("List pipeline runs")
+  .action(() => withClient((c) => c.pipelineList()));
+
+pipeline
+  .command("status <id>")
+  .description("Show a run's phase progress + any pending halt")
+  .action((id: string) => withClient((c) => c.pipelineStatus(id)));
+
+pipeline
+  .command("approve <id>")
+  .description("Approve the halted phase and continue to the next")
+  .option("--note <text>", "Optional note recorded as the phase summary")
+  .action((id: string, opts: { note?: string }) => withClient((c) => c.pipelineDecide(id, "approve", opts.note)));
+
+pipeline
+  .command("reject <id>")
+  .description("Reject the halted phase and stop the run")
+  .option("--note <text>", "Optional reason")
+  .action((id: string, opts: { note?: string }) => withClient((c) => c.pipelineDecide(id, "reject", opts.note)));
+
+pipeline
+  .command("revise <id> <feedback...>")
+  .description("Re-run the halted phase with your feedback (loop until satisfied, then approve)")
+  .action((id: string, feedback: string[]) => withClient((c) => c.pipelineDecide(id, "revise", feedback.join(" "))));
+
 program.parse();

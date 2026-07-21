@@ -48,7 +48,12 @@ import {
 } from "./dispatch.js";
 import { createPipelineManagerFromConfig } from "./pipeline/wiring.js";
 import type { PipelineManager } from "./pipeline/manager.js";
-import { PackService, type PackActivation, type PackServiceConfig } from "./pipeline/pack-service.js";
+import {
+  PackService,
+  resolvePhaseActivation,
+  type PackActivation,
+  type PackServiceConfig,
+} from "./pipeline/pack-service.js";
 import { SessionPhaseRunner, type PhaseTurnResult } from "./pipeline/runner.js";
 import type { DispatchEventRow, DispatchTaskRow } from "./store.js";
 import { type MemoryEngine, type MemoryMcpMount, workspaceIdFromPath } from "./memory/index.js";
@@ -588,6 +593,8 @@ mcpHub: this.#mcpHub,
         return this.#pipelineAnswer(msg, auth);
       case "pipeline.abort":
         return this.#pipelineAbort(msg, auth);
+      case "pipeline.revise":
+        return this.#pipelineRevise(msg, auth);
       case "pipeline.pack.list":
         return this.#packList(msg, auth);
       case "pipeline.registry.add":
@@ -1745,9 +1752,20 @@ mcpHub: this.#mcpHub,
     accountId: string;
     projectId: string;
     createdBy: string;
+    packId?: string;
+    roleName?: string;
   }): Promise<PhaseTurnResult> {
     const workdir = normalizeWorkdir(req.workdir);
     if (!workdir) throw new Error(`workdir not usable: ${req.workdir}`);
+    // Per-phase governance: run this phase's worker under the pack's
+    // constitution + the phase's capability role (a reviewer phase can't write).
+    // resolvePhaseActivation fails CLOSED when a role is declared but can't be
+    // applied (no silent escalation) and SOFT otherwise — see its doc comment.
+    const pack: PackActivation | undefined = resolvePhaseActivation(
+      this.#packs,
+      req.packId,
+      req.roleName,
+    );
     const auth: AuthContext = {
       sub: req.createdBy,
       scopes: [],
@@ -1767,6 +1785,7 @@ mcpHub: this.#mcpHub,
       name: `phase-${randomUUID().slice(0, 8)}`,
       workdir,
       role: "worker",
+      pack,
       initialMode: { mode: "autonomous", maxTurns: this.#dispatcher.config.workerToolBudget },
       providerId: req.provider,
       defaultModel: req.model,
@@ -1868,6 +1887,7 @@ mcpHub: this.#mcpHub,
           w.reason = st.reason;
           w.questions = st.questions;
         }
+        if (p.feedback && p.feedback.length > 0) w.feedback = p.feedback;
         return w;
       }),
     };
@@ -1945,6 +1965,25 @@ mcpHub: this.#mcpHub,
         approved: msg.approved,
         value: msg.value,
       });
+      return { type: "pipeline.snapshot", requestId: msg.id, pipeline: this.#pipelineToWire(next) };
+    } catch (e) {
+      return this.#pipelineError(msg.id, e);
+    }
+  }
+
+  /** Revise a halted phase: re-run it with the human's feedback (the
+   *  Approve / Revise / Reject loop — docs/pipeline-run.md). */
+  async #pipelineRevise(
+    msg: Extract<ClientMessage, { type: "pipeline.revise" }>,
+    auth: AuthContext,
+  ): Promise<DaemonMessage> {
+    const g = this.#pipelineGuard(msg.id, auth, SCOPES.PIPELINE_ANSWER);
+    if ("error" in g) return g.error;
+    if (!this.#ownedPipeline(g.pm, msg.pipelineId, auth)) {
+      return { type: "response.error", requestId: msg.id, error: "Pipeline not found", code: "not_found" };
+    }
+    try {
+      const next = await g.pm.revise(msg.pipelineId, msg.requestId, msg.feedback);
       return { type: "pipeline.snapshot", requestId: msg.id, pipeline: this.#pipelineToWire(next) };
     } catch (e) {
       return this.#pipelineError(msg.id, e);

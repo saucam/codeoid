@@ -31,10 +31,12 @@ model, review → a cross-provider panel).
   "ethos" ship in the daemon core. Those live in a swappable **SDLC pack**
   (§3, §7). Codeoid gains a *generic pipeline primitive*; the process content is
   content.
-- **Off by default.** The pipeline ships dark: no pack is enabled unless one is
-  explicitly selected (per-run, project, or user config). A session with nothing
-  configured behaves exactly as today (`freestyle`) — the same "zero behavior change
-  until enabled" discipline as `ContextStrategy`.
+- **Inert until you start a run.** The pipeline runtime is available by default,
+  but it stays dark: no phase, pack, or ethos runs until you explicitly create a
+  run with a pack (per-run, project, or user config). A session with nothing
+  configured behaves exactly as today (`freestyle`) — the same "zero behavior
+  change until you initiate" discipline as `ContextStrategy`. (An operator can
+  remove the runtime entirely with `pipeline.enabled: false`.)
 - **We do not clone ADLC.** ADLC's skills already run unmodified inside a Codeoid
   session (they are just Claude Code skills). We adopt the methodology as content
   and upgrade the layers ADLC structurally can't do: durable orchestration,

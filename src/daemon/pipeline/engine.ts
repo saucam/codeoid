@@ -99,6 +99,11 @@ export class PipelineEngine {
       return applyFail(s, phase, { pass: false, reason: res.reason }, attempts, "kind");
     }
 
+    // Keep the run's output on the phase so a subsequent revise can show the
+    // agent its prior attempt — even if the exit gate now fails and halts (the
+    // halted state itself doesn't carry a summary).
+    if (res.summary !== undefined) phase.lastSummary = res.summary;
+
     // Exit gate — acceptance predicate on the phase output (§5, §5a.5).
     if (phase.def.gate) {
       const v = await this.#gate(phase.def.gate, s, phase.def, "exit");

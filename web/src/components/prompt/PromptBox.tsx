@@ -34,6 +34,7 @@ import {
 import { openCapabilitiesDrawer } from "../CapabilitiesDrawer";
 import { openHelpModal } from "../HelpModal";
 import { openPackBrowser } from "../PackBrowser";
+import { openPipelineRunner } from "../PipelineRunner";
 import { openSettings } from "../SettingsDrawer";
 import { openModelPicker } from "../SessionControls";
 import { openIdentityDrawer } from "../IdentityDrawer";
@@ -237,6 +238,7 @@ const PromptBox: Component = () => {
           showCapabilities: openCapabilitiesDrawer,
           showSettings: openSettings,
           showPacks: openPackBrowser,
+          showPipeline: openPipelineRunner,
           showExport: openExportModal,
           showImport: openImportModal,
           onSessionForked: (forked) => {
@@ -411,8 +413,9 @@ const PromptBox: Component = () => {
           <div class="px-1 text-[11px] text-danger">{error()}</div>
         </Show>
         <div class="px-1 text-[10px] text-fg-faint">
-          /new · /rename · /interrupt · /rotate · /mode · /model · /export ·
-          /import · /who · /agents · /skills · /mcp · /hooks · /destroy
+          /new · /rename · /interrupt · /rotate · /mode · /model · /packs ·
+          /pipeline · /export · /import · /who · /agents · /skills · /mcp ·
+          /hooks · /destroy
         </div>
       </div>
       <Show when={dragging() && focusedSession()}>
