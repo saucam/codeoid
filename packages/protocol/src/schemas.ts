@@ -76,6 +76,20 @@ export const sessionCreateSchema = z.object({
    * schema opaquely rejecting the whole create.
    */
   providerId: z.string().min(1).max(64).optional(),
+  /**
+   * Activate an installed SDLC pack on this session (ambient mode —
+   * docs/pack-loading.md): its constitution is injected into the system
+   * prompt, its skills/subagents become available, and — if `packRole` is set
+   * — the session runs under that capability role. Bounded string; the daemon
+   * fail-closes on an unknown pack.
+   */
+  pack: z.string().max(64).optional(),
+  /**
+   * Capability role (a role name the `pack` declares) to run under — e.g.
+   * "reviewer" for a read-only session. Requires `pack`; the daemon
+   * fail-closes on a role the pack doesn't declare.
+   */
+  packRole: z.string().max(64).optional(),
 });
 
 export const sessionListSchema = z.object({ ...base, type: z.literal("session.list") });

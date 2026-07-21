@@ -296,11 +296,19 @@ program
     "--worktree-dir <path>",
     "Override the worktree directory (default: <repo>.wt-<branch>).",
   )
+  .option(
+    "--pack <id>",
+    "Activate an installed SDLC pack on the session (inject its constitution, expose its skills/subagents).",
+  )
+  .option(
+    "--pack-role <role>",
+    "Run the session under a capability role the pack declares (e.g. reviewer = read-only). Requires --pack.",
+  )
   .action(
     async (
       name: string,
       workdir: string | undefined,
-      opts: { worktree?: string; repo?: string; worktreeDir?: string },
+      opts: { worktree?: string; repo?: string; worktreeDir?: string; pack?: string; packRole?: string },
     ) => {
       const config = loadConfig();
       let resolvedWorkdir = workdir;
@@ -319,7 +327,7 @@ program
       }
       const client = new TerminalClient(config);
       await client.connect();
-      await client.createSession(name, resolvedWorkdir);
+      await client.createSession(name, resolvedWorkdir, { pack: opts.pack, packRole: opts.packRole });
       client.disconnect();
     },
   );

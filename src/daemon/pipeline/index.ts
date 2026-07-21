@@ -41,7 +41,9 @@ export {
   registryNameFromUrl,
   type PackServiceConfig,
   type PackServiceDeps,
+  type PackActivation,
   type RegistryEntry,
   type InstalledPackEntry,
   type GitResult,
 } from "./pack-service";
+export { loadSubagents, parseSubagentFile, type PackSubagent } from "./subagents";

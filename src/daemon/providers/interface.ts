@@ -19,6 +19,7 @@ import type {
 } from "../../protocol/types.js";
 import type { CanonicalTurn, HistorySeedResult } from "./canonical.js";
 import type { LLMCallUsage } from "../context-math.js";
+import type { PackSubagent } from "../pipeline/subagents.js";
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
@@ -117,6 +118,14 @@ export interface TurnOpts {
    * carries the mode. Absent = treat as `guarded`.
    */
   mode?: SessionMode;
+  /**
+   * Subagents contributed by an ambient-activated pack (docs/pack-loading.md).
+   * The Claude backend maps these to the SDK's programmatic `agents` option so
+   * they're available for auto-selection; other backends currently ignore them
+   * (symlinking `~/.claude/agents` doesn't work — the provider excludes the
+   * user settings tier). Absent = none.
+   */
+  subagents?: readonly PackSubagent[];
 }
 
 // ── Normalized turn result ────────────────────────────────────────────────────

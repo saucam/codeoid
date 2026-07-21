@@ -263,17 +263,20 @@ export class TerminalClient {
     for (const line of formatPackList(resp)) console.log(line);
   }
 
-  async createSession(name: string, workdir: string): Promise<void> {
+  async createSession(name: string, workdir: string, opts: { pack?: string; packRole?: string } = {}): Promise<void> {
     const resp = await this.#request({
       type: "session.create",
       id: randomUUID(),
       name,
       workdir,
+      ...(opts.pack ? { pack: opts.pack } : {}),
+      ...(opts.packRole ? { packRole: opts.packRole } : {}),
     });
 
     if (resp.type === "response.ok") {
       const data = resp.data as SessionInfo;
-      console.log(`Session created: ${data.name} (${data.id})`);
+      const profile = data.profile ? ` [pack: ${data.profile}]` : "";
+      console.log(`Session created: ${data.name} (${data.id})${profile}`);
     } else {
       this.#printError(resp);
     }

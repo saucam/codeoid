@@ -323,6 +323,49 @@ describe("install / trust / select / remove", () => {
   });
 });
 
+describe("resolveActivation (ambient pack activation)", () => {
+  test("resolves constitution + role + registry subagents", async () => {
+    const fixture = tmp();
+    writeRegistry(fixture, ["aif"], ["spec"]);
+    // add a subagent file at the registry root's agents/ dir
+    mkdirSync(join(fixture, "agents"), { recursive: true });
+    writeFileSync(join(fixture, "agents", "rev.md"), "---\nname: rev\ndescription: reviewer bot\n---\nReview well.");
+    const { svc } = makeService({ cacheDir: join(tmp(), "c"), fixture });
+    await svc.addRegistry({ url: "https://github.com/a/ai-factory.git", name: "ai-factory" });
+    svc.install({ packId: "aif" });
+
+    // no role → constitution + subagents, no role
+    const a = svc.resolveActivation("aif");
+    expect(a.id).toBe("aif");
+    expect(a.constitution).toBe("Be good."); // writePack writes ETHOS.md = "Be good."
+    expect(a.role).toBeUndefined();
+    expect(a.subagents.map((s) => s.name)).toEqual(["rev"]);
+
+    // with a declared role → role resolved (writePack declares "implementer")
+    const withRole = svc.resolveActivation("aif", "implementer");
+    expect(withRole.roleName).toBe("implementer");
+    expect(withRole.role?.write).toBe(true);
+  });
+
+  test("throws on an uninstalled pack or an unknown role", async () => {
+    const fixture = tmp();
+    writeRegistry(fixture, ["aif"]);
+    const { svc } = makeService({ cacheDir: join(tmp(), "c"), fixture });
+    await svc.addRegistry({ url: "https://github.com/a/reg.git" });
+    svc.install({ packId: "aif" });
+    expect(() => svc.resolveActivation("ghost")).toThrow(/not installed/);
+    expect(() => svc.resolveActivation("aif", "wizard")).toThrow(/no role "wizard"/);
+  });
+
+  test("a local-dir install has no registry → no subagents", () => {
+    const dir = join(tmp(), "local");
+    writePack(dir, "loc");
+    const { svc } = makeService({ cacheDir: join(tmp(), "c") });
+    svc.install({ dir });
+    expect(svc.resolveActivation("loc").subagents).toEqual([]);
+  });
+});
+
 describe("installed() resilience", () => {
   test("a broken pack dir surfaces as an error entry, not a throw", () => {
     const dir = join(tmp(), "broken");
