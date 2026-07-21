@@ -98,6 +98,39 @@ describe("PipelineEngine.run", () => {
     if (st.status === "failed") expect(st.reason).toContain("unknown phase kind");
   });
 
+  test("a THROWING kind fails the pipeline under the DEFAULT onFail (never halts)", async () => {
+    const r = regs();
+    r.phases.register({
+      id: "boom",
+      async run() {
+        throw new Error("kaboom");
+      },
+    });
+    // No onFail specified ⇒ the default is "halt". A gate rejection would halt
+    // for a human, but an EXECUTION error must fail the run — a human can't
+    // approve a crashed turn into a green "passed".
+    const out = await new PipelineEngine(r).run(pipeline([{ id: "one", kind: "boom" }]));
+    expect(out.status).toBe("failed");
+    const st = out.phases[0].state;
+    expect(st.status).toBe("failed");
+    if (st.status === "failed") expect(st.reason).toContain("kaboom");
+  });
+
+  test("a kind returning outcome:failed fails the pipeline under the DEFAULT onFail", async () => {
+    const r = regs();
+    r.phases.register({
+      id: "nope",
+      async run() {
+        return { outcome: "failed", reason: "explicit failure" };
+      },
+    });
+    const out = await new PipelineEngine(r).run(pipeline([{ id: "one", kind: "nope" }]));
+    expect(out.status).toBe("failed");
+    const st = out.phases[0].state;
+    expect(st.status).toBe("failed");
+    if (st.status === "failed") expect(st.reason).toContain("explicit failure");
+  });
+
   test("retry: a flaky kind succeeds within budget", async () => {
     const r = regs();
     let calls = 0;
