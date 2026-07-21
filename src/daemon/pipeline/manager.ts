@@ -221,7 +221,9 @@ export class PipelineManager {
     }
 
     if (opts.approved) {
-      current.state = { status: "passed", summary: opts.value ?? "approved" };
+      // Record the phase's actual output as its summary (its lastSummary), so
+      // the run preserves what the phase produced; the human's note augments it.
+      current.state = { status: "passed", summary: opts.value ?? current.lastSummary ?? "approved" };
       s.cursor += 1;
       s.status = s.cursor >= s.phases.length ? "done" : "running";
     } else {

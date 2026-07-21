@@ -4,7 +4,14 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { isNetworkTool, isSafeTool, isWriteTool, roleDeniesTool, type ToolRole } from "./tool-safety";
+import {
+  isNetworkTool,
+  isSafeTool,
+  isWriteTool,
+  roleDeniesTool,
+  roleEnforcement,
+  type ToolRole,
+} from "./tool-safety";
 
 describe("classifiers", () => {
   test("read-safe tools", () => {
@@ -48,5 +55,20 @@ describe("roleDeniesTool", () => {
   test("network:false denies network tools but not writes", () => {
     expect(roleDeniesTool(noNet, "WebFetch")).toMatch(/network/);
     expect(roleDeniesTool(noNet, "Write")).toBeNull();
+  });
+});
+
+describe("roleEnforcement (per-backend)", () => {
+  test("claude hard-enforces the role tool gate", () => {
+    expect(roleEnforcement("claude")).toBe("hard");
+  });
+  test("other backends are advisory (soft prompt-contract only)", () => {
+    for (const p of ["codex", "pi", "gemini", "gemini-cli", "openai"]) {
+      expect(roleEnforcement(p)).toBe("advisory");
+    }
+  });
+  test("an unknown / undefined backend defaults to advisory (never over-claims)", () => {
+    expect(roleEnforcement(undefined)).toBe("advisory");
+    expect(roleEnforcement("mystery")).toBe("advisory");
   });
 });

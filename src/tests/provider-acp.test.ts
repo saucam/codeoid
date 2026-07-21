@@ -174,6 +174,31 @@ describe("GeminiAcpProvider over fake-acp", () => {
     await p.teardown();
   });
 
+  it("A5b: delivers systemPromptAppend as a prompt preamble, re-sending only when it changes (pipeline role swap)", async () => {
+    const p = makeProvider();
+    const textOfEvents = (evts: ProviderEvent[]): string =>
+      evts.filter((e) => e.type === "text_delta").map((e) => (e as { content: string }).content).join("");
+    // ACP/gemini-cli has no system-prompt channel, so the pack constitution +
+    // role contract must ride the prompt text — else a reviewer phase's role
+    // would be silently dropped on this backend.
+    const t1 = textOfEvents(
+      await collect(p.runTurn(turnOpts("echo-prompt", { systemPromptAppend: "ROLE: read-only reviewer" }))),
+    );
+    expect(t1).toContain("ROLE: read-only reviewer");
+    expect(t1.indexOf("ROLE: read-only reviewer")).toBeLessThan(t1.indexOf("echo-prompt"));
+    // Same append next turn → not re-sent (a stable session delivers it once).
+    const t2 = textOfEvents(
+      await collect(p.runTurn(turnOpts("echo-prompt", { systemPromptAppend: "ROLE: read-only reviewer" }))),
+    );
+    expect(t2).not.toContain("ROLE: read-only reviewer");
+    // Changed append (a pipeline phase swapped the role) → re-delivered.
+    const t3 = textOfEvents(
+      await collect(p.runTurn(turnOpts("echo-prompt", { systemPromptAppend: "ROLE: implementer" }))),
+    );
+    expect(t3).toContain("ROLE: implementer");
+    await p.teardown();
+  });
+
   it("A6: interrupt sends session/cancel and the turn ends cancelled", async () => {
     const p = makeProvider();
     const run = p.runTurn(turnOpts("hang-forever"));

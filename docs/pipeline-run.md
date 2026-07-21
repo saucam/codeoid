@@ -76,6 +76,32 @@ The only thing it saves is one auto-attach, which the client does for free.
 
 ---
 
+## Governance across backends
+
+A run drives its phases on whatever backend the bound session uses, so the pivot must hold on all of them.
+Two layers behave differently:
+
+- **Phase execution** (run a phase's turn, stream it, halt at the boundary) is backend-agnostic — it is an ordinary session turn.
+  Works on claude / pi / codex / gemini / gemini-cli / openai.
+- **Per-phase capability role.**
+  Hard tool-deny (a reviewer phase physically cannot Write/Edit) rides Session's `canUseTool` gate, which only lands on backends that route every tool through it under canonical tool names.
+  That is **claude only** today.
+  Everywhere else the role is *advisory*: the pack constitution + role contract are delivered in the system prompt and the model is instructed to stay in role, but nothing hard-denies.
+
+| Backend | Phase execution | Role (hard tool-deny) | Constitution / role contract |
+| --- | --- | --- | --- |
+| claude | ✅ | ✅ hard | ✅ |
+| pi | ✅ | ⚠️ advisory | ✅ |
+| codex | ✅ | ⚠️ advisory | ✅ |
+| gemini (stateless) | ✅ | ⚠️ advisory | ✅ |
+| gemini-cli (ACP) | ✅ | ⚠️ advisory | ✅ (delivered as a prompt preamble — this PR fixes the prior drop) |
+| openai (stateless) | ✅ | ⚠️ advisory | ✅ |
+
+`roleEnforcement(providerId)` classifies each backend, and `runPhaseOnSession` **logs when a phase's role is only advisory** on the bound backend — so a reviewer phase on, say, codex is never silently presented as locked down.
+Full hard enforcement on the other backends (mapping their native tool names, or using a read-only native sandbox for reviewer phases) is future work; note codex in autonomous mode never invokes `canUseTool` at all, so it needs a native-policy approach rather than tool-name mapping.
+
+---
+
 ## What changes, by layer
 
 **Protocol**

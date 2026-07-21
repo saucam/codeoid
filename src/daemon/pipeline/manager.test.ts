@@ -20,12 +20,17 @@ describe("PipelineManager", () => {
     expect(store.get(p.id)?.name).toBe("REQ-1");
   });
 
-  test("advance drives to done and persists", async () => {
+  test("advance halts at each boundary; approving each drives to done and persists", async () => {
     const store = new PipelineStore(new Database(":memory:"));
     const mgr = new PipelineManager(store);
     const p = mgr.create({ name: "REQ-1", phases, ...tenant });
-    const done = await mgr.advance(p.id);
-    expect(done.status).toBe("done");
+    let s = await mgr.advance(p.id);
+    expect(s.status).toBe("halted"); // every phase halts for a human decision
+    // Approve each boundary → done.
+    for (const requestId of ["exit:one", "exit:two"]) {
+      s = await mgr.answer(p.id, requestId, { approved: true });
+    }
+    expect(s.status).toBe("done");
     expect(store.get(p.id)?.status).toBe("done");
   });
 

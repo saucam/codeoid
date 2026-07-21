@@ -55,6 +55,7 @@ import {
   type PackServiceConfig,
 } from "./pipeline/pack-service.js";
 import { SessionPhaseRunner, type PhaseTurnResult } from "./pipeline/runner.js";
+import { roleEnforcement } from "./providers/tool-safety.js";
 import type { DispatchEventRow, DispatchTaskRow } from "./store.js";
 import { type MemoryEngine, type MemoryMcpMount, workspaceIdFromPath } from "./memory/index.js";
 import type { McpRegistry } from "./mcp/registry.js";
@@ -1779,6 +1780,15 @@ mcpHub: this.#mcpHub,
     // to the live session before its turn. resolvePhaseActivation fails CLOSED
     // when a declared role can't be applied (no silent escalation), SOFT otherwise.
     session.applyPhaseActivation(resolvePhaseActivation(this.#packs, req.packId, req.roleName));
+    // Honesty: a capability role is only HARD-enforced (tool-deny) on backends
+    // that route every tool through canUseTool under canonical names (claude).
+    // Elsewhere the role is advisory — the constitution + role-contract system
+    // prompt guide the model, but nothing hard-denies. Surface that, don't pretend.
+    if (req.roleName && roleEnforcement(session.providerId) === "advisory") {
+      console.warn(
+        `[pipeline] phase role "${req.roleName}" is ADVISORY on backend "${session.providerId}" (soft prompt-contract only, no hard tool-deny — hard enforcement is claude-only)`,
+      );
+    }
     const auth = this.#dispatchSystemAuth(session.accountId, session.projectId);
     // Run the phase autonomously within the role (no per-tool prompt), with a
     // fresh generous budget each phase. The human gate is the phase boundary,
@@ -1894,6 +1904,9 @@ mcpHub: this.#mcpHub,
           w.requestId = st.requestId;
           w.reason = st.reason;
           w.questions = st.questions;
+          // Surface the phase's produced output at the boundary halt so the UI
+          // can show "here's what this phase did" next to Approve/Revise/Reject.
+          if (p.lastSummary) w.summary = p.lastSummary;
         }
         if (p.feedback && p.feedback.length > 0) w.feedback = p.feedback;
         return w;

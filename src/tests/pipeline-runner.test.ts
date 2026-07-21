@@ -149,8 +149,22 @@ describe("pipeline runtime (real SessionManager + mock backend)", () => {
     );
     if (created.type !== "pipeline.snapshot") throw new Error(`create failed: ${JSON.stringify(created)}`);
     expect(created.pipeline.sessionId).toBeTruthy();
-    const done = await manager.handle({ type: "pipeline.advance", id: "2", pipelineId: created.pipeline.id }, AUTH, CLIENT);
-    if (done.type !== "pipeline.snapshot") throw new Error(`advance failed: ${JSON.stringify(done)}`);
+    // The phase runs a turn on the bound session, then halts for review with its
+    // produced text surfaced.
+    const halted = await manager.handle({ type: "pipeline.advance", id: "2", pipelineId: created.pipeline.id }, AUTH, CLIENT);
+    if (halted.type !== "pipeline.snapshot") throw new Error(`advance failed: ${JSON.stringify(halted)}`);
+    expect(halted.pipeline.status).toBe("halted");
+    const halt = halted.pipeline.phases[0];
+    expect(halt.status).toBe("halted");
+    expect(halt.summary).toContain("phase complete");
+    if (halt.status !== "halted" || !halt.requestId) throw new Error("expected halt with requestId");
+    // Approve → the run's captured summary is the phase's output.
+    const done = await manager.handle(
+      { type: "pipeline.answer", id: "3", pipelineId: created.pipeline.id, requestId: halt.requestId, approved: true },
+      AUTH,
+      CLIENT,
+    );
+    if (done.type !== "pipeline.snapshot") throw new Error(`answer failed: ${JSON.stringify(done)}`);
     expect(done.pipeline.status).toBe("done");
     const ph = done.pipeline.phases[0];
     expect(ph.status).toBe("passed");

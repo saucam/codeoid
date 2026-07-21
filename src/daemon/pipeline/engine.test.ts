@@ -26,22 +26,50 @@ function regs(): PipelineRegistries {
   return r;
 }
 
+/** Drive the engine to a terminal state by simulating a human Approve at every
+ *  boundary halt (mirrors PipelineManager #answerInner approve) — since every
+ *  phase now halts for a human, reaching "done" means approving each boundary. */
+async function runApprovingAll(engine: PipelineEngine, state: PipelineState): Promise<PipelineState> {
+  let s = await engine.run(state);
+  let guard = 0;
+  while (s.status === "halted" && guard++ < 100) {
+    s = structuredClone(s);
+    const ph = s.phases[s.cursor];
+    if (ph) ph.state = { status: "passed", summary: ph.lastSummary };
+    s.cursor += 1;
+    s.status = s.cursor >= s.phases.length ? "done" : "running";
+    if (s.status === "running") s = await engine.run(s);
+  }
+  return s;
+}
+
 describe("PipelineEngine.run", () => {
-  test("runs noop phases with a passing gate to done", async () => {
-    const out = await new PipelineEngine(regs()).run(
-      pipeline([
-        { id: "one", kind: "noop", gate: "always" },
-        { id: "two", kind: "noop", gate: "always" },
-      ]),
-    );
+  test("halts at each phase boundary for review (a passing gate does NOT auto-advance); approving each reaches done", async () => {
+    const engine = new PipelineEngine(regs());
+    const p = pipeline([
+      { id: "one", kind: "noop", gate: "always" },
+      { id: "two", kind: "noop", gate: "always" },
+    ]);
+    // The first advance halts at phase 0 for a human decision, even though its
+    // gate passes — the boundary halt is universal (docs/pipeline-run.md).
+    const first = await engine.run(p);
+    expect(first.status).toBe("halted");
+    expect(first.cursor).toBe(0);
+    const st0 = first.phases[0].state;
+    if (st0.status === "halted") expect(st0.requestId).toBe("exit:one");
+    // Approving each boundary walks the run to done.
+    const out = await runApprovingAll(engine, p);
     expect(out.status).toBe("done");
     expect(out.cursor).toBe(2);
     expect(out.phases.every((p) => p.state.status === "passed")).toBe(true);
   });
 
-  test("a phase with no gate passes", async () => {
+  test("a phase with no gate halts for human review (never auto-advances)", async () => {
     const out = await new PipelineEngine(regs()).run(pipeline([{ id: "one", kind: "noop" }]));
-    expect(out.status).toBe("done");
+    expect(out.status).toBe("halted");
+    const st = out.phases[0].state;
+    expect(st.status).toBe("halted");
+    if (st.status === "halted") expect(st.requestId).toBe("exit:one");
   });
 
   test("a failing exit gate with the default onFail halts", async () => {
@@ -84,8 +112,12 @@ describe("PipelineEngine.run", () => {
     const out = await new PipelineEngine(r).run(
       pipeline([{ id: "one", kind: "flaky", onFail: { action: "retry", max: 5 } }]),
     );
-    expect(out.status).toBe("done");
+    // The retry loop is a MACHINE loop (no human); once it succeeds the phase
+    // reaches its boundary and halts for the human — it does not fail.
+    expect(out.status).toBe("halted");
     expect(calls).toBe(3);
+    const st = out.phases[0].state;
+    if (st.status === "halted") expect(st.requestId).toBe("exit:one");
   });
 
   test("retry: an exhausted budget fails with the attempt count", async () => {
@@ -210,8 +242,10 @@ describe("PipelineEngine.run", () => {
         { id: "two", kind: "noop" },
       ]),
     );
-    expect(out.status).toBe("done");
-    expect(out.cursor).toBe(2);
+    // Vandal ran and halted at its boundary; its ctx-clone mutations (cursor 999,
+    // status abandoned, phases []) did NOT leak into the engine's real state.
+    expect(out.status).toBe("halted");
+    expect(out.cursor).toBe(0);
     expect(out.phases).toHaveLength(2);
   });
 });
