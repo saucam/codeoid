@@ -2652,7 +2652,7 @@ export class Session {
       const r = pack.role;
       const envelope = r.envelope === "all" ? "all tools" : r.envelope.join(", ");
       const rules = [
-        r.write === false ? "This session is READ-ONLY — do not attempt to modify files (write/edit tools are denied)." : "",
+        r.write === false ? "This session is READ-ONLY — do not modify files. The write/edit tools are denied; do NOT work around that by writing files via shell (Bash redirects, tee, sed -i, patch, git apply, etc.)." : "",
         r.network === false ? "Network access is denied — do not attempt to fetch or browse." : "",
       ].filter(Boolean).join(" ");
       const roleBlock = `## Capability role: ${pack.roleName}\nYou operate under the "${pack.roleName}" role (write=${r.write}, network=${r.network}, envelope=${envelope}).`;

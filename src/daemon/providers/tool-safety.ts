@@ -41,7 +41,11 @@ export function isSafeTool(name: string): boolean {
 /** Built-in file-mutation tools. A `write:false` capability role (e.g. the
  *  reviewer) may not use these. Bash is deliberately NOT here — a reviewer keeps
  *  shell for read-only inspection (matching the ai-factory reviewer envelope
- *  `[read, grep, glob, bash]`); gating all of Bash would break inspection. */
+ *  `[read, grep, glob, bash]`); gating all of Bash would break inspection.
+ *  NOTE: this makes the read-only role a call-time DENY of the write tools, NOT
+ *  a hard sandbox — a determined agent could still mutate files via Bash
+ *  (`>`, tee, sed -i, git apply). The role's system-prompt contract instructs
+ *  the model not to; a true sandbox (Shield/OS fence) is a later slice. */
 const WRITE_TOOLS = new Set<string>(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 
 /** Built-in network tools. A role with `network:false` may not use these;

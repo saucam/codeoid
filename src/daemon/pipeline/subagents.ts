@@ -27,6 +27,14 @@ const MAX_SUBAGENT_BYTES = 512_000;
 
 const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/;
 
+/** A safe subagent name — becomes a map key, so no non-identifier junk. Same
+ *  shape as pack ids. */
+const SAFE_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
+
+/** Object-key names that are footguns even when they pass SAFE_NAME
+ *  (`constructor` passes the regex) — reject outright. */
+const RESERVED_NAMES = new Set(["__proto__", "constructor", "prototype"]);
+
 function parseTools(v: unknown): string[] | undefined {
   if (Array.isArray(v)) return v.filter((x): x is string => typeof x === "string");
   if (typeof v === "string") {
@@ -57,7 +65,10 @@ export function parseSubagentFile(path: string): PackSubagent | undefined {
   if (!fm || typeof fm !== "object") return undefined;
   const name = typeof fm.name === "string" ? fm.name : undefined;
   const description = typeof fm.description === "string" ? fm.description : undefined;
-  if (!name || !description) return undefined;
+  // Reject a hostile / malformed name from an untrusted pack: it becomes a KEY
+  // in the agents map, so `__proto__` / `constructor` / non-identifier names
+  // could set a prototype or collide. Require a safe id (same shape as pack ids).
+  if (!name || !description || !SAFE_NAME.test(name) || RESERVED_NAMES.has(name)) return undefined;
   const prompt = (m[2] ?? "").trim();
   if (!prompt) return undefined;
   const tools = parseTools(fm.tools);

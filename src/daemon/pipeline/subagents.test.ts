@@ -60,6 +60,15 @@ describe("parseSubagentFile", () => {
     writeFileSync(noBody, "---\nname: n\ndescription: d\n---\n");
     expect(parseSubagentFile(noBody)).toBeUndefined();
   });
+
+  test("rejects a hostile/reserved name (prototype-pollution guard)", () => {
+    const dir = tmp();
+    for (const bad of ["__proto__", "constructor", "has space", "-leading-dash"]) {
+      const p = join(dir, "x.md");
+      writeFileSync(p, `---\nname: "${bad}"\ndescription: d\n---\nbody`);
+      expect(parseSubagentFile(p)).toBeUndefined();
+    }
+  });
 });
 
 describe("loadSubagents", () => {

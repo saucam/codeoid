@@ -52,7 +52,10 @@ function packAgentsOption(
   subs?: readonly PackSubagent[],
 ): { agents?: Record<string, { description: string; prompt: string; tools?: string[] }> } {
   if (!subs || subs.length === 0) return {};
-  const agents: Record<string, { description: string; prompt: string; tools?: string[] }> = {};
+  // Null-proto map: subagent names are pack DATA (validated at parse, but keyed
+  // here regardless) — a plain `{}` would let a `__proto__` key hit the
+  // prototype setter. Object.create(null) has no such trap.
+  const agents: Record<string, { description: string; prompt: string; tools?: string[] }> = Object.create(null);
   for (const a of subs) {
     agents[a.name] = { description: a.description, prompt: a.prompt, ...(a.tools ? { tools: a.tools } : {}) };
   }
