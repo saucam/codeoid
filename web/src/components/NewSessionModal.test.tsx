@@ -33,8 +33,14 @@ vi.mock("../state/packs", () => ({
   }),
 }));
 
+// Pipeline mode delegates the start to state/pipelines.runPipeline (create →
+// focus session → advance). Mock it so we can assert the payload without a live
+// daemon (getClient throws in this suite).
+const runPipelineMock = vi.hoisted(() => vi.fn(() => Promise.resolve()));
+vi.mock("../state/pipelines", () => ({ runPipeline: runPipelineMock }));
+
 import type { PackWire } from "../protocol/types";
-import NewSessionModal, { openNewSessionModal } from "./NewSessionModal";
+import NewSessionModal, { openNewSessionModal, openPipelineModal } from "./NewSessionModal";
 import { _resetSessionsForTest } from "../state/sessions";
 
 /** Minimal installed PackWire for the modal's pack/role selectors. */
@@ -67,6 +73,7 @@ afterEach(() => {
   requestMock.mockReset();
   authMock.mockReset();
   fetchPacksMock.mockClear();
+  runPipelineMock.mockClear();
   packsHolder.installed = [];
 });
 
@@ -228,5 +235,42 @@ describe("NewSessionModal pack + role picker", () => {
     expect(sent.type).toBe("session.create");
     expect("pack" in sent).toBe(false);
     expect("packRole" in sent).toBe(false);
+  });
+});
+
+describe("NewSessionModal pipeline mode", () => {
+  it("shows a goal box, hides the role picker, and starts a run with {pack, goal, workdir}", async () => {
+    authMock.mockReturnValue(authOk());
+    packsHolder.installed = [
+      pack({ id: "aif-sdlc", name: "AI Factory SDLC", selected: true, roles: ["reviewer"] }),
+    ];
+    const { getByText, getByLabelText, queryByLabelText, getByPlaceholderText } = render(() => (
+      <NewSessionModal />
+    ));
+    openPipelineModal("build a --json flag");
+
+    // Pipeline framing: header + a goal box prefilled from the trigger.
+    expect(getByText("Start a pipeline run")).toBeTruthy();
+    expect((getByLabelText("Goal") as HTMLTextAreaElement).value).toBe("build a --json flag");
+    // No per-session role picker in pipeline mode (roles are per-phase).
+    expect(queryByLabelText("Pack role")).toBeNull();
+
+    fireEvent.input(getByPlaceholderText("."), { target: { value: "/repo" } });
+    fireEvent.click(getByText("start run"));
+
+    await waitFor(() => expect(runPipelineMock).toHaveBeenCalled());
+    expect(runPipelineMock).toHaveBeenCalledWith(
+      expect.objectContaining({ pack: "aif-sdlc", goal: "build a --json flag", workdir: "/repo" }),
+    );
+    // It starts a run, not a plain session.
+    expect(requestMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps Start disabled until there is a goal", () => {
+    authMock.mockReturnValue(authOk());
+    packsHolder.installed = [pack({ id: "aif-sdlc", name: "AI Factory SDLC", selected: true })];
+    const { getByText } = render(() => <NewSessionModal />);
+    openPipelineModal();
+    expect((getByText("start run") as HTMLButtonElement).disabled).toBe(true);
   });
 });

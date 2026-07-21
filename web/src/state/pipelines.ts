@@ -22,6 +22,7 @@
 import { createSignal } from "solid-js";
 
 import { getClient, newRequestId } from "./connection";
+import { focusSession } from "./sessions";
 import type {
   ClientMessage,
   PipelineSnapshotMsg,
@@ -185,15 +186,20 @@ function deriveName(goal: string): string {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
- * Create a run from an installed pack with a goal, then drive it (advance) —
- * both fire-and-forget past the create. `create` is awaited only to learn the
- * pipeline id; everything after is poll-driven. A create rejection (e.g.
- * "Pipeline is disabled") surfaces as `error`.
+ * Create a run from an installed pack + goal, FOCUS its bound session (a run is
+ * a conductor over a live session — the chat is the primary surface), then drive
+ * it (advance). Everything past `create` is fire-and-forget + poll-driven;
+ * `create` is awaited only to learn the pipeline id + its bound session id. A
+ * create rejection (e.g. "Pipeline is disabled") surfaces as `error`.
  */
 export async function runPipeline(opts: {
   pack: string;
   goal: string;
   workdir: string;
+  /** Display name for the run + its session (defaults to a goal-derived label). */
+  name?: string;
+  /** Backend for the run's bound session ("" / undefined → daemon default). */
+  provider?: string;
 }): Promise<void> {
   stopPoll();
   setState(() => ({ ...EMPTY, loading: true }));
@@ -203,10 +209,11 @@ export async function runPipeline(opts: {
       {
         type: "pipeline.create",
         id,
-        name: deriveName(opts.goal),
+        name: opts.name?.trim() || deriveName(opts.goal),
         pack: opts.pack,
         spec: opts.goal,
         workdir: opts.workdir,
+        ...(opts.provider ? { providerId: opts.provider } : {}),
       },
       {
         waitForResult: (m) =>
@@ -215,7 +222,12 @@ export async function runPipeline(opts: {
       },
     );
     applySnapshot(snap);
-    if (snap?.pipeline) advance(snap.pipeline.id);
+    if (snap?.pipeline) {
+      // Focus the bound session so the run shows up as a normal, interruptible
+      // chat (the cockpit overlays it), then drive the first phase.
+      if (snap.pipeline.sessionId) focusSession(snap.pipeline.sessionId);
+      advance(snap.pipeline.id);
+    }
   } catch (e) {
     setState((s) => ({ ...s, error: errMessage(e) }));
   } finally {

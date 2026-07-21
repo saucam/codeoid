@@ -23,20 +23,39 @@ import {
 
 import { authIdentity, newRequestId, refreshSessions, request } from "../state/connection";
 import { fetchPacks, packsState } from "../state/packs";
+import { runPipeline } from "../state/pipelines";
 import { focusSession, mergeSession, sessionList } from "../state/sessions";
 import type { PackWire, SessionInfo } from "../protocol/types";
 import DirectoryPicker from "./files/DirectoryPicker";
 
+/** The modal serves two flows from one dialog (docs/pipeline-run.md): a plain
+ *  session, or a governed pipeline run (adds a goal box + requires a pack). */
+type Mode = "session" | "pipeline";
+
 const [openSignal, setOpenSignal] = createSignal(false);
+const [mode, setMode] = createSignal<Mode>("session");
+const [goalPrefill, setGoalPrefill] = createSignal("");
 
 /** External hook so the empty-state CTA / sidebar button can open it. */
 export function openNewSessionModal(): void {
+  setMode("session");
+  setOpenSignal(true);
+}
+
+/** Open the SAME dialog in pipeline mode: a goal / feature box + a required pack.
+ *  Submitting starts a governed run and focuses its bound session (the run shows
+ *  up as a normal chat). Wired to `/pipeline` and the Pack Browser's Run action. */
+export function openPipelineModal(goal?: string): void {
+  setMode("pipeline");
+  setGoalPrefill(goal ?? "");
   setOpenSignal(true);
 }
 
 const NewSessionModal: Component = () => {
   const [name, setName] = createSignal("");
   const [workdir, setWorkdir] = createSignal("");
+  // Pipeline mode only: the feature/goal that seeds the run's spec phase.
+  const [goal, setGoal] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [pickerOpen, setPickerOpen] = createSignal(false);
@@ -62,9 +81,25 @@ const NewSessionModal: Component = () => {
   // Roles the chosen pack declares (populate the role <select>).
   const packRoles = createMemo<string[]>(() => selectedPack()?.roles ?? []);
 
+  // Pipeline runs need an ACTIVE (registered) pack — an inactive/broken pack
+  // can't back a run; ambient session mode can pick any installed pack.
+  const packOptions = createMemo<PackWire[]>(() =>
+    mode() === "pipeline" ? installedPacks().filter((p) => p.active && !p.error) : installedPacks(),
+  );
+
   // Changing the pack invalidates any previously-picked role. `defer` so this
   // doesn't clobber the initial empty state on first run.
   createEffect(on(packId, () => setPackRole(""), { defer: true }));
+
+  // Pipeline mode requires a pack, so default the picker to the selected/first
+  // active pack once the (async) pack list lands — otherwise the <select> shows
+  // a pack visually while packId() is still "" (and Start stays disabled).
+  createEffect(() => {
+    if (mode() !== "pipeline" || !openSignal() || packId()) return;
+    const opts = packOptions();
+    const def = opts.find((p) => p.selected)?.id ?? opts[0]?.id;
+    if (def) setPackId(def);
+  });
 
   let nameRef: HTMLInputElement | undefined;
 
@@ -106,6 +141,7 @@ const NewSessionModal: Component = () => {
       if (v) {
         setBusy(false);
         setError(null);
+        if (mode() === "pipeline") setGoal(goalPrefill());
         // Refresh the pack list every open. fetchPacks swallows its own
         // errors (it sets pack-state.error rather than rejecting), but guard
         // anyway so a rejected read can never break opening the modal.
@@ -119,6 +155,47 @@ const NewSessionModal: Component = () => {
     ev.preventDefault();
     if (busy()) return;
     const n = name().trim();
+
+    // ── Pipeline run ──────────────────────────────────────────────────────────
+    if (mode() === "pipeline") {
+      const g = goal().trim();
+      if (!packId()) {
+        setError("pick a pack to run");
+        return;
+      }
+      if (!g) {
+        setError("a goal / feature description is required");
+        return;
+      }
+      setBusy(true);
+      setError(null);
+      try {
+        // runPipeline creates the run, focuses its bound session (the run shows
+        // up as a normal chat), and drives it — catching its own errors into
+        // pipeline state, so we can close as soon as it returns.
+        await runPipeline({
+          pack: packId(),
+          goal: g,
+          workdir: workdir().trim() || ".",
+          ...(n ? { name: n } : {}),
+          ...(providerId() ? { provider: providerId() } : {}),
+        });
+        setBusy(false);
+        setOpenSignal(false);
+        setName("");
+        setWorkdir("");
+        setGoal("");
+        setProviderId("");
+        setPackId("");
+        setPackRole("");
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+        setBusy(false);
+      }
+      return;
+    }
+
+    // ── Plain session ─────────────────────────────────────────────────────────
     if (!n) {
       setError("name required");
       return;
@@ -176,29 +253,30 @@ const NewSessionModal: Component = () => {
         >
           <header class="space-y-1">
             <h2 class="text-base font-semibold tracking-tight text-fg">
-              New session
+              {mode() === "pipeline" ? "Start a pipeline run" : "New session"}
             </h2>
             <p class="text-xs text-fg-muted">
-              A session is one Claude conversation rooted at a workdir. The
-              daemon registers a per-session ZeroID agent identity automatically.
+              {mode() === "pipeline"
+                ? "Run an installed pack against a goal. It creates a session, auto-advances through the pack's phases, and halts at each boundary for you to Approve / Revise / Reject."
+                : "A session is one Claude conversation rooted at a workdir. The daemon registers a per-session ZeroID agent identity automatically."}
             </p>
           </header>
 
           <label class="block space-y-1.5">
             <span class="text-[11px] font-medium uppercase tracking-wider text-fg-faint">
-              Name
+              Name{mode() === "pipeline" ? " (optional)" : ""}
             </span>
             <input
               ref={nameRef}
               type="text"
               autocomplete="off"
               spellcheck={false}
-              placeholder="e.g. shield-refactor"
+              placeholder={mode() === "pipeline" ? "defaults to the goal" : "e.g. shield-refactor"}
               value={name()}
               onInput={(e) => setName(e.currentTarget.value)}
               class="w-full rounded border border-border bg-bg px-3 py-1.5 font-mono text-sm text-fg outline-none focus:border-accent"
               disabled={busy()}
-              required
+              required={mode() === "session"}
             />
           </label>
 
@@ -257,6 +335,23 @@ const NewSessionModal: Component = () => {
             </p>
           </label>
 
+          <Show when={mode() === "pipeline"}>
+            <label class="block space-y-1.5">
+              <span class="text-[11px] font-medium uppercase tracking-wider text-fg-faint">
+                Goal / feature
+              </span>
+              <textarea
+                rows={4}
+                placeholder="Describe the feature to build — this seeds the run's spec phase…"
+                value={goal()}
+                onInput={(e) => setGoal(e.currentTarget.value)}
+                class="w-full resize-y rounded border border-border bg-bg px-3 py-1.5 font-mono text-sm leading-6 text-fg outline-none focus:border-accent"
+                disabled={busy()}
+                aria-label="Goal"
+              />
+            </label>
+          </Show>
+
           <Show when={providers().length > 1}>
             <div class="block space-y-1.5">
               <span class="text-[11px] font-medium uppercase tracking-wider text-fg-faint">
@@ -286,22 +381,21 @@ const NewSessionModal: Component = () => {
             </div>
           </Show>
 
-          {/* Ambient pack activation (docs/pack-loading.md). Pick an installed
-              SDLC pack to run this session under — injects its constitution and
-              exposes its skills/subagents; an optional role (e.g. reviewer =
-              read-only) runs the session under that capability envelope.
-              Degrades to a subtle note when no packs are installed or the pack
-              read was rejected — never blocks freestyle session creation. */}
+          {/* Pack. Session mode: OPTIONAL ambient activation (constitution +
+              skills/subagents + an optional capability role). Pipeline mode:
+              REQUIRED — the run's phases come from the pack, and each phase's
+              role is applied per-phase (so no role picker here). */}
           <div class="block space-y-1.5">
             <span class="text-[11px] font-medium uppercase tracking-wider text-fg-faint">
-              Pack
+              Pack{mode() === "pipeline" ? " (required)" : ""}
             </span>
             <Show
-              when={installedPacks().length > 0}
+              when={packOptions().length > 0}
               fallback={
                 <p class="text-[10px] text-fg-faint">
-                  No packs installed — this session runs freestyle. Install one
-                  via <code class="font-mono">/packs</code>.
+                  {mode() === "pipeline"
+                    ? "No active packs — install + activate one via /packs to run a pipeline."
+                    : "No packs installed — this session runs freestyle. Install one via /packs."}
                 </p>
               }
             >
@@ -312,12 +406,14 @@ const NewSessionModal: Component = () => {
                 disabled={busy()}
                 aria-label="Pack"
               >
-                <option value="">None (freestyle)</option>
-                <For each={installedPacks()}>
+                <Show when={mode() === "session"}>
+                  <option value="">None (freestyle)</option>
+                </Show>
+                <For each={packOptions()}>
                   {(p) => <option value={p.id}>{p.name}</option>}
                 </For>
               </select>
-              <Show when={selectedPack() && packRoles().length > 0}>
+              <Show when={mode() === "session" && selectedPack() && packRoles().length > 0}>
                 <label class="block space-y-1">
                   <span class="text-[10px] uppercase tracking-wider text-fg-faint">
                     Role (optional)
@@ -357,9 +453,15 @@ const NewSessionModal: Component = () => {
             <button
               type="submit"
               class="ml-auto rounded bg-accent px-3 py-1.5 text-sm font-semibold text-bg transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={busy() || !name().trim()}
+              disabled={busy() || (mode() === "pipeline" ? !packId() || !goal().trim() : !name().trim())}
             >
-              {busy() ? "creating…" : "create"}
+              {busy()
+                ? mode() === "pipeline"
+                  ? "starting…"
+                  : "creating…"
+                : mode() === "pipeline"
+                  ? "start run"
+                  : "create"}
             </button>
           </div>
         </form>

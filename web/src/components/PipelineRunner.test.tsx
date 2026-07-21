@@ -2,27 +2,9 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { render, cleanup, fireEvent } from "@solidjs/testing-library";
 import { PipelineRunnerView } from "./PipelineRunner";
-import type {
-  PackWire,
-  PipelinePhaseWire,
-  PipelineWire,
-} from "../protocol/types";
+import type { PipelinePhaseWire, PipelineWire } from "../protocol/types";
 
 afterEach(cleanup);
-
-function pack(p: Partial<PackWire> & Pick<PackWire, "id" | "name">): PackWire {
-  return {
-    version: "1.0.0",
-    dir: `/cache/${p.id}`,
-    trusted: true,
-    selected: false,
-    phases: [],
-    roles: [],
-    gates: [],
-    active: true,
-    ...p,
-  };
-}
 
 function phase(
   p: Partial<PipelinePhaseWire> & Pick<PipelinePhaseWire, "id">,
@@ -37,6 +19,7 @@ function pipeline(over: Partial<PipelineWire> = {}): PipelineWire {
     status: "running",
     cursor: 0,
     phases: [],
+    sessionId: "sess-1",
     createdAt: 0,
     updatedAt: 0,
     ...over,
@@ -45,51 +28,21 @@ function pipeline(over: Partial<PipelineWire> = {}): PipelineWire {
 
 const noop = () => {};
 
+/** The cockpit no longer starts runs (the create-session dialog does), so the
+ *  view only takes the active pipeline + the steer callbacks. */
 function baseProps() {
   return {
     pipeline: null as PipelineWire | null,
-    packs: [] as PackWire[],
-    onRun: noop,
     onApprove: noop,
     onReject: noop,
     onRevise: noop,
   };
 }
 
-describe("PipelineRunnerView — Start panel", () => {
-  it("renders installed packs and fires onRun with {pack,goal,workdir}", () => {
-    const onRun = vi.fn();
-    const { getByText, getByLabelText } = render(() => (
-      <PipelineRunnerView
-        {...baseProps()}
-        packs={[pack({ id: "aif-sdlc", name: "AI Factory SDLC" })]}
-        onRun={onRun}
-      />
-    ));
-
-    expect(getByText("Start a run")).toBeTruthy();
-    // The pack picker offers the installed pack (defaulting to it).
-    expect(getByLabelText("Pack")).toBeTruthy();
-
-    fireEvent.input(getByLabelText("Workdir"), { target: { value: "/repo" } });
-    fireEvent.input(getByLabelText("Goal"), {
-      target: { value: "build the thing" },
-    });
-    fireEvent.click(getByText("Start"));
-
-    expect(onRun).toHaveBeenCalledWith({
-      pack: "aif-sdlc",
-      goal: "build the thing",
-      workdir: "/repo",
-    });
-  });
-
-  it("prefills the goal and shows an empty-packs fallback", () => {
-    const { getByText } = render(() => (
-      <PipelineRunnerView {...baseProps()} packs={[]} goalPrefill="seeded goal" />
-    ));
-    // No active packs → guidance instead of the form.
-    expect(getByText(/No active packs/)).toBeTruthy();
+describe("PipelineRunnerView — empty", () => {
+  it("shows a subtle note when there is no active run (starting is done from the dialog)", () => {
+    const { getByText } = render(() => <PipelineRunnerView {...baseProps()} />);
+    expect(getByText("No active run.")).toBeTruthy();
   });
 });
 

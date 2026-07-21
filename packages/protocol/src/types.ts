@@ -1639,6 +1639,8 @@ export interface PipelineCreateMsg extends BaseClientMsg {
   pack?: string;
   spec?: string;
   workdir?: string;
+  /** Backend for the run's bound session (default: the daemon's default provider). */
+  providerId?: string;
 }
 export interface PipelineListMsg extends BaseClientMsg {
   type: "pipeline.list";

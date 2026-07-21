@@ -1938,6 +1938,9 @@ mcpHub: this.#mcpHub,
     const defaultPack = this.#config?.pipeline?.defaultPack ?? undefined;
     const pack = msg.pack ?? (msg.phases === undefined ? defaultPack : undefined);
     const providerIds = this.#providers.ids();
+    if (msg.providerId && !providerIds.includes(msg.providerId)) {
+      return { type: "response.error", requestId: msg.id, error: `unknown provider "${msg.providerId}"`, code: "invalid_request" };
+    }
     for (const p of msg.phases ?? []) {
       if (p.provider && !providerIds.includes(p.provider)) {
         return { type: "response.error", requestId: msg.id, error: `phase "${p.id}": unknown provider "${p.provider}"`, code: "invalid_request" };
@@ -1950,6 +1953,7 @@ mcpHub: this.#mcpHub,
     const runSession = this.#createBoundRunSession({
       name: msg.name,
       workdir: workdir ?? process.cwd(),
+      provider: msg.providerId,
       auth,
     });
     try {
