@@ -124,16 +124,18 @@ Full hard enforcement on the other backends (mapping their native tool names, or
 
 ---
 
-## Implementation slices (each its own PR off `main`)
+## Implementation slices
 
-1. **S1 — bind + visible turns (the core fix).**
+**S1–S3 landed together in this PR.** S4 is future work.
+
+1. **S1 — bind + visible turns (the core fix).** ✅
    `pipeline.sessionId`; create binds a session; phases run as streamed turns on it; per-phase role applied; **timeout removed**; worker path retired.
    Outcome: you see the model work and can talk to it; no more invisible run, no timeout.
-2. **S2 — gate/checkpoint cleanup.**
-   `command` gates run on Approve; drop the "not yet enforced" stub halts; boundary messaging reworded.
-3. **S3 — web overlay UX.**
-   `/pipeline` opens the extended create-session dialog (name · workdir · provider/model · **goal** · **installed pack**); on submit, auto-attach the run-session.
-   Chat-primary layout, cockpit overlay, phase-role identity marker.
+2. **S2 — gate/checkpoint cleanup.** ✅
+   Every phase halts at its boundary for the human; `command` gate verdicts are surfaced; the "not yet enforced" stub halts are gone. Plus honest cross-backend governance (advisory vs hard) + the gemini-cli constitution-delivery fix.
+3. **S3 — web overlay UX.** ✅
+   `/pipeline` opens the extended create-session dialog (name · workdir · provider · **goal** · **installed pack**); on submit, focus the run-session.
+   Chat-primary layout, a non-modal collapsible cockpit dock over the run's chat.
    (Retires the `#217` bespoke "Start panel".)
 4. **S4 (optional, later) — automated skill/review gate verdicts** via validation subagents, shown as an assist.
 
