@@ -209,6 +209,97 @@ export class TerminalClient {
     }
   }
 
+  // ── Packs (dynamic pack loading — docs/pack-loading.md) ──────────────────
+
+  async packList(): Promise<void> {
+    this.#renderPacks(await this.#request({ type: "pipeline.pack.list", id: randomUUID() }));
+  }
+
+  async packRegistryAdd(url: string, opts: { name?: string; ref?: string }): Promise<void> {
+    this.#renderPacks(
+      await this.#request({ type: "pipeline.registry.add", id: randomUUID(), url, name: opts.name, ref: opts.ref }),
+    );
+  }
+
+  async packInstall(ref: string, opts: { trusted?: boolean; dir?: boolean }): Promise<void> {
+    const msg = opts.dir
+      ? ({ type: "pipeline.pack.install", id: randomUUID(), dir: ref, trusted: opts.trusted } as const)
+      : ({ type: "pipeline.pack.install", id: randomUUID(), packId: ref, trusted: opts.trusted } as const);
+    this.#renderPacks(await this.#request(msg));
+  }
+
+  async packRemove(id: string): Promise<void> {
+    this.#renderPacks(await this.#request({ type: "pipeline.pack.remove", id: randomUUID(), packId: id }));
+  }
+
+  async packTrust(id: string, trusted: boolean): Promise<void> {
+    this.#renderPacks(await this.#request({ type: "pipeline.pack.trust", id: randomUUID(), packId: id, trusted }));
+  }
+
+  async packSelect(id: string | null): Promise<void> {
+    this.#renderPacks(await this.#request({ type: "pipeline.pack.select", id: randomUUID(), packId: id }));
+  }
+
+  async packShow(id: string): Promise<void> {
+    const resp = await this.#request({ type: "pipeline.pack.list", id: randomUUID() });
+    if (resp.type !== "pipeline.pack.list.result") {
+      this.#printError(resp);
+      return;
+    }
+    const p = resp.installed.find((x) => x.id === id);
+    if (p) {
+      console.log(`\n  ${p.name}  v${p.version}${p.selected ? "  (selected)" : ""}`);
+      if (p.description) console.log(`  ${p.description}`);
+      console.log(`  source: ${p.registry ?? "local"} · trust: ${p.trusted ? "trusted" : "untrusted"} · ${p.active ? "active" : "inactive"}`);
+      if (p.error) {
+        console.log(`  ⚠ ${p.error}\n`);
+        return;
+      }
+      console.log("\n  phases:");
+      for (const ph of p.phases) {
+        console.log(`    → ${ph.id}${ph.role ? ` [${ph.role}]` : ""}${ph.gate ? ` (gate: ${ph.gate})` : ""}`);
+      }
+      if (p.gates.length) console.log(`\n  gates: ${p.gates.map((g) => `${g.id}:${g.kind}`).join(", ")}`);
+      if (p.roles.length) console.log(`  roles: ${p.roles.join(", ")}`);
+      console.log();
+      return;
+    }
+    const a = resp.available.find((x) => x.id === id);
+    if (a) {
+      console.log(`\n  ${a.name}  v${a.version}  (available in ${a.registry}, not installed)`);
+      if (a.description) console.log(`  ${a.description}`);
+      console.log(`\n  install with: codeoid pack install ${a.id}\n`);
+      return;
+    }
+    console.error(`Pack "${id}" not found (installed or available).`);
+  }
+
+  #renderPacks(resp: DaemonMessage): void {
+    if (resp.type !== "pipeline.pack.list.result") {
+      this.#printError(resp);
+      return;
+    }
+    const { installed, available, registries } = resp;
+    console.log("\n  Registries:");
+    if (registries.length === 0) console.log("    (none — add one: codeoid pack registry add <git-url>)");
+    for (const r of registries) {
+      console.log(`    ${r.name.padEnd(20)} ${r.cached ? `cached · ${r.packCount ?? 0} packs` : "not cached"}   ${r.url}`);
+    }
+    console.log("\n  Installed:");
+    if (installed.length === 0) console.log("    (none)");
+    for (const p of installed) {
+      const flags = [p.selected ? "selected" : "", p.trusted ? "trusted" : "untrusted", p.active ? "active" : "inactive", p.error ? "ERROR" : ""]
+        .filter(Boolean)
+        .join(" · ");
+      console.log(`    ${p.id.padEnd(20)} v${p.version.padEnd(8)} ${flags}`);
+    }
+    const notInstalled = available.filter((a) => !a.installed);
+    console.log("\n  Available:");
+    if (notInstalled.length === 0) console.log("    (none new)");
+    for (const a of notInstalled) console.log(`    ${a.id.padEnd(20)} v${a.version.padEnd(8)} from ${a.registry}`);
+    console.log();
+  }
+
   async createSession(name: string, workdir: string): Promise<void> {
     const resp = await this.#request({
       type: "session.create",
