@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+  isNeedInput,
   isPhaseComplete,
   PHASE_COMPLETE_MARKER,
+  PHASE_NEEDS_INPUT_MARKER,
+  stripNeedInputMarker,
   stripPhaseCompleteMarker,
 } from "./phase-completion";
 
@@ -22,5 +25,22 @@ describe("phase-completion", () => {
     expect(stripPhaseCompleteMarker(`the spec\n${PHASE_COMPLETE_MARKER}\n`)).toBe("the spec");
     // no marker → unchanged
     expect(stripPhaseCompleteMarker("just some text")).toBe("just some text");
+  });
+
+  test("isNeedInput matches the need-input marker only at the END", () => {
+    expect(isNeedInput(`Which framework should I use?\n${PHASE_NEEDS_INPUT_MARKER}`)).toBe(true);
+    expect(isNeedInput("Working on it, no question yet.")).toBe(false);
+    // a completed phase is NOT a need-input
+    expect(isNeedInput(`done\n${PHASE_COMPLETE_MARKER}`)).toBe(false);
+  });
+
+  test("the two markers are distinct and don't cross-match", () => {
+    expect(isPhaseComplete(`q?\n${PHASE_NEEDS_INPUT_MARKER}`)).toBe(false);
+    expect(isNeedInput(`done\n${PHASE_COMPLETE_MARKER}`)).toBe(false);
+  });
+
+  test("stripNeedInputMarker leaves just the question", () => {
+    expect(stripNeedInputMarker(`Which DB?\n${PHASE_NEEDS_INPUT_MARKER}`)).toBe("Which DB?");
+    expect(stripNeedInputMarker("no marker here")).toBe("no marker here");
   });
 });

@@ -56,10 +56,13 @@ import {
 } from "./pipeline/pack-service.js";
 import { SessionPhaseRunner, type PhaseTurnResult } from "./pipeline/runner.js";
 import {
+  isNeedInput,
   isPhaseComplete,
   MAX_PHASE_NUDGES,
   PHASE_COMPLETION_CONTRACT,
   PHASE_CONTINUE_NUDGE,
+  PHASE_NO_INPUT_NUDGE,
+  stripNeedInputMarker,
   stripPhaseCompleteMarker,
 } from "./pipeline/phase-completion.js";
 import { roleEnforcement } from "./providers/tool-safety.js";
@@ -1815,17 +1818,41 @@ mcpHub: this.#mcpHub,
     // still reaches Approve/Reject instead of looping. A non-idle rest
     // (error / budget-exhausted) is a real phase failure, surfaced as-is.
     let message = `${req.prompt}\n${PHASE_COMPLETION_CONTRACT}`;
+    let nudges = 0;
     try {
-      for (let nudge = 0; ; nudge++) {
+      while (true) {
         const done = new Promise<PhaseTurnResult["finalStatus"]>((resolve) => {
           this.#phaseWaiters.set(req.sessionId, resolve);
         });
         await session.send(message, auth);
         const finalStatus = await done;
         const text = session.lastAssistantText ?? "";
+        // A non-idle rest (error / budget-exhausted) is a real phase failure.
         if (finalStatus !== "idle") return { finalStatus, text };
+        // Deliverable complete → done, marker stripped from the summary.
         if (isPhaseComplete(text)) return { finalStatus: "idle", text: stripPhaseCompleteMarker(text) };
-        if (nudge >= MAX_PHASE_NUDGES) return { finalStatus: "idle", text };
+        // The model needs the user's input. Surface the question as an input
+        // dialog and feed the answer back as the next turn — a legitimate pause,
+        // NOT a nudge, so a genuine Q&A round never burns the give-up budget.
+        if (isNeedInput(text)) {
+          const resp = await session.requestUserInput({
+            method: "input",
+            title: "The agent needs your input to continue this phase",
+            message: stripNeedInputMarker(text),
+            placeholder: "Type your answer…",
+          });
+          message =
+            !resp.cancelled && resp.value && resp.value.trim().length > 0
+              ? resp.value
+              : PHASE_NO_INPUT_NUDGE;
+          nudges = 0;
+          continue;
+        }
+        // Rested without any marker (an intermediate pause). Nudge to continue,
+        // bounded; after the cap, hand what it has to the human review boundary
+        // so a never-completing model still reaches Approve/Reject.
+        if (nudges >= MAX_PHASE_NUDGES) return { finalStatus: "idle", text };
+        nudges += 1;
         message = PHASE_CONTINUE_NUDGE;
       }
     } finally {
