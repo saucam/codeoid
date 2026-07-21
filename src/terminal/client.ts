@@ -7,10 +7,11 @@
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import type { CodeoidConfig } from "../config.js";
-import type { ClientMessage, DaemonMessage, SessionInfo } from "../protocol/types.js";
+import type { ClientMessage, DaemonMessage, PipelineWire, SessionInfo } from "../protocol/types.js";
 import { ALL_SCOPES_STRING } from "../protocol/scopes.js";
 import { sanitizeTerminalOutput } from "../tui/ansi/codes.js";
 import { formatPackList, formatPackShow } from "./pack-format.js";
+import { formatPipeline, haltedRequestId } from "./pipeline-format.js";
 
 // ── Stream rendering (pure, exported for tests) ───────────────────────────────
 
@@ -468,6 +469,84 @@ export class TerminalClient {
     return null;
   }
 
+  // ── Pipeline runs (docs/pipeline-run.md) ─────────────────────────────────
+
+  async #getPipeline(id: string): Promise<PipelineWire | undefined> {
+    const resp = await this.#request({ type: "pipeline.get", id: randomUUID(), pipelineId: id });
+    if (resp.type !== "pipeline.snapshot") {
+      this.#printError(resp);
+      return undefined;
+    }
+    return resp.pipeline;
+  }
+
+  async pipelineRun(pack: string, goal: string, workdir: string): Promise<void> {
+    const resp = await this.#request({
+      type: "pipeline.create",
+      id: randomUUID(),
+      name: goal.slice(0, 60) || "run",
+      pack,
+      spec: goal,
+      workdir,
+    });
+    if (resp.type !== "pipeline.snapshot") {
+      this.#printError(resp);
+      return;
+    }
+    const p = resp.pipeline;
+    // Kick the run off — advance drives all phases server-side (minutes), so
+    // fire it and let the user poll status rather than block the CLI.
+    this.#fire({ type: "pipeline.advance", id: randomUUID(), pipelineId: p.id });
+    for (const line of formatPipeline(p)) console.log(line);
+  }
+
+  async pipelineStatus(id: string): Promise<void> {
+    const p = await this.#getPipeline(id);
+    if (p) for (const line of formatPipeline(p)) console.log(line);
+  }
+
+  async pipelineList(): Promise<void> {
+    const resp = await this.#request({ type: "pipeline.list", id: randomUUID() });
+    if (resp.type !== "pipeline.list.result") {
+      this.#printError(resp);
+      return;
+    }
+    if (resp.pipelines.length === 0) {
+      console.log("No pipelines.");
+      return;
+    }
+    console.log("\n  Pipelines:\n");
+    for (const p of resp.pipelines) console.log(`  ${p.id}  [${p.status}]  ${p.name}`);
+    console.log();
+  }
+
+  async pipelineDecide(id: string, kind: "approve" | "reject" | "revise", text?: string): Promise<void> {
+    const p = await this.#getPipeline(id);
+    if (!p) return;
+    const reqId = haltedRequestId(p);
+    if (!reqId) {
+      console.error(`Pipeline ${id} is not awaiting a decision (status: ${p.status}).`);
+      return;
+    }
+    if (kind === "revise") {
+      if (!text || !text.trim()) {
+        console.error("revise needs feedback text.");
+        return;
+      }
+      this.#fire({ type: "pipeline.revise", id: randomUUID(), pipelineId: id, requestId: reqId, feedback: text });
+    } else {
+      this.#fire({
+        type: "pipeline.answer",
+        id: randomUUID(),
+        pipelineId: id,
+        requestId: reqId,
+        approved: kind === "approve",
+        value: text,
+      });
+    }
+    console.log(`${kind} sent — watch: codeoid pipeline status ${id}`);
+  }
+
   #request(msg: ClientMessage): Promise<DaemonMessage> {
     return new Promise((resolve, reject) => {
       if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) {
@@ -487,6 +566,15 @@ export class TerminalClient {
 
       this.#ws.send(JSON.stringify(msg));
     });
+  }
+
+  /** Fire a message without awaiting a reply. For pipeline advance/answer/revise:
+   *  they run SERVER-SIDE for minutes (a phase turn), far past the 30s request
+   *  timeout — the daemon completes + persists them regardless of the client, so
+   *  the CLI fires them and polls `pipeline.status` instead of blocking. */
+  #fire(msg: ClientMessage): void {
+    if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) throw new Error("Not connected");
+    this.#ws.send(JSON.stringify(msg));
   }
 
   async #getToken(): Promise<string> {
