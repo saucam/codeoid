@@ -22,9 +22,8 @@ import {
 } from "solid-js";
 
 import { authIdentity, newRequestId, refreshSessions, request } from "../state/connection";
-import { fetchPacks, packsState } from "../state/packs";
 import { focusSession, mergeSession, sessionList } from "../state/sessions";
-import type { PackWire, SessionInfo } from "../protocol/types";
+import type { SessionInfo } from "../protocol/types";
 import DirectoryPicker from "./files/DirectoryPicker";
 
 const [openSignal, setOpenSignal] = createSignal(false);
@@ -42,29 +41,10 @@ const NewSessionModal: Component = () => {
   const [pickerOpen, setPickerOpen] = createSignal(false);
   // "" = daemon default (first advertised provider).
   const [providerId, setProviderId] = createSignal("");
-  // Ambient pack activation (docs/pack-loading.md): "" = freestyle (no pack).
-  const [packId, setPackId] = createSignal("");
-  // Capability role declared by the chosen pack; "" = no role restriction.
-  const [packRole, setPackRole] = createSignal("");
 
   // Backends this daemon registered (auth.ok `providers`, default first).
   // Older daemons don't advertise — hide the picker, sessions stay claude.
   const providers = createMemo<string[]>(() => authIdentity()?.providers ?? []);
-
-  // Installed packs from the daemon-canonical pack state. Empty when none are
-  // installed OR when the fetch was rejected (e.g. the session token lacks
-  // `pipeline:read`) — either way we degrade to a subtle note and never block
-  // freestyle session creation.
-  const installedPacks = createMemo<PackWire[]>(() => packsState().installed ?? []);
-  const selectedPack = createMemo<PackWire | undefined>(() =>
-    installedPacks().find((p) => p.id === packId()),
-  );
-  // Roles the chosen pack declares (populate the role <select>).
-  const packRoles = createMemo<string[]>(() => selectedPack()?.roles ?? []);
-
-  // Changing the pack invalidates any previously-picked role. `defer` so this
-  // doesn't clobber the initial empty state on first run.
-  createEffect(on(packId, () => setPackRole(""), { defer: true }));
 
   let nameRef: HTMLInputElement | undefined;
 
@@ -106,10 +86,6 @@ const NewSessionModal: Component = () => {
       if (v) {
         setBusy(false);
         setError(null);
-        // Refresh the pack list every open. fetchPacks swallows its own
-        // errors (it sets pack-state.error rather than rejecting), but guard
-        // anyway so a rejected read can never break opening the modal.
-        void fetchPacks().catch(() => {});
         requestAnimationFrame(() => nameRef?.focus());
       }
     }),
@@ -137,8 +113,6 @@ const NewSessionModal: Component = () => {
         name: n,
         workdir: wd,
         ...(providerId() ? { providerId: providerId() } : {}),
-        ...(packId() ? { pack: packId() } : {}),
-        ...(packRole() ? { packRole: packRole() } : {}),
       })) as SessionInfo | undefined;
       if (data && typeof data === "object" && "id" in data) {
         mergeSession(data);
@@ -154,8 +128,6 @@ const NewSessionModal: Component = () => {
       setName("");
       setWorkdir("");
       setProviderId("");
-      setPackId("");
-      setPackRole("");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setBusy(false);
@@ -285,59 +257,6 @@ const NewSessionModal: Component = () => {
               </div>
             </div>
           </Show>
-
-          {/* Ambient pack activation (docs/pack-loading.md). Pick an installed
-              SDLC pack to run this session under — injects its constitution and
-              exposes its skills/subagents; an optional role (e.g. reviewer =
-              read-only) runs the session under that capability envelope.
-              Degrades to a subtle note when no packs are installed or the pack
-              read was rejected — never blocks freestyle session creation. */}
-          <div class="block space-y-1.5">
-            <span class="text-[11px] font-medium uppercase tracking-wider text-fg-faint">
-              Pack
-            </span>
-            <Show
-              when={installedPacks().length > 0}
-              fallback={
-                <p class="text-[10px] text-fg-faint">
-                  No packs installed — this session runs freestyle. Install one
-                  via <code class="font-mono">/packs</code>.
-                </p>
-              }
-            >
-              <select
-                value={packId()}
-                onChange={(e) => setPackId(e.currentTarget.value)}
-                class="w-full rounded border border-border bg-bg px-3 py-1.5 font-mono text-sm text-fg outline-none focus:border-accent disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={busy()}
-                aria-label="Pack"
-              >
-                <option value="">None (freestyle)</option>
-                <For each={installedPacks()}>
-                  {(p) => <option value={p.id}>{p.name}</option>}
-                </For>
-              </select>
-              <Show when={selectedPack() && packRoles().length > 0}>
-                <label class="block space-y-1">
-                  <span class="text-[10px] uppercase tracking-wider text-fg-faint">
-                    Role (optional)
-                  </span>
-                  <select
-                    value={packRole()}
-                    onChange={(e) => setPackRole(e.currentTarget.value)}
-                    class="w-full rounded border border-border bg-bg px-3 py-1.5 font-mono text-sm text-fg outline-none focus:border-accent disabled:cursor-not-allowed disabled:opacity-50"
-                    disabled={busy()}
-                    aria-label="Pack role"
-                  >
-                    <option value="">Default (no role restriction)</option>
-                    <For each={packRoles()}>
-                      {(r) => <option value={r}>{r}</option>}
-                    </For>
-                  </select>
-                </label>
-              </Show>
-            </Show>
-          </div>
 
           <Show when={error()}>
             <div class="rounded border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
