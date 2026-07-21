@@ -66,12 +66,14 @@ and drives the view off a **poll loop** on `pipeline.get`.
 - **Scopes**: add `pipeline:create` (create/advance/abort) + `pipeline:answer`
   (answer/revise) to `DEFAULT_WEB_SCOPES` (web re-login to pick up).
 
-## Prerequisites for a live run (flagged)
+## Prerequisites for a live run
 
-`config.pipeline.enabled: true`; the pack **active + trusted** with its **skills
-installed**; a **provider + API keys**; a real **workdir/repo**. A full run is 5
-real model turns (minutes each) and can fail mid-phase — so the UI is verified on
-a short/fast pipeline; a live `aif-sdlc` run works given the prereqs.
+The pipeline runtime is **on by default** (opt out with `pipeline.enabled: false`
+/ `CODEOID_PIPELINE_ENABLED=false`), so a live run just needs: the pack **active +
+trusted** with its **skills installed**; a **provider + API keys**; a real
+**workdir/repo**. A full run is 5 real model turns (minutes each) and can fail
+mid-phase — so the UI is verified on a short/fast pipeline; a live `aif-sdlc` run
+works given the prereqs.
 
 ## Non-goals (here)
 

@@ -40,6 +40,10 @@ describe("loadConfig — defaults", () => {
     expect(c.memory?.enabled).toBe(true);
     expect(c.memory?.clusters.enabled).toBe(false);
     expect(c.telemetry.osc8).toBe("auto");
+    // Pipeline is ON by default (user-initiated + gate-halted + scope/trust
+    // gated, so no off-by-default is warranted); the flag is an operator opt-out.
+    expect(c.pipeline?.enabled).toBe(true);
+    expect(c.pipeline?.defaultPack).toBe(null);
   });
 
   it("agentIdentity stays undefined when no file/env supplies it", () => {
@@ -417,6 +421,14 @@ describe("loadConfig — hooks", () => {
     expect(c.hooks?.entries).toHaveLength(2);
     expect(c.hooks?.entries[0]).toMatchObject({ event: "tool_call", type: "command", command: "./guard.sh" });
     expect(c.hooks?.entries[1]).toMatchObject({ event: "after_turn", type: "webhook", timeoutMs: 5000 });
+  });
+
+  it("CODEOID_PIPELINE_ENABLED=false opts out of the (default-on) pipeline runtime", () => {
+    writeConfig({});
+    const on = loadConfig({ configPath, env: {} });
+    expect(on.pipeline?.enabled).toBe(true); // default
+    const off = loadConfig({ configPath, env: { CODEOID_PIPELINE_ENABLED: "false" } });
+    expect(off.pipeline?.enabled).toBe(false);
   });
 
   it("CODEOID_HOOKS_ENABLED=false kills every hook per-invocation", () => {

@@ -1,8 +1,9 @@
 /**
  * Boot wiring for the SDLC pipeline. Builds a PipelineManager from config,
- * returning `undefined` when the feature is disabled (the default) so the daemon
- * stays dark. Kept a pure factory so the enable/disable + share-the-daemon-DB
- * behavior is unit-testable without standing up a full SessionManager.
+ * returning `undefined` when the feature is opted out (`enabled: false` — it's on
+ * by default) so the daemon stays dark. Kept a pure factory so the
+ * enable/disable + share-the-daemon-DB behavior is unit-testable without standing
+ * up a full SessionManager.
  */
 
 import type { Database } from "bun:sqlite";
