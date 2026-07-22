@@ -524,9 +524,11 @@ describe("skillCommandAllowRules", () => {
       history: [],
       userMessage: "hi",
       workdir: tmp,
-      canUseTool: async (_id, _aid, _name, input) => {
-        asked.push(String((input as { command?: string }).command));
-        return { behavior: "allow" as const };
+      // Auto-approves everything — proves the approval does NOT ride this gate.
+      canUseTool: async () => ({ behavior: "allow" as const }),
+      requestUserInput: async (req) => {
+        asked.push(req.message ?? "");
+        return { confirmed: true, cancelled: false };
       },
     });
     for await (const _ of run.events) { /* drain */ }
@@ -540,9 +542,61 @@ describe("skillCommandAllowRules", () => {
     // Demand-driven: only the command that actually blocked is raised — the
     // already-approved one is never re-asked, and no other declared command
     // (including the developer's real ~/.claude/skills tree) is prompted for.
-    expect(asked).toEqual(["sh unapproved.sh"]);
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain("sh unapproved.sh");
     expect(recorded).toEqual([["Bash(sh unapproved.sh)", true]]);
 
+    await provider.teardown?.();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  // `cancelled` covers dismissal, timeout, interrupt and teardown. It is "no
+  // answer", never consent — recording a deny would silently bury a command the
+  // user never actually ruled on.
+  it("persists nothing when the approval dialog is dismissed", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "codeoid-skills-"));
+    mkdirSync(join(tmp, ".claude", "skills", "s"), { recursive: true });
+    writeFileSync(
+      join(tmp, ".claude", "skills", "s", "SKILL.md"),
+      "---\nname: s\n---\n!`sh pending.sh`\n",
+    );
+    const recorded: unknown[] = [];
+    const provider = new ClaudeProvider({
+      sessionId: "cancel-ses",
+      initialBackingId: "cancel-backing",
+      workspaceId: "ws_cancel",
+      store: {
+        audit: () => {},
+        getClaudeCodeSessionId: () => null,
+        setClaudeCodeSessionId: () => {},
+        getSkillCommandGrants: () => new Map<string, boolean>(),
+        setSkillCommandGrant: (...a: unknown[]) => recorded.push(a),
+      } as never,
+    });
+
+    sdkMessages = [
+      {
+        type: "user",
+        message: {
+          role: "user",
+          content:
+            '<local-command-stderr>Error: Shell command permission check failed for pattern "!`sh pending.sh`": This command requires approval</local-command-stderr>',
+        },
+      },
+      { type: "result", subtype: "success", is_error: false, num_turns: 0, result: "" },
+    ];
+
+    const run = provider.runTurn({
+      history: [],
+      userMessage: "hi",
+      workdir: tmp,
+      canUseTool: async () => ({ behavior: "allow" as const }),
+      requestUserInput: async () => ({ cancelled: true }),
+    });
+    for await (const _ of run.events) { /* drain */ }
+    await Bun.sleep(5);
+
+    expect(recorded).toEqual([]); // no verdict written — it will ask again
     await provider.teardown?.();
     rmSync(tmp, { recursive: true, force: true });
   });

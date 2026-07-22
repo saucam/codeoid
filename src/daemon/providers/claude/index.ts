@@ -141,6 +141,10 @@ export class ClaudeProvider implements SessionProvider {
 
   // Per-turn mutable canUseTool + sender — updated on each runTurn()
   #currentCanUseTool: TurnOpts["canUseTool"] | null = null;
+  /** Session's dialog gate, captured per turn — skill-command approval uses
+   * this rather than canUseTool so the autonomous auto-approve path cannot
+   * swallow it (#233). */
+  #currentRequestUserInput: TurnOpts["requestUserInput"] | null = null;
   #currentSender: AuthContext | null = null;
 
   #init: ClaudeProviderInit;
@@ -179,6 +183,7 @@ export class ClaudeProvider implements SessionProvider {
    */
   runTurn(opts: TurnOpts): TurnRun {
     this.#currentCanUseTool = opts.canUseTool;
+    this.#currentRequestUserInput = opts.requestUserInput ?? null;
     this.#currentSender = opts.sender ?? null;
 
     this.#ensureQueryLoop(opts);
@@ -645,29 +650,51 @@ export class ClaudeProvider implements SessionProvider {
    * on this developer's machine — for a turn that needed one of them. Asking
    * only for what actually blocked keeps it to a single prompt the user can
    * connect to the thing they just ran.
+   *
+   * Raised through `requestUserInput`, NOT `canUseTool`, and deliberately not
+   * keyed on session mode. Mode says how much you trust the AGENT's judgment
+   * for this task; this asks whether you trust code an installed PACK will run
+   * unconditionally, decided at install time and invisible in the tool stream.
+   * Those are orthogonal, and routing it through canUseTool meant `autonomous`
+   * auto-approved it with no dialog ever rendered — the exact silent-shell
+   * class this work exists to close.
+   *
+   * Asking always is safe here precisely because the approval is deferred: the
+   * turn has already failed by the time we ask, so an unanswered dialog blocks
+   * nothing. Worst case the skill stays blocked, which is the right default.
    */
   #requestApprovalFromDenial(stderr: string): void {
     const m = /pattern "!`([^`\n]+)`"/.exec(stderr);
     if (!m) return;
     const command = m[1].trim();
     const rule = `Bash(${command})`;
-    const canUseTool = this.#currentCanUseTool;
-    if (!canUseTool || this.#pendingSkillApprovals.has(rule)) return;
+    const ask = this.#currentRequestUserInput;
+    if (!ask || this.#pendingSkillApprovals.has(rule)) return;
     this.#pendingSkillApprovals.add(rule);
     void (async () => {
       try {
-        const verdict = await canUseTool(randomUUID(), randomUUID(), "Bash", {
-          command,
-          description:
-            "A skill declared this command and it was blocked. It runs when the slash command expands, before the agent starts. Approving lets the skill run from the next message.",
+        const answer = await ask({
+          method: "confirm",
+          title: "Allow a command declared by an installed skill?",
+          message:
+            `A skill wants to run:\n\n    ${command}\n\n` +
+            "This runs when the slash command expands, before the agent starts, " +
+            "so it never appears in the tool stream. Allowing it is remembered " +
+            "for this workspace; the skill works from your next message.",
         });
-        this.#init.store.setSkillCommandGrant(
-          this.#init.workspaceId,
-          rule,
-          verdict.behavior === "allow",
-        );
+        // `cancelled` covers dismissal, timeout, interrupt and teardown — it is
+        // "no answer", never consent. Persist nothing so we ask again later,
+        // rather than recording a deny the user never chose.
+        if (answer.cancelled) {
+          console.error(
+            `[claude-provider ${this.#init.sessionId.slice(0, 8)}] skill approval unanswered: ${command.slice(0, 60)}`,
+          );
+          return;
+        }
+        const allowed = answer.confirmed === true;
+        this.#init.store.setSkillCommandGrant(this.#init.workspaceId, rule, allowed);
         console.error(
-          `[claude-provider ${this.#init.sessionId.slice(0, 8)}] skill command ${verdict.behavior === "allow" ? "approved" : "denied"}: ${command.slice(0, 60)}`,
+          `[claude-provider ${this.#init.sessionId.slice(0, 8)}] skill command ${allowed ? "approved" : "denied"}: ${command.slice(0, 60)}`,
         );
       } catch (err) {
         // Never let an approval round-trip break the turn — leaving it
