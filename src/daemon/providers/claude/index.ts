@@ -22,7 +22,7 @@ import {
   type McpSdkServerConfigWithInstance,
 } from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { AsyncQueue } from "../../async-queue.js";
@@ -368,6 +368,18 @@ export class ClaudeProvider implements SessionProvider {
     };
     const mcpServers = Object.keys(merged).length > 0 ? merged : undefined;
 
+    // Pre-authorize exactly the commands our installed skills declare (#233).
+    // Recomputed per query so an edited skill can never leave a stale grant.
+    const skillAllowRules = skillCommandAllowRules([
+      join(homedir(), ".claude", "skills"),
+      join(opts.workdir, ".claude", "skills"),
+    ]);
+    if (skillAllowRules.length > 0) {
+      console.error(
+        `[claude-provider ${sessionId.slice(0, 8)}] pre-authorized ${skillAllowRules.length} skill command(s)`,
+      );
+    }
+
     this.#query = query({
       prompt: this.#inputQueue,
       options: {
@@ -386,6 +398,10 @@ export class ClaudeProvider implements SessionProvider {
           ...(init.fleet
             ? FLEET_TOOL_NAMES.map((t) => `mcp__codeoid_fleet__${t}`)
             : []),
+          // Verbatim grants for the shell substitutions our installed skills
+          // declare — without these a headless session silently expands the
+          // whole slash command to nothing. See skillCommandAllowRules.
+          ...skillAllowRules,
         ],
         permissionMode: "default",
         includePartialMessages: true,
@@ -819,6 +835,68 @@ export function translateSDKMessage(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * Verbatim `Bash(…)` allow rules for every shell substitution the installed
+ * skills declare (#233).
+ *
+ * A `SKILL.md` may contain `` !`…` `` substitutions that run at slash-command
+ * EXPANSION time — before the agent loop starts — to inject content into the
+ * prompt. That phase has no approval path in a headless session: `canUseTool`
+ * is not consulted pre-loop and there is no human at a terminal, so anything
+ * not pre-allowed is hard-denied. One denial aborts the WHOLE expansion, and
+ * the prompt is then consumed with nothing to run — which the SDK reports as
+ * `subtype: "success", num_turns: 0` (#232). Silent and total.
+ *
+ * `options.allowedTools` governs that expansion-time check, so granting the
+ * exact commands here fixes it in code — no mutation of the user's repo, no
+ * asking anyone to hand-edit `.claude/settings.json`. (Note that a rule in
+ * `settings.local.json` is silently ignored for this check; only
+ * `settings.json` is read. Another reason to do it in code.)
+ *
+ * Rules are emitted VERBATIM — no wildcards, no prefix grants. Measured
+ * behaviour: the checker splits compound commands and requires every part
+ * allowed, OR one exact rule covering the whole string. The exact rule is
+ * strictly least-privilege, so we use it: a skill gets the one command line it
+ * declared and nothing else. Recomputed per query, so editing a skill can
+ * never leave a stale grant behind.
+ */
+export function skillCommandAllowRules(skillsDirs: string[]): string[] {
+  const rules = new Set<string>();
+  for (const dir of skillsDirs) {
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      continue; // tier not present (no user skills, or project has no .claude/skills)
+    }
+    for (const name of entries) {
+      let md: string;
+      try {
+        md = readFileSync(join(dir, name, "SKILL.md"), "utf8");
+      } catch {
+        continue; // not a skill dir, dangling symlink, or unreadable — never fail the turn
+      }
+      // `!`<command>`` — a command containing a backtick can't be expressed in
+      // this syntax, so `[^`]` is exact. Excluding \n matters: prose like
+      // "…fails!`code`" would otherwise swallow everything up to the next
+      // backtick ANYWHERE later in the file, turning paragraphs into "commands".
+      for (const [, cmd] of md.matchAll(/!`([^`\n]+)`/g)) {
+        const trimmed = cmd.trim();
+        if (!trimmed) continue;
+        // Prose that documents the `!` character itself (e.g. "the `!` suffix,
+        // `x`") parses as a substitution. Require the first token to look like
+        // an executable name so we grant less, not more. Under-granting is the
+        // safe direction: it fails loudly via the zero-turn backstop (#232),
+        // whereas an over-grant silently pre-approves a command for in-loop use.
+        const argv0 = trimmed.split(/\s+/)[0] ?? "";
+        if (!/^[A-Za-z0-9_./~-]+$/.test(argv0)) continue;
+        rules.add(`Bash(${trimmed})`);
+      }
+    }
+  }
+  return [...rules];
+}
 
 /**
  * Apply a per-call wall-clock `timeout` (ms) to external MCP servers so a hung

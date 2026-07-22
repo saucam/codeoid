@@ -79,7 +79,11 @@ import {
   extractToolResultText,
   withMcpToolTimeout,
   buildAgentEnv,
+  skillCommandAllowRules,
 } from "../daemon/providers/claude/index.js";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { MemoryEngine } from "../daemon/memory/engine.js";
 import { SqliteEpisodeStore } from "../daemon/memory/store.js";
 import { MEMORY_TOOL_NAMES } from "../daemon/memory/index.js";
@@ -349,6 +353,102 @@ describe("translateSDKMessage – result", () => {
       type: "turn_done",
       result: { isError: undefined, errorMessage: undefined },
     });
+  });
+});
+
+describe("skillCommandAllowRules", () => {
+  const write = (dir: string, name: string, body: string) => {
+    mkdirSync(join(dir, name), { recursive: true });
+    writeFileSync(join(dir, name, "SKILL.md"), body);
+  };
+
+  // Regression (#233): a skill's `!`…`` substitution runs at expansion time,
+  // which has no approval path in a headless session. Unallowed → the whole
+  // slash command silently expands to nothing.
+  it("emits a verbatim rule per declared command", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "codeoid-skills-"));
+    write(tmp, "spec", "---\nname: spec\n---\n# spec\n!`sh ./ethos.sh`\nctx: !`cat ./x.md`\n");
+
+    const rules = skillCommandAllowRules([tmp]);
+    expect(rules).toContain("Bash(sh ./ethos.sh)");
+    expect(rules).toContain("Bash(cat ./x.md)");
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  // Measured SDK behaviour: the permission checker splits compound commands and
+  // requires every part allowed, OR one exact rule spanning the whole string.
+  // We emit the exact rule — a prefix grant like `Bash(sh:*)` would hand every
+  // session arbitrary shell.
+  it("keeps a compound command intact as one exact rule", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "codeoid-skills-"));
+    write(tmp, "spec", "---\nname: spec\n---\n!`sh a.sh 2>/dev/null || sh b.sh`\n");
+
+    const rules = skillCommandAllowRules([tmp]);
+    expect(rules).toEqual(["Bash(sh a.sh 2>/dev/null || sh b.sh)"]);
+    expect(rules.some((r) => r.includes(":*"))).toBe(false); // never a wildcard grant
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("dedupes across skills and tiers, and skips non-skill entries", () => {
+    const userDir = mkdtempSync(join(tmpdir(), "codeoid-user-"));
+    const projDir = mkdtempSync(join(tmpdir(), "codeoid-proj-"));
+    write(userDir, "a", "---\nname: a\n---\n!`sh shared.sh`\n");
+    write(projDir, "b", "---\nname: b\n---\n!`sh shared.sh`\n!`echo hi`\n");
+    mkdirSync(join(userDir, "not-a-skill"), { recursive: true }); // no SKILL.md
+
+    const rules = skillCommandAllowRules([userDir, projDir]);
+    expect(rules.filter((r) => r === "Bash(sh shared.sh)")).toHaveLength(1);
+    expect(rules).toContain("Bash(echo hi)");
+    rmSync(userDir, { recursive: true, force: true });
+    rmSync(projDir, { recursive: true, force: true });
+  });
+
+  // Regression: `[^`]+` (no \n exclusion) let prose like "…fails!`code`" swallow
+  // everything to the next backtick anywhere later in the file, turning whole
+  // paragraphs into "commands". Against the real skill set this produced grants
+  // like `Bash(suffix,)` and multi-line markdown blobs.
+  it("does not let an inline code span in prose span lines into a rule", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "codeoid-skills-"));
+    write(
+      tmp,
+      "prosey",
+      [
+        "---",
+        "name: prosey",
+        "---",
+        "!`sh real.sh`",
+        "",
+        "Watch out for a bang!`inline` and then prose that runs on",
+        "- **Control flow:** inverted condition, wrong operator,",
+        "and a much later `span` closing it.",
+      ].join("\n"),
+    );
+
+    const rules = skillCommandAllowRules([tmp]);
+    expect(rules).toContain("Bash(sh real.sh)");
+    expect(rules.every((r) => !r.includes("\n"))).toBe(true);
+    expect(rules.some((r) => r.includes("Control flow"))).toBe(false);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  // `release-notes/SKILL.md` documents the `!` character as prose — "the `!`
+  // suffix, `x`" — which parses as a substitution named `suffix,`. Inert, but a
+  // permission feature should grant less rather than more.
+  it("rejects a candidate whose first token is not an executable name", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "codeoid-skills-"));
+    write(tmp, "doc", "---\nname: doc\n---\nUse the `!` suffix, `then` code.\n!`git status`\n");
+
+    const rules = skillCommandAllowRules([tmp]);
+    expect(rules).toEqual(["Bash(git status)"]);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("returns [] for absent dirs and skills with no substitutions", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "codeoid-skills-"));
+    write(tmp, "plain", "---\nname: plain\n---\nJust prose, no substitutions.\n");
+    expect(skillCommandAllowRules([tmp])).toEqual([]);
+    expect(skillCommandAllowRules([join(tmpdir(), "codeoid-absent-dir")])).toEqual([]);
+    rmSync(tmp, { recursive: true, force: true });
   });
 });
 
