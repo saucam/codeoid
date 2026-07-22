@@ -375,14 +375,25 @@ export class CanonicalHistoryAccumulator {
           ...this.#currentTools.values(),
         ].filter((t): t is CanonicalToolCall => t.output !== undefined);
 
-        this.#history.push({
-          role: "assistant",
-          content: this.#currentText,
-          ...(toolCalls.length > 0 ? { toolCalls } : {}),
-          ...(this.#currentThinking ? { thinking: this.#currentThinking } : {}),
-          providerId: event.result.providerId,
-          model: event.result.model,
-        });
+        // Only commit a turn that actually PRODUCED something (text, tools, or
+        // thinking). A content-free turn_done is not a model turn — the Claude
+        // provider emits one when it rebuilds its query loop (e.g. on a phase-
+        // activation systemPromptAppend change), and committing a phantom empty
+        // assistant turn corrupts every "did the model respond yet?" signal
+        // (historyLength, lastTurnRole, lastAssistantText), which made a pipeline
+        // phase's transient rebuild idle look like a real rest. Skip it.
+        const produced =
+          this.#currentText.length > 0 || toolCalls.length > 0 || this.#currentThinking.length > 0;
+        if (produced) {
+          this.#history.push({
+            role: "assistant",
+            content: this.#currentText,
+            ...(toolCalls.length > 0 ? { toolCalls } : {}),
+            ...(this.#currentThinking ? { thinking: this.#currentThinking } : {}),
+            providerId: event.result.providerId,
+            model: event.result.model,
+          });
+        }
 
         // Reset in-progress state for the next turn.
         this.#currentText = "";
