@@ -106,6 +106,10 @@ function makeProvider(): ClaudeProvider {
       audit: () => {},
       getClaudeCodeSessionId: () => null,
       setClaudeCodeSessionId: () => {},
+      // #233: the provider reads persisted skill-command verdicts on every
+      // query build. Empty map = nothing approved yet.
+      getSkillCommandGrants: () => new Map<string, boolean>(),
+      setSkillCommandGrant: () => {},
     } as never,
   });
 }
@@ -440,6 +444,73 @@ describe("skillCommandAllowRules", () => {
 
     const rules = skillCommandAllowRules([tmp]);
     expect(rules).toEqual(["Bash(git status)"]);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  // L4 (#233): only commands a human already approved are granted; anything
+  // undecided is withheld and raised for approval out-of-band. Verified through
+  // the real query build so the wiring — not just the helper — is covered.
+  it("grants only approved commands and requests approval for the rest", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "codeoid-skills-"));
+    mkdirSync(join(tmp, ".claude", "skills", "s"), { recursive: true });
+    writeFileSync(
+      join(tmp, ".claude", "skills", "s", "SKILL.md"),
+      "---\nname: s\n---\n!`sh approved.sh`\n!`sh unapproved.sh`\n",
+    );
+
+    const asked: string[] = [];
+    const recorded: Array<[string, boolean]> = [];
+    const provider = new ClaudeProvider({
+      sessionId: "grant-ses",
+      initialBackingId: "grant-backing",
+      workspaceId: "ws_grant",
+      store: {
+        audit: () => {},
+        getClaudeCodeSessionId: () => null,
+        setClaudeCodeSessionId: () => {},
+        getSkillCommandGrants: () => new Map([["Bash(sh approved.sh)", true]]),
+        setSkillCommandGrant: (_ws: string, cmd: string, ok: boolean) =>
+          recorded.push([cmd, ok]),
+      } as never,
+    });
+
+    // A denial for `sh unapproved.sh`, then the zero-turn result it causes.
+    sdkMessages = [
+      {
+        type: "user",
+        message: {
+          role: "user",
+          content:
+            '<local-command-stderr>Error: Shell command permission check failed for pattern "!`sh unapproved.sh`": This command requires approval</local-command-stderr>',
+        },
+      },
+      { type: "result", subtype: "success", is_error: false, num_turns: 0, result: "" },
+    ];
+
+    const run = provider.runTurn({
+      history: [],
+      userMessage: "hi",
+      workdir: tmp,
+      canUseTool: async (_id, _aid, _name, input) => {
+        asked.push(String((input as { command?: string }).command));
+        return { behavior: "allow" as const };
+      },
+    });
+    for await (const _ of run.events) { /* drain */ }
+
+    const opts = (capturedQueryOpts?.options ?? {}) as { allowedTools?: string[] };
+    const allowed = opts.allowedTools ?? [];
+    expect(allowed).toContain("Bash(sh approved.sh)");
+    expect(allowed).not.toContain("Bash(sh unapproved.sh)"); // withheld until decided
+
+    await Bun.sleep(5); // let the fire-and-forget approval settle
+    // Demand-driven: only the command that actually blocked is raised — the
+    // already-approved one is never re-asked, and no other declared command
+    // (including the developer's real ~/.claude/skills tree) is prompted for.
+    expect(asked).toEqual(["sh unapproved.sh"]);
+    expect(recorded).toEqual([["Bash(sh unapproved.sh)", true]]);
+
+    await provider.teardown?.();
     rmSync(tmp, { recursive: true, force: true });
   });
 
@@ -1039,6 +1110,10 @@ function makeProviderWithMemory(memory: MemoryEngine): ClaudeProvider {
       audit: () => {},
       getClaudeCodeSessionId: () => null,
       setClaudeCodeSessionId: () => {},
+      // #233: the provider reads persisted skill-command verdicts on every
+      // query build. Empty map = nothing approved yet.
+      getSkillCommandGrants: () => new Map<string, boolean>(),
+      setSkillCommandGrant: () => {},
     } as never,
   });
 }

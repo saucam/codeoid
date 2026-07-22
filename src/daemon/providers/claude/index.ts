@@ -108,6 +108,9 @@ export class ClaudeProvider implements SessionProvider {
   /** Cross-message carry-over for the translator (see TranslateState) — holds
    * the `<local-command-stderr>` that explains a zero-turn "success". */
   #translateState: TranslateState = { lastLocalCommandStderr: null };
+  /** Skill commands with an approval prompt in flight — prevents a repeated
+   * turn from raising a duplicate prompt for the same command (#233). */
+  #pendingSkillApprovals = new Set<string>();
   /** Rendered transcript from seedFromHistory() — prepended to the next prompt. */
   #pendingHistorySeed: string | null = null;
 
@@ -368,17 +371,7 @@ export class ClaudeProvider implements SessionProvider {
     };
     const mcpServers = Object.keys(merged).length > 0 ? merged : undefined;
 
-    // Pre-authorize exactly the commands our installed skills declare (#233).
-    // Recomputed per query so an edited skill can never leave a stale grant.
-    const skillAllowRules = skillCommandAllowRules([
-      join(homedir(), ".claude", "skills"),
-      join(opts.workdir, ".claude", "skills"),
-    ]);
-    if (skillAllowRules.length > 0) {
-      console.error(
-        `[claude-provider ${sessionId.slice(0, 8)}] pre-authorized ${skillAllowRules.length} skill command(s)`,
-      );
-    }
+    const skillAllowRules = this.#resolveSkillGrants(opts);
 
     this.#query = query({
       prompt: this.#inputQueue,
@@ -606,9 +599,89 @@ export class ClaudeProvider implements SessionProvider {
     }
   }
 
+  /**
+   * Decide which skill-declared commands this query may run (#233).
+   *
+   * Only commands a human has already approved are granted. Anything new (or
+   * changed — the key is the verbatim command) is NOT granted; an approval is
+   * requested out-of-band and persisted, so it takes effect from the next turn.
+   *
+   * Deferred rather than blocking on purpose: these commands run at expansion
+   * time, before the agent loop exists, so there is no in-turn moment to await
+   * a decision without restructuring the turn lifecycle for every backend.
+   * Until the approval lands the expansion fails — but loudly and actionably
+   * now, via the zero-turn backstop (#232), instead of silently.
+   */
+  #resolveSkillGrants(opts: TurnOpts): string[] {
+    const declared = skillCommandAllowRules([
+      join(homedir(), ".claude", "skills"),
+      join(opts.workdir, ".claude", "skills"),
+    ]);
+    if (declared.length === 0) return [];
+
+    const decided = this.#init.store.getSkillCommandGrants(this.#init.workspaceId);
+    const granted = declared.filter((rule) => decided.get(rule) === true);
+    if (granted.length > 0) {
+      console.error(
+        `[claude-provider ${this.#init.sessionId.slice(0, 8)}] ${granted.length}/${declared.length} skill command(s) pre-authorized`,
+      );
+    }
+    return granted;
+  }
+
+  /**
+   * Raise an approval for the command a denial actually blocked on, parsed out
+   * of the `<local-command-stderr>` the SDK reported.
+   *
+   * Demand-driven on purpose. Prompting for everything *declared* would fire
+   * one prompt per undecided command across the user's whole skills tree — 31
+   * on this developer's machine — for a turn that needed one of them. Asking
+   * only for what actually blocked keeps it to a single prompt the user can
+   * connect to the thing they just ran.
+   */
+  #requestApprovalFromDenial(stderr: string): void {
+    const m = /pattern "!`([^`\n]+)`"/.exec(stderr);
+    if (!m) return;
+    const command = m[1].trim();
+    const rule = `Bash(${command})`;
+    const canUseTool = this.#currentCanUseTool;
+    if (!canUseTool || this.#pendingSkillApprovals.has(rule)) return;
+    this.#pendingSkillApprovals.add(rule);
+    void (async () => {
+      try {
+        const verdict = await canUseTool(randomUUID(), randomUUID(), "Bash", {
+          command,
+          description:
+            "A skill declared this command and it was blocked. It runs when the slash command expands, before the agent starts. Approving lets the skill run from the next message.",
+        });
+        this.#init.store.setSkillCommandGrant(
+          this.#init.workspaceId,
+          rule,
+          verdict.behavior === "allow",
+        );
+        console.error(
+          `[claude-provider ${this.#init.sessionId.slice(0, 8)}] skill command ${verdict.behavior === "allow" ? "approved" : "denied"}: ${command.slice(0, 60)}`,
+        );
+      } catch (err) {
+        // Never let an approval round-trip break the turn — leaving it
+        // undecided just means we ask again next turn.
+        console.error(
+          `[claude-provider ${this.#init.sessionId.slice(0, 8)}] skill approval failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      } finally {
+        this.#pendingSkillApprovals.delete(rule);
+      }
+    })();
+  }
+
   /** Translate one SDKMessage to ProviderEvents. */
   #translateSDKMessage(msg: SDKMessage): void {
+    // The translator clears the carried stderr on a result, so read it first.
+    const stderrBefore = this.#translateState.lastLocalCommandStderr;
     translateSDKMessage(msg, this.#emit.bind(this), this.id, this.#translateState);
+    if ((msg as { type?: string }).type === "result" && stderrBefore) {
+      this.#requestApprovalFromDenial(stderrBefore);
+    }
   }
 }
 

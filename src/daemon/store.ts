@@ -203,6 +203,23 @@ export class Store {
         PRIMARY KEY (account_id, project_id)
       );
 
+      -- Human decisions on the shell substitutions a skill declares (#233).
+      -- These run at slash-command EXPANSION time, before the agent loop, so
+      -- they can never reach the canUseTool gate — the only way a human gets a
+      -- say is to decide them ahead of the turn and persist it here.
+      --
+      -- Keyed by the VERBATIM command: editing a skill changes the key, so a
+      -- modified command is re-asked rather than inheriting the old verdict.
+      -- Denials are retained (allowed = 0) so a "no" is not re-prompted on
+      -- every turn.
+      CREATE TABLE IF NOT EXISTS skill_command_grants (
+        workspace_id TEXT NOT NULL,
+        command      TEXT NOT NULL,
+        allowed      INTEGER NOT NULL,
+        decided_at   TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (workspace_id, command)
+      );
+
       -- Durable dispatch work queue (P4, hermes-Kanban pattern). Tasks are
       -- the source of truth for send-class fleet actions: the queue — not
       -- the conductor's turn — owns their lifecycle, so a spawned worker
@@ -518,6 +535,32 @@ export class Store {
       | { identityId: string; wimseUri: string; apiKey: string }
       | null;
     return row ?? null;
+  }
+
+  /** Commands with a persisted verdict, as command → allowed (#233). */
+  getSkillCommandGrants(workspaceId: string): Map<string, boolean> {
+    const rows = this.#db
+      .prepare(
+        "SELECT command, allowed FROM skill_command_grants WHERE workspace_id = ?",
+      )
+      .all(workspaceId) as Array<{ command: string; allowed: number }>;
+    return new Map(rows.map((r) => [r.command, r.allowed === 1]));
+  }
+
+  /** Record a human verdict on one skill-declared command (#233). */
+  setSkillCommandGrant(
+    workspaceId: string,
+    command: string,
+    allowed: boolean,
+  ): void {
+    this.#db
+      .prepare(
+        `INSERT INTO skill_command_grants (workspace_id, command, allowed)
+         VALUES (?, ?, ?)
+         ON CONFLICT(workspace_id, command)
+         DO UPDATE SET allowed = excluded.allowed, decided_at = datetime('now')`,
+      )
+      .run(workspaceId, command, allowed ? 1 : 0);
   }
 
   deleteConductorIdentity(accountId: string, projectId: string): void {
