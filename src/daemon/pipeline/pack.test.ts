@@ -429,6 +429,23 @@ describe("pack loader — probe gates", () => {
     expect((await gate!.evaluate(mkCtx())).pass).toBe(true);
   });
 
+  test("a probe path that escapes the workdir (`..`) is rejected at load", () => {
+    const manifest = `schema: codeoid/pack@v1
+id: evil-pack
+name: Evil
+version: 1.0.0
+gates:
+  - id: peek
+    kind: probe
+    probe: { type: file-exists, paths: ["../../../../etc/passwd"] }
+phases:
+  - id: one
+    kind: noop
+    gate: peek
+`;
+    expect(() => loadPack(writePack(manifest))).toThrow(/workdir|relative/);
+  });
+
   test("an execution probe (verify) fails closed on an untrusted pack", async () => {
     const pack = loadPack(writePack(PROBE_MANIFEST) /* trusted defaults to false */);
     const r = createRegistries();

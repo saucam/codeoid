@@ -31,7 +31,7 @@ describe("detectEcosystem", () => {
 
   test("package.json → package-manager scripts; pnpm-lock selects pnpm", () => {
     const d = tmp();
-    writeFileSync(join(d, "package.json"), "{}");
+    writeFileSync(join(d, "package.json"), JSON.stringify({ scripts: { build: "x", test: "y" } }));
     writeFileSync(join(d, "pnpm-lock.yaml"), "");
     const eco = detectEcosystem(d);
     expect(eco.build).toBe("pnpm run build");
@@ -57,6 +57,25 @@ describe("detectEcosystem", () => {
 
   test("unrecognized workspace → empty ecosystem", () => {
     expect(detectEcosystem(tmp())).toEqual({});
+  });
+
+  test("package.json only derives commands whose scripts exist (no false lint)", () => {
+    const d = tmp();
+    writeFileSync(join(d, "package.json"), JSON.stringify({ scripts: { build: "x", test: "y" } }));
+    const eco = detectEcosystem(d);
+    expect(eco.build).toContain("run build");
+    expect(eco.test).toContain("run test");
+    expect(eco.lint).toBeUndefined(); // no lint script → not derived (would fail the gate falsely)
+  });
+
+  test("bun test is derived without a script; other commands are not", () => {
+    const d = tmp();
+    writeFileSync(join(d, "package.json"), "{}");
+    writeFileSync(join(d, "bun.lockb"), "");
+    const eco = detectEcosystem(d);
+    expect(eco.test).toBe("bun test");
+    expect(eco.build).toBeUndefined();
+    expect(eco.lint).toBeUndefined();
   });
 });
 
@@ -85,6 +104,18 @@ describe("file-exists / glob-nonempty probes (read-only, run untrusted)", () => 
     const v = await evalProbe({ type: "file-exists" }, tmp());
     expect(v.pass).toBe(false);
     expect(v.reason).toContain("no paths");
+  });
+
+  test("a `..` escaping path is fail-closed, not a host-filesystem existence oracle", async () => {
+    const v = await evalProbe({ type: "file-exists", paths: ["../../../../etc/hosts"] }, tmp());
+    expect(v.pass).toBe(false);
+    expect(v.reason).toContain("escape");
+  });
+
+  test("an escaping glob is fail-closed too", async () => {
+    const v = await evalProbe({ type: "glob-nonempty", paths: ["../*"] }, tmp());
+    expect(v.pass).toBe(false);
+    expect(v.reason).toContain("escape");
   });
 });
 

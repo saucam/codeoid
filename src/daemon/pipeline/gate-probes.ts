@@ -20,8 +20,16 @@
  * gate), so a single registered gate works across runs in different repos.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import type { GateCtx, GatePlugin, GateVerdict } from "./interface";
+
+/** A probe path/glob must stay WITHIN the run's workdir: it is relative and has
+ *  no `..` segment. Read-only probes run even for an untrusted pack, so an
+ *  unconfined `../../.ssh/id_rsa` would be a host-filesystem existence oracle.
+ *  Rejected at load (pack.ts refine) and defended here at evaluate time. */
+export function probePathEscapes(p: string): boolean {
+  return p.startsWith("/") || p.split(/[/\\]/).includes("..");
+}
 
 /** Hard bound on a single execution-probe command (build/test/lint). A test
  *  suite or build that hangs must not wedge the phase forever — on timeout we
@@ -101,11 +109,26 @@ export function detectEcosystem(workdir: string): Ecosystem {
     return { build: "cargo build", test: "cargo test", lint: "cargo clippy -- -D warnings" };
   }
   if (has("package.json")) {
-    // Prefer the project's own scripts via the detected package manager so we
-    // honor whatever build/test/lint the author already defined.
+    // Honor the project's OWN scripts via the detected package manager — but only
+    // derive a command when the matching script actually exists, else e.g.
+    // `pnpm run lint` on a repo with no lint script fails the gate falsely (npm
+    // scripts are optional, unlike go/cargo toolchain verbs). `bun test` is the
+    // one built-in that needs no script.
     const pm = has("pnpm-lock.yaml") ? "pnpm" : has("yarn.lock") ? "yarn" : has("bun.lockb") ? "bun" : "npm";
-    const run = pm === "npm" ? "npm run" : `${pm} run`;
-    return { build: `${run} build`, test: pm === "bun" ? "bun test" : `${run} test`, lint: `${run} lint` };
+    const run = `${pm} run`;
+    let scripts: Record<string, unknown> = {};
+    try {
+      const pkg = JSON.parse(readFileSync(`${workdir}/package.json`, "utf8")) as { scripts?: Record<string, unknown> };
+      scripts = pkg.scripts ?? {};
+    } catch {
+      // Unreadable/invalid package.json → no derivable scripts (fail closed at the probe).
+    }
+    const eco: Ecosystem = {};
+    if (typeof scripts.build === "string") eco.build = `${run} build`;
+    if (typeof scripts.test === "string") eco.test = `${run} test`;
+    else if (pm === "bun") eco.test = "bun test";
+    if (typeof scripts.lint === "string") eco.lint = `${run} lint`;
+    return eco;
   }
   if (has("pyproject.toml") || has("setup.py") || has("requirements.txt")) {
     return { test: "pytest -q", lint: "ruff check ." };
@@ -175,6 +198,10 @@ export function buildProbeGate(
         const globs = spec.paths ?? [];
         if (globs.length === 0) {
           return { pass: false, reason: `probe "${id}" (${spec.type}) declares no paths` };
+        }
+        const escaping = globs.find(probePathEscapes);
+        if (escaping) {
+          return { pass: false, reason: `probe "${id}": path "${escaping}" must be relative to the workdir and not escape it` };
         }
         try {
           const hit = anyGlobMatches(workdir, globs);

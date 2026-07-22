@@ -10,7 +10,7 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { z } from "zod";
-import { buildProbeGate, type ProbeSpec } from "./gate-probes";
+import { buildProbeGate, probePathEscapes, type ProbeSpec } from "./gate-probes";
 import type {
   GatePlugin,
   Pack,
@@ -66,8 +66,13 @@ const probeTypeSchema = z.enum([
 ]);
 const probeSchema = z.object({
   type: probeTypeSchema,
-  /** Path globs for file-exists / glob-nonempty (relative to the run's workdir). */
-  paths: z.array(z.string().min(1).max(512)).max(32).optional(),
+  /** Path globs for file-exists / glob-nonempty, CONFINED to the run's workdir:
+   *  relative and no `..` segment (a read-only probe runs even for an untrusted
+   *  pack, so an escaping path would be a host-filesystem existence oracle). */
+  paths: z
+    .array(z.string().min(1).max(512).refine((p) => !probePathEscapes(p), "must be relative to the workdir (no leading / or `..`)"))
+    .max(32)
+    .optional(),
 });
 const gateSchema = z.union([
   z.object({ id: idField, kind: z.literal("command"), run: z.string().min(1).max(2000), at: gateAt }),
