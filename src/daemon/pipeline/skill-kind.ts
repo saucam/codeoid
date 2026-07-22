@@ -20,12 +20,11 @@ function composePhasePrompt(base: string, spec: string | undefined, phase: Pipel
     // the goal across several phases with a human review boundary between each;
     // without this framing the model treats the goal as "build the whole thing"
     // and runs a spec/design phase straight into implementation.
-    parts.push(
-      `## Overall goal (context — do NOT try to complete all of it now)\n${spec}\n\n` +
-        "This goal is delivered across several pipeline phases with a review boundary between each. " +
-        "Your target for THIS phase is only the deliverable described above — the next phase continues " +
-        "from your output. Produce this phase's deliverable and stop there; don't run ahead into a later phase's work.",
-    );
+    const framing =
+      "This goal is delivered across several pipeline phases with a review boundary between each. " +
+      "Your target for THIS phase is only the deliverable described above — the next phase continues " +
+      "from your output. Produce this phase's deliverable and stop there; don't run ahead into a later phase's work.";
+    parts.push(`## Overall goal (context — do NOT try to complete all of it now)\n${spec}\n\n${framing}`);
   }
   const feedback = phase?.feedback ?? [];
   if (feedback.length > 0) {
