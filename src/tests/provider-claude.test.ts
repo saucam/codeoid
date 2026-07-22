@@ -80,8 +80,9 @@ import {
   withMcpToolTimeout,
   buildAgentEnv,
   skillCommandAllowRules,
+  skillSandboxDirs,
 } from "../daemon/providers/claude/index.js";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MemoryEngine } from "../daemon/memory/engine.js";
@@ -357,6 +358,38 @@ describe("translateSDKMessage – result", () => {
       type: "turn_done",
       result: { isError: undefined, errorMessage: undefined },
     });
+  });
+});
+
+describe("skillSandboxDirs", () => {
+  // Running a skill's command and reading the files it touches are independent
+  // gates that fail in that order. Once the command cleared the permission
+  // gate, the real failure surfaced: "cat in '~/.codeoid/packs/.../templates/
+  // requirement-template.md' was blocked ... may only concatenate files from
+  // the allowed working directories". Pack skills are symlinks, so the check
+  // sees the resolved path — outside the workdir.
+  it("grants the real parent of a symlinked pack skill, and nothing broader", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "codeoid-sandbox-"));
+    const packSkills = join(tmp, "packs", "ai-factory", "skills");
+    mkdirSync(join(packSkills, "spec"), { recursive: true });
+    mkdirSync(join(packSkills, "templates"), { recursive: true });
+    const skillsDir = join(tmp, "claude-skills");
+    mkdirSync(skillsDir, { recursive: true });
+    symlinkSync(join(packSkills, "spec"), join(skillsDir, "spec"));
+
+    const dirs = skillSandboxDirs([skillsDir]);
+    expect(dirs).toContain(realpathSync(packSkills)); // holds templates/
+    expect(dirs).toContain(realpathSync(skillsDir));
+    expect(dirs).not.toContain(realpathSync(join(tmp, "packs"))); // never the whole pack
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("skips dangling symlinks and absent tiers instead of throwing", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "codeoid-sandbox-"));
+    symlinkSync(join(tmp, "does-not-exist"), join(tmp, "broken"));
+    expect(() => skillSandboxDirs([tmp, join(tmpdir(), "codeoid-absent")])).not.toThrow();
+    expect(skillSandboxDirs([tmp])).toEqual([realpathSync(tmp)]);
+    rmSync(tmp, { recursive: true, force: true });
   });
 });
 

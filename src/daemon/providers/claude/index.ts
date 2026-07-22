@@ -22,9 +22,9 @@ import {
   type McpSdkServerConfigWithInstance,
 } from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "node:crypto";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { AsyncQueue } from "../../async-queue.js";
 import type { AgentIdentityManager } from "../../agent-identity.js";
 import type { Store } from "../../store.js";
@@ -433,6 +433,13 @@ export class ClaudeProvider implements SessionProvider {
         // skills, which is the intended behaviour.
         settingSources: ["project", "user"],
         skills: "all",
+        // Permission to RUN a skill's command is not permission to READ the
+        // files it touches — the two gates are independent and fail in that
+        // order. See skillSandboxDirs.
+        additionalDirectories: skillSandboxDirs([
+          join(homedir(), ".claude", "skills"),
+          join(opts.workdir, ".claude", "skills"),
+        ]),
 
         hooks: {
           PreToolUse: [{
@@ -908,6 +915,63 @@ export function translateSDKMessage(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * Absolute directories the agent must be able to READ for skills to work,
+ * beyond `cwd`.
+ *
+ * Running a skill's command and reading the files that command touches are two
+ * independent gates, and they fail in that order — which is why this looked
+ * unnecessary at first. Once skillCommandAllowRules got a command past the
+ * permission gate, the next failure was the sandbox:
+ *
+ *   cat in '~/.codeoid/packs/ai-factory/skills/templates/requirement-template.md'
+ *   was blocked. For security, Claude Code may only concatenate files from the
+ *   allowed working directories for this session: '/…/highflame-zeroid'
+ *
+ * A pack installs skills as SYMLINKS (`~/.claude/skills/spec` →
+ * `~/.codeoid/packs/<pack>/skills/spec`), and a skill's substitutions commonly
+ * read a sibling in its own tree (`templates/`, `partials/`). The sandbox check
+ * sees the RESOLVED real path, which lives outside the workdir, and denies it.
+ * `settingSources: ["user"]` makes the SDK *discover* those skills, but
+ * discovery is not access.
+ *
+ * The failure is silent and total: one blocked read aborts the WHOLE
+ * slash-command expansion — a `|| fallback` in the same substitution does not
+ * rescue it — so the turn never runs (#232 is the backstop that makes it
+ * visible).
+ *
+ * Scope is deliberately tight: each skill's PARENT (the `…/skills` root holding
+ * `templates/` and `partials/`), never the whole repo or pack it is symlinked
+ * out of.
+ */
+export function skillSandboxDirs(skillsDirs: string[]): string[] {
+  const dirs = new Set<string>();
+  for (const skillsDir of skillsDirs) {
+    let entries: string[];
+    try {
+      entries = readdirSync(skillsDir);
+    } catch {
+      continue; // tier not installed — nothing to widen
+    }
+    // The dir itself: covers non-symlinked skills and `<skillsDir>/templates`.
+    try {
+      dirs.add(realpathSync(skillsDir));
+    } catch {
+      /* unreadable — skip */
+    }
+    for (const name of entries) {
+      try {
+        // realpath resolves the pack symlink to its true location; the parent
+        // is the `…/skills` root the sibling templates/partials live under.
+        dirs.add(dirname(realpathSync(join(skillsDir, name))));
+      } catch {
+        /* dangling symlink or race — skip, never fail the turn */
+      }
+    }
+  }
+  return [...dirs];
+}
 
 /**
  * Verbatim `Bash(…)` allow rules for every shell substitution the installed
