@@ -174,6 +174,67 @@ describe("pipeline runtime (real SessionManager + mock backend)", () => {
     expect(ph.summary).toContain("phase complete");
   });
 
+  test("phase 2 completes with its OWN output, not a reuse of phase 1's summary", async () => {
+    // Guards the cross-phase-contamination class (issue: architecture instantly
+    // 'completed' reusing spec's marker-terminated output). Each phase gets its
+    // own scripted turn; phase 2's summary must be its own text. (The provider-
+    // specific query-loop REBUILD idle that triggered the original reuse isn't
+    // reproducible in the mock — one turn per send, no auto-continue — so this is
+    // the strongest feasible integration guard; the root fix is the post-send
+    // history re-baseline in runPhaseOnSession.)
+    const store2 = new Store(join(tmp, "codeoid-2ph.db"));
+    const m2 = new SessionManager(store2, transcript, undefined, undefined, undefined, {
+      config: mkConfig(join(tmp, "codeoid-2ph.db"), true),
+      _testProviderFactory: () =>
+        new MockSessionProvider("mock", [
+          sayTurn(`SPEC deliverable written\n${PHASE_COMPLETE_MARKER}`),
+          sayTurn(`ARCHITECTURE design — distinct from spec\n${PHASE_COMPLETE_MARKER}`),
+        ]),
+    });
+    const pm = m2.pipelines;
+    if (!pm) return;
+    pm.registries.skills.register({ id: "spec", kind: "slash", command: "/spec" });
+    pm.registries.skills.register({ id: "arch", kind: "slash", command: "/arch" });
+    const created = await m2.handle(
+      {
+        type: "pipeline.create",
+        id: "1",
+        name: "REQ-2",
+        workdir: join(tmp, "repo"),
+        phases: [
+          { id: "spec", kind: "skill", skill: "spec" },
+          { id: "architecture", kind: "skill", skill: "arch" },
+        ],
+      },
+      AUTH,
+      CLIENT,
+    );
+    if (created.type !== "pipeline.snapshot") throw new Error(`create failed: ${JSON.stringify(created)}`);
+    const id = created.pipeline.id;
+
+    // Phase 1 (spec) runs + halts with the spec output.
+    const p1 = await m2.handle({ type: "pipeline.advance", id: "2", pipelineId: id }, AUTH, CLIENT);
+    if (p1.type !== "pipeline.snapshot") throw new Error(`advance failed: ${JSON.stringify(p1)}`);
+    const spec = p1.pipeline.phases[0];
+    expect(spec.status).toBe("halted");
+    expect(spec.summary).toContain("SPEC deliverable");
+    if (spec.status !== "halted" || !spec.requestId) throw new Error("expected spec halt");
+
+    // Approve spec → phase 2 (architecture) runs its OWN turn and halts.
+    const p2 = await m2.handle(
+      { type: "pipeline.answer", id: "3", pipelineId: id, requestId: spec.requestId, approved: true },
+      AUTH,
+      CLIENT,
+    );
+    if (p2.type !== "pipeline.snapshot") throw new Error(`answer failed: ${JSON.stringify(p2)}`);
+    const arch = p2.pipeline.phases[1];
+    expect(arch.status).toBe("halted");
+    // The architecture phase must carry ITS OWN output — not a reuse of spec's.
+    expect(arch.summary).toContain("ARCHITECTURE design");
+    expect(arch.summary ?? "").not.toContain("SPEC deliverable");
+    await m2.drain(3_000);
+  });
+
   test("an errored backend turn fails the phase instead of passing it", async () => {
     const store2 = new Store(join(tmp, "codeoid-err.db"));
     const m2 = new SessionManager(store2, transcript, undefined, undefined, undefined, {

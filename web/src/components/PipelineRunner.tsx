@@ -304,8 +304,11 @@ const RunView: Component<{
         </For>
       </div>
 
-      {/* Gate halt — Approve / Revise / Reject. */}
-      <Show when={p().status === "halted" && halted()}>
+      {/* Gate halt — Approve / Revise / Reject. Hidden while a decision is in
+          flight (busy) so the moment you click Approve the card disappears and
+          the live phase rail + "running…" indicator show through, rather than a
+          stale card lingering over the next phase's status. */}
+      <Show when={!props.busy && p().status === "halted" && halted()}>
         {(phase) => (
           <HaltCard
             phase={phase()}

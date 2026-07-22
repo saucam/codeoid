@@ -1840,6 +1840,16 @@ mcpHub: this.#mcpHub,
         if (pendingSend !== null) {
           await session.send(pendingSend, auth);
           pendingSend = null;
+          // Re-baseline AFTER the send: session.send pushes a USER turn (our
+          // prompt / nudge) that bumps historyLength. That user turn is OUR
+          // input, not model output, so it belongs in the baseline. Without this,
+          // the transient query-loop rebuild idle that follows a phase-activation
+          // systemPromptAppend change looks like "history grew" (by our user turn)
+          // and is NOT skipped as spurious — so we'd process a rest whose
+          // lastAssistantText is still the PRIOR phase's marker-terminated output,
+          // falsely completing this phase (phase N reuses phase N-1's summary), or
+          // nudge before the model has produced anything on the FIRST phase.
+          actedHistoryLen = session.historyLength;
         }
         const finalStatus = await done;
         const text = session.lastAssistantText ?? "";
