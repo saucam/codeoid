@@ -199,6 +199,8 @@ function statusClass(status: PipelinePhaseWire["status"]): string {
       return "border-warn/50 bg-warn/10 text-warn";
     case "passed":
       return "border-success/50 bg-success/10 text-success";
+    case "skipped":
+      return "border-border bg-bg/40 text-fg-faint";
     case "failed":
       return "border-danger/50 bg-danger/10 text-danger";
     case "pending":

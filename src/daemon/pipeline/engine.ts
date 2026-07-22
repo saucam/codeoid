@@ -52,6 +52,13 @@ export class PipelineEngine {
       return touch(s);
     }
 
+    // A phase's FIRST entry is the pending→running promotion. A retry
+    // (applyFail) or a human revise (#reviseInner) sets `running` directly, so
+    // `wasPending` is false there — the auto-skip below must not fire on a
+    // re-entry (the phase already RAN; re-checking the probe would mislabel "the
+    // model just did the work" as skipped and bypass the exit gate + human
+    // boundary a normal pass gets).
+    const wasPending = phase.state.status === "pending";
     if (phase.state.status === "pending") {
       phase.state = { status: "running", startedAt: now(), attempts: 0 };
     }
@@ -60,6 +67,26 @@ export class PipelineEngine {
       return touch(s);
     }
     const attempts = phase.state.attempts;
+
+    // Auto-skip (opt-in) — if the phase requested it and its exit `gate` (a
+    // deterministic probe) ALREADY passes at FIRST entry, the deliverable is
+    // already present, so mark the phase `skipped` and advance without running it
+    // (the partially-built / resume case, docs/pipeline-phase-detection.md). A
+    // stale artifact is never silently accepted for a phase that didn't opt in,
+    // the skip is recorded (status + reason) not hidden, and it only pre-empts a
+    // never-run phase (see `wasPending` above).
+    if (wasPending && phase.def.skipWhenSatisfied && phase.def.gate) {
+      const v = await this.#gate(phase.def.gate, s, phase.def, "entry");
+      if (v.pass) {
+        phase.state = {
+          status: "skipped",
+          reason: `deliverable already present — exit probe "${phase.def.gate}" satisfied at entry`,
+        };
+        s.cursor += 1;
+        s.status = s.cursor >= s.phases.length ? "done" : "running";
+        return touch(s);
+      }
+    }
 
     // Entry (grounding) gate — read-only probe before the phase acts (§5a.3).
     if (phase.def.entryGate) {
@@ -215,6 +242,15 @@ function applyFail(
   const nextAttempts = attempts + 1;
 
   if (onFail.action === "retry" && nextAttempts < onFail.max) {
+    // Verify-fix loop: thread a failing EXIT probe's reason into the phase
+    // feedback so the re-run's prompt tells the model exactly which
+    // deterministic check failed. Reuses the revise-feedback channel that
+    // composePhasePrompt already reads (skill-kind.ts) — no new plumbing. Only
+    // for `exit` (an acceptance verdict the model can act on); an `entry`
+    // grounding failure or a `kind` execution error isn't actionable feedback.
+    if (source === "exit" && verdict.reason) {
+      phase.feedback = [...(phase.feedback ?? []), `Automated check failed — fix and retry: ${verdict.reason}`];
+    }
     phase.state = { status: "running", startedAt: now(), attempts: nextAttempts };
     s.status = "running";
     return touch(s);

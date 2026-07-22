@@ -42,6 +42,13 @@ export interface PhaseDef {
   gate?: string;
   /** entry (grounding) gate id — a read-only probe before the phase acts (§5a.3). */
   entryGate?: string;
+  /** When true, and this phase's exit `gate` (a deterministic probe) already
+   *  passes at entry, the phase is auto-marked `skipped` — its deliverable is
+   *  already present (the partially-built / resume case,
+   *  docs/pipeline-phase-detection.md). OFF by default: no phase auto-skips
+   *  unless a pack opts in, so a stale/wrong artifact is never silently accepted
+   *  for a phase that didn't request it. */
+  skipWhenSatisfied?: boolean;
   /** Capability role this phase runs under — an id into the pack's `roles` (an
    *  ai-factory role envelope). Compiles to Cedar and is enforced at the tool
    *  fence (Shield) so e.g. a `reviewer` phase cannot write or egress (§5a.1).
@@ -64,6 +71,7 @@ export type PhaseState =
   | { status: "running"; startedAt: number; attempts: number; workerSessionId?: string }
   | { status: "halted"; requestId: string; reason: string; questions?: string[] }
   | { status: "passed"; summary?: string; artifacts?: string[] }
+  | { status: "skipped"; reason: string }
   | { status: "failed"; reason: string; attempts: number };
 
 export type PipelineStatus =

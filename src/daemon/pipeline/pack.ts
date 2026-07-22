@@ -10,6 +10,7 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { z } from "zod";
+import { buildProbeGate, probePathEscapes, type ProbeSpec } from "./gate-probes";
 import type {
   GatePlugin,
   Pack,
@@ -54,8 +55,28 @@ const skillSchema = z.discriminatedUnion("kind", [
 ]);
 
 const gateAt = z.enum(["entry", "exit"]).optional();
+const probeTypeSchema = z.enum([
+  "file-exists",
+  "glob-nonempty",
+  "git-diff-nonempty",
+  "build",
+  "test",
+  "lint",
+  "verify",
+]);
+const probeSchema = z.object({
+  type: probeTypeSchema,
+  /** Path globs for file-exists / glob-nonempty, CONFINED to the run's workdir:
+   *  relative and no `..` segment (a read-only probe runs even for an untrusted
+   *  pack, so an escaping path would be a host-filesystem existence oracle). */
+  paths: z
+    .array(z.string().min(1).max(512).refine((p) => !probePathEscapes(p), "must be relative to the workdir (no leading / or `..`)"))
+    .max(32)
+    .optional(),
+});
 const gateSchema = z.union([
   z.object({ id: idField, kind: z.literal("command"), run: z.string().min(1).max(2000), at: gateAt }),
+  z.object({ id: idField, kind: z.literal("probe"), probe: probeSchema, at: gateAt }),
   z.object({ id: idField, kind: z.literal("self"), prompt: z.string().max(2000).optional(), at: gateAt }),
   z.object({ id: idField, kind: z.literal("skill"), skill: idField, at: gateAt }),
   z.object({ id: idField, kind: z.literal("review"), role: z.string().max(64).optional(), at: gateAt }),
@@ -71,6 +92,10 @@ const phaseSchema = z.object({
   model: z.string().max(256).optional(),
   gate: idField.optional(),
   entryGate: idField.optional(),
+  /** When true, and the phase's exit `gate` (a probe) already passes at entry,
+   *  the phase is auto-marked `skipped` (its deliverable is already present).
+   *  OFF by default — no phase auto-skips unless a pack opts in. */
+  skipWhenSatisfied: z.boolean().optional(),
   onFail: onFailSchema,
 });
 
@@ -102,7 +127,7 @@ export interface LoadedPack extends Pack {
   dir: string;
   /** Declared gates (id + kind) — surfaced for pack browsing without re-parsing
    *  the manifest. Whether a `command` gate actually runs still depends on trust. */
-  gateSpecs: { id: string; kind: "command" | "self" | "skill" | "review" }[];
+  gateSpecs: { id: string; kind: "command" | "probe" | "self" | "skill" | "review" }[];
 }
 
 export interface LoadPackOptions {
@@ -236,6 +261,7 @@ export function loadPack(dir: string, opts: LoadPackOptions = {}): LoadedPack {
     if (p.model) def.model = p.model;
     if (p.gate) def.gate = p.gate;
     if (p.entryGate) def.entryGate = p.entryGate;
+    if (p.skipWhenSatisfied) def.skipWhenSatisfied = true;
     const onFail = toOnFail(p.onFail);
     if (onFail) def.onFail = onFail;
     return def;
@@ -278,6 +304,13 @@ function failClosedGate(id: string, at: "entry" | "exit", reason: string): GateP
 
 function buildGate(g: PackManifest["gates"][number], dir: string, trusted: boolean): GatePlugin {
   const at = g.at ?? "exit";
+  if (g.kind === "probe") {
+    // A deterministic phase-completion probe (docs/pipeline-phase-detection.md).
+    // Read-only probes run for any pack; execution probes (build/test/lint/verify)
+    // run auto-derived commands and fail closed on an untrusted pack — buildProbeGate
+    // enforces that split, so trust is threaded through the same as a command gate.
+    return buildProbeGate(g.id, g.probe as ProbeSpec, at, trusted);
+  }
   if (g.kind === "command") {
     // A command gate is DATA (a declared shell string). Executing it is a host
     // trust decision: an untrusted pack (the registry default) fails closed, so
