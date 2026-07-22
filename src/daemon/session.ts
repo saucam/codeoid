@@ -71,7 +71,7 @@ import {
   type MemoryEngine,
   type MemoryMcpMount,
 } from "./memory/index.js";
-import { isSafeTool, roleDeniesTool } from "./providers/tool-safety.js";
+import { isElicitationTool, isSafeTool, roleDeniesTool } from "./providers/tool-safety.js";
 import type { PackActivation } from "./pipeline/index.js";
 import type { McpRegistry } from "./mcp/registry.js";
 import type { McpHub } from "./mcp/hub.js";
@@ -2750,6 +2750,14 @@ export class Session {
     // not a mode default.
     if (isFleetSendTool(toolName)) return false;
 
+    // HARD gate, mode-independent: an elicitation tool (AskUserQuestion) is a
+    // user-input requirement by definition. Auto-approving it hands control
+    // back to the backend with no answer, and the SDK's tool body immediately
+    // reports "The user did not answer the questions." It ALWAYS routes to
+    // manual approval — every mode, including autonomous workers, which park as
+    // waiting_approval until the owner attaches and answers.
+    if (isElicitationTool(toolName)) return false;
+
     if (this.#mode === "interactive") return false;
 
     // Read-only / retrieval tools — safe in both guarded and autonomous.
@@ -2786,6 +2794,7 @@ export class Session {
    */
   #peekAutoApprove(toolName: string): boolean {
     if (isFleetSendTool(toolName)) return false;
+    if (isElicitationTool(toolName)) return false;
     if (this.#mode === "interactive") return false;
     if (isSafeTool(toolName)) return true;
     if (this.#isReadonlyMcpTool(toolName)) return true;
