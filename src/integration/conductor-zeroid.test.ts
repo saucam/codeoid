@@ -81,29 +81,39 @@ function resolveTenant(): { accountId: string; projectId: string } | null {
 }
 
 /**
- * `/health` is unauthenticated, so "reachable" says nothing about whether we
- * can actually USE this ZeroID. Without this probe an expired or revoked
- * credential let the suite start and then die in the first test, leaving
- * `owner` / `conductor` unset and cascading `undefined is not an object` into
- * every dependent test — six failures reported as assertion errors when the
- * real cause was a 401. Probe a cheap authenticated read and skip cleanly.
+ * `/health` is unauthenticated and always answers, so "reachable" says nothing
+ * about whether the SDK can actually drive the agents API this suite depends
+ * on. Without this probe the suite started and then died in its first test,
+ * leaving `owner` / `conductor` unset and cascading `undefined is not an
+ * object` into every dependent test — six failures that looked like assertion
+ * bugs when the real cause was an unusable endpoint.
+ *
+ * Returns null when the API is usable, else the underlying error message, so
+ * the skip names the real reason instead of guessing at one.
+ *
+ * Known cause as of @highflame/sdk 0.3.18: `AgentsResource.basePath` is
+ * "/agents" while every sibling resource is "/api/v1/…", and the server serves
+ * /api/v1/agents/*. Every agents.* call therefore 404s. This is NOT test-only
+ * — src/daemon/agent-identity.ts calls agents.register in production.
  */
-async function zeroidUsable(
+async function agentsApiUnusable(
   accountId: string,
   projectId: string,
-): Promise<boolean> {
+): Promise<string | null> {
   try {
     await new ZeroIDClient({ baseUrl: BASE_URL, accountId, projectId }).agents.list();
-    return true;
-  } catch {
-    return false;
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
   }
 }
 
 const up = await zeroidUp();
 const tenant = up ? resolveTenant() : null;
-const usable = tenant ? await zeroidUsable(tenant.accountId, tenant.projectId) : false;
-const ready = up && tenant !== null && usable;
+const apiError = tenant
+  ? await agentsApiUnusable(tenant.accountId, tenant.projectId)
+  : "no tenant";
+const ready = up && tenant !== null && apiError === null;
 if (!up) {
   console.warn(
     `[conductor-integration] skipping — ZeroID not reachable at ${BASE_URL}`,
@@ -112,9 +122,9 @@ if (!up) {
   console.warn(
     "[conductor-integration] skipping — no tenant in ~/.codeoid/codeoid.db and no ZEROID_TEST_ACCOUNT/ZEROID_TEST_PROJECT",
   );
-} else if (!usable) {
+} else if (apiError) {
   console.warn(
-    `[conductor-integration] skipping — ZeroID at ${BASE_URL} rejected an authenticated read (expired/revoked credential, or wrong tenant ${tenant.accountId}/${tenant.projectId})`,
+    `[conductor-integration] skipping — ZeroID at ${BASE_URL} is up but its agents API is unusable: ${apiError}`,
   );
 }
 
