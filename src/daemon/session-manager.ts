@@ -1819,15 +1819,12 @@ mcpHub: this.#mcpHub,
     // still reaches Approve/Reject instead of looping. A non-idle rest
     // (error / budget-exhausted) is a real phase failure, surfaced as-is.
     let pendingSend: string | null = `${req.prompt}\n${PHASE_COMPLETION_CONTRACT}`;
-    // Watermark of the canonical history as of the last turn we ACTED on. A rest
-    // that hasn't grown the history COMMITTED no turn — it's a transient query-
-    // loop rebuild idle, not the model resting — so we skip it and wait for the
-    // real turn instead of nudging over the model mid-work. We key off history
-    // length (turns committed), NOT assistant text: a real turn that only called
-    // tools has empty assistant text (invisible to lastAssistantText) yet still
-    // grows the history, so a text check would mistake it for spurious and skip
-    // a genuine rest — hanging the loop waiting for an idle that never comes.
-    let actedHistoryLen = session.historyLength;
+    // The model's last final text as of our most recent send. A phase may only
+    // COMPLETE (or ask for input) on GENUINELY NEW final text — never on the
+    // PRIOR phase's ⟦PHASE-COMPLETE⟧ that still sits in lastAssistantText (e.g.
+    // behind a tools-only turn whose own text is empty). Without this, phase N
+    // "completes" instantly by reading phase N-1's marker.
+    let textAtSend = session.lastAssistantText ?? "";
     let nudges = 0;
     let spurious = 0;
     try {
@@ -1840,16 +1837,7 @@ mcpHub: this.#mcpHub,
         if (pendingSend !== null) {
           await session.send(pendingSend, auth);
           pendingSend = null;
-          // Re-baseline AFTER the send: session.send pushes a USER turn (our
-          // prompt / nudge) that bumps historyLength. That user turn is OUR
-          // input, not model output, so it belongs in the baseline. Without this,
-          // the transient query-loop rebuild idle that follows a phase-activation
-          // systemPromptAppend change looks like "history grew" (by our user turn)
-          // and is NOT skipped as spurious — so we'd process a rest whose
-          // lastAssistantText is still the PRIOR phase's marker-terminated output,
-          // falsely completing this phase (phase N reuses phase N-1's summary), or
-          // nudge before the model has produced anything on the FIRST phase.
-          actedHistoryLen = session.historyLength;
+          textAtSend = session.lastAssistantText ?? "";
         }
         const finalStatus = await done;
         const text = session.lastAssistantText ?? "";
@@ -1859,27 +1847,31 @@ mcpHub: this.#mcpHub,
         // so without this we'd re-drive a nudge over the stop. Hand the partial
         // to the review boundary instead.
         if (session.turnInterrupted) return { finalStatus: "idle", text };
-        // A rest that COMMITTED no new turn is spurious (e.g. a query-loop
-        // rebuild that rests transiently before the real turn runs) — the real
-        // turn is still in flight and will emit its own idle. Don't nudge; wait
-        // for it, bounded by MAX_SPURIOUS_RESTS so a backend that somehow never
-        // commits a turn still hands off to the human boundary instead of
-        // looping. (Tool calls happen WITHIN a turn, so a tools-only turn still
-        // grows the history and is NOT treated as spurious.)
-        if (session.historyLength === actedHistoryLen) {
+        // The model hasn't COMMITTED a turn in response to our prompt yet — the
+        // last canonical turn is still our own USER prompt/nudge, which is where a
+        // transient query-loop rebuild idle rests BEFORE the real turn runs. Don't
+        // nudge or complete over it; wait for the model's turn (`assistant`).
+        // Bounded by MAX_SPURIOUS_RESTS so a backend that never responds still
+        // reaches the human boundary. Immune to history-length / user-turn commit
+        // timing — the reason the earlier length watermark missed the rebuild idle.
+        if (session.lastTurnRole !== "assistant") {
           if (++spurious > MAX_SPURIOUS_RESTS) return { finalStatus: "idle", text };
           continue;
         }
-        actedHistoryLen = session.historyLength;
         spurious = 0;
-        // Deliverable complete → done, marker stripped from the summary.
-        if (isPhaseComplete(text)) return { finalStatus: "idle", text: stripPhaseCompleteMarker(text) };
+        // Deliverable complete → done, marker stripped. Guarded on NEW text: a
+        // phase can't "complete" by reading the PRIOR phase's marker still sitting
+        // in lastAssistantText (behind a tools-only turn) — only its OWN output.
+        if (text !== textAtSend && isPhaseComplete(text)) {
+          return { finalStatus: "idle", text: stripPhaseCompleteMarker(text) };
+        }
         // The model needs the user's input. Surface the question as an input
         // dialog and feed the answer back as the next turn — a REAL answer is a
         // legitimate pause (not a nudge), so it resets the give-up budget; a
         // dismissed / interrupted dialog falls through to the bounded nudge path
-        // so repeated dismissals can't loop forever.
-        if (isNeedInput(text)) {
+        // so repeated dismissals can't loop forever. Guarded on NEW text, same as
+        // completion above — never a stale marker from the prior phase.
+        if (text !== textAtSend && isNeedInput(text)) {
           const resp = await session.requestUserInput({
             method: "input",
             title: "The agent needs your input to continue this phase",

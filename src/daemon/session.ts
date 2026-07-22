@@ -933,17 +933,21 @@ export class Session {
     }
     return null;
   }
-  /**
-   * Number of turns in the canonical history. A monotonic watermark: it grows
-   * by exactly one whenever a turn is COMMITTED (an agent loop — text and/or
-   * tool calls — is flattened into one CanonicalTurn and flushed before the
-   * turn's idle status is emitted). A transient query-loop rebuild that rests
-   * WITHOUT committing a turn leaves it unchanged. The pipeline phase driver
-   * uses this to tell a real turn (even a tools-only one, whose assistant text
-   * is empty so `lastAssistantText` can't see it) from a content-free rebuild
-   * idle — without it, a tools-only rest would be mistaken for spurious.
-   */
+  /** Number of turns (user + assistant) in the canonical history. */
   get historyLength(): number { return this.#accumulator.history.length; }
+  /**
+   * Role of the MOST RECENT canonical turn (undefined before any turn). Right
+   * after `send()` the last turn is our USER prompt/nudge; a transient query-loop
+   * rebuild idle rests there WITHOUT the model committing anything, so the last
+   * turn stays `user`. Only a real model turn appends an `assistant` turn. The
+   * pipeline phase driver keys "has the model responded to this phase's prompt
+   * yet?" off this — immune to history-length/user-turn commit timing (which the
+   * length watermark was not).
+   */
+  get lastTurnRole(): "user" | "assistant" | undefined {
+    const h = this.#accumulator.history;
+    return h[h.length - 1]?.role;
+  }
   get attachedClientCount(): number { return this.#clients.size; }
 
   /**
