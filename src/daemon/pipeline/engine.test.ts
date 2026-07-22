@@ -331,6 +331,19 @@ describe("PipelineEngine — auto-skip (skipWhenSatisfied)", () => {
     );
     expect(out.phases[0].state.status).toBe("halted");
   });
+
+  test("a phase re-entered on retry/revise is NEVER auto-skipped even if its probe now passes", async () => {
+    const r = regs();
+    r.gates.register(fixedGate("passes-now", true));
+    // Simulate a retry/revise in progress: the phase is already `running`
+    // (not pending), as applyFail / #reviseInner leave it, probe would now pass.
+    const p = pipeline([{ id: "impl", kind: "noop", gate: "passes-now", skipWhenSatisfied: true }]);
+    p.phases[0].state = { status: "running", startedAt: 1, attempts: 1 };
+    p.status = "running";
+    const out = await new PipelineEngine(r).run(p);
+    // Not skipped — the model DID the work; normal pass path (exit gate + halt).
+    expect(out.phases[0].state.status).toBe("halted");
+  });
 });
 
 describe("PipelineEngine — verify-bounce (failing exit probe threads feedback on retry)", () => {

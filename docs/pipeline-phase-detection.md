@@ -196,6 +196,13 @@ Notes:
 
 When a phase declares no `entry`/`exit`, derive them:
 
+> **Auto-skip evaluates the probe ONCE, at a phase's first entry** (the
+> pending→running promotion) — never on a retry or a human revise, so a phase the
+> model *just did work on* is never mislabeled `skipped`. If the opted-in probe is
+> an execution probe (`build`/`test`/`verify`), that suite therefore runs once at
+> entry to decide the skip; prefer a cheap `file-exists` probe for skip unless the
+> "does it already build+test?" cost is intended.
+
 - **Entry probe** ← *does the phase's conventional deliverable already exist?*
   Deliverable paths follow a convention (`specs/<slug>/spec.md`, `plan.md`,
   `design.md`, `tasks.md`), pack-overridable via a phase `deliverable:` field.

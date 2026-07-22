@@ -52,6 +52,13 @@ export class PipelineEngine {
       return touch(s);
     }
 
+    // A phase's FIRST entry is the pending→running promotion. A retry
+    // (applyFail) or a human revise (#reviseInner) sets `running` directly, so
+    // `wasPending` is false there — the auto-skip below must not fire on a
+    // re-entry (the phase already RAN; re-checking the probe would mislabel "the
+    // model just did the work" as skipped and bypass the exit gate + human
+    // boundary a normal pass gets).
+    const wasPending = phase.state.status === "pending";
     if (phase.state.status === "pending") {
       phase.state = { status: "running", startedAt: now(), attempts: 0 };
     }
@@ -62,12 +69,13 @@ export class PipelineEngine {
     const attempts = phase.state.attempts;
 
     // Auto-skip (opt-in) — if the phase requested it and its exit `gate` (a
-    // deterministic probe) ALREADY passes at entry, the deliverable is already
-    // present, so mark the phase `skipped` and advance without running it (the
-    // partially-built / resume case, docs/pipeline-phase-detection.md). A stale
-    // artifact is never silently accepted for a phase that didn't opt in, and
-    // the skip is recorded (status + reason), not hidden.
-    if (phase.def.skipWhenSatisfied && phase.def.gate) {
+    // deterministic probe) ALREADY passes at FIRST entry, the deliverable is
+    // already present, so mark the phase `skipped` and advance without running it
+    // (the partially-built / resume case, docs/pipeline-phase-detection.md). A
+    // stale artifact is never silently accepted for a phase that didn't opt in,
+    // the skip is recorded (status + reason) not hidden, and it only pre-empts a
+    // never-run phase (see `wasPending` above).
+    if (wasPending && phase.def.skipWhenSatisfied && phase.def.gate) {
       const v = await this.#gate(phase.def.gate, s, phase.def, "entry");
       if (v.pass) {
         phase.state = {
