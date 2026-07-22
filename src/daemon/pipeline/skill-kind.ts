@@ -14,7 +14,19 @@ import type { PhaseRunner } from "./runner";
  *  feedback so the agent re-iterates on the same phase (docs/pipeline-run.md). */
 function composePhasePrompt(base: string, spec: string | undefined, phase: PipelinePhase | undefined): string {
   const parts = [base];
-  if (spec) parts.push(`## Goal / feature\n${spec}`);
+  if (spec) {
+    // Frame the overall goal as CONTEXT, and scope the model to THIS phase's
+    // deliverable (docs/pipeline-phase-detection.md §4). The pipeline delivers
+    // the goal across several phases with a human review boundary between each;
+    // without this framing the model treats the goal as "build the whole thing"
+    // and runs a spec/design phase straight into implementation.
+    parts.push(
+      `## Overall goal (context — do NOT try to complete all of it now)\n${spec}\n\n` +
+        "This goal is delivered across several pipeline phases with a review boundary between each. " +
+        "Your target for THIS phase is only the deliverable described above — the next phase continues " +
+        "from your output. Produce this phase's deliverable and stop there; don't run ahead into a later phase's work.",
+    );
+  }
   const feedback = phase?.feedback ?? [];
   if (feedback.length > 0) {
     if (phase?.lastSummary) parts.push(`## Your previous output for this phase\n${phase.lastSummary}`);

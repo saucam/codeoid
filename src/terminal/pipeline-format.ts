@@ -24,6 +24,7 @@ const MARK: Record<PipelinePhaseWire["status"], string> = {
   running: "▶",
   halted: "⏸",
   passed: "✓",
+  skipped: "⤼",
   failed: "✗",
 };
 
@@ -39,6 +40,7 @@ export function formatPipeline(p: PipelineWire): string[] {
     const role = ph.role ? ` [${ph.role}]` : "";
     out.push(`  ${cursor}${MARK[ph.status]} ${ph.id}${role}  ${ph.status}`);
     if (ph.status === "passed" && ph.summary) out.push(`        ↳ ${truncate(ph.summary)}`);
+    if (ph.status === "skipped" && ph.reason) out.push(`        ↳ ${truncate(ph.reason)}`);
     if (ph.status === "failed" && ph.reason) out.push(`        ↳ ${truncate(ph.reason)}`);
     if (ph.feedback && ph.feedback.length > 0) {
       out.push(`        revisions: ${ph.feedback.length}`);

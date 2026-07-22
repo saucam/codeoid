@@ -1,0 +1,113 @@
+import { describe, expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { buildProbeGate, detectEcosystem, type ProbeSpec } from "./gate-probes";
+import type { GateCtx, PipelineState } from "./interface";
+
+function tmp(): string {
+  return mkdtempSync(join(tmpdir(), "probe-test-"));
+}
+
+/** Minimal GateCtx over a workdir — the only field the probes read. */
+function ctx(workdir: string | undefined): GateCtx {
+  const pipeline = { workdir } as unknown as PipelineState;
+  return { pipeline, phase: { id: "x", kind: "noop" } };
+}
+
+async function evalProbe(spec: ProbeSpec, workdir: string | undefined, trusted = false) {
+  return buildProbeGate("g", spec, "exit", trusted).evaluate(ctx(workdir));
+}
+
+describe("detectEcosystem", () => {
+  test("go.mod → go build/test/vet", () => {
+    const d = tmp();
+    writeFileSync(join(d, "go.mod"), "module x\n");
+    const eco = detectEcosystem(d);
+    expect(eco.build).toBe("go build ./...");
+    expect(eco.test).toBe("go test ./...");
+    expect(eco.lint).toContain("go vet");
+  });
+
+  test("package.json → package-manager scripts; pnpm-lock selects pnpm", () => {
+    const d = tmp();
+    writeFileSync(join(d, "package.json"), "{}");
+    writeFileSync(join(d, "pnpm-lock.yaml"), "");
+    const eco = detectEcosystem(d);
+    expect(eco.build).toBe("pnpm run build");
+    expect(eco.test).toBe("pnpm run test");
+  });
+
+  test("pyproject.toml → pytest + ruff (no build)", () => {
+    const d = tmp();
+    writeFileSync(join(d, "pyproject.toml"), "");
+    const eco = detectEcosystem(d);
+    expect(eco.build).toBeUndefined();
+    expect(eco.test).toBe("pytest -q");
+    expect(eco.lint).toBe("ruff check .");
+  });
+
+  test("Cargo.toml → cargo build/test/clippy", () => {
+    const d = tmp();
+    writeFileSync(join(d, "Cargo.toml"), "");
+    const eco = detectEcosystem(d);
+    expect(eco.build).toBe("cargo build");
+    expect(eco.test).toBe("cargo test");
+  });
+
+  test("unrecognized workspace → empty ecosystem", () => {
+    expect(detectEcosystem(tmp())).toEqual({});
+  });
+});
+
+describe("file-exists / glob-nonempty probes (read-only, run untrusted)", () => {
+  test("passes when a bare path exists", async () => {
+    const d = tmp();
+    writeFileSync(join(d, "spec.md"), "# spec");
+    const v = await evalProbe({ type: "file-exists", paths: ["spec.md"] }, d);
+    expect(v.pass).toBe(true);
+  });
+
+  test("passes when a glob matches", async () => {
+    const d = tmp();
+    writeFileSync(join(d, "spec.md"), "# spec");
+    const v = await evalProbe({ type: "file-exists", paths: ["**/*.md"] }, d);
+    expect(v.pass).toBe(true);
+  });
+
+  test("fails with a reason when nothing matches", async () => {
+    const v = await evalProbe({ type: "file-exists", paths: ["specs/**/spec.md"] }, tmp());
+    expect(v.pass).toBe(false);
+    expect(v.reason).toContain("no file matches");
+  });
+
+  test("fails when no paths declared", async () => {
+    const v = await evalProbe({ type: "file-exists" }, tmp());
+    expect(v.pass).toBe(false);
+    expect(v.reason).toContain("no paths");
+  });
+});
+
+describe("execution probes (trust-gated)", () => {
+  test("fail closed on an untrusted pack — the command never runs", async () => {
+    const d = tmp();
+    writeFileSync(join(d, "go.mod"), "module x\n");
+    const v = await evalProbe({ type: "test" }, d, /* trusted */ false);
+    expect(v.pass).toBe(false);
+    expect(v.reason).toContain("requires a trusted pack");
+  });
+
+  test("fail when the ecosystem defines no such command (trusted but unrecognized)", async () => {
+    const v = await evalProbe({ type: "build" }, tmp(), /* trusted */ true);
+    expect(v.pass).toBe(false);
+    expect(v.reason).toContain("no build command auto-derived");
+  });
+});
+
+describe("workdir guard", () => {
+  test("any probe fails closed with no workdir set on the run", async () => {
+    const v = await evalProbe({ type: "file-exists", paths: ["x"] }, undefined);
+    expect(v.pass).toBe(false);
+    expect(v.reason).toContain("needs a workdir");
+  });
+});

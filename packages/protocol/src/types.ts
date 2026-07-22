@@ -1579,7 +1579,7 @@ export interface SessionCommandsResultMsg {
 export interface PipelinePhaseWire {
   id: string;
   name?: string;
-  status: "pending" | "running" | "halted" | "passed" | "failed";
+  status: "pending" | "running" | "halted" | "passed" | "skipped" | "failed";
   /** Capability role this phase runs under (from the pack) — a client can render
    *  the phase's tool envelope (e.g. a read-only reviewer). */
   role?: string;

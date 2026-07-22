@@ -68,6 +68,26 @@ describe("skill phase kind", () => {
     if (res.outcome === "failed") expect(res.reason).toContain("needs a phase runner");
   });
 
+  test("frames the goal as CONTEXT and scopes the model to THIS phase's deliverable", async () => {
+    let prompt = "";
+    const runner: PhaseRunner = {
+      async runPrompt(req) {
+        prompt = req.prompt;
+        return { summary: "ok" };
+      },
+    };
+    const skill: SkillPlugin = { id: "spec", kind: "slash", command: "/spec" };
+    const ctx = ctxFor({ id: "one", kind: "skill", skill: "spec" }, [skill]);
+    ctx.pipeline.spec = "Build a rate limiter";
+    await makeSkillPhaseKind(runner).run(ctx);
+    // The overall goal is present as CONTEXT, not as "the task to complete now".
+    expect(prompt).toContain("Build a rate limiter");
+    expect(prompt).toContain("Overall goal (context");
+    expect(prompt).toContain("target for THIS phase");
+    // The old whole-feature framing is gone (it caused spec→implement scope creep).
+    expect(prompt).not.toContain("## Goal / feature");
+  });
+
   test("drives a prompt/slash skill through the runner with per-phase provider/model", async () => {
     const seen: PhaseRunRequest[] = [];
     const runner: PhaseRunner = {

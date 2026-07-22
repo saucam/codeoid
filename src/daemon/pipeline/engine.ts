@@ -61,6 +61,25 @@ export class PipelineEngine {
     }
     const attempts = phase.state.attempts;
 
+    // Auto-skip (opt-in) — if the phase requested it and its exit `gate` (a
+    // deterministic probe) ALREADY passes at entry, the deliverable is already
+    // present, so mark the phase `skipped` and advance without running it (the
+    // partially-built / resume case, docs/pipeline-phase-detection.md). A stale
+    // artifact is never silently accepted for a phase that didn't opt in, and
+    // the skip is recorded (status + reason), not hidden.
+    if (phase.def.skipWhenSatisfied && phase.def.gate) {
+      const v = await this.#gate(phase.def.gate, s, phase.def, "entry");
+      if (v.pass) {
+        phase.state = {
+          status: "skipped",
+          reason: `deliverable already present — exit probe "${phase.def.gate}" satisfied at entry`,
+        };
+        s.cursor += 1;
+        s.status = s.cursor >= s.phases.length ? "done" : "running";
+        return touch(s);
+      }
+    }
+
     // Entry (grounding) gate — read-only probe before the phase acts (§5a.3).
     if (phase.def.entryGate) {
       const v = await this.#gate(phase.def.entryGate, s, phase.def, "entry");
@@ -215,6 +234,15 @@ function applyFail(
   const nextAttempts = attempts + 1;
 
   if (onFail.action === "retry" && nextAttempts < onFail.max) {
+    // Verify-fix loop: thread a failing EXIT probe's reason into the phase
+    // feedback so the re-run's prompt tells the model exactly which
+    // deterministic check failed. Reuses the revise-feedback channel that
+    // composePhasePrompt already reads (skill-kind.ts) — no new plumbing. Only
+    // for `exit` (an acceptance verdict the model can act on); an `entry`
+    // grounding failure or a `kind` execution error isn't actionable feedback.
+    if (source === "exit" && verdict.reason) {
+      phase.feedback = [...(phase.feedback ?? []), `Automated check failed — fix and retry: ${verdict.reason}`];
+    }
     phase.state = { status: "running", startedAt: now(), attempts: nextAttempts };
     s.status = "running";
     return touch(s);

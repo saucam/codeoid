@@ -9,6 +9,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createRegistries } from "./registry";
 import { PipelineManager } from "./manager";
 import { loadPack } from "./pack";
 import { PipelineStore } from "./store";
@@ -367,5 +368,128 @@ phases:
   test("throws when neither phases nor pack is given", () => {
     const mgr = new PipelineManager(new PipelineStore(new Database(":memory:")));
     expect(() => mgr.create({ name: "x", ...tenant })).toThrow("provide");
+  });
+});
+
+
+const PROBE_MANIFEST = `schema: codeoid/pack@v1
+id: probe-pack
+name: Probe Pack
+version: 1.0.0
+skills:
+  - id: spec
+    kind: slash
+    command: /spec
+gates:
+  - id: spec-done
+    kind: probe
+    probe: { type: file-exists, paths: ["spec.md"] }
+    at: exit
+  - id: impl-verify
+    kind: probe
+    probe: { type: verify }
+    at: exit
+phases:
+  - id: spec
+    skill: spec
+    gate: spec-done
+    skipWhenSatisfied: true
+  - id: implement
+    skill: spec
+    gate: impl-verify
+    onFail: { retry: 2 }
+`;
+
+describe("pack loader — probe gates", () => {
+  test("parses probe gates + skipWhenSatisfied into the phase defs and gateSpecs", () => {
+    const pack = loadPack(writePack(PROBE_MANIFEST));
+    expect(pack.pipeline[0]).toMatchObject({ id: "spec", gate: "spec-done", skipWhenSatisfied: true });
+    expect(pack.pipeline[1]).toMatchObject({ id: "implement", gate: "impl-verify" });
+    expect(pack.pipeline[1].skipWhenSatisfied).toBeUndefined(); // default off
+    expect(pack.gateSpecs).toContainEqual({ id: "spec-done", kind: "probe" });
+    expect(pack.gateSpecs).toContainEqual({ id: "impl-verify", kind: "probe" });
+  });
+
+  test("a registered file-exists probe evaluates against the run's workdir", async () => {
+    const pack = loadPack(writePack(PROBE_MANIFEST));
+    const r = createRegistries();
+    pack.register(r);
+    const gate = r.gates.resolve("spec-done");
+    expect(gate).toBeDefined();
+
+    const workdir = mkdtempSync(join(tmpdir(), "probe-wd-"));
+    dirs.push(workdir);
+    const mkCtx = () => ({
+      pipeline: { workdir } as never,
+      phase: { id: "spec", kind: "skill" as const },
+    });
+    // Absent → fail; present → pass.
+    expect((await gate!.evaluate(mkCtx())).pass).toBe(false);
+    writeFileSync(join(workdir, "spec.md"), "# spec");
+    expect((await gate!.evaluate(mkCtx())).pass).toBe(true);
+  });
+
+  test("an execution probe (verify) fails closed on an untrusted pack", async () => {
+    const pack = loadPack(writePack(PROBE_MANIFEST) /* trusted defaults to false */);
+    const r = createRegistries();
+    pack.register(r);
+    const workdir = mkdtempSync(join(tmpdir(), "probe-wd-"));
+    dirs.push(workdir);
+    writeFileSync(join(workdir, "go.mod"), "module x\n");
+    const v = await r.gates.resolve("impl-verify")!.evaluate({
+      pipeline: { workdir } as never,
+      phase: { id: "implement", kind: "skill" },
+    });
+    expect(v.pass).toBe(false);
+    expect(v.reason).toContain("requires a trusted pack");
+  });
+});
+
+// ── Auto-skip end-to-end through the manager (docs/pipeline-phase-detection.md)
+
+const SKIP_MANIFEST = `schema: codeoid/pack@v1
+id: skip-pack
+name: Skip Pack
+version: 1.0.0
+gates:
+  - id: spec-done
+    kind: probe
+    probe: { type: file-exists, paths: ["spec.md"] }
+    at: exit
+phases:
+  - id: spec
+    kind: noop
+    gate: spec-done
+    skipWhenSatisfied: true
+`;
+
+describe("pipeline auto-skip (manager end-to-end)", () => {
+  test("a phase whose deliverable already exists in the workdir is skipped, not run", async () => {
+    const mgr = new PipelineManager(new PipelineStore(new Database(":memory:")));
+    mgr.installPack(loadPack(writePack(SKIP_MANIFEST)));
+    const workdir = mkdtempSync(join(tmpdir(), "skip-wd-"));
+    dirs.push(workdir);
+    writeFileSync(join(workdir, "spec.md"), "# already written");
+
+    const p = mgr.create({ name: "run", pack: "skip-pack", workdir, ...tenant });
+    const s = await mgr.advance(p.id);
+
+    expect(s.status).toBe("done");
+    expect(s.phases[0].state.status).toBe("skipped");
+    const st = s.phases[0].state;
+    if (st.status === "skipped") expect(st.reason).toContain("already present");
+  });
+
+  test("the same phase RUNS (does not skip) when the deliverable is absent", async () => {
+    const mgr = new PipelineManager(new PipelineStore(new Database(":memory:")));
+    mgr.installPack(loadPack(writePack(SKIP_MANIFEST)));
+    const workdir = mkdtempSync(join(tmpdir(), "skip-wd-"));
+    dirs.push(workdir); // empty — no spec.md
+
+    const p = mgr.create({ name: "run", pack: "skip-pack", workdir, ...tenant });
+    const s = await mgr.advance(p.id);
+
+    // Not skipped: it ran, then the exit probe failed (no spec.md) → halted for a human.
+    expect(s.phases[0].state.status).toBe("halted");
   });
 });

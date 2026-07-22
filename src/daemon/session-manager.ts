@@ -1993,6 +1993,7 @@ mcpHub: this.#mcpHub,
         const w: PipelinePhaseWire = { id: p.def.id, name: p.def.name, role: p.def.role, status: st.status };
         if (st.status === "passed") w.summary = st.summary;
         else if (st.status === "failed") w.reason = st.reason;
+        else if (st.status === "skipped") w.reason = st.reason;
         else if (st.status === "halted") {
           w.requestId = st.requestId;
           w.reason = st.reason;

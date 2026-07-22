@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { registerBuiltins } from "./builtin";
 import { PipelineEngine } from "./engine";
-import type { PhaseDef, PhaseKind, PipelineRegistries, PipelineState } from "./interface";
+import type { GatePlugin, PhaseDef, PhaseKind, PipelineRegistries, PipelineState } from "./interface";
 import { createRegistries } from "./registry";
 
 function pipeline(phases: PhaseDef[]): PipelineState {
@@ -280,5 +280,81 @@ describe("PipelineEngine.run", () => {
     expect(out.status).toBe("halted");
     expect(out.cursor).toBe(0);
     expect(out.phases).toHaveLength(2);
+  });
+});
+
+
+// ── Deterministic phase detection (docs/pipeline-phase-detection.md) ─────────
+
+/** A gate that resolves to a fixed verdict — for exercising skip / verify-bounce. */
+function fixedGate(id: string, pass: boolean, reason?: string): GatePlugin {
+  return { id, at: "exit", async evaluate() { return pass ? { pass: true } : { pass: false, reason }; } };
+}
+
+describe("PipelineEngine — auto-skip (skipWhenSatisfied)", () => {
+  test("opted-in phase whose exit probe already passes at entry is marked skipped and advances", async () => {
+    const r = regs();
+    r.gates.register(fixedGate("done-already", true));
+    const out = await new PipelineEngine(r).run(
+      pipeline([{ id: "spec", kind: "noop", gate: "done-already", skipWhenSatisfied: true }]),
+    );
+    expect(out.status).toBe("done");
+    expect(out.cursor).toBe(1);
+    const st = out.phases[0].state;
+    expect(st.status).toBe("skipped");
+    if (st.status === "skipped") expect(st.reason).toContain("already present");
+  });
+
+  test("opted-in phase whose probe does NOT pass at entry runs normally (halts at boundary)", async () => {
+    const r = regs();
+    r.gates.register(fixedGate("not-yet", false, "missing"));
+    const out = await new PipelineEngine(r).run(
+      pipeline([{ id: "spec", kind: "noop", gate: "not-yet", skipWhenSatisfied: true }]),
+    );
+    // Not skipped — it ran; the exit gate then fails → default halt for the human.
+    expect(out.phases[0].state.status).toBe("halted");
+  });
+
+  test("a phase that did NOT opt in never auto-skips even if its probe would pass", async () => {
+    const r = regs();
+    r.gates.register(fixedGate("passes", true));
+    const out = await new PipelineEngine(r).run(
+      pipeline([{ id: "spec", kind: "noop", gate: "passes" /* no skipWhenSatisfied */ }]),
+    );
+    // It ran and halted at the boundary — the passing gate does not skip it.
+    expect(out.phases[0].state.status).toBe("halted");
+  });
+
+  test("skipWhenSatisfied with no gate is a no-op (nothing to probe) — the phase runs", async () => {
+    const out = await new PipelineEngine(regs()).run(
+      pipeline([{ id: "spec", kind: "noop", skipWhenSatisfied: true }]),
+    );
+    expect(out.phases[0].state.status).toBe("halted");
+  });
+});
+
+describe("PipelineEngine — verify-bounce (failing exit probe threads feedback on retry)", () => {
+  test("a failing exit probe under onFail:retry threads its reason into the phase feedback", async () => {
+    const r = regs();
+    r.gates.register(fixedGate("build-ok", false, "test failed (exit 1): go test ./..."));
+    const out = await new PipelineEngine(r).run(
+      pipeline([{ id: "impl", kind: "noop", gate: "build-ok", onFail: { action: "retry", max: 2 } }]),
+    );
+    // retry budget exhausts (noop can't make the probe pass) → failed, but the
+    // failure reason was threaded into feedback so a re-run's prompt carries it.
+    expect(out.status).toBe("failed");
+    const fb = out.phases[0].feedback ?? [];
+    expect(fb.length).toBeGreaterThan(0);
+    expect(fb.some((f) => f.includes("Automated check failed") && f.includes("test failed"))).toBe(true);
+  });
+
+  test("a passing exit probe adds no feedback", async () => {
+    const r = regs();
+    r.gates.register(fixedGate("build-ok", true));
+    const out = await new PipelineEngine(r).run(
+      pipeline([{ id: "impl", kind: "noop", gate: "build-ok", onFail: { action: "retry", max: 2 } }]),
+    );
+    expect(out.phases[0].state.status).toBe("halted"); // passed gate → boundary halt
+    expect(out.phases[0].feedback ?? []).toHaveLength(0);
   });
 });

@@ -9,6 +9,20 @@ and the pack model (`docs/sdlc-pipeline.md`, `pack.ts`).
 
 ---
 
+> **Scope — pipeline phase turns ONLY.** Everything in this document applies
+> exclusively to turns the pipeline conductor drives on a run's bound session
+> (`SessionManager.runPhaseOnSession`, via the `skill` phase kind and the
+> `PipelineEngine`). A **normal user session — and a user's own messages to any
+> session, including a pipeline's bound session between phases — is completely
+> unaffected**: `session.send` never touches phase framing, gates, probes, or the
+> completion contract. The framing (§4) lives in `composePhasePrompt`
+> (pipeline-only); the probes (§5–9) are `PipelineEngine` gates (pipeline-only).
+> No behavior here changes how a plain chat session works. This is verified by
+> construction: `composePhasePrompt`/`runPhaseOnSession` have no callers on the
+> `session.send` path.
+
+---
+
 ## 1. The problem
 
 A pipeline phase is a **deliverable** (a spec, a design, an implementation), but
