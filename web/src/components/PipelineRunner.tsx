@@ -22,7 +22,7 @@ import { Component, For, Show, createSignal, onCleanup, onMount } from "solid-js
 
 import { openPipelineModal } from "./NewSessionModal";
 import { abort, approve, pipelinesState, reject, revise } from "../state/pipelines";
-import { focusSession, focusedSessionId } from "../state/sessions";
+import { focusSession, focusedSessionId, sessionList } from "../state/sessions";
 import type { PipelinePhaseWire, PipelineWire } from "../protocol/types";
 
 // The cockpit can collapse to a thin tab so the run's chat gets the full pane.
@@ -58,7 +58,13 @@ const PipelineRunner: Component = () => {
   // must never strand the user with no way back: the old tab only rendered on
   // the run's own session, so navigating away after collapsing left nothing to
   // click, and `/pipeline` starts a NEW run rather than restoring this one.
-  const hasRun = () => !!runSessionId();
+  // BUT the run's bound session must still EXIST: if the user destroys it, the
+  // pipeline lingers in state with a dangling sessionId — without this check the
+  // thin tab would haunt every other session (there's nothing to reopen).
+  const hasRun = () => {
+    const id = runSessionId();
+    return !!id && sessionList().some((s) => s.id === id);
+  };
 
   // Bring the cockpit back: jump to the run's own session (so the dock can
   // overlay its chat) AND expand it. Works from any session and any collapsed
