@@ -386,6 +386,14 @@ export class Session {
   // of exiting the consumer and leaving the continuation turn without a reader.
   #pendingMidTurnCount = 0;
   #indexScheduler?: IndexScheduler;
+  /** The workspace memory index FROZEN into the system-prompt append for the
+   *  current context. Snapshotted once (per context; refreshed on rotation), NOT
+   *  refreshed per turn — the live index's relative times + counts fluctuate by a
+   *  few bytes each turn, and since the SDK fixes the system prompt at query
+   *  construction, that would force a query-loop rebuild every turn (which aborts
+   *  the in-flight turn — the systemPromptAppend-oscillation bug). Orientation is
+   *  enough in the prompt; live memory is via the recall/timeline tools. */
+  #frozenMemoryIndex: string | null = null;
   #workspaceId: string;
 
   #config?: CodeoidConfig;
@@ -2528,6 +2536,10 @@ export class Session {
     // than trying to resume an id that has no persisted history.
     this.#provider.resetToNewSession(newBackingId);
     this.#accumulator.reset();
+    // Re-snapshot the frozen workspace index for the fresh context (the rotated
+    // session gets an up-to-date orientation; within the context it stays stable
+    // so the system-prompt append doesn't churn — see #frozenMemoryIndex).
+    this.#frozenMemoryIndex = null;
     // Reset rotation-trigger inputs so the next #shouldRotate()
     // doesn't immediately fire on the SAME usage figures that just
     // triggered THIS rotation. Without this:
@@ -2704,7 +2716,13 @@ export class Session {
   }
 
   #buildMemoryPromptAppend(): string {
-    const index = this.#indexScheduler?.get() ?? "";
+    // Freeze the index for this context (see #frozenMemoryIndex): calling the
+    // live scheduler every turn churns the append by a few bytes (relative times,
+    // counts) and forces a per-turn query-loop rebuild that aborts the turn.
+    if (this.#frozenMemoryIndex === null) {
+      this.#frozenMemoryIndex = this.#indexScheduler?.get() ?? "";
+    }
+    const index = this.#frozenMemoryIndex;
     if (!index) return MEMORY_SYSTEM_PROMPT_APPEND;
     return `${MEMORY_SYSTEM_PROMPT_APPEND}\n\n${index}`;
   }
