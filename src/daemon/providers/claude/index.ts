@@ -105,6 +105,9 @@ export class ClaudeProvider implements SessionProvider {
   #hasQueried = false;
   #backingRecoveryAttempted = false;
   #lastPushedContent: string | null = null;
+  /** Cross-message carry-over for the translator (see TranslateState) — holds
+   * the `<local-command-stderr>` that explains a zero-turn "success". */
+  #translateState: TranslateState = { lastLocalCommandStderr: null };
   /** Rendered transcript from seedFromHistory() — prepended to the next prompt. */
   #pendingHistorySeed: string | null = null;
 
@@ -209,7 +212,10 @@ export class ClaudeProvider implements SessionProvider {
         this.#inputQueue?.close();
       },
       pushMidTurn: (content, priority) => {
-        this.#pushSDKMessage(content, priority);
+        // A "later" mid-turn injection is meant to MERGE into the running turn
+        // (no new query); "now"/"next" should query. Only the primary prompt
+        // (above, via the default) always queries.
+        this.#pushSDKMessage(content, priority, priority !== "later");
       },
     };
   }
@@ -279,7 +285,7 @@ export class ClaudeProvider implements SessionProvider {
 
   // ── Internal ──────────────────────────────────────────────────────────────
 
-  #pushSDKMessage(content: string, priority: "now" | "next" | "later"): void {
+  #pushSDKMessage(content: string, priority: "now" | "next" | "later", shouldQuery = true): void {
     if (!this.#inputQueue) {
       console.error(`[claude-provider ${this.#init.sessionId.slice(0, 8)}] push without active queue — dropping`);
       return;
@@ -290,6 +296,10 @@ export class ClaudeProvider implements SessionProvider {
       parent_tool_use_id: null,
       session_id: this.#claudeCodeSessionId,
       priority,
+      // shouldQuery MUST be true for a message that should trigger an assistant
+      // turn — the SDK otherwise appends it to the transcript WITHOUT querying
+      // and merges it into the next querying message (sdk.d.ts SDKUserMessage).
+      shouldQuery,
     };
     this.#lastPushedContent = content;
     try {
@@ -582,21 +592,35 @@ export class ClaudeProvider implements SessionProvider {
 
   /** Translate one SDKMessage to ProviderEvents. */
   #translateSDKMessage(msg: SDKMessage): void {
-    translateSDKMessage(msg, this.#emit.bind(this), this.id);
+    translateSDKMessage(msg, this.#emit.bind(this), this.id, this.#translateState);
   }
 }
 
 // ── Pure translation (exported for unit tests) ────────────────────────────────
 
 /**
+ * Cross-message carry-over for {@link translateSDKMessage}. The SDK reports a
+ * failed slash-command expansion on one message and the resulting zero-turn
+ * `result` on a later one, so the cause has to survive between calls. Owned by
+ * the caller (one per session) to keep the translator itself free of module
+ * state — two concurrent sessions never share a bag.
+ */
+export interface TranslateState {
+  /** Last `<local-command-stderr>` seen since the previous result. */
+  lastLocalCommandStderr: string | null;
+}
+
+/**
  * Translate one SDKMessage from the Claude Agent SDK into zero or more
  * ProviderEvents.  Pure function — no I/O, no side-effects beyond calling
- * `emit`.  Extracted so it can be unit-tested without spawning the SDK.
+ * `emit` and updating the caller-owned `state`.  Extracted so it can be
+ * unit-tested without spawning the SDK.
  */
 export function translateSDKMessage(
   msg: SDKMessage,
   emit: (event: ProviderEvent) => void,
   providerId: string,
+  state: TranslateState = { lastLocalCommandStderr: null },
 ): void {
     switch (msg.type) {
       case "assistant": {
@@ -686,6 +710,7 @@ export function translateSDKMessage(
         const r = msg as {
           subtype?: string;
           is_error?: boolean;
+          num_turns?: number;
           result?: string;
           stop_reason?: string | null;
           total_cost_usd?: number;
@@ -700,6 +725,19 @@ export function translateSDKMessage(
         };
         // Derive the model from the first key in modelUsage (most-used model this turn).
         const model = Object.keys(r.modelUsage ?? {})[0] ?? "unknown";
+        // A zero-turn run means the assistant never ran — the prompt was
+        // consumed and discarded (blocked slash-command expansion, rejected
+        // input). The SDK reports this as `subtype: "success", is_error: false`,
+        // so without this check it surfaces as a silently empty turn and no
+        // retry/error path ever fires. Never let that pass as success.
+        const zeroTurn = r.num_turns === 0;
+        const zeroTurnError = zeroTurn
+          ? `The agent produced no turn — the prompt was consumed without running. ${
+              state.lastLocalCommandStderr ??
+              "No cause was reported by the backend (check for a blocked slash-command expansion or rejected input)."
+            }`
+          : undefined;
+        state.lastLocalCommandStderr = null;
         const normalized: NormalizedTurnResult = {
           providerId,
           model,
@@ -710,8 +748,10 @@ export function translateSDKMessage(
           totalCostUsd: r.total_cost_usd ?? 0,
           durationMs: r.duration_ms ?? 0,
           stopReason: r.stop_reason ?? undefined,
-          isError: r.is_error,
-          errorMessage: r.subtype !== "success" && r.result ? r.result : undefined,
+          // Preserve `undefined` when the SDK didn't report — only force true.
+          isError: zeroTurn ? true : r.is_error,
+          errorMessage:
+            zeroTurnError ?? (r.subtype !== "success" && r.result ? r.result : undefined),
         };
         emit({ type: "turn_done", result: normalized });
         // Stay warm — keep the queue open for the next turn.
@@ -747,8 +787,17 @@ export function translateSDKMessage(
       }
 
       case "user": {
-        // tool_result blocks — close the matching tool call with real output.
         const content = (msg.message as { content?: unknown }).content;
+        // Slash-command expansion failures arrive as a synthetic string-content
+        // user message, NOT as an error. Stash it so a resulting zero-turn run
+        // can report the real cause instead of "no assistant turn ran".
+        if (typeof content === "string" && content.includes("<local-command-stderr>")) {
+          state.lastLocalCommandStderr = content
+            .replace(/<\/?local-command-stderr>/g, "")
+            .trim();
+          break;
+        }
+        // tool_result blocks — close the matching tool call with real output.
         if (!Array.isArray(content)) break;
         for (const block of content as Array<Record<string, unknown>>) {
           if (block.type !== "tool_result") continue;

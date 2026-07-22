@@ -298,6 +298,58 @@ describe("translateSDKMessage – result", () => {
     const events = collectEmits({ type: "result" });
     expect(events[0]).toMatchObject({ type: "turn_done", result: { model: "unknown" } });
   });
+
+  // A blocked slash-command expansion makes the SDK report
+  // `subtype: "success", is_error: false, num_turns: 0, result: ""` — a turn
+  // that never ran, dressed as a success. Left unflagged it surfaced as a
+  // silently empty turn and no retry/error path ever fired.
+  it("flags a zero-turn run as an error even when the SDK reports success", () => {
+    const events = collectEmits({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      num_turns: 0,
+      result: "",
+    });
+    expect(events[0]).toMatchObject({ type: "turn_done", result: { isError: true } });
+    const { errorMessage } = (events[0] as { result: { errorMessage?: string } }).result;
+    expect(errorMessage).toContain("produced no turn");
+  });
+
+  it("attributes a zero-turn run to the local-command-stderr that caused it", () => {
+    const state = { lastLocalCommandStderr: null as string | null };
+    const out: ProviderEvent[] = [];
+    const emit = (e: ProviderEvent) => out.push(e);
+    // The SDK reports the cause on an earlier message than the result, so the
+    // translator has to carry it across calls via `state`.
+    translateSDKMessage(
+      {
+        type: "user",
+        message: {
+          role: "user",
+          content:
+            "<local-command-stderr>Error: Shell command permission check failed for pattern \"!`cat ~/.claude/skills/templates/x.md`\": blocked.</local-command-stderr>",
+        },
+      } as never,
+      emit,
+      "claude",
+      state,
+    );
+    expect(out).toHaveLength(0); // stderr is captured, not emitted as a tool result
+    translateSDKMessage({ type: "result", subtype: "success", num_turns: 0 } as never, emit, "claude", state);
+    const { errorMessage } = (out[0] as { result: { errorMessage?: string } }).result;
+    expect(errorMessage).toContain("permission check failed");
+    // Cleared on the result so the next turn can't inherit a stale cause.
+    expect(state.lastLocalCommandStderr).toBeNull();
+  });
+
+  it("leaves a normal multi-turn result untouched", () => {
+    const events = collectEmits({ type: "result", subtype: "success", num_turns: 3, result: "done" });
+    expect(events[0]).toMatchObject({
+      type: "turn_done",
+      result: { isError: undefined, errorMessage: undefined },
+    });
+  });
 });
 
 describe("translateSDKMessage – system", () => {
