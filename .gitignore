@@ -16,3 +16,8 @@ junit.xml
 
 # codeoid is a bun project — bun.lock is the lockfile; never commit an npm lock
 package-lock.json
+
+# Local Claude Code state — agent worktree pointers + personal settings.
+# These were committed by accident once; keep them out of the tree.
+.claude/worktrees/
+.claude/settings.local.json
