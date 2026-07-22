@@ -36,6 +36,22 @@ export function isSafeTool(name: string): boolean {
   return false;
 }
 
+/**
+ * Built-in elicitation tools whose entire purpose is to collect a human answer
+ * (the model poses questions; a person picks). They must NEVER auto-approve, in
+ * ANY mode: an elicitation is a user-input requirement by definition, so
+ * auto-approving hands control back to the backend with no answer and the SDK's
+ * tool body immediately reports "The user did not answer the questions." They
+ * always route to manual approval — the answer arrives via `session.approve`'s
+ * `answers` patch. (`ask_user_question` is the snake_case alias some non-Claude
+ * backends surface.)
+ */
+const ELICITATION_TOOLS = new Set<string>(["AskUserQuestion", "ask_user_question"]);
+
+export function isElicitationTool(name: string): boolean {
+  return ELICITATION_TOOLS.has(name);
+}
+
 // ── Capability-role enforcement (ambient pack activation — docs/pack-loading.md)
 
 /** Built-in file-mutation tools. A `write:false` capability role (e.g. the

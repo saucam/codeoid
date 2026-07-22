@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { isSafeTool } from "../daemon/providers/tool-safety.js";
+import { isElicitationTool, isSafeTool } from "../daemon/providers/tool-safety.js";
 import { MEMORY_TOOL_NAMES } from "../daemon/memory/tools.js";
 
 describe("isSafeTool", () => {
@@ -28,5 +28,25 @@ describe("isSafeTool", () => {
     expect(isSafeTool("mcp__codeoid_memory__purge")).toBe(false);
     // Namespace as a substring but not a prefix.
     expect(isSafeTool("evil.codeoid_memory__recall")).toBe(false);
+  });
+});
+
+describe("isElicitationTool", () => {
+  test("AskUserQuestion and its snake_case alias are elicitation tools", () => {
+    expect(isElicitationTool("AskUserQuestion")).toBe(true);
+    expect(isElicitationTool("ask_user_question")).toBe(true);
+  });
+
+  test("ordinary tools are not elicitation tools", () => {
+    for (const t of [
+      "Read",
+      "Bash",
+      "Write",
+      "AskUser", // partial name must not match
+      "askuserquestion", // wrong case must not match
+      "mcp__codeoid_fleet__fleet_send",
+    ]) {
+      expect(isElicitationTool(t)).toBe(false);
+    }
   });
 });

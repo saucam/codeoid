@@ -1,9 +1,12 @@
 /**
- * The R3 hard approval gate (P4) — send-class fleet tools must NEVER
- * auto-approve, even in autonomous mode with an unlimited budget. This is
- * the safety invariant that keeps every dispatch behind the owner's explicit
- * confirmation; if it regresses, an autonomous conductor could direct the
- * fleet silently.
+ * Hard, mode-independent approval gates — tools that must NEVER auto-approve,
+ * not even in autonomous mode with an unlimited budget:
+ *   - Send-class fleet dispatch (R3): keeps every dispatch behind the owner's
+ *     explicit confirmation; if it regresses, an autonomous conductor could
+ *     direct the fleet silently.
+ *   - Elicitation (AskUserQuestion): a user-input requirement by definition;
+ *     auto-approving returns no answer and the backend no-ops with "The user
+ *     did not answer the questions."
  *
  * Driven through a real Session + MockSessionProvider (which invokes
  * canUseTool exactly like the SDK's PreToolUse gate).
@@ -169,5 +172,40 @@ describe("R3 hard approval gate", () => {
       (m) => m.type === "session.status_change" && m.status === "waiting_approval",
     );
     expect(sawWaiting).toBe(false);
+  });
+});
+
+describe("elicitation hard gate", () => {
+  test("AskUserQuestion requires approval even in autonomous mode with unlimited budget", async () => {
+    const provider = new MockSessionProvider("mock", [
+      toolTurn("AskUserQuestion", {
+        questions: [
+          {
+            question: "Which scope?",
+            header: "Scope",
+            options: [
+              { label: "A", description: "first" },
+              { label: "B", description: "second" },
+            ],
+          },
+        ],
+      }),
+    ]);
+    const session = makeSession(provider);
+    attachRecorder(session);
+    session.setMode("autonomous"); // unlimited budget → ordinary tools auto-approve
+
+    await session.send("ask me", TEST_AUTH);
+    await until(() => session.status === "waiting_approval");
+
+    // Genuinely PARKED, not auto-approving underneath. Without the hard gate,
+    // autonomous mode would auto-allow, the backend would receive no answer,
+    // and the turn would reach idle right here.
+    await new Promise((r) => setTimeout(r, 150));
+    expect(session.status).toBe("waiting_approval");
+
+    // Owner answers via the AskUserQuestion `answers` patch → turn completes.
+    session.approve("approval-1", true, TEST_AUTH, { answers: { "Which scope?": "A" } });
+    await until(() => session.status === "idle" || session.status === "error");
   });
 });
