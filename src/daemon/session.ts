@@ -3624,6 +3624,28 @@ export class Session {
         break;
       }
 
+      case "approval_pending": {
+        // A skill's expansion-time command was blocked and the provider raised
+        // an approval for it (#233). PARK the turn: waiting_approval (not error)
+        // so the pipeline phase waiter — which resolves only on idle/error —
+        // keeps the phase alive. The turn does NOT end here; the provider
+        // retries in place on approval or emits a terminal turn_done on denial,
+        // so #consumeEvents must NOT break on this event. Post a visible cue so
+        // the user knows their approval is what unblocks it.
+        this.#setStatus("waiting_approval");
+        const note = this.#makeMessage(
+          "system",
+          `⏸ A skill needs approval to run \`${event.command}\` before it can continue. Approve the prompt and it resumes automatically.`,
+          SYSTEM_IDENTITY,
+          undefined,
+          undefined,
+          { event: "skill_approval_pending" },
+        );
+        this.#persistAndBuffer(note);
+        this.#broadcastRaw(note);
+        break;
+      }
+
       case "error": {
         console.error(`[codeoid/session ${this.id}] provider error:`, event.message);
         this.#setStatus("error");

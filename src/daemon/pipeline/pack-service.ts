@@ -344,7 +344,14 @@ export class PackService {
 
     // Make the pack runnable: link the registry's slash-skills into the skills
     // dir (best-effort, never overwrites an existing skill).
-    if (registryRoot) this.#linkSkills(registryRoot);
+    //
+    // Trust-gated, same as command gates. A skill's `!`…`` frontmatter runs a
+    // host shell at slash-command expansion time, so linking an UNTRUSTED
+    // pack's skills is executing declared shell without the operator opt-in the
+    // gate path already requires — the exact "declaring is not executing" model
+    // in loadPack. Only trusted packs get linked; an untrusted pack still
+    // installs and indexes, it just contributes no runnable slash-skills.
+    if (registryRoot && trusted) this.#linkSkills(registryRoot);
 
     return this.installed();
   }
@@ -367,6 +374,15 @@ export class PackService {
     this.#save();
     // Re-register at the new trust level (gates are compiled at load).
     this.#manager?.()?.installPack(loadPack(entry.dir, { trusted }));
+    // Trust gates skill linking (see install). Toggling ON must now make the
+    // pack's slash-skills runnable — otherwise trusting is a no-op for skills
+    // and the pack silently stays half-installed. (Toggling OFF leaves the
+    // links; removing them belongs to `remove`, and unlinking live skills
+    // mid-session is out of scope here.)
+    if (trusted && entry.registry) {
+      const root = this.#cachePath(entry.registry);
+      if (existsSync(root)) this.#linkSkills(root);
+    }
     return this.installed();
   }
 

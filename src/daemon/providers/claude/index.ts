@@ -22,9 +22,9 @@ import {
   type McpSdkServerConfigWithInstance,
 } from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { AsyncQueue } from "../../async-queue.js";
 import type { AgentIdentityManager } from "../../agent-identity.js";
 import type { Store } from "../../store.js";
@@ -105,6 +105,19 @@ export class ClaudeProvider implements SessionProvider {
   #hasQueried = false;
   #backingRecoveryAttempted = false;
   #lastPushedContent: string | null = null;
+  /** Cross-message carry-over for the translator (see TranslateState) — holds
+   * the `<local-command-stderr>` that explains a zero-turn "success". */
+  #translateState: TranslateState = { lastLocalCommandStderr: null };
+  /** Skill commands with an approval prompt in flight — prevents a repeated
+   * turn from raising a duplicate prompt for the same command (#233). */
+  #pendingSkillApprovals = new Set<string>();
+  /** Granted skill-command rules the LIVE query loop was built with. A changed
+   * set forces a rebuild (like #builtSystemPromptAppend) so a just-approved
+   * command is actually in allowedTools on the retry (#233). */
+  #builtSkillAllowRules = "";
+  /** Last TurnOpts — the retry after a skill approval rebuilds the loop with
+   * these, then re-pushes #lastPushedContent into the SAME turn queue (#233). */
+  #lastTurnOpts: TurnOpts | null = null;
   /** Rendered transcript from seedFromHistory() — prepended to the next prompt. */
   #pendingHistorySeed: string | null = null;
 
@@ -135,6 +148,10 @@ export class ClaudeProvider implements SessionProvider {
 
   // Per-turn mutable canUseTool + sender — updated on each runTurn()
   #currentCanUseTool: TurnOpts["canUseTool"] | null = null;
+  /** Session's dialog gate, captured per turn — skill-command approval uses
+   * this rather than canUseTool so the autonomous auto-approve path cannot
+   * swallow it (#233). */
+  #currentRequestUserInput: TurnOpts["requestUserInput"] | null = null;
   #currentSender: AuthContext | null = null;
 
   #init: ClaudeProviderInit;
@@ -173,7 +190,9 @@ export class ClaudeProvider implements SessionProvider {
    */
   runTurn(opts: TurnOpts): TurnRun {
     this.#currentCanUseTool = opts.canUseTool;
+    this.#currentRequestUserInput = opts.requestUserInput ?? null;
     this.#currentSender = opts.sender ?? null;
+    this.#lastTurnOpts = opts;
 
     this.#ensureQueryLoop(opts);
 
@@ -209,7 +228,10 @@ export class ClaudeProvider implements SessionProvider {
         this.#inputQueue?.close();
       },
       pushMidTurn: (content, priority) => {
-        this.#pushSDKMessage(content, priority);
+        // A "later" mid-turn injection is meant to MERGE into the running turn
+        // (no new query); "now"/"next" should query. Only the primary prompt
+        // (above, via the default) always queries.
+        this.#pushSDKMessage(content, priority, priority !== "later");
       },
     };
   }
@@ -279,7 +301,7 @@ export class ClaudeProvider implements SessionProvider {
 
   // ── Internal ──────────────────────────────────────────────────────────────
 
-  #pushSDKMessage(content: string, priority: "now" | "next" | "later"): void {
+  #pushSDKMessage(content: string, priority: "now" | "next" | "later", shouldQuery = true): void {
     if (!this.#inputQueue) {
       console.error(`[claude-provider ${this.#init.sessionId.slice(0, 8)}] push without active queue — dropping`);
       return;
@@ -290,6 +312,10 @@ export class ClaudeProvider implements SessionProvider {
       parent_tool_use_id: null,
       session_id: this.#claudeCodeSessionId,
       priority,
+      // shouldQuery MUST be true for a message that should trigger an assistant
+      // turn — the SDK otherwise appends it to the transcript WITHOUT querying
+      // and merges it into the next querying message (sdk.d.ts SDKUserMessage).
+      shouldQuery,
     };
     this.#lastPushedContent = content;
     try {
@@ -301,19 +327,28 @@ export class ClaudeProvider implements SessionProvider {
 
   #ensureQueryLoop(opts: TurnOpts): void {
     const desiredAppend = opts.systemPromptAppend ?? "";
+    const skillAllowRules = this.#resolveSkillGrants(opts);
+    const desiredGrants = skillAllowRules.join("\n");
     if (this.#consumerTask && this.#inputQueue && !this.#inputQueue.closed) {
-      if (this.#builtSystemPromptAppend === desiredAppend) return;
-      // Per-turn system-prompt contributions changed (before_turn hooks,
-      // memory workspace-index refresh). The SDK fixes the system prompt at
-      // query construction, so the warm loop would silently drop the new
-      // append (#153) — rebuild instead. The fresh query RESUMES the same
-      // backing session, so no conversation context is lost; this trades
-      // subprocess warmth for the documented per-turn hook contract. Loops
-      // whose append never changes keep full warm-reuse.
-      // console.log, not error: an expected control-flow event (log-level
-      // alerting shouldn't page on it).
+      if (
+        this.#builtSystemPromptAppend === desiredAppend &&
+        this.#builtSkillAllowRules === desiredGrants
+      ) {
+        return;
+      }
+      // Per-turn contributions the SDK fixes at query construction changed, so
+      // the warm loop would silently use the stale value — rebuild instead.
+      // Two triggers: the system-prompt append (before_turn hooks, memory
+      // workspace-index refresh — #153) and the skill-command grants (a just-
+      // approved command must reach allowedTools on the retry — #233). The
+      // fresh query RESUMES the same backing session, so no context is lost.
+      // console.log, not error: an expected control-flow event.
+      const reason =
+        this.#builtSystemPromptAppend !== desiredAppend
+          ? `systemPromptAppend changed (${this.#builtSystemPromptAppend.length}B → ${desiredAppend.length}B)`
+          : "skill-command grants changed";
       console.log(
-        `[claude-provider ${this.#init.sessionId.slice(0, 8)}] systemPromptAppend changed (${this.#builtSystemPromptAppend.length}B → ${desiredAppend.length}B) — rebuilding query loop`,
+        `[claude-provider ${this.#init.sessionId.slice(0, 8)}] ${reason} — rebuilding query loop`,
       );
       this.#inputQueue?.close();
       this.#abortController?.abort();
@@ -326,6 +361,7 @@ export class ClaudeProvider implements SessionProvider {
     this.#abortController = new AbortController();
     this.#inputQueue = new AsyncQueue<SDKUserMessage>();
     this.#builtSystemPromptAppend = desiredAppend;
+    this.#builtSkillAllowRules = desiredGrants;
     this.#loopGeneration += 1;
     const myGeneration = this.#loopGeneration;
 
@@ -358,6 +394,7 @@ export class ClaudeProvider implements SessionProvider {
     };
     const mcpServers = Object.keys(merged).length > 0 ? merged : undefined;
 
+    // skillAllowRules computed above (used in the rebuild guard).
     this.#query = query({
       prompt: this.#inputQueue,
       options: {
@@ -376,6 +413,10 @@ export class ClaudeProvider implements SessionProvider {
           ...(init.fleet
             ? FLEET_TOOL_NAMES.map((t) => `mcp__codeoid_fleet__${t}`)
             : []),
+          // Verbatim grants for the shell substitutions our installed skills
+          // declare — without these a headless session silently expands the
+          // whole slash command to nothing. See skillCommandAllowRules.
+          ...skillAllowRules,
         ],
         permissionMode: "default",
         includePartialMessages: true,
@@ -414,6 +455,13 @@ export class ClaudeProvider implements SessionProvider {
         // skills, which is the intended behaviour.
         settingSources: ["project", "user"],
         skills: "all",
+        // Permission to RUN a skill's command is not permission to READ the
+        // files it touches — the two gates are independent and fail in that
+        // order. See skillSandboxDirs.
+        additionalDirectories: skillSandboxDirs([
+          join(homedir(), ".claude", "skills"),
+          join(opts.workdir, ".claude", "skills"),
+        ]),
 
         hooks: {
           PreToolUse: [{
@@ -580,23 +628,193 @@ export class ClaudeProvider implements SessionProvider {
     }
   }
 
+  /**
+   * Decide which skill-declared commands this query may run (#233).
+   *
+   * Only commands a human has already approved are granted. Anything new (or
+   * changed — the key is the verbatim command) is NOT granted; an approval is
+   * requested out-of-band and persisted, so it takes effect from the next turn.
+   *
+   * When a command is blocked, the turn PARKS (waiting_approval) rather than
+   * failing: {@link #tryHandleSkillBlock} raises an approval and, once granted,
+   * the loop rebuilds (grants are in the reuse guard) and the same prompt is
+   * retried in place. Pure + side-effect-free so it is safe to call on every
+   * warm-loop check.
+   */
+  #resolveSkillGrants(opts: TurnOpts): string[] {
+    const declared = skillCommandAllowRules([
+      join(homedir(), ".claude", "skills"),
+      join(opts.workdir, ".claude", "skills"),
+    ]);
+    if (declared.length === 0) return [];
+    const decided = this.#init.store.getSkillCommandGrants(this.#init.workspaceId);
+    return declared.filter((rule) => decided.get(rule) === true);
+  }
+
+  /**
+   * A zero-turn run was caused by a blocked skill command. Try to PARK the turn
+   * for approval instead of failing it. Returns true if handled (caller then
+   * suppresses the terminal error), false to fall through to the normal error.
+   *
+   * Demand-driven: we ask only for the command that actually blocked (parsed
+   * from the stderr), never the whole declared set — one prompt tied to what
+   * the user just ran, not 31 across their skills tree.
+   *
+   * Falls through (false → terminal error) when there is no dialog channel, or
+   * when the blocked command is ALREADY granted — a granted command that still
+   * blocks means the grant is not taking effect, and retrying would loop.
+   */
+  #tryHandleSkillBlock(stderr: string): boolean {
+    const m = /pattern "!`([^`\n]+)`"/.exec(stderr);
+    if (!m) return false;
+    const command = m[1].trim();
+    const rule = `Bash(${command})`;
+    if (!this.#currentRequestUserInput) return false;
+    const decided = this.#init.store.getSkillCommandGrants(this.#init.workspaceId);
+    if (decided.get(rule) === true) return false; // granted yet blocked → don't loop
+
+    // Park the turn (waiting_approval) — this does NOT end it. A duplicate
+    // result for an already-pending command re-parks without re-asking.
+    this.#emit({ type: "approval_pending", command });
+    if (!this.#pendingSkillApprovals.has(rule)) {
+      this.#pendingSkillApprovals.add(rule);
+      void this.#approveAndRetry(command, rule);
+    }
+    return true;
+  }
+
+  /**
+   * Await the human's decision on a parked skill command, then resolve the turn:
+   * approve → persist + retry the same prompt in place; deny/cancel → fail the
+   * turn cleanly with a reason.
+   *
+   * Raised through `requestUserInput`, NOT `canUseTool`, and deliberately not
+   * keyed on session mode. Mode says how much you trust the AGENT's judgment;
+   * this asks whether you trust code an installed PACK runs unconditionally,
+   * fixed at install time and invisible in the tool stream. Those are
+   * orthogonal — routing it through canUseTool meant `autonomous` auto-approved
+   * it with no dialog, the exact silent-shell class this work closes.
+   */
+  async #approveAndRetry(command: string, rule: string): Promise<void> {
+    const ask = this.#currentRequestUserInput;
+    try {
+      if (!ask) {
+        this.#failSkillTurn(command, "no approval channel is attached");
+        return;
+      }
+      const answer = await ask({
+        method: "confirm",
+        title: "Allow a command declared by an installed skill?",
+        message: `A skill needs to run:\n\n    ${command}\n\nIt runs when the slash command expands, before the agent starts, so it never appears in the tool stream. Approve and I'll continue automatically; the choice is remembered for this workspace.`,
+      });
+      // `cancelled` = dismissal / timeout / interrupt / teardown — "no answer",
+      // never consent. Persist nothing (so a real decision can still be made
+      // later) but fail THIS turn, since a parked turn would otherwise hang.
+      if (answer.cancelled) {
+        this.#failSkillTurn(command, "the approval was dismissed");
+        return;
+      }
+      const allowed = answer.confirmed === true;
+      this.#init.store.setSkillCommandGrant(this.#init.workspaceId, rule, allowed);
+      console.error(
+        `[claude-provider ${this.#init.sessionId.slice(0, 8)}] skill command ${allowed ? "approved" : "denied"}: ${command.slice(0, 60)}`,
+      );
+      if (allowed) this.#retryAfterGrant();
+      else this.#failSkillTurn(command, "you denied it");
+    } catch (err) {
+      this.#failSkillTurn(
+        command,
+        `approval failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      this.#pendingSkillApprovals.delete(rule);
+    }
+  }
+
+  /**
+   * Retry the parked prompt in place: rebuild the query loop (the changed grant
+   * is in the reuse guard, so this re-reads it into allowedTools) and re-push
+   * the same content into the SAME turn queue. From the session's view the one
+   * turn simply resumes — no new run, no second consumer.
+   */
+  #retryAfterGrant(): void {
+    if (!this.#lastTurnOpts || this.#lastPushedContent === null) {
+      this.#failSkillTurn("", "internal: no prompt to retry");
+      return;
+    }
+    this.#emit({ type: "custom_message", role: "info", content: "Approved — continuing…" });
+    this.#ensureQueryLoop(this.#lastTurnOpts);
+    this.#pushSDKMessage(this.#lastPushedContent, "later", true);
+  }
+
+  /** End a parked skill turn as a clean error (denied / dismissed / broken). */
+  #failSkillTurn(command: string, reason: string): void {
+    const detail = command ? `: ${command}` : "";
+    this.#emit({
+      type: "turn_done",
+      result: {
+        providerId: this.id,
+        model: "unknown",
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        totalCostUsd: 0,
+        durationMs: 0,
+        isError: true,
+        errorMessage: `Skill command not run — ${reason}${detail}`,
+      },
+    });
+  }
+
   /** Translate one SDKMessage to ProviderEvents. */
   #translateSDKMessage(msg: SDKMessage): void {
-    translateSDKMessage(msg, this.#emit.bind(this), this.id);
+    const m = msg as { type?: string; num_turns?: number };
+    // A zero-turn caused by a blocked skill command is RECOVERABLE: park the
+    // turn for approval instead of letting the pure translator turn it into a
+    // terminal error. We intercept BEFORE translating and, when handled,
+    // suppress the pure translation entirely (its only output for this result
+    // would have been the turn_done error we are replacing). Clear the carried
+    // stderr ourselves since the translator normally does that on a result.
+    const stderr = this.#translateState.lastLocalCommandStderr;
+    if (
+      m.type === "result" &&
+      m.num_turns === 0 &&
+      stderr &&
+      this.#tryHandleSkillBlock(stderr)
+    ) {
+      this.#translateState.lastLocalCommandStderr = null;
+      return;
+    }
+    translateSDKMessage(msg, this.#emit.bind(this), this.id, this.#translateState);
   }
 }
 
 // ── Pure translation (exported for unit tests) ────────────────────────────────
 
 /**
+ * Cross-message carry-over for {@link translateSDKMessage}. The SDK reports a
+ * failed slash-command expansion on one message and the resulting zero-turn
+ * `result` on a later one, so the cause has to survive between calls. Owned by
+ * the caller (one per session) to keep the translator itself free of module
+ * state — two concurrent sessions never share a bag.
+ */
+export interface TranslateState {
+  /** Last `<local-command-stderr>` seen since the previous result. */
+  lastLocalCommandStderr: string | null;
+}
+
+/**
  * Translate one SDKMessage from the Claude Agent SDK into zero or more
  * ProviderEvents.  Pure function — no I/O, no side-effects beyond calling
- * `emit`.  Extracted so it can be unit-tested without spawning the SDK.
+ * `emit` and updating the caller-owned `state`.  Extracted so it can be
+ * unit-tested without spawning the SDK.
  */
 export function translateSDKMessage(
   msg: SDKMessage,
   emit: (event: ProviderEvent) => void,
   providerId: string,
+  state: TranslateState = { lastLocalCommandStderr: null },
 ): void {
     switch (msg.type) {
       case "assistant": {
@@ -686,6 +904,7 @@ export function translateSDKMessage(
         const r = msg as {
           subtype?: string;
           is_error?: boolean;
+          num_turns?: number;
           result?: string;
           stop_reason?: string | null;
           total_cost_usd?: number;
@@ -700,6 +919,19 @@ export function translateSDKMessage(
         };
         // Derive the model from the first key in modelUsage (most-used model this turn).
         const model = Object.keys(r.modelUsage ?? {})[0] ?? "unknown";
+        // A zero-turn run means the assistant never ran — the prompt was
+        // consumed and discarded (blocked slash-command expansion, rejected
+        // input). The SDK reports this as `subtype: "success", is_error: false`,
+        // so without this check it surfaces as a silently empty turn and no
+        // retry/error path ever fires. Never let that pass as success.
+        const zeroTurn = r.num_turns === 0;
+        const zeroTurnError = zeroTurn
+          ? `The agent produced no turn — the prompt was consumed without running. ${
+              state.lastLocalCommandStderr ??
+              "No cause was reported by the backend (check for a blocked slash-command expansion or rejected input)."
+            }`
+          : undefined;
+        state.lastLocalCommandStderr = null;
         const normalized: NormalizedTurnResult = {
           providerId,
           model,
@@ -710,8 +942,10 @@ export function translateSDKMessage(
           totalCostUsd: r.total_cost_usd ?? 0,
           durationMs: r.duration_ms ?? 0,
           stopReason: r.stop_reason ?? undefined,
-          isError: r.is_error,
-          errorMessage: r.subtype !== "success" && r.result ? r.result : undefined,
+          // Preserve `undefined` when the SDK didn't report — only force true.
+          isError: zeroTurn ? true : r.is_error,
+          errorMessage:
+            zeroTurnError ?? (r.subtype !== "success" && r.result ? r.result : undefined),
         };
         emit({ type: "turn_done", result: normalized });
         // Stay warm — keep the queue open for the next turn.
@@ -747,8 +981,17 @@ export function translateSDKMessage(
       }
 
       case "user": {
-        // tool_result blocks — close the matching tool call with real output.
         const content = (msg.message as { content?: unknown }).content;
+        // Slash-command expansion failures arrive as a synthetic string-content
+        // user message, NOT as an error. Stash it so a resulting zero-turn run
+        // can report the real cause instead of "no assistant turn ran".
+        if (typeof content === "string" && content.includes("<local-command-stderr>")) {
+          state.lastLocalCommandStderr = content
+            .replace(/<\/?local-command-stderr>/g, "")
+            .trim();
+          break;
+        }
+        // tool_result blocks — close the matching tool call with real output.
         if (!Array.isArray(content)) break;
         for (const block of content as Array<Record<string, unknown>>) {
           if (block.type !== "tool_result") continue;
@@ -770,6 +1013,128 @@ export function translateSDKMessage(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * Absolute directories the agent must be able to READ for skills to work,
+ * beyond `cwd`.
+ *
+ * Running a skill's command and reading the files that command touches are two
+ * independent gates, and they fail in that order — which is why this looked
+ * unnecessary at first. Once skillCommandAllowRules got a command past the
+ * permission gate, the next failure was the sandbox:
+ *
+ *   cat in '~/.codeoid/packs/ai-factory/skills/templates/requirement-template.md'
+ *   was blocked. For security, Claude Code may only concatenate files from the
+ *   allowed working directories for this session: '/…/highflame-zeroid'
+ *
+ * A pack installs skills as SYMLINKS (`~/.claude/skills/spec` →
+ * `~/.codeoid/packs/<pack>/skills/spec`), and a skill's substitutions commonly
+ * read a sibling in its own tree (`templates/`, `partials/`). The sandbox check
+ * sees the RESOLVED real path, which lives outside the workdir, and denies it.
+ * `settingSources: ["user"]` makes the SDK *discover* those skills, but
+ * discovery is not access.
+ *
+ * The failure is silent and total: one blocked read aborts the WHOLE
+ * slash-command expansion — a `|| fallback` in the same substitution does not
+ * rescue it — so the turn never runs (#232 is the backstop that makes it
+ * visible).
+ *
+ * Scope is deliberately tight: each skill's PARENT (the `…/skills` root holding
+ * `templates/` and `partials/`), never the whole repo or pack it is symlinked
+ * out of.
+ */
+export function skillSandboxDirs(skillsDirs: string[]): string[] {
+  const dirs = new Set<string>();
+  for (const skillsDir of skillsDirs) {
+    let entries: string[];
+    try {
+      entries = readdirSync(skillsDir);
+    } catch {
+      continue; // tier not installed — nothing to widen
+    }
+    // The dir itself: covers non-symlinked skills and `<skillsDir>/templates`.
+    try {
+      dirs.add(realpathSync(skillsDir));
+    } catch {
+      /* unreadable — skip */
+    }
+    for (const name of entries) {
+      try {
+        // realpath resolves the pack symlink to its true location; the parent
+        // is the `…/skills` root the sibling templates/partials live under.
+        dirs.add(dirname(realpathSync(join(skillsDir, name))));
+      } catch {
+        /* dangling symlink or race — skip, never fail the turn */
+      }
+    }
+  }
+  return [...dirs];
+}
+
+/**
+ * Verbatim `Bash(…)` allow rules for every shell substitution the installed
+ * skills declare (#233).
+ *
+ * A `SKILL.md` may contain `` !`…` `` substitutions that run at slash-command
+ * EXPANSION time — before the agent loop starts — to inject content into the
+ * prompt. That phase has no approval path in a headless session: `canUseTool`
+ * is not consulted pre-loop and there is no human at a terminal, so anything
+ * not pre-allowed is hard-denied. One denial aborts the WHOLE expansion, and
+ * the prompt is then consumed with nothing to run — which the SDK reports as
+ * `subtype: "success", num_turns: 0` (#232). Silent and total.
+ *
+ * `options.allowedTools` governs that expansion-time check, so granting the
+ * exact commands here fixes it in code — no mutation of the user's repo, no
+ * asking anyone to hand-edit `.claude/settings.json`. (Note that a rule in
+ * `settings.local.json` is silently ignored for this check; only
+ * `settings.json` is read. Another reason to do it in code.)
+ *
+ * Rules are emitted VERBATIM — no wildcards, no prefix grants. Measured
+ * behaviour: the checker splits compound commands and requires every part
+ * allowed, OR one exact rule covering the whole string. The exact rule is
+ * strictly least-privilege, so we use it: a skill gets the one command line it
+ * declared and nothing else. Recomputed per query, so editing a skill can
+ * never leave a stale grant behind.
+ */
+export function skillCommandAllowRules(skillsDirs: string[]): string[] {
+  const rules = new Set<string>();
+  for (const dir of skillsDirs) {
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      continue; // tier not present (no user skills, or project has no .claude/skills)
+    }
+    for (const name of entries) {
+      let md: string;
+      try {
+        md = readFileSync(join(dir, name, "SKILL.md"), "utf8");
+      } catch {
+        continue; // not a skill dir, dangling symlink, or unreadable — never fail the turn
+      }
+      // `!`<command>`` — a command containing a backtick can't be expressed in
+      // this syntax, so `[^`]` is exact. Excluding \n matters: prose like
+      // "…fails!`code`" would otherwise swallow everything up to the next
+      // backtick ANYWHERE later in the file, turning paragraphs into "commands".
+      for (const [, cmd] of md.matchAll(/!`([^`\n]+)`/g)) {
+        const trimmed = cmd.trim();
+        if (!trimmed) continue;
+        // Prose that documents the `!` character itself (e.g. "the `!` suffix,
+        // `x`") parses as a substitution. Require the first token to look like
+        // an executable name so we grant less, not more. Under-granting is the
+        // safe direction: it fails loudly via the zero-turn backstop (#232),
+        // whereas an over-grant silently pre-approves a command for in-loop use.
+        // `=` is allowed so an env-prefixed command (`FOO=1 ./run.sh`) — whose
+        // first token is the assignment — isn't filtered out, which would leave
+        // an approved grant permanently un-derivable and fail its retry.
+        const argv0 = trimmed.split(/\s+/)[0] ?? "";
+        if (!/^[A-Za-z0-9_./~=-]+$/.test(argv0)) continue;
+        rules.add(`Bash(${trimmed})`);
+      }
+    }
+  }
+  return [...rules];
+}
 
 /**
  * Apply a per-call wall-clock `timeout` (ms) to external MCP servers so a hung

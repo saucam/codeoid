@@ -52,7 +52,7 @@
     "format": "biome format --write src/ packages/protocol/src/ packages/core/src/",
     "test": "bun test src/tests src/daemon packages/protocol/src packages/core/src",
     "test:coverage": "bun test src/tests src/daemon packages/protocol/src packages/core/src --coverage --coverage-reporter=lcov --reporter=junit --reporter-outfile=junit.xml",
-    "test:integration": "bun test src/tests/*.integration.test.ts",
+    "test:integration": "bun test src/integration",
     "test:web": "cd web && bun run test",
     "typecheck": "bun x tsc --noEmit && bun x tsc --noEmit -p packages/protocol && bun x tsc --noEmit -p packages/core",
     "smoke": "bash scripts/release-smoke.sh",

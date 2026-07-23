@@ -79,7 +79,12 @@ import {
   extractToolResultText,
   withMcpToolTimeout,
   buildAgentEnv,
+  skillCommandAllowRules,
+  skillSandboxDirs,
 } from "../daemon/providers/claude/index.js";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { MemoryEngine } from "../daemon/memory/engine.js";
 import { SqliteEpisodeStore } from "../daemon/memory/store.js";
 import { MEMORY_TOOL_NAMES } from "../daemon/memory/index.js";
@@ -102,6 +107,10 @@ function makeProvider(): ClaudeProvider {
       audit: () => {},
       getClaudeCodeSessionId: () => null,
       setClaudeCodeSessionId: () => {},
+      // #233: the provider reads persisted skill-command verdicts on every
+      // query build. Empty map = nothing approved yet.
+      getSkillCommandGrants: () => new Map<string, boolean>(),
+      setSkillCommandGrant: () => {},
     } as never,
   });
 }
@@ -297,6 +306,364 @@ describe("translateSDKMessage – result", () => {
   it("falls back to 'unknown' model when modelUsage is absent", () => {
     const events = collectEmits({ type: "result" });
     expect(events[0]).toMatchObject({ type: "turn_done", result: { model: "unknown" } });
+  });
+
+  // A blocked slash-command expansion makes the SDK report
+  // `subtype: "success", is_error: false, num_turns: 0, result: ""` — a turn
+  // that never ran, dressed as a success. Left unflagged it surfaced as a
+  // silently empty turn and no retry/error path ever fired.
+  it("flags a zero-turn run as an error even when the SDK reports success", () => {
+    const events = collectEmits({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      num_turns: 0,
+      result: "",
+    });
+    expect(events[0]).toMatchObject({ type: "turn_done", result: { isError: true } });
+    const { errorMessage } = (events[0] as { result: { errorMessage?: string } }).result;
+    expect(errorMessage).toContain("produced no turn");
+  });
+
+  it("attributes a zero-turn run to the local-command-stderr that caused it", () => {
+    const state = { lastLocalCommandStderr: null as string | null };
+    const out: ProviderEvent[] = [];
+    const emit = (e: ProviderEvent) => out.push(e);
+    // The SDK reports the cause on an earlier message than the result, so the
+    // translator has to carry it across calls via `state`.
+    translateSDKMessage(
+      {
+        type: "user",
+        message: {
+          role: "user",
+          content:
+            "<local-command-stderr>Error: Shell command permission check failed for pattern \"!`cat ~/.claude/skills/templates/x.md`\": blocked.</local-command-stderr>",
+        },
+      } as never,
+      emit,
+      "claude",
+      state,
+    );
+    expect(out).toHaveLength(0); // stderr is captured, not emitted as a tool result
+    translateSDKMessage({ type: "result", subtype: "success", num_turns: 0 } as never, emit, "claude", state);
+    const { errorMessage } = (out[0] as { result: { errorMessage?: string } }).result;
+    expect(errorMessage).toContain("permission check failed");
+    // Cleared on the result so the next turn can't inherit a stale cause.
+    expect(state.lastLocalCommandStderr).toBeNull();
+  });
+
+  it("leaves a normal multi-turn result untouched", () => {
+    const events = collectEmits({ type: "result", subtype: "success", num_turns: 3, result: "done" });
+    expect(events[0]).toMatchObject({
+      type: "turn_done",
+      result: { isError: undefined, errorMessage: undefined },
+    });
+  });
+});
+
+describe("skillSandboxDirs", () => {
+  // Running a skill's command and reading the files it touches are independent
+  // gates that fail in that order. Once the command cleared the permission
+  // gate, the real failure surfaced: "cat in '~/.codeoid/packs/.../templates/
+  // requirement-template.md' was blocked ... may only concatenate files from
+  // the allowed working directories". Pack skills are symlinks, so the check
+  // sees the resolved path — outside the workdir.
+  it("grants the real parent of a symlinked pack skill, and nothing broader", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "codeoid-sandbox-"));
+    const packSkills = join(tmp, "packs", "ai-factory", "skills");
+    mkdirSync(join(packSkills, "spec"), { recursive: true });
+    mkdirSync(join(packSkills, "templates"), { recursive: true });
+    const skillsDir = join(tmp, "claude-skills");
+    mkdirSync(skillsDir, { recursive: true });
+    symlinkSync(join(packSkills, "spec"), join(skillsDir, "spec"));
+
+    const dirs = skillSandboxDirs([skillsDir]);
+    expect(dirs).toContain(realpathSync(packSkills)); // holds templates/
+    expect(dirs).toContain(realpathSync(skillsDir));
+    expect(dirs).not.toContain(realpathSync(join(tmp, "packs"))); // never the whole pack
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("skips dangling symlinks and absent tiers instead of throwing", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "codeoid-sandbox-"));
+    symlinkSync(join(tmp, "does-not-exist"), join(tmp, "broken"));
+    expect(() => skillSandboxDirs([tmp, join(tmpdir(), "codeoid-absent")])).not.toThrow();
+    expect(skillSandboxDirs([tmp])).toEqual([realpathSync(tmp)]);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+});
+
+describe("skillCommandAllowRules", () => {
+  const write = (dir: string, name: string, body: string) => {
+    mkdirSync(join(dir, name), { recursive: true });
+    writeFileSync(join(dir, name, "SKILL.md"), body);
+  };
+
+  // Regression (#233): a skill's `!`…`` substitution runs at expansion time,
+  // which has no approval path in a headless session. Unallowed → the whole
+  // slash command silently expands to nothing.
+  it("emits a verbatim rule per declared command", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "codeoid-skills-"));
+    write(tmp, "spec", "---\nname: spec\n---\n# spec\n!`sh ./ethos.sh`\nctx: !`cat ./x.md`\n");
+
+    const rules = skillCommandAllowRules([tmp]);
+    expect(rules).toContain("Bash(sh ./ethos.sh)");
+    expect(rules).toContain("Bash(cat ./x.md)");
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  // Measured SDK behaviour: the permission checker splits compound commands and
+  // requires every part allowed, OR one exact rule spanning the whole string.
+  // We emit the exact rule — a prefix grant like `Bash(sh:*)` would hand every
+  // session arbitrary shell.
+  it("keeps a compound command intact as one exact rule", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "codeoid-skills-"));
+    write(tmp, "spec", "---\nname: spec\n---\n!`sh a.sh 2>/dev/null || sh b.sh`\n");
+
+    const rules = skillCommandAllowRules([tmp]);
+    expect(rules).toEqual(["Bash(sh a.sh 2>/dev/null || sh b.sh)"]);
+    expect(rules.some((r) => r.includes(":*"))).toBe(false); // never a wildcard grant
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("dedupes across skills and tiers, and skips non-skill entries", () => {
+    const userDir = mkdtempSync(join(tmpdir(), "codeoid-user-"));
+    const projDir = mkdtempSync(join(tmpdir(), "codeoid-proj-"));
+    write(userDir, "a", "---\nname: a\n---\n!`sh shared.sh`\n");
+    write(projDir, "b", "---\nname: b\n---\n!`sh shared.sh`\n!`echo hi`\n");
+    mkdirSync(join(userDir, "not-a-skill"), { recursive: true }); // no SKILL.md
+
+    const rules = skillCommandAllowRules([userDir, projDir]);
+    expect(rules.filter((r) => r === "Bash(sh shared.sh)")).toHaveLength(1);
+    expect(rules).toContain("Bash(echo hi)");
+    rmSync(userDir, { recursive: true, force: true });
+    rmSync(projDir, { recursive: true, force: true });
+  });
+
+  // Regression: `[^`]+` (no \n exclusion) let prose like "…fails!`code`" swallow
+  // everything to the next backtick anywhere later in the file, turning whole
+  // paragraphs into "commands". Against the real skill set this produced grants
+  // like `Bash(suffix,)` and multi-line markdown blobs.
+  it("does not let an inline code span in prose span lines into a rule", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "codeoid-skills-"));
+    write(
+      tmp,
+      "prosey",
+      [
+        "---",
+        "name: prosey",
+        "---",
+        "!`sh real.sh`",
+        "",
+        "Watch out for a bang!`inline` and then prose that runs on",
+        "- **Control flow:** inverted condition, wrong operator,",
+        "and a much later `span` closing it.",
+      ].join("\n"),
+    );
+
+    const rules = skillCommandAllowRules([tmp]);
+    expect(rules).toContain("Bash(sh real.sh)");
+    expect(rules.every((r) => !r.includes("\n"))).toBe(true);
+    expect(rules.some((r) => r.includes("Control flow"))).toBe(false);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  // `release-notes/SKILL.md` documents the `!` character as prose — "the `!`
+  // suffix, `x`" — which parses as a substitution named `suffix,`. Inert, but a
+  // permission feature should grant less rather than more.
+  it("rejects a candidate whose first token is not an executable name", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "codeoid-skills-"));
+    write(tmp, "doc", "---\nname: doc\n---\nUse the `!` suffix, `then` code.\n!`git status`\n");
+
+    const rules = skillCommandAllowRules([tmp]);
+    expect(rules).toEqual(["Bash(git status)"]);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  // An env-var-prefixed command (`FOO=1 ./run.sh`) has an assignment as its
+  // first token — it must NOT be filtered out, or the grant is un-derivable and
+  // the retry fails after approval. `=` is in the argv0 class for this reason.
+  it("keeps an env-var-prefixed command (assignment as first token)", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "codeoid-skills-"));
+    write(tmp, "env", "---\nname: env\n---\n!`FOO=1 ./run.sh --flag`\n");
+
+    const rules = skillCommandAllowRules([tmp]);
+    expect(rules).toEqual(["Bash(FOO=1 ./run.sh --flag)"]);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  // L4 (#233): only commands a human already approved are granted; anything
+  // undecided is withheld and raised for approval out-of-band. Verified through
+  // the real query build so the wiring — not just the helper — is covered.
+  it("returns [] for absent dirs and skills with no substitutions", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "codeoid-skills-"));
+    write(tmp, "plain", "---\nname: plain\n---\nJust prose, no substitutions.\n");
+    expect(skillCommandAllowRules([tmp])).toEqual([]);
+    expect(skillCommandAllowRules([join(tmpdir(), "codeoid-absent-dir")])).toEqual([]);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+});
+
+// Park-and-retry: a blocked skill command must NOT fail the turn (that killed the
+// pipeline — #233). It parks the turn (approval_pending), and on approval the
+// loop rebuilds with the grant and retries the SAME prompt in place.
+describe("ClaudeProvider – skill-command approval (#233)", () => {
+  // A Store backed by a real Map, so a persisted grant is visible to the retry's
+  // query rebuild (a fixed-map stub could never satisfy the retry).
+  function statefulStore(seed: Record<string, boolean> = {}) {
+    const grants = new Map<string, boolean>(Object.entries(seed));
+    const writes: Array<[string, boolean]> = [];
+    return {
+      store: {
+        audit: () => {},
+        getClaudeCodeSessionId: () => null,
+        setClaudeCodeSessionId: () => {},
+        getSkillCommandGrants: () => new Map(grants),
+        setSkillCommandGrant: (_ws: string, cmd: string, ok: boolean) => {
+          grants.set(cmd, ok);
+          writes.push([cmd, ok]);
+        },
+      } as never,
+      writes,
+    };
+  }
+
+  function skillDir(body: string): string {
+    const tmp = mkdtempSync(join(tmpdir(), "codeoid-skills-"));
+    mkdirSync(join(tmp, ".claude", "skills", "s"), { recursive: true });
+    writeFileSync(join(tmp, ".claude", "skills", "s", "SKILL.md"), body);
+    return tmp;
+  }
+
+  const blockFor = (cmd: string) => ({
+    type: "user",
+    message: {
+      role: "user",
+      content: `<local-command-stderr>Error: Shell command permission check failed for pattern "!\`${cmd}\`": This command requires approval</local-command-stderr>`,
+    },
+  });
+  const zeroTurn = { type: "result", subtype: "success", is_error: false, num_turns: 0, result: "" };
+
+  it("parks (approval_pending) then retries to success once approved", async () => {
+    const tmp = skillDir("---\nname: s\n---\n!`sh gate.sh`\n");
+    const { store, writes } = statefulStore();
+    const provider = new ClaudeProvider({
+      sessionId: "ok", initialBackingId: "b", workspaceId: "ws", store,
+    });
+
+    // Turn 1 blocks. The gate keeps the mock stream open (like the real
+    // streaming SDK, which parks after a zero-turn rather than ending).
+    sdkMessages = [blockFor("sh gate.sh"), zeroTurn];
+    queryCallCount = 0; // count builds for THIS turn: initial + retry rebuild
+    let release!: () => void;
+    sdkGate = new Promise<void>((r) => { release = r; });
+
+    const run = provider.runTurn({
+      history: [], userMessage: "/spec", workdir: tmp,
+      canUseTool: async () => ({ behavior: "allow" as const }),
+      requestUserInput: async () => {
+        // On approval the retry rebuilds the query — swap in a real turn so the
+        // rebuilt loop yields success instead of the same block.
+        sdkMessages = [
+          { type: "assistant", message: { content: [{ type: "text", text: "done" }] }, parent_tool_use_id: null },
+          { type: "result", subtype: "success", is_error: false, num_turns: 1, result: "done", modelUsage: {} },
+        ];
+        return { confirmed: true, cancelled: false };
+      },
+    });
+
+    const events: ProviderEvent[] = [];
+    const drain = (async () => { for await (const e of run.events) events.push(e); })();
+    await Bun.sleep(20); // let park → approve → rebuild → retry run
+    release();
+    await drain;
+
+    // Parked (not failed) with the exact command...
+    const pending = events.find((e) => e.type === "approval_pending") as
+      | Extract<ProviderEvent, { type: "approval_pending" }> | undefined;
+    expect(pending?.command).toBe("sh gate.sh");
+    // ...approval persisted, loop rebuilt (2 query builds), retry granted it...
+    expect(writes).toEqual([["Bash(sh gate.sh)", true]]);
+    expect(queryCallCount).toBe(2);
+    const retryAllowed = ((capturedQueryOpts?.options ?? {}) as { allowedTools?: string[] }).allowedTools ?? [];
+    expect(retryAllowed).toContain("Bash(sh gate.sh)");
+    // ...and the turn ended a real success, never an error.
+    const done = events.filter((e) => e.type === "turn_done") as Array<Extract<ProviderEvent, { type: "turn_done" }>>;
+    expect(done).toHaveLength(1);
+    expect(done[0].result.isError).toBeFalsy();
+
+    await provider.teardown?.();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("fails the turn cleanly when denied", async () => {
+    const tmp = skillDir("---\nname: s\n---\n!`sh nope.sh`\n");
+    const { store, writes } = statefulStore();
+    const provider = new ClaudeProvider({ sessionId: "d", initialBackingId: "b", workspaceId: "ws", store });
+    sdkMessages = [blockFor("sh nope.sh"), zeroTurn];
+
+    const run = provider.runTurn({
+      history: [], userMessage: "/spec", workdir: tmp,
+      canUseTool: async () => ({ behavior: "allow" as const }),
+      requestUserInput: async () => ({ confirmed: false, cancelled: false }), // deny
+    });
+    const events: ProviderEvent[] = [];
+    for await (const e of run.events) events.push(e);
+    await Bun.sleep(5);
+
+    const done = events.find((e) => e.type === "turn_done") as Extract<ProviderEvent, { type: "turn_done" }>;
+    expect(done.result.isError).toBe(true);
+    expect(done.result.errorMessage).toContain("denied");
+    expect(writes).toEqual([["Bash(sh nope.sh)", false]]); // a denial IS recorded
+    await provider.teardown?.();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("dismissal fails the turn and persists nothing (no false consent)", async () => {
+    const tmp = skillDir("---\nname: s\n---\n!`sh maybe.sh`\n");
+    const { store, writes } = statefulStore();
+    const provider = new ClaudeProvider({ sessionId: "c", initialBackingId: "b", workspaceId: "ws", store });
+    sdkMessages = [blockFor("sh maybe.sh"), zeroTurn];
+
+    const run = provider.runTurn({
+      history: [], userMessage: "/spec", workdir: tmp,
+      canUseTool: async () => ({ behavior: "allow" as const }),
+      requestUserInput: async () => ({ cancelled: true }),
+    });
+    const events: ProviderEvent[] = [];
+    for await (const e of run.events) events.push(e);
+    await Bun.sleep(5);
+
+    const done = events.find((e) => e.type === "turn_done") as Extract<ProviderEvent, { type: "turn_done" }>;
+    expect(done.result.isError).toBe(true);
+    expect(done.result.errorMessage).toContain("dismissed");
+    expect(writes).toEqual([]); // no verdict — a real decision can still be made
+    await provider.teardown?.();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("does not loop: an already-granted command that still blocks fails terminally", async () => {
+    const tmp = skillDir("---\nname: s\n---\n!`sh broken.sh`\n");
+    const { store } = statefulStore({ "Bash(sh broken.sh)": true }); // already granted
+    const provider = new ClaudeProvider({ sessionId: "g", initialBackingId: "b", workspaceId: "ws", store });
+    sdkMessages = [blockFor("sh broken.sh"), zeroTurn];
+
+    let asked = 0;
+    const run = provider.runTurn({
+      history: [], userMessage: "/spec", workdir: tmp,
+      canUseTool: async () => ({ behavior: "allow" as const }),
+      requestUserInput: async () => { asked++; return { cancelled: true }; },
+    });
+    const events: ProviderEvent[] = [];
+    for await (const e of run.events) events.push(e);
+
+    expect(asked).toBe(0); // never re-prompted for an already-granted command
+    expect(events.find((e) => e.type === "approval_pending")).toBeUndefined();
+    // Falls through to the normal zero-turn backstop error.
+    const done = events.find((e) => e.type === "turn_done") as Extract<ProviderEvent, { type: "turn_done" }>;
+    expect(done.result.isError).toBe(true);
+    await provider.teardown?.();
+    rmSync(tmp, { recursive: true, force: true });
   });
 });
 
@@ -887,6 +1254,10 @@ function makeProviderWithMemory(memory: MemoryEngine): ClaudeProvider {
       audit: () => {},
       getClaudeCodeSessionId: () => null,
       setClaudeCodeSessionId: () => {},
+      // #233: the provider reads persisted skill-command verdicts on every
+      // query build. Empty map = nothing approved yet.
+      getSkillCommandGrants: () => new Map<string, boolean>(),
+      setSkillCommandGrant: () => {},
     } as never,
   });
 }
