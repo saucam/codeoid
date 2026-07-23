@@ -16,6 +16,7 @@ import {
   pipelinesState,
   _resetPipelinesForTest,
 } from "./pipelines";
+import { sessionList, focusedSessionId } from "./sessions";
 
 afterEach(() => {
   _resetPipelinesForTest();
@@ -72,6 +73,36 @@ describe("pipelines store", () => {
     expect(pipelinesState().pipeline?.id).toBe("p1");
     expect(pipelinesState().loading).toBe(false);
     expect(pipelinesState().error).toBeNull();
+  });
+
+  // Regression: pipeline.create returns only a sessionId (not a full
+  // SessionInfo), so focusing it without first adding it to the list rendered
+  // the empty "new session" state until the next reconnect refresh (~30-50s).
+  // runPipeline must upsert the bound session so the view has something to show.
+  it("adds the bound session to the list and focuses it (no reconnect wait)", async () => {
+    clientRequestMock.mockResolvedValue(
+      snap({ id: "p1", sessionId: "sess-boundtest", name: "run", workdir: "/repo" }),
+    );
+    await runPipeline({ pack: "aif-sdlc", goal: "x", workdir: "/repo" });
+
+    const bound = sessionList().find((s) => s.id === "sess-boundtest");
+    expect(bound).toBeDefined(); // in the list → view renders immediately
+    expect(bound?.name).toBe("run");
+    expect(bound?.workdir).toBe("/repo");
+    expect(focusedSessionId()).toBe("sess-boundtest"); // and focused
+  });
+
+  // A snapshot missing createdAt must not throw (new Date(undefined) is an
+  // Invalid Date whose toISOString() raises RangeError) — that would land in
+  // the catch and skip the merge, reintroducing the empty-state bug.
+  it("still merges the bound session when createdAt is missing", async () => {
+    clientRequestMock.mockResolvedValue(
+      snap({ id: "p1", sessionId: "sess-nodate", name: "run", createdAt: undefined }),
+    );
+    await runPipeline({ pack: "aif-sdlc", goal: "x", workdir: "/repo" });
+
+    expect(sessionList().some((s) => s.id === "sess-nodate")).toBe(true);
+    expect(pipelinesState().error).toBeNull(); // did not fall into the catch
   });
 
   it("surfaces a create rejection (pipeline disabled) without a run", async () => {
