@@ -194,16 +194,16 @@ describe("install / trust / select / remove", () => {
     const { svc, persisted } = makeService({ cacheDir, skillsDir, fixture, sink });
     await svc.addRegistry({ url: "https://github.com/highflame-ai/ai-factory.git" });
 
-    const installed = svc.install({ packId: "aif-sdlc", trusted: false });
+    const installed = svc.install({ packId: "aif-sdlc", trusted: true });
     const pack = installed.find((p) => p.id === "aif-sdlc")!;
     expect(pack).toBeTruthy();
-    expect(pack.trusted).toBe(false);
+    expect(pack.trusted).toBe(true);
     expect(pack.active).toBe(true); // registered into the sink
     expect(pack.registry).toBe("ai-factory");
     expect(pack.phases.map((ph) => ph.id)).toEqual(["impl"]);
     expect(pack.roles).toEqual(["implementer"]);
     expect(sink._packs.has("aif-sdlc")).toBe(true);
-    // config persisted, and skills linked into the skills dir
+    // config persisted, and skills linked into the skills dir (trusted pack)
     expect(persisted.at(-1)!.packs).toHaveLength(1);
     expect(existsSync(join(skillsDir, "spec"))).toBe(true);
     expect(existsSync(join(skillsDir, "review"))).toBe(true);
@@ -242,9 +242,27 @@ describe("install / trust / select / remove", () => {
     const skillsDir = join(tmp(), "skills");
     const { svc } = makeService({ cacheDir: join(tmp(), "c"), skillsDir, fixture });
     await svc.addRegistry({ url: "https://github.com/a/reg.git" });
-    svc.install({ packId: "p" });
+    svc.install({ packId: "p", trusted: true });
     expect(existsSync(join(skillsDir, "real"))).toBe(true); // a real skill dir is linked
     expect(existsSync(join(skillsDir, "evil"))).toBe(false); // the symlink is NOT
+  });
+
+  test("an UNTRUSTED pack links no skills (declaring is not executing)", async () => {
+    const fixture = tmp();
+    writeRegistry(fixture, ["p"], ["spec", "review"]);
+    const skillsDir = join(tmp(), "skills");
+    const sink = fakeSink();
+    const { svc } = makeService({ cacheDir: join(tmp(), "c"), skillsDir, fixture, sink });
+    await svc.addRegistry({ url: "https://github.com/a/reg.git" });
+
+    // Default trust is false. The pack still installs and indexes...
+    const installed = svc.install({ packId: "p" });
+    expect(installed.find((x) => x.id === "p")!.trusted).toBe(false);
+    expect(sink._packs.has("p")).toBe(true);
+    // ...but its `!`…`` skill frontmatter must not become runnable host shell
+    // without an explicit trust opt-in, exactly like its command gates.
+    expect(existsSync(join(skillsDir, "spec"))).toBe(false);
+    expect(existsSync(join(skillsDir, "review"))).toBe(false);
   });
 
   test("skill-linking never clobbers an existing skill", async () => {
@@ -255,7 +273,7 @@ describe("install / trust / select / remove", () => {
     writeFileSync(join(skillsDir, "spec", "SKILL.md"), "PRE-EXISTING");
     const { svc } = makeService({ cacheDir: join(tmp(), "c"), skillsDir, fixture });
     await svc.addRegistry({ url: "https://github.com/a/reg.git" });
-    svc.install({ packId: "p" });
+    svc.install({ packId: "p", trusted: true });
     // The pre-existing skill dir is untouched (not a symlink to the registry).
     expect(require("node:fs").readFileSync(join(skillsDir, "spec", "SKILL.md"), "utf8")).toBe("PRE-EXISTING");
   });
@@ -269,6 +287,20 @@ describe("install / trust / select / remove", () => {
     svc.install({ packId: "p", trusted: false });
     const after = svc.trust("p", true);
     expect(after.find((x) => x.id === "p")!.trusted).toBe(true);
+  });
+
+  test("trusting an installed-untrusted pack links its skills (no re-install)", async () => {
+    const fixture = tmp();
+    writeRegistry(fixture, ["p"], ["spec"]);
+    const skillsDir = join(tmp(), "skills");
+    const { svc } = makeService({ cacheDir: join(tmp(), "c"), skillsDir, fixture });
+    await svc.addRegistry({ url: "https://github.com/a/reg.git" });
+
+    svc.install({ packId: "p" }); // untrusted → not linked
+    expect(existsSync(join(skillsDir, "spec"))).toBe(false);
+
+    svc.trust("p", true); // trusting it must make the skill runnable
+    expect(existsSync(join(skillsDir, "spec"))).toBe(true);
   });
 
   test("select sets the default pack (and rejects an uninstalled id)", () => {
