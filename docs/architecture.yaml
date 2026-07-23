@@ -46,4 +46,4 @@ rail:
 footer:
   insight: "Sessions live in the daemon — not the client, and not the model's context window"
   line2: "clients attach and stream · memory persists verbatim across sessions · every tool call is stamped with a ZeroID identity"
-  cite: "github.com/saucam/codeoid"
+  cite: "github.com/highflame-ai/codeoid"

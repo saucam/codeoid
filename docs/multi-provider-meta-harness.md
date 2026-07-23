@@ -1,7 +1,7 @@
 # Multi-Provider Meta-Harness
 
 **Status**: Design — pre-implementation  
-**Issue**: [#30](https://github.com/saucam/codeoid/issues/30)  
+**Issue**: [#30](https://github.com/highflame-ai/codeoid/issues/30)  
 **Authors**: Yash Datta  
 
 ---

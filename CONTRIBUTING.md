@@ -7,7 +7,7 @@ the development loop, and what we expect on a pull request.
 
 Codeoid is a [Bun](https://bun.sh) daemon that wraps the Claude Agent SDK and
 serves multiple frontends (web, Telegram) from one process. The terminal client
-lives in a **separate repo**, [`codeoid-ui`](https://github.com/saucam/codeoid-ui)
+lives in a **separate repo**, [`codeoid-ui`](https://github.com/highflame-ai/codeoid-ui)
 (Rust/Ratatui) — see [README § Terminal client](README.md#terminal-client).
 
 ```
@@ -65,7 +65,7 @@ bun run test           # vitest
 3. New behavior has a test where practical — the daemon has good coverage of
    session lifecycle, attachments, memory, and protocol handling; add to it.
 4. If you changed the client↔daemon protocol (`src/protocol/`), keep the Rust
-   protocol crate in [`codeoid-ui`](https://github.com/saucam/codeoid-ui)
+   protocol crate in [`codeoid-ui`](https://github.com/highflame-ai/codeoid-ui)
    (`crates/codeoid-protocol`) in lockstep — the wire format is shared.
 
 ## Reporting bugs & security
@@ -78,3 +78,21 @@ bun run test           # vitest
 
 By contributing, you agree your contributions are licensed under the project's
 [MIT License](LICENSE).
+
+## Signing off your work (DCO)
+
+This project uses the [Developer Certificate of Origin](https://developercertificate.org/) (DCO) rather than a CLA — a lightweight, per-commit attestation that you wrote, or otherwise have the right to submit, the code you contribute.
+
+Sign off every commit:
+
+```bash
+git commit -s -m "your message"
+```
+
+That appends a trailer derived from your Git identity:
+
+```
+Signed-off-by: Your Name <you@example.com>
+```
+
+By signing off you agree to the DCO (full text at <https://developercertificate.org/>). If a commit is missing the trailer, amend it with `git commit --amend -s` (or `git rebase --signoff` for a range) before pushing.

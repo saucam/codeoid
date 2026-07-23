@@ -2,8 +2,8 @@
 
 [![npm version](https://img.shields.io/npm/v/codeoid?logo=npm&label=npm&color=cb3837)](https://www.npmjs.com/package/codeoid)
 [![npm downloads](https://img.shields.io/npm/dm/codeoid?logo=npm&label=downloads&color=cb3837)](https://www.npmjs.com/package/codeoid)
-[![CI](https://github.com/saucam/codeoid/actions/workflows/ci.yml/badge.svg)](https://github.com/saucam/codeoid/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/saucam/codeoid/branch/main/graph/badge.svg)](https://codecov.io/gh/saucam/codeoid)
+[![CI](https://github.com/highflame-ai/codeoid/actions/workflows/ci.yml/badge.svg)](https://github.com/highflame-ai/codeoid/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/highflame-ai/codeoid/branch/main/graph/badge.svg)](https://codecov.io/gh/highflame-ai/codeoid)
 [![published with provenance](https://img.shields.io/badge/published%20with-provenance-2da44e?logo=npm)](https://www.npmjs.com/package/codeoid)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Runtime: Bun](https://img.shields.io/badge/runtime-Bun-000000.svg?logo=bun)](https://bun.sh)
@@ -12,7 +12,7 @@
 
 Run N parallel coding-agent sessions across repos — Claude Code by default, with Codex, Gemini, OpenAI, and pi as drop-in backends. Switch between them from a terminal cockpit, a web UI, or Telegram. Every action auditable; every agent (and sub-agent) has a cryptographic identity via [ZeroID](https://github.com/highflame-ai/zeroid). Memory persists across sessions, so each agent inherits what the last one learned.
 
-> **Terminal client lives in its own repo.** The recommended cockpit is [**codeoid-tui**](https://github.com/saucam/codeoid-ui) — a native Rust/[Ratatui](https://ratatui.rs) client that speaks the daemon's WebSocket protocol. A built-in `codeoid tui` (Ink/React) ships in this repo as a zero-install fallback. See [Terminal client](docs/FEATURES.md#terminal-client).
+> **Terminal client lives in its own repo.** The recommended cockpit is [**codeoid-tui**](https://github.com/highflame-ai/codeoid-ui) — a native Rust/[Ratatui](https://ratatui.rs) client that speaks the daemon's WebSocket protocol. A built-in `codeoid tui` (Ink/React) ships in this repo as a zero-install fallback. See [Terminal client](docs/FEATURES.md#terminal-client).
 
 <p align="center">
   <img src="docs/screenshots/tui.webp" width="860"
@@ -78,7 +78,7 @@ This puts a `codeoid` command on your `PATH`. Everywhere below you can run `code
 **From source** — to hack on it:
 
 ```bash
-git clone https://github.com/saucam/codeoid.git
+git clone https://github.com/highflame-ai/codeoid.git
 cd codeoid
 bun install
 ```
@@ -139,7 +139,7 @@ Then connect a client:
 
 ```bash
 # Recommended: the native Rust cockpit (separate repo).
-#   git clone https://github.com/saucam/codeoid-ui && cd codeoid-ui
+#   git clone https://github.com/highflame-ai/codeoid-ui && cd codeoid-ui
 #   cargo run -p codeoid-tui --release
 #
 # Or the built-in fallback TUI (Ink/React, no extra install):
@@ -327,7 +327,7 @@ bun test                 # run unit tests (memory, attachments, etc.)
 | Web UI app (SolidJS) | [web/](web/) |
 | Telegram bot | [src/frontends/telegram/index.ts](src/frontends/telegram/index.ts) |
 | Built-in TUI (Ink, legacy fallback) | [src/tui/](src/tui/) |
-| Native TUI (Rust, recommended) | [saucam/codeoid-ui](https://github.com/saucam/codeoid-ui) |
+| Native TUI (Rust, recommended) | [highflame-ai/codeoid-ui](https://github.com/highflame-ai/codeoid-ui) |
 | Protocol types | [src/protocol/types.ts](src/protocol/types.ts) |
 
 ## Contributing & security
@@ -341,4 +341,4 @@ PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). For vulnerabilities, see
 
 ---
 
-Powered by [ZeroID](https://github.com/highflame-ai/zeroid) with pluggable agent backends (default [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-typescript)). Terminal cockpit: [codeoid-tui](https://github.com/saucam/codeoid-ui).
+Powered by [ZeroID](https://github.com/highflame-ai/zeroid) with pluggable agent backends (default [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-typescript)). Terminal cockpit: [codeoid-tui](https://github.com/highflame-ai/codeoid-ui).

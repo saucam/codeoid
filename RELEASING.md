@@ -43,5 +43,5 @@ bun install -g codeoid   # or: bunx codeoid
 - The **wire protocol** is versioned independently via `PROTOCOL_VERSION` in
   [`src/protocol/types.ts`](src/protocol/types.ts). Bump it only on wire-breaking
   changes, and keep it in lockstep with the `codeoid-protocol` crate in
-  [codeoid-ui](https://github.com/saucam/codeoid-ui). App versions and the protocol
+  [codeoid-ui](https://github.com/highflame-ai/codeoid-ui). App versions and the protocol
   version move independently; the handshake negotiates compatibility.

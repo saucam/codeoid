@@ -26,11 +26,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/saucam/codeoid.git"
+    "url": "git+https://github.com/highflame-ai/codeoid.git"
   },
-  "homepage": "https://github.com/saucam/codeoid#readme",
+  "homepage": "https://github.com/highflame-ai/codeoid#readme",
   "bugs": {
-    "url": "https://github.com/saucam/codeoid/issues"
+    "url": "https://github.com/highflame-ai/codeoid/issues"
   },
   "keywords": [
     "claude",

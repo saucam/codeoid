@@ -23,7 +23,7 @@ Memory, identity, attachments, the multi-frontend clients, and device handoff ar
 
 Codeoid has two terminal cockpits, both speaking the daemon's WebSocket protocol:
 
-- **[codeoid-tui](https://github.com/saucam/codeoid-ui) (recommended)** — a native
+- **[codeoid-tui](https://github.com/highflame-ai/codeoid-ui) (recommended)** — a native
   Rust/[Ratatui](https://ratatui.rs) client in its own repo. A true cell-matrix
   framebuffer, so it stays jitter-free under high-frequency streaming deltas.
   Build once (`cargo run -p codeoid-tui --release`) and point it at the daemon.

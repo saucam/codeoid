@@ -9,7 +9,7 @@ commands. We take its security posture seriously.
 **Please do not open a public issue for security vulnerabilities.**
 
 Report privately via GitHub Security Advisories:
-<https://github.com/saucam/codeoid/security/advisories/new>
+<https://github.com/highflame-ai/codeoid/security/advisories/new>
 
 Include repro steps, affected version/commit, and impact. We'll acknowledge,
 investigate, and coordinate a fix and disclosure timeline with you.
