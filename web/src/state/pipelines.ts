@@ -239,7 +239,10 @@ export async function runPipeline(opts: {
           name: p.name,
           workdir: p.workdir ?? opts.workdir,
           status: "thinking",
-          createdAt: new Date(p.createdAt).toISOString(),
+          // `?? Date.now()` guards a missing createdAt: `new Date(undefined)`
+          // is an Invalid Date and .toISOString() throws, which would drop us
+          // into the catch and reintroduce the empty-state bug this fixes.
+          createdAt: new Date(p.createdAt ?? Date.now()).toISOString(),
           attachedClients: 1,
         });
         focusSession(p.sessionId);

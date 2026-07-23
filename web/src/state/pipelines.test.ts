@@ -92,6 +92,19 @@ describe("pipelines store", () => {
     expect(focusedSessionId()).toBe("sess-boundtest"); // and focused
   });
 
+  // A snapshot missing createdAt must not throw (new Date(undefined) is an
+  // Invalid Date whose toISOString() raises RangeError) — that would land in
+  // the catch and skip the merge, reintroducing the empty-state bug.
+  it("still merges the bound session when createdAt is missing", async () => {
+    clientRequestMock.mockResolvedValue(
+      snap({ id: "p1", sessionId: "sess-nodate", name: "run", createdAt: undefined }),
+    );
+    await runPipeline({ pack: "aif-sdlc", goal: "x", workdir: "/repo" });
+
+    expect(sessionList().some((s) => s.id === "sess-nodate")).toBe(true);
+    expect(pipelinesState().error).toBeNull(); // did not fall into the catch
+  });
+
   it("surfaces a create rejection (pipeline disabled) without a run", async () => {
     clientRequestMock.mockRejectedValueOnce({
       type: "response.error",
