@@ -211,6 +211,14 @@ export type ProviderEvent =
       metadata?: Record<string, unknown>;
     }
   | { type: "turn_done"; result: NormalizedTurnResult }
+  /**
+   * A skill's expansion-time command was blocked and we've raised an approval
+   * for it (#233). This PARKS the turn — the session shows waiting_approval and
+   * the pipeline phase stays alive — WITHOUT ending it: the provider retries the
+   * same prompt in-place once approved, or emits a terminal `turn_done` if
+   * denied. Distinct from a tool approval, whose SDK turn is still live.
+   */
+  | { type: "approval_pending"; command: string }
   | { type: "error"; message: string };
 
 /**

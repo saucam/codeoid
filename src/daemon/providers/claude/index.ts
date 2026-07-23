@@ -111,6 +111,13 @@ export class ClaudeProvider implements SessionProvider {
   /** Skill commands with an approval prompt in flight — prevents a repeated
    * turn from raising a duplicate prompt for the same command (#233). */
   #pendingSkillApprovals = new Set<string>();
+  /** Granted skill-command rules the LIVE query loop was built with. A changed
+   * set forces a rebuild (like #builtSystemPromptAppend) so a just-approved
+   * command is actually in allowedTools on the retry (#233). */
+  #builtSkillAllowRules = "";
+  /** Last TurnOpts — the retry after a skill approval rebuilds the loop with
+   * these, then re-pushes #lastPushedContent into the SAME turn queue (#233). */
+  #lastTurnOpts: TurnOpts | null = null;
   /** Rendered transcript from seedFromHistory() — prepended to the next prompt. */
   #pendingHistorySeed: string | null = null;
 
@@ -185,6 +192,7 @@ export class ClaudeProvider implements SessionProvider {
     this.#currentCanUseTool = opts.canUseTool;
     this.#currentRequestUserInput = opts.requestUserInput ?? null;
     this.#currentSender = opts.sender ?? null;
+    this.#lastTurnOpts = opts;
 
     this.#ensureQueryLoop(opts);
 
@@ -319,19 +327,28 @@ export class ClaudeProvider implements SessionProvider {
 
   #ensureQueryLoop(opts: TurnOpts): void {
     const desiredAppend = opts.systemPromptAppend ?? "";
+    const skillAllowRules = this.#resolveSkillGrants(opts);
+    const desiredGrants = skillAllowRules.join("\n");
     if (this.#consumerTask && this.#inputQueue && !this.#inputQueue.closed) {
-      if (this.#builtSystemPromptAppend === desiredAppend) return;
-      // Per-turn system-prompt contributions changed (before_turn hooks,
-      // memory workspace-index refresh). The SDK fixes the system prompt at
-      // query construction, so the warm loop would silently drop the new
-      // append (#153) — rebuild instead. The fresh query RESUMES the same
-      // backing session, so no conversation context is lost; this trades
-      // subprocess warmth for the documented per-turn hook contract. Loops
-      // whose append never changes keep full warm-reuse.
-      // console.log, not error: an expected control-flow event (log-level
-      // alerting shouldn't page on it).
+      if (
+        this.#builtSystemPromptAppend === desiredAppend &&
+        this.#builtSkillAllowRules === desiredGrants
+      ) {
+        return;
+      }
+      // Per-turn contributions the SDK fixes at query construction changed, so
+      // the warm loop would silently use the stale value — rebuild instead.
+      // Two triggers: the system-prompt append (before_turn hooks, memory
+      // workspace-index refresh — #153) and the skill-command grants (a just-
+      // approved command must reach allowedTools on the retry — #233). The
+      // fresh query RESUMES the same backing session, so no context is lost.
+      // console.log, not error: an expected control-flow event.
+      const reason =
+        this.#builtSystemPromptAppend !== desiredAppend
+          ? `systemPromptAppend changed (${this.#builtSystemPromptAppend.length}B → ${desiredAppend.length}B)`
+          : "skill-command grants changed";
       console.log(
-        `[claude-provider ${this.#init.sessionId.slice(0, 8)}] systemPromptAppend changed (${this.#builtSystemPromptAppend.length}B → ${desiredAppend.length}B) — rebuilding query loop`,
+        `[claude-provider ${this.#init.sessionId.slice(0, 8)}] ${reason} — rebuilding query loop`,
       );
       this.#inputQueue?.close();
       this.#abortController?.abort();
@@ -344,6 +361,7 @@ export class ClaudeProvider implements SessionProvider {
     this.#abortController = new AbortController();
     this.#inputQueue = new AsyncQueue<SDKUserMessage>();
     this.#builtSystemPromptAppend = desiredAppend;
+    this.#builtSkillAllowRules = desiredGrants;
     this.#loopGeneration += 1;
     const myGeneration = this.#loopGeneration;
 
@@ -376,8 +394,7 @@ export class ClaudeProvider implements SessionProvider {
     };
     const mcpServers = Object.keys(merged).length > 0 ? merged : undefined;
 
-    const skillAllowRules = this.#resolveSkillGrants(opts);
-
+    // skillAllowRules computed above (used in the rebuild guard).
     this.#query = query({
       prompt: this.#inputQueue,
       options: {
@@ -618,11 +635,11 @@ export class ClaudeProvider implements SessionProvider {
    * changed — the key is the verbatim command) is NOT granted; an approval is
    * requested out-of-band and persisted, so it takes effect from the next turn.
    *
-   * Deferred rather than blocking on purpose: these commands run at expansion
-   * time, before the agent loop exists, so there is no in-turn moment to await
-   * a decision without restructuring the turn lifecycle for every backend.
-   * Until the approval lands the expansion fails — but loudly and actionably
-   * now, via the zero-turn backstop (#232), instead of silently.
+   * When a command is blocked, the turn PARKS (waiting_approval) rather than
+   * failing: {@link #tryHandleSkillBlock} raises an approval and, once granted,
+   * the loop rebuilds (grants are in the reuse guard) and the same prompt is
+   * retried in place. Pure + side-effect-free so it is safe to call on every
+   * warm-loop check.
    */
   #resolveSkillGrants(opts: TurnOpts): string[] {
     const declared = skillCommandAllowRules([
@@ -630,92 +647,146 @@ export class ClaudeProvider implements SessionProvider {
       join(opts.workdir, ".claude", "skills"),
     ]);
     if (declared.length === 0) return [];
-
     const decided = this.#init.store.getSkillCommandGrants(this.#init.workspaceId);
-    const granted = declared.filter((rule) => decided.get(rule) === true);
-    if (granted.length > 0) {
-      console.error(
-        `[claude-provider ${this.#init.sessionId.slice(0, 8)}] ${granted.length}/${declared.length} skill command(s) pre-authorized`,
-      );
-    }
-    return granted;
+    return declared.filter((rule) => decided.get(rule) === true);
   }
 
   /**
-   * Raise an approval for the command a denial actually blocked on, parsed out
-   * of the `<local-command-stderr>` the SDK reported.
+   * A zero-turn run was caused by a blocked skill command. Try to PARK the turn
+   * for approval instead of failing it. Returns true if handled (caller then
+   * suppresses the terminal error), false to fall through to the normal error.
    *
-   * Demand-driven on purpose. Prompting for everything *declared* would fire
-   * one prompt per undecided command across the user's whole skills tree — 31
-   * on this developer's machine — for a turn that needed one of them. Asking
-   * only for what actually blocked keeps it to a single prompt the user can
-   * connect to the thing they just ran.
+   * Demand-driven: we ask only for the command that actually blocked (parsed
+   * from the stderr), never the whole declared set — one prompt tied to what
+   * the user just ran, not 31 across their skills tree.
    *
-   * Raised through `requestUserInput`, NOT `canUseTool`, and deliberately not
-   * keyed on session mode. Mode says how much you trust the AGENT's judgment
-   * for this task; this asks whether you trust code an installed PACK will run
-   * unconditionally, decided at install time and invisible in the tool stream.
-   * Those are orthogonal, and routing it through canUseTool meant `autonomous`
-   * auto-approved it with no dialog ever rendered — the exact silent-shell
-   * class this work exists to close.
-   *
-   * Asking always is safe here precisely because the approval is deferred: the
-   * turn has already failed by the time we ask, so an unanswered dialog blocks
-   * nothing. Worst case the skill stays blocked, which is the right default.
+   * Falls through (false → terminal error) when there is no dialog channel, or
+   * when the blocked command is ALREADY granted — a granted command that still
+   * blocks means the grant is not taking effect, and retrying would loop.
    */
-  #requestApprovalFromDenial(stderr: string): void {
+  #tryHandleSkillBlock(stderr: string): boolean {
     const m = /pattern "!`([^`\n]+)`"/.exec(stderr);
-    if (!m) return;
+    if (!m) return false;
     const command = m[1].trim();
     const rule = `Bash(${command})`;
+    if (!this.#currentRequestUserInput) return false;
+    const decided = this.#init.store.getSkillCommandGrants(this.#init.workspaceId);
+    if (decided.get(rule) === true) return false; // granted yet blocked → don't loop
+
+    // Park the turn (waiting_approval) — this does NOT end it. A duplicate
+    // result for an already-pending command re-parks without re-asking.
+    this.#emit({ type: "approval_pending", command });
+    if (!this.#pendingSkillApprovals.has(rule)) {
+      this.#pendingSkillApprovals.add(rule);
+      void this.#approveAndRetry(command, rule);
+    }
+    return true;
+  }
+
+  /**
+   * Await the human's decision on a parked skill command, then resolve the turn:
+   * approve → persist + retry the same prompt in place; deny/cancel → fail the
+   * turn cleanly with a reason.
+   *
+   * Raised through `requestUserInput`, NOT `canUseTool`, and deliberately not
+   * keyed on session mode. Mode says how much you trust the AGENT's judgment;
+   * this asks whether you trust code an installed PACK runs unconditionally,
+   * fixed at install time and invisible in the tool stream. Those are
+   * orthogonal — routing it through canUseTool meant `autonomous` auto-approved
+   * it with no dialog, the exact silent-shell class this work closes.
+   */
+  async #approveAndRetry(command: string, rule: string): Promise<void> {
     const ask = this.#currentRequestUserInput;
-    if (!ask || this.#pendingSkillApprovals.has(rule)) return;
-    this.#pendingSkillApprovals.add(rule);
-    void (async () => {
-      try {
-        const answer = await ask({
-          method: "confirm",
-          title: "Allow a command declared by an installed skill?",
-          message:
-            `A skill wants to run:\n\n    ${command}\n\n` +
-            "This runs when the slash command expands, before the agent starts, " +
-            "so it never appears in the tool stream. Allowing it is remembered " +
-            "for this workspace; the skill works from your next message.",
-        });
-        // `cancelled` covers dismissal, timeout, interrupt and teardown — it is
-        // "no answer", never consent. Persist nothing so we ask again later,
-        // rather than recording a deny the user never chose.
-        if (answer.cancelled) {
-          console.error(
-            `[claude-provider ${this.#init.sessionId.slice(0, 8)}] skill approval unanswered: ${command.slice(0, 60)}`,
-          );
-          return;
-        }
-        const allowed = answer.confirmed === true;
-        this.#init.store.setSkillCommandGrant(this.#init.workspaceId, rule, allowed);
-        console.error(
-          `[claude-provider ${this.#init.sessionId.slice(0, 8)}] skill command ${allowed ? "approved" : "denied"}: ${command.slice(0, 60)}`,
-        );
-      } catch (err) {
-        // Never let an approval round-trip break the turn — leaving it
-        // undecided just means we ask again next turn.
-        console.error(
-          `[claude-provider ${this.#init.sessionId.slice(0, 8)}] skill approval failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      } finally {
-        this.#pendingSkillApprovals.delete(rule);
+    try {
+      if (!ask) {
+        this.#failSkillTurn(command, "no approval channel is attached");
+        return;
       }
-    })();
+      const answer = await ask({
+        method: "confirm",
+        title: "Allow a command declared by an installed skill?",
+        message: `A skill needs to run:\n\n    ${command}\n\nIt runs when the slash command expands, before the agent starts, so it never appears in the tool stream. Approve and I'll continue automatically; the choice is remembered for this workspace.`,
+      });
+      // `cancelled` = dismissal / timeout / interrupt / teardown — "no answer",
+      // never consent. Persist nothing (so a real decision can still be made
+      // later) but fail THIS turn, since a parked turn would otherwise hang.
+      if (answer.cancelled) {
+        this.#failSkillTurn(command, "the approval was dismissed");
+        return;
+      }
+      const allowed = answer.confirmed === true;
+      this.#init.store.setSkillCommandGrant(this.#init.workspaceId, rule, allowed);
+      console.error(
+        `[claude-provider ${this.#init.sessionId.slice(0, 8)}] skill command ${allowed ? "approved" : "denied"}: ${command.slice(0, 60)}`,
+      );
+      if (allowed) this.#retryAfterGrant();
+      else this.#failSkillTurn(command, "you denied it");
+    } catch (err) {
+      this.#failSkillTurn(
+        command,
+        `approval failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      this.#pendingSkillApprovals.delete(rule);
+    }
+  }
+
+  /**
+   * Retry the parked prompt in place: rebuild the query loop (the changed grant
+   * is in the reuse guard, so this re-reads it into allowedTools) and re-push
+   * the same content into the SAME turn queue. From the session's view the one
+   * turn simply resumes — no new run, no second consumer.
+   */
+  #retryAfterGrant(): void {
+    if (!this.#lastTurnOpts || this.#lastPushedContent === null) {
+      this.#failSkillTurn("", "internal: no prompt to retry");
+      return;
+    }
+    this.#emit({ type: "custom_message", role: "info", content: "Approved — continuing…" });
+    this.#ensureQueryLoop(this.#lastTurnOpts);
+    this.#pushSDKMessage(this.#lastPushedContent, "later", true);
+  }
+
+  /** End a parked skill turn as a clean error (denied / dismissed / broken). */
+  #failSkillTurn(command: string, reason: string): void {
+    const detail = command ? `: ${command}` : "";
+    this.#emit({
+      type: "turn_done",
+      result: {
+        providerId: this.id,
+        model: "unknown",
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        totalCostUsd: 0,
+        durationMs: 0,
+        isError: true,
+        errorMessage: `Skill command not run — ${reason}${detail}`,
+      },
+    });
   }
 
   /** Translate one SDKMessage to ProviderEvents. */
   #translateSDKMessage(msg: SDKMessage): void {
-    // The translator clears the carried stderr on a result, so read it first.
-    const stderrBefore = this.#translateState.lastLocalCommandStderr;
-    translateSDKMessage(msg, this.#emit.bind(this), this.id, this.#translateState);
-    if ((msg as { type?: string }).type === "result" && stderrBefore) {
-      this.#requestApprovalFromDenial(stderrBefore);
+    const m = msg as { type?: string; num_turns?: number };
+    // A zero-turn caused by a blocked skill command is RECOVERABLE: park the
+    // turn for approval instead of letting the pure translator turn it into a
+    // terminal error. We intercept BEFORE translating and, when handled,
+    // suppress the pure translation entirely (its only output for this result
+    // would have been the turn_done error we are replacing). Clear the carried
+    // stderr ourselves since the translator normally does that on a result.
+    const stderr = this.#translateState.lastLocalCommandStderr;
+    if (
+      m.type === "result" &&
+      m.num_turns === 0 &&
+      stderr &&
+      this.#tryHandleSkillBlock(stderr)
+    ) {
+      this.#translateState.lastLocalCommandStderr = null;
+      return;
     }
+    translateSDKMessage(msg, this.#emit.bind(this), this.id, this.#translateState);
   }
 }
 

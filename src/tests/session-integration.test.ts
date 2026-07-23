@@ -477,6 +477,37 @@ describe("T4 – onRecoveryNeeded recovery path", () => {
       expect(last.content).toBe("Recovered.");
     }
   });
+
+  // #233: a skill's blocked expansion-time command must PARK the turn, not fail
+  // it. The session goes waiting_approval (so a driving pipeline phase — which
+  // resolves only on idle/error — stays alive) and posts a visible cue, while
+  // the turn stays open for the provider's in-place retry.
+  it("approval_pending parks the turn as waiting_approval, not error", async () => {
+    // stall:true leaves the queue OPEN after the scripted events — the turn is
+    // parked awaiting approval, exactly as ClaudeProvider does.
+    const provider = new MockSessionProvider(
+      "claude",
+      [[{ type: "approval_pending", command: "sh .aif/partials/ethos.sh" }]],
+      { stall: true },
+    );
+    const session = makeSession(provider);
+    const { client, received } = makeClient();
+    session.attach(client);
+
+    await session.send("/spec", TEST_AUTH);
+    await waitForStatus(session, "waiting_approval", 10000);
+
+    expect(session.status).toBe("waiting_approval"); // NOT error, NOT idle
+    const note = received.find(
+      (m) => m.type === "session.message" && m.role === "system" && m.content.includes("needs approval"),
+    );
+    expect(note).toBeDefined();
+    if (note?.type === "session.message") {
+      expect(note.content).toContain("sh .aif/partials/ethos.sh");
+    }
+
+    await session.interrupt(TEST_AUTH); // unblock the parked (stalled) consumer
+  });
 });
 
 // ── T5: Session resume after restart ─────────────────────────────────────────

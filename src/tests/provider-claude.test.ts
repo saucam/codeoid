@@ -483,129 +483,174 @@ describe("skillCommandAllowRules", () => {
   // L4 (#233): only commands a human already approved are granted; anything
   // undecided is withheld and raised for approval out-of-band. Verified through
   // the real query build so the wiring — not just the helper — is covered.
-  it("grants only approved commands and requests approval for the rest", async () => {
-    const tmp = mkdtempSync(join(tmpdir(), "codeoid-skills-"));
-    mkdirSync(join(tmp, ".claude", "skills", "s"), { recursive: true });
-    writeFileSync(
-      join(tmp, ".claude", "skills", "s", "SKILL.md"),
-      "---\nname: s\n---\n!`sh approved.sh`\n!`sh unapproved.sh`\n",
-    );
-
-    const asked: string[] = [];
-    const recorded: Array<[string, boolean]> = [];
-    const provider = new ClaudeProvider({
-      sessionId: "grant-ses",
-      initialBackingId: "grant-backing",
-      workspaceId: "ws_grant",
-      store: {
-        audit: () => {},
-        getClaudeCodeSessionId: () => null,
-        setClaudeCodeSessionId: () => {},
-        getSkillCommandGrants: () => new Map([["Bash(sh approved.sh)", true]]),
-        setSkillCommandGrant: (_ws: string, cmd: string, ok: boolean) =>
-          recorded.push([cmd, ok]),
-      } as never,
-    });
-
-    // A denial for `sh unapproved.sh`, then the zero-turn result it causes.
-    sdkMessages = [
-      {
-        type: "user",
-        message: {
-          role: "user",
-          content:
-            '<local-command-stderr>Error: Shell command permission check failed for pattern "!`sh unapproved.sh`": This command requires approval</local-command-stderr>',
-        },
-      },
-      { type: "result", subtype: "success", is_error: false, num_turns: 0, result: "" },
-    ];
-
-    const run = provider.runTurn({
-      history: [],
-      userMessage: "hi",
-      workdir: tmp,
-      // Auto-approves everything — proves the approval does NOT ride this gate.
-      canUseTool: async () => ({ behavior: "allow" as const }),
-      requestUserInput: async (req) => {
-        asked.push(req.message ?? "");
-        return { confirmed: true, cancelled: false };
-      },
-    });
-    for await (const _ of run.events) { /* drain */ }
-
-    const opts = (capturedQueryOpts?.options ?? {}) as { allowedTools?: string[] };
-    const allowed = opts.allowedTools ?? [];
-    expect(allowed).toContain("Bash(sh approved.sh)");
-    expect(allowed).not.toContain("Bash(sh unapproved.sh)"); // withheld until decided
-
-    await Bun.sleep(5); // let the fire-and-forget approval settle
-    // Demand-driven: only the command that actually blocked is raised — the
-    // already-approved one is never re-asked, and no other declared command
-    // (including the developer's real ~/.claude/skills tree) is prompted for.
-    expect(asked).toHaveLength(1);
-    expect(asked[0]).toContain("sh unapproved.sh");
-    expect(recorded).toEqual([["Bash(sh unapproved.sh)", true]]);
-
-    await provider.teardown?.();
-    rmSync(tmp, { recursive: true, force: true });
-  });
-
-  // `cancelled` covers dismissal, timeout, interrupt and teardown. It is "no
-  // answer", never consent — recording a deny would silently bury a command the
-  // user never actually ruled on.
-  it("persists nothing when the approval dialog is dismissed", async () => {
-    const tmp = mkdtempSync(join(tmpdir(), "codeoid-skills-"));
-    mkdirSync(join(tmp, ".claude", "skills", "s"), { recursive: true });
-    writeFileSync(
-      join(tmp, ".claude", "skills", "s", "SKILL.md"),
-      "---\nname: s\n---\n!`sh pending.sh`\n",
-    );
-    const recorded: unknown[] = [];
-    const provider = new ClaudeProvider({
-      sessionId: "cancel-ses",
-      initialBackingId: "cancel-backing",
-      workspaceId: "ws_cancel",
-      store: {
-        audit: () => {},
-        getClaudeCodeSessionId: () => null,
-        setClaudeCodeSessionId: () => {},
-        getSkillCommandGrants: () => new Map<string, boolean>(),
-        setSkillCommandGrant: (...a: unknown[]) => recorded.push(a),
-      } as never,
-    });
-
-    sdkMessages = [
-      {
-        type: "user",
-        message: {
-          role: "user",
-          content:
-            '<local-command-stderr>Error: Shell command permission check failed for pattern "!`sh pending.sh`": This command requires approval</local-command-stderr>',
-        },
-      },
-      { type: "result", subtype: "success", is_error: false, num_turns: 0, result: "" },
-    ];
-
-    const run = provider.runTurn({
-      history: [],
-      userMessage: "hi",
-      workdir: tmp,
-      canUseTool: async () => ({ behavior: "allow" as const }),
-      requestUserInput: async () => ({ cancelled: true }),
-    });
-    for await (const _ of run.events) { /* drain */ }
-    await Bun.sleep(5);
-
-    expect(recorded).toEqual([]); // no verdict written — it will ask again
-    await provider.teardown?.();
-    rmSync(tmp, { recursive: true, force: true });
-  });
-
   it("returns [] for absent dirs and skills with no substitutions", () => {
     const tmp = mkdtempSync(join(tmpdir(), "codeoid-skills-"));
     write(tmp, "plain", "---\nname: plain\n---\nJust prose, no substitutions.\n");
     expect(skillCommandAllowRules([tmp])).toEqual([]);
     expect(skillCommandAllowRules([join(tmpdir(), "codeoid-absent-dir")])).toEqual([]);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+});
+
+// Park-and-retry: a blocked skill command must NOT fail the turn (that killed the
+// pipeline — #233). It parks the turn (approval_pending), and on approval the
+// loop rebuilds with the grant and retries the SAME prompt in place.
+describe("ClaudeProvider – skill-command approval (#233)", () => {
+  // A Store backed by a real Map, so a persisted grant is visible to the retry's
+  // query rebuild (a fixed-map stub could never satisfy the retry).
+  function statefulStore(seed: Record<string, boolean> = {}) {
+    const grants = new Map<string, boolean>(Object.entries(seed));
+    const writes: Array<[string, boolean]> = [];
+    return {
+      store: {
+        audit: () => {},
+        getClaudeCodeSessionId: () => null,
+        setClaudeCodeSessionId: () => {},
+        getSkillCommandGrants: () => new Map(grants),
+        setSkillCommandGrant: (_ws: string, cmd: string, ok: boolean) => {
+          grants.set(cmd, ok);
+          writes.push([cmd, ok]);
+        },
+      } as never,
+      writes,
+    };
+  }
+
+  function skillDir(body: string): string {
+    const tmp = mkdtempSync(join(tmpdir(), "codeoid-skills-"));
+    mkdirSync(join(tmp, ".claude", "skills", "s"), { recursive: true });
+    writeFileSync(join(tmp, ".claude", "skills", "s", "SKILL.md"), body);
+    return tmp;
+  }
+
+  const blockFor = (cmd: string) => ({
+    type: "user",
+    message: {
+      role: "user",
+      content: `<local-command-stderr>Error: Shell command permission check failed for pattern "!\`${cmd}\`": This command requires approval</local-command-stderr>`,
+    },
+  });
+  const zeroTurn = { type: "result", subtype: "success", is_error: false, num_turns: 0, result: "" };
+
+  it("parks (approval_pending) then retries to success once approved", async () => {
+    const tmp = skillDir("---\nname: s\n---\n!`sh gate.sh`\n");
+    const { store, writes } = statefulStore();
+    const provider = new ClaudeProvider({
+      sessionId: "ok", initialBackingId: "b", workspaceId: "ws", store,
+    });
+
+    // Turn 1 blocks. The gate keeps the mock stream open (like the real
+    // streaming SDK, which parks after a zero-turn rather than ending).
+    sdkMessages = [blockFor("sh gate.sh"), zeroTurn];
+    queryCallCount = 0; // count builds for THIS turn: initial + retry rebuild
+    let release!: () => void;
+    sdkGate = new Promise<void>((r) => { release = r; });
+
+    const run = provider.runTurn({
+      history: [], userMessage: "/spec", workdir: tmp,
+      canUseTool: async () => ({ behavior: "allow" as const }),
+      requestUserInput: async () => {
+        // On approval the retry rebuilds the query — swap in a real turn so the
+        // rebuilt loop yields success instead of the same block.
+        sdkMessages = [
+          { type: "assistant", message: { content: [{ type: "text", text: "done" }] }, parent_tool_use_id: null },
+          { type: "result", subtype: "success", is_error: false, num_turns: 1, result: "done", modelUsage: {} },
+        ];
+        return { confirmed: true, cancelled: false };
+      },
+    });
+
+    const events: ProviderEvent[] = [];
+    const drain = (async () => { for await (const e of run.events) events.push(e); })();
+    await Bun.sleep(20); // let park → approve → rebuild → retry run
+    release();
+    await drain;
+
+    // Parked (not failed) with the exact command...
+    const pending = events.find((e) => e.type === "approval_pending") as
+      | Extract<ProviderEvent, { type: "approval_pending" }> | undefined;
+    expect(pending?.command).toBe("sh gate.sh");
+    // ...approval persisted, loop rebuilt (2 query builds), retry granted it...
+    expect(writes).toEqual([["Bash(sh gate.sh)", true]]);
+    expect(queryCallCount).toBe(2);
+    const retryAllowed = ((capturedQueryOpts?.options ?? {}) as { allowedTools?: string[] }).allowedTools ?? [];
+    expect(retryAllowed).toContain("Bash(sh gate.sh)");
+    // ...and the turn ended a real success, never an error.
+    const done = events.filter((e) => e.type === "turn_done") as Array<Extract<ProviderEvent, { type: "turn_done" }>>;
+    expect(done).toHaveLength(1);
+    expect(done[0].result.isError).toBeFalsy();
+
+    await provider.teardown?.();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("fails the turn cleanly when denied", async () => {
+    const tmp = skillDir("---\nname: s\n---\n!`sh nope.sh`\n");
+    const { store, writes } = statefulStore();
+    const provider = new ClaudeProvider({ sessionId: "d", initialBackingId: "b", workspaceId: "ws", store });
+    sdkMessages = [blockFor("sh nope.sh"), zeroTurn];
+
+    const run = provider.runTurn({
+      history: [], userMessage: "/spec", workdir: tmp,
+      canUseTool: async () => ({ behavior: "allow" as const }),
+      requestUserInput: async () => ({ confirmed: false, cancelled: false }), // deny
+    });
+    const events: ProviderEvent[] = [];
+    for await (const e of run.events) events.push(e);
+    await Bun.sleep(5);
+
+    const done = events.find((e) => e.type === "turn_done") as Extract<ProviderEvent, { type: "turn_done" }>;
+    expect(done.result.isError).toBe(true);
+    expect(done.result.errorMessage).toContain("denied");
+    expect(writes).toEqual([["Bash(sh nope.sh)", false]]); // a denial IS recorded
+    await provider.teardown?.();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("dismissal fails the turn and persists nothing (no false consent)", async () => {
+    const tmp = skillDir("---\nname: s\n---\n!`sh maybe.sh`\n");
+    const { store, writes } = statefulStore();
+    const provider = new ClaudeProvider({ sessionId: "c", initialBackingId: "b", workspaceId: "ws", store });
+    sdkMessages = [blockFor("sh maybe.sh"), zeroTurn];
+
+    const run = provider.runTurn({
+      history: [], userMessage: "/spec", workdir: tmp,
+      canUseTool: async () => ({ behavior: "allow" as const }),
+      requestUserInput: async () => ({ cancelled: true }),
+    });
+    const events: ProviderEvent[] = [];
+    for await (const e of run.events) events.push(e);
+    await Bun.sleep(5);
+
+    const done = events.find((e) => e.type === "turn_done") as Extract<ProviderEvent, { type: "turn_done" }>;
+    expect(done.result.isError).toBe(true);
+    expect(done.result.errorMessage).toContain("dismissed");
+    expect(writes).toEqual([]); // no verdict — a real decision can still be made
+    await provider.teardown?.();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("does not loop: an already-granted command that still blocks fails terminally", async () => {
+    const tmp = skillDir("---\nname: s\n---\n!`sh broken.sh`\n");
+    const { store } = statefulStore({ "Bash(sh broken.sh)": true }); // already granted
+    const provider = new ClaudeProvider({ sessionId: "g", initialBackingId: "b", workspaceId: "ws", store });
+    sdkMessages = [blockFor("sh broken.sh"), zeroTurn];
+
+    let asked = 0;
+    const run = provider.runTurn({
+      history: [], userMessage: "/spec", workdir: tmp,
+      canUseTool: async () => ({ behavior: "allow" as const }),
+      requestUserInput: async () => { asked++; return { cancelled: true }; },
+    });
+    const events: ProviderEvent[] = [];
+    for await (const e of run.events) events.push(e);
+
+    expect(asked).toBe(0); // never re-prompted for an already-granted command
+    expect(events.find((e) => e.type === "approval_pending")).toBeUndefined();
+    // Falls through to the normal zero-turn backstop error.
+    const done = events.find((e) => e.type === "turn_done") as Extract<ProviderEvent, { type: "turn_done" }>;
+    expect(done.result.isError).toBe(true);
+    await provider.teardown?.();
     rmSync(tmp, { recursive: true, force: true });
   });
 });
