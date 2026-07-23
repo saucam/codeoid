@@ -22,7 +22,7 @@
 import { createSignal } from "solid-js";
 
 import { getClient, newRequestId } from "./connection";
-import { focusSession } from "./sessions";
+import { focusSession, mergeSession } from "./sessions";
 import type {
   ClientMessage,
   PipelineSnapshotMsg,
@@ -223,10 +223,28 @@ export async function runPipeline(opts: {
     );
     applySnapshot(snap);
     if (snap?.pipeline) {
+      const p = snap.pipeline;
       // Focus the bound session so the run shows up as a normal, interruptible
       // chat (the cockpit overlays it), then drive the first phase.
-      if (snap.pipeline.sessionId) focusSession(snap.pipeline.sessionId);
-      advance(snap.pipeline.id);
+      if (p.sessionId) {
+        // Add the session to the list BEFORE focusing it. `pipeline.create`
+        // creates the session daemon-side but — unlike plain session.create,
+        // which mergeSession()s the returned SessionInfo — the snapshot only
+        // carries a sessionId. Focusing an id the list doesn't contain renders
+        // the empty "new session" state until the next reconnect refresh pulls
+        // it in (30-50s, since there is no periodic list poll). Upsert a partial
+        // now; the daemon's info_update/status_change broadcasts complete it.
+        mergeSession({
+          id: p.sessionId,
+          name: p.name,
+          workdir: p.workdir ?? opts.workdir,
+          status: "thinking",
+          createdAt: new Date(p.createdAt).toISOString(),
+          attachedClients: 1,
+        });
+        focusSession(p.sessionId);
+      }
+      advance(p.id);
     }
   } catch (e) {
     setState((s) => ({ ...s, error: errMessage(e) }));
