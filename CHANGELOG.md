@@ -6,6 +6,82 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-07-23
+
+The governed pipeline becomes reliable end-to-end. Phase boundaries are now
+decided by deterministic workspace probes instead of a text sentinel, the
+phantom-turn hang that stalled runs is eliminated at its root cause, and a
+pack's skill-declared shell commands are gated behind an explicit human
+approval.
+
+### Added
+
+- **Deterministic, backend-agnostic phase detection** (`pipeline` probes): phase
+  completion moves off the fragile `⟦PHASE-COMPLETE⟧` text sentinel onto
+  daemon-run probes that behave identically on every backend, scoped entirely to
+  pipeline phase turns (normal sessions and a user's own messages are untouched).
+  Read-only probes (`file-exists` / `glob-nonempty` / `git-diff-nonempty`,
+  confined to the workdir) and execution probes (`build` / `test` / `lint` /
+  `verify`, auto-derived from `go.mod` / `package.json` / `pyproject` / `Cargo`
+  and fail-closed on an untrusted pack). A phase's exit probe is now a real
+  workspace predicate, so `passed` means the deliverable actually exists or
+  builds; a failing exit probe under `onFail: retry` threads the failure reason
+  into the re-run prompt. Opt-in `skipWhenSatisfied` marks an already-satisfied
+  phase `skipped` at first entry only — off by default, so a stale artifact is
+  never silently accepted. Adds a `skipped` phase outcome across interface, wire,
+  web rail, and TUI. (#227)
+
+- **Human approval for pack skill-declared shell commands**: an installed pack's
+  skills can run a host shell at slash-command expansion time — before the agent
+  loop, where a headless session has no approval path. codeoid now derives a
+  least-privilege, verbatim allow rule per declared substitution and gates first
+  use behind a persisted, demand-driven approval (new `skill_command_grants`
+  table keyed by workspace + the verbatim command). The prompt is raised only for
+  the command a denial actually blocked on, and routed through `requestUserInput`
+  rather than the mode-gated `canUseTool` path — so an autonomous session cannot
+  silently self-approve. Skill linking is gated on pack trust (an untrusted pack
+  contributes no runnable skills), and each skill is granted read access to its
+  own tree. (#233)
+
+### Fixed
+
+- **The pipeline phantom-turn hang, fixed at the root**: pipeline phases would
+  hang, nudge before the model had worked, or "complete" a phase by reusing the
+  previous phase's summary. The cause was two-fold — the canonical history
+  accumulator committed an assistant turn on every `turn_done`, including the
+  content-free one the Claude provider emits when it rebuilds its query loop; and
+  that rebuild was itself triggered by a live workspace memory index embedded in
+  the per-turn system-prompt append, whose byte count oscillated every turn and
+  SIGTERM'd the in-flight turn. Now a turn is committed only when it produced
+  text, tools, or thinking; the memory index is frozen into the append once per
+  context (re-snapshotted on rotation) so it changes only on a meaningful event
+  like a phase role switch; phase turns are detected by last-turn role and
+  genuinely-new final text instead of a racy history-length watermark; and
+  history is re-baselined after `send`. (#228, #229, #230, #231)
+
+- **`AskUserQuestion` is never auto-approved**: an elicitation is a user-input
+  requirement by definition, but autonomous workers (dispatch / fleet)
+  auto-approved it like any write tool and it returned "the user did not answer
+  the questions" with no dialog rendered. It is now a hard block in every mode —
+  an autonomous worker parks as `waiting_approval` until the owner attaches and
+  answers. (#226)
+
+- **Turns the SDK silently never ran are surfaced**: a blocked slash-command
+  expansion made the SDK report `num_turns: 0` as a `success` — a turn that never
+  happened, dressed as one, with nothing shown to the user and no retry or error
+  path. A zero-turn result is now treated as an error and attributed to the
+  `<local-command-stderr>` that caused it. In a pipeline, a zero-turn from a
+  blocked skill command parks the turn as `approval_pending` / `waiting_approval`
+  so the phase stays alive and resumes in place on approval, rather than failing
+  the run. (#232, #233)
+
+- **Pipeline-created session appears immediately**: starting a run left the UI on
+  the empty "create new session" state for 30–50s (until the next reconnect) even
+  though the daemon had created the session and the agent was already thinking,
+  because `runPipeline` focused the bound session without adding it to the client
+  session list. It now upserts a partial `SessionInfo` from the snapshot before
+  focusing. (#237)
+
 ## [0.3.3] - 2026-07-22
 
 The governed SDLC pipeline goes live end-to-end: fetch a methodology pack from a
