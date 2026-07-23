@@ -264,7 +264,9 @@ program
       if (issuerInput) updates.zeroidUrl = issuerInput;
       const path = writeConfigKeys(updates);
       console.log(`Saved to ${path} (mode 600).`);
-      console.log("Run `codeoid start` to launch the daemon.");
+      console.log(
+        "Next: start the daemon with `codeoid start` (or `bun src/cli.ts start` from a source checkout).",
+      );
     },
   );
 

@@ -67,23 +67,26 @@ Its closest peer is **[Omnigent](https://github.com/omnigent-ai/omnigent)**, ano
 
 ### Install
 
-**From npm (recommended)** — Codeoid runs on Bun, so install it with Bun (`npm` also works as long as Bun is on your `PATH`, since it's the runtime):
+Pick **one** path. This guide writes every command as `codeoid <cmd>` (the global install); **from a source checkout, run `bun src/cli.ts <cmd>` instead** — they're interchangeable. Don't mix the two.
+
+**A. From npm — recommended, to just use it.** Codeoid runs on Bun, so install it with Bun (`npm` also works, as long as Bun is on your `PATH` — it's the runtime):
 
 ```bash
 bun install -g codeoid        # or: npm install -g codeoid
+codeoid --help                # confirm it's on your PATH
 ```
 
-This puts a `codeoid` command on your `PATH`. Everywhere below you can run `codeoid <cmd>` directly — e.g. `codeoid login`, `codeoid start`, `codeoid tui`.
+This puts a `codeoid` command on your `PATH`; use `codeoid <cmd>` everywhere below. If `codeoid` isn't found afterward, your global-bin directory isn't on `PATH` — add Bun's (`~/.bun/bin`) to it, or use path **B**.
 
-**From source** — to hack on it:
+**B. From source — to hack on it.** Clone, then **run `bun install` before anything else**:
 
 ```bash
-git clone https://github.com/saucam/codeoid.git
+git clone https://github.com/highflame-ai/codeoid.git
 cd codeoid
-bun install
+bun install                   # REQUIRED first — pulls commander and the rest
 ```
 
-From a source checkout, run `bun src/cli.ts <cmd>` in place of `codeoid <cmd>` below.
+> ⚠️ Skipping `bun install` and running `bun src/cli.ts …` straight from a fresh clone fails with `error: ENOENT while resolving package 'commander'`. Run `bun install` once in the checkout and it's fixed. From source, use `bun src/cli.ts <cmd>` wherever this guide says `codeoid <cmd>`.
 
 ### Authenticate
 
@@ -92,11 +95,12 @@ Codeoid needs one thing to start: a ZeroID key. Two ways to get one.
 **Option A — Highflame SaaS (recommended, no infra)**
 
 1. Sign up at [highflame.ai](https://highflame.ai) and open Studio → **Code Agents**.
-2. Create a key (you'll get a `zid_sk_...`).
+2. Create a code agent and mint its key — you'll get a `zid_sk_...`, shown once, so copy it now.
+   - The agent's **credential policy must allow the `api-key` grant type**, or the key won't verify. If minting or registration fails with a grant-type error, switch the agent to a policy that permits `api-key` grants.
 3. Log in — Codeoid ships pointing at the Highflame SaaS issuer, so there's nothing else to configure:
 
    ```bash
-   bun src/cli.ts login          # prompts for the key (hidden), verifies it, saves to ~/.codeoid/config.json
+   codeoid login                 # prompts for the key (hidden), verifies it, saves to ~/.codeoid/config.json
    ```
 
 **Option B — Self-hosted ZeroID (local, ~2 min)**
@@ -116,12 +120,12 @@ curl http://localhost:8899/health     # → {"status":"healthy",...}
 #   client.agents.register(name="codeoid", created_by="you@example.com")
 ```
 
-Then, back in Codeoid, log in against your local issuer with that key (`codeoid login` if installed globally):
+Then, back in Codeoid, log in against your local issuer with that key:
 
 ```bash
-bun src/cli.ts login --zeroid local                       # localhost:8899
+codeoid login --zeroid local                       # localhost:8899
 # ...or any deployment:
-bun src/cli.ts login --zeroid https://zeroid.mycorp.com
+codeoid login --zeroid https://zeroid.mycorp.com
 ```
 
 `--zeroid` accepts a preset (`highflame`, `highflame-dev`, `local`) or any URL. The issuer is pinned to whatever you log in against — a token minted by any other issuer is rejected. `login` exchanges the key on the spot and prints the subject + granted scopes so you know it works before the daemon ever starts.
@@ -132,21 +136,23 @@ bun src/cli.ts login --zeroid https://zeroid.mycorp.com
 
 ```bash
 # Start the daemon — serves TUI/web/Telegram + mounts memory
-bun src/cli.ts start
+codeoid start
 ```
 
 Then connect a client:
 
 ```bash
 # Recommended: the native Rust cockpit (separate repo).
-#   git clone https://github.com/saucam/codeoid-ui && cd codeoid-ui
+#   git clone https://github.com/highflame-ai/codeoid-ui && cd codeoid-ui
 #   cargo run -p codeoid-tui --release
 #
 # Or the built-in fallback TUI (Ink/React, no extra install):
-bun src/cli.ts tui
+codeoid tui
 ```
 
 Or browse to http://localhost:7400/ui/ for the web UI.
+
+> **Each client authenticates itself — not just the daemon.** `codeoid login` authorizes the *daemon* (saved to `~/.codeoid/config.json`). A browser or Telegram client is a separate client under the same zero-trust model, so the web UI's first-run splash asks for a credential too — paste the same `zid_sk_...` key (or a scoped [share token](docs/CONFIGURATION.md)) once; the browser remembers it and exchanges it for a short-lived JWT to talk to the daemon. Logging in on the CLI does **not** carry over to the browser.
 
 ## Backends
 
@@ -286,20 +292,22 @@ Codeoid reads `~/.codeoid/config.json` and environment variables; env-only secre
 
 ## CLI reference
 
-```bash
-bun src/cli.ts start [--port 7400] [--host 127.0.0.1] [--no-telegram] [--no-web]
+Commands below use the global install (`codeoid`). From a source checkout, replace `codeoid` with `bun src/cli.ts`.
 
-bun src/cli.ts tui                                   # Launch the cockpit TUI
-bun src/cli.ts ls                                    # List sessions
-bun src/cli.ts new <name> [workdir]                  # Create session
+```bash
+codeoid start [--port 7400] [--host 127.0.0.1] [--no-telegram] [--no-web]
+
+codeoid tui                                          # Launch the cockpit TUI
+codeoid ls                                           # List sessions
+codeoid new <name> [workdir]                         # Create session
   --worktree <branch>                                #   auto-spawn a git worktree
   --repo <path>                                      #   worktree source (default: cwd)
   --worktree-dir <path>                              #   override target dir
-bun src/cli.ts attach <session>                      # Readline streaming attach
-bun src/cli.ts send <session> <message...>           # One-shot send
-bun src/cli.ts interrupt <session>                   # Interrupt
-bun src/cli.ts approve <session> [--deny]            # Approve / deny pending tool
-bun src/cli.ts destroy <session>                     # Destroy
+codeoid attach <session>                             # Readline streaming attach
+codeoid send <session> <message...>                  # One-shot send
+codeoid interrupt <session>                          # Interrupt
+codeoid approve <session> [--deny]                   # Approve / deny pending tool
+codeoid destroy <session>                            # Destroy
 ```
 
 ## Development

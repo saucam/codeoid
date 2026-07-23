@@ -166,7 +166,7 @@ export class TerminalClient {
 
       this.#ws.onerror = () => {
         console.error(`Cannot connect to Codeoid daemon at ${this.#config.daemonUrl}`);
-        console.error("  Is the daemon running? Try: codeoid start\n");
+        console.error("  Is the daemon running? Try: codeoid start (or `bun src/cli.ts start` from source)\n");
         process.exit(1);
       };
       this.#ws.onclose = (event) => {
