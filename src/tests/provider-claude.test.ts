@@ -480,6 +480,18 @@ describe("skillCommandAllowRules", () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
+  // An env-var-prefixed command (`FOO=1 ./run.sh`) has an assignment as its
+  // first token — it must NOT be filtered out, or the grant is un-derivable and
+  // the retry fails after approval. `=` is in the argv0 class for this reason.
+  it("keeps an env-var-prefixed command (assignment as first token)", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "codeoid-skills-"));
+    write(tmp, "env", "---\nname: env\n---\n!`FOO=1 ./run.sh --flag`\n");
+
+    const rules = skillCommandAllowRules([tmp]);
+    expect(rules).toEqual(["Bash(FOO=1 ./run.sh --flag)"]);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
   // L4 (#233): only commands a human already approved are granted; anything
   // undecided is withheld and raised for approval out-of-band. Verified through
   // the real query build so the wiring — not just the helper — is covered.

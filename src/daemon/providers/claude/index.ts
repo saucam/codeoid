@@ -1124,8 +1124,11 @@ export function skillCommandAllowRules(skillsDirs: string[]): string[] {
         // an executable name so we grant less, not more. Under-granting is the
         // safe direction: it fails loudly via the zero-turn backstop (#232),
         // whereas an over-grant silently pre-approves a command for in-loop use.
+        // `=` is allowed so an env-prefixed command (`FOO=1 ./run.sh`) — whose
+        // first token is the assignment — isn't filtered out, which would leave
+        // an approved grant permanently un-derivable and fail its retry.
         const argv0 = trimmed.split(/\s+/)[0] ?? "";
-        if (!/^[A-Za-z0-9_./~-]+$/.test(argv0)) continue;
+        if (!/^[A-Za-z0-9_./~=-]+$/.test(argv0)) continue;
         rules.add(`Bash(${trimmed})`);
       }
     }
