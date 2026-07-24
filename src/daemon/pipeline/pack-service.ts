@@ -201,6 +201,29 @@ export class PackService {
     }
   }
 
+  /**
+   * Pull the registry cache then reload every installed pack from that registry
+   * into the live PipelineManager. A pull alone updates disk while the running
+   * pipeline keeps the stale in-memory pack — both steps are required (issue #236).
+   *
+   * Trust gate: skills are re-linked only for trusted packs, matching the
+   * invariant enforced by install() and trust() (issue #233).
+   */
+  async refreshRegistry(name?: string): Promise<void> {
+    await this.refresh(name);
+    const mgr = this.#manager?.();
+    for (const entry of this.#packs) {
+      if (name !== undefined && entry.registry !== name) continue;
+      if (!entry.registry) continue; // dir-installed pack — no registry to reload from
+      const loaded = loadPack(entry.dir, { trusted: entry.trusted });
+      mgr?.installPack(loaded);
+      if (entry.trusted) {
+        const root = this.#cachePath(entry.registry);
+        if (existsSync(root)) this.#linkSkills(root);
+      }
+    }
+  }
+
   // ── Discovery ───────────────────────────────────────────────────────────────
 
   /** Directories under `<registry>/packs` that contain a pack.yaml. */
