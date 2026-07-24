@@ -10,8 +10,9 @@
 
 import { Component, Show, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
 
-import { rememberedApiKey, rememberedOAuthToken } from "./lib/auth";
+import { rememberedApiKey, rememberedOAuthToken, rememberOAuthToken } from "./lib/auth";
 import { consumeHandoffCredential, readEmbedAllowedOrigins } from "./lib/handoff";
+import { installEmbedTokenRefresh } from "./lib/embed-refresh";
 import SignIn from "./components/SignIn";
 import Shell from "./components/Shell";
 import {
@@ -46,9 +47,29 @@ const App: Component = () => {
     // The helper enforces a fail-closed trusted-framing-origin gate against the
     // daemon-published allowlist: it consumes the hash ONLY when this page is
     // embedded by an allowlisted parent origin, closing the login-CSRF vector.
-    const handoff = consumeHandoffCredential({
-      allowedOrigins: readEmbedAllowedOrigins(),
+    const allowedOrigins = readEmbedAllowedOrigins();
+    const handoff = consumeHandoffCredential({ allowedOrigins });
+
+    // Embed token refresh: Studio sends a fresh SSO token every 12 minutes via
+    // postMessage so the session survives past the token's 15-minute expiry.
+    // We update localStorage so the client's getToken callback picks it up on
+    // the next reconnect. If the connection already dropped to `failed` (the
+    // daemon rejected the expired token before the refresh arrived), call
+    // bootstrap() to reconnect immediately with the new token.
+    const removeRefreshListener = installEmbedTokenRefresh({
+      allowedOrigins,
+      onRefresh: async (token) => {
+        rememberOAuthToken(token);
+        if (connectionStatus().kind === "failed") {
+          try {
+            await bootstrap({ token });
+          } catch {
+            // bootstrapError signal carries the reason; SignIn renders it.
+          }
+        }
+      },
     });
+    onCleanup(removeRefreshListener);
 
     const savedKey = rememberedApiKey();
     const savedToken = rememberedOAuthToken();
